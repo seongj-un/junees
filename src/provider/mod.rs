@@ -47,4 +47,13 @@ pub trait Provider: Send + Sync {
         &self,
         request: CompletionRequest<'_>,
     ) -> Result<CompletionResponse, ProviderError>;
+
+    /// Whether requests that allow thinking ask for manual extended thinking
+    /// (a fixed token budget). The API then wants the turn in progress to
+    /// start with a thinking block, and only models that do not check what
+    /// came before a returned thinking block (Claude 4.6 and earlier) accept
+    /// it, so the history keeps its thinking blocks when it is shrunk.
+    fn manual_thinking(&self) -> bool {
+        false
+    }
 }

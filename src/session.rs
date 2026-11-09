@@ -91,9 +91,15 @@ pub enum Entry {
     Usage(Usage),
     /// The output of every tool result in the messages before index `upto`
     /// was replaced with [`CLEARED`], and every thinking block was dropped
-    /// (see [`Transcript::apply`]).
+    /// (see [`Transcript::apply`]) unless `keep_thinking` is set.
     ClearToolResults {
         upto: usize,
+        /// Set with manual extended thinking (see
+        /// [`crate::provider::Provider::manual_thinking`]): the models that
+        /// accept it do not check what came before a thinking block, and
+        /// the turn in progress has to keep starting with one.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_thinking: bool,
     },
     /// Token usage of a call that summarized the conversation. It counts
     /// toward the session's usage but says nothing about the context size.
@@ -102,10 +108,13 @@ pub enum Entry {
     /// It leads the first kept message when that is a user input; when the
     /// tail starts with a model reply (a cut inside one turn), it goes into
     /// a new user message, followed by the text of the input that started
-    /// the turn, word for word. Every kept thinking block was dropped.
+    /// the turn, word for word. Every kept thinking block was dropped
+    /// unless `keep_thinking` is set (as for `clear_tool_results`).
     Compact {
         summary: String,
         keep_from: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep_thinking: bool,
     },
 }
 
@@ -159,7 +168,10 @@ impl Transcript {
                 self.usage.add(usage);
                 self.context_tokens = usage.context_tokens();
             }
-            Entry::ClearToolResults { upto } => {
+            Entry::ClearToolResults {
+                upto,
+                keep_thinking,
+            } => {
                 for message in self.messages.iter_mut().take(upto) {
                     for block in &mut message.content {
                         if let ContentBlock::ToolResult { content, .. } = block {
@@ -167,10 +179,16 @@ impl Transcript {
                         }
                     }
                 }
-                self.drop_thinking();
+                if !keep_thinking {
+                    self.drop_thinking();
+                }
             }
             Entry::SummaryUsage(usage) => self.usage.add(usage),
-            Entry::Compact { summary, keep_from } => {
+            Entry::Compact {
+                summary,
+                keep_from,
+                keep_thinking,
+            } => {
                 let dropped: Vec<Message> = self
                     .messages
                     .drain(..keep_from.min(self.messages.len()))
@@ -206,7 +224,9 @@ impl Transcript {
                         );
                     }
                 }
-                self.drop_thinking();
+                if !keep_thinking {
+                    self.drop_thinking();
+                }
                 // Unknown until the next model call measures it.
                 self.context_tokens = 0;
             }
@@ -241,7 +261,13 @@ impl Transcript {
     /// reply that directly follows a message holding nothing but tool
     /// results, so every earlier tool call has its result. It keeps the
     /// last two such rounds when it can, else the last one.
-    pub fn compact_point(&self) -> Option<usize> {
+    ///
+    /// With `manual_thinking` the API wants the turn in progress to start
+    /// with a thinking block, and only the turn's first reply has one, so a
+    /// cut inside the turn keeps none of it: where the cut above would go,
+    /// everything is summarized, and the turn starts again from the summary
+    /// and its input.
+    pub fn compact_point(&self, manual_thinking: bool) -> Option<usize> {
         let inputs: Vec<usize> = (1..self.messages.len())
             .filter(|&i| {
                 let message = &self.messages[i];
@@ -270,6 +296,9 @@ impl Transcript {
                 self.messages[i].role == Role::Assistant && only_tool_results(&self.messages[i - 1])
             })
             .collect();
+        if manual_thinking {
+            return rounds.last().map(|_| self.messages.len());
+        }
         rounds
             .iter()
             .rev()
@@ -282,14 +311,14 @@ impl Transcript {
     /// in the last [`KEEP_TOOL_RESULTS`] messages that carry tool results,
     /// or `None` when there is nothing left to clear. The blocks stay, with
     /// their `tool_use_id` and `is_error`, so every tool call keeps its
-    /// result.
-    pub fn clear_entry(&self) -> Option<Entry> {
-        self.clear_entry_keeping(KEEP_TOOL_RESULTS)
+    /// result. With `manual_thinking` the entry keeps thinking blocks.
+    pub fn clear_entry(&self, manual_thinking: bool) -> Option<Entry> {
+        self.clear_entry_keeping(KEEP_TOOL_RESULTS, manual_thinking)
     }
 
     /// Like [`Transcript::clear_entry`], but keeps the output of the last
     /// `keep` messages with tool results; 0 clears every tool result.
-    pub fn clear_entry_keeping(&self, keep: usize) -> Option<Entry> {
+    pub fn clear_entry_keeping(&self, keep: usize, manual_thinking: bool) -> Option<Entry> {
         let upto = match keep.checked_sub(1) {
             None => self.messages.len(),
             Some(skip) => self
@@ -306,7 +335,10 @@ impl Transcript {
                 |block| matches!(block, ContentBlock::ToolResult { content, .. } if content != CLEARED),
             )
         });
-        uncleared.then_some(Entry::ClearToolResults { upto })
+        uncleared.then_some(Entry::ClearToolResults {
+            upto,
+            keep_thinking: manual_thinking,
+        })
     }
 
     /// The entry that adds user input: it joins a trailing user message (left
@@ -1018,11 +1050,15 @@ mod tests {
             Entry::Message(Message::user_text("hi")),
             Entry::AppendText { text: "x".into() },
             Entry::Usage(Usage::default()),
-            Entry::ClearToolResults { upto: 1 },
+            Entry::ClearToolResults {
+                upto: 1,
+                keep_thinking: false,
+            },
             Entry::SummaryUsage(Usage::default()),
             Entry::Compact {
                 summary: "s".into(),
                 keep_from: 1,
+                keep_thinking: false,
             },
         ];
         let kinds: Vec<String> = samples
@@ -1084,7 +1120,12 @@ mod tests {
         assert_eq!(session.transcript.messages.len(), 2);
         assert_eq!(session.transcript.context_tokens, 34);
         // New entries are appended to it as they are.
-        writer.record(&Entry::ClearToolResults { upto: 0 }).unwrap();
+        writer
+            .record(&Entry::ClearToolResults {
+                upto: 0,
+                keep_thinking: false,
+            })
+            .unwrap();
         drop(writer);
         assert_eq!(Session::load(&path).unwrap().transcript, session.transcript);
     }
@@ -1115,12 +1156,18 @@ mod tests {
 
     #[test]
     fn clearing_keeps_the_last_three_tool_results() {
-        assert_eq!(tool_rounds(3).clear_entry(), None);
+        assert_eq!(tool_rounds(3).clear_entry(false), None);
         let mut transcript = tool_rounds(5);
         let before = transcript.clone();
-        let entry = transcript.clear_entry().unwrap();
+        let entry = transcript.clear_entry(false).unwrap();
         // Results sit at 2, 4, 6, 8, 10; the last three start at 6.
-        assert_eq!(entry, Entry::ClearToolResults { upto: 6 });
+        assert_eq!(
+            entry,
+            Entry::ClearToolResults {
+                upto: 6,
+                keep_thinking: false
+            }
+        );
         assert_eq!(
             serde_json::to_value(&entry).unwrap(),
             json!({"type": "clear_tool_results", "upto": 6})
@@ -1144,27 +1191,36 @@ mod tests {
             }
         }
         // Already cleared: nothing to do until another result comes in.
-        assert_eq!(transcript.clear_entry(), None);
+        assert_eq!(transcript.clear_entry(false), None);
         transcript.apply(Entry::Message(tool_call("toolu_5")));
         transcript.apply(Entry::Message(tool_results("toolu_5", "more", false)));
         assert_eq!(
-            transcript.clear_entry(),
-            Some(Entry::ClearToolResults { upto: 8 })
+            transcript.clear_entry(false),
+            Some(Entry::ClearToolResults {
+                upto: 8,
+                keep_thinking: false
+            })
         );
     }
 
     #[test]
     fn clearing_can_take_the_latest_tool_results_too() {
         let mut transcript = tool_rounds(2);
-        let entry = transcript.clear_entry_keeping(0).unwrap();
-        assert_eq!(entry, Entry::ClearToolResults { upto: 5 });
+        let entry = transcript.clear_entry_keeping(0, false).unwrap();
+        assert_eq!(
+            entry,
+            Entry::ClearToolResults {
+                upto: 5,
+                keep_thinking: false
+            }
+        );
         transcript.apply(entry);
         assert_eq!(
             transcript.messages[4],
             tool_results("toolu_1", CLEARED, false)
         );
-        assert_eq!(transcript.clear_entry_keeping(0), None);
-        assert_eq!(Transcript::default().clear_entry_keeping(0), None);
+        assert_eq!(transcript.clear_entry_keeping(0, false), None);
+        assert_eq!(Transcript::default().clear_entry_keeping(0, false), None);
     }
 
     /// A tool call after a signed thinking block and a redacted one.
@@ -1204,15 +1260,15 @@ mod tests {
     fn clearing_drops_every_thinking_block() {
         let mut transcript = transcript_of(thinking_rounds(6));
         // The rules cut where they would without thinking blocks.
-        let entry = transcript.clear_entry().unwrap();
-        assert_eq!(Some(&entry), tool_rounds(6).clear_entry().as_ref());
+        let entry = transcript.clear_entry(false).unwrap();
+        assert_eq!(Some(&entry), tool_rounds(6).clear_entry(false).as_ref());
         transcript.apply(entry);
         // Thinking after a cleared result would no longer match what came
         // before it, and dropping only that would change what came before
         // the rest: none stays, before the cut or after it.
         assert!(!has_thinking(&transcript), "{:#?}", transcript.messages);
         let mut plain = tool_rounds(6);
-        let entry = plain.clear_entry().unwrap();
+        let entry = plain.clear_entry(false).unwrap();
         plain.apply(entry);
         for (now, then) in transcript.messages.iter().zip(&plain.messages) {
             assert_eq!(now.role, then.role);
@@ -1238,11 +1294,12 @@ mod tests {
             writer.record(&entry).unwrap();
             transcript.apply(entry);
         }
-        let keep_from = transcript.compact_point().unwrap();
-        assert_eq!(Some(keep_from), tool_rounds(5).compact_point());
+        let keep_from = transcript.compact_point(false).unwrap();
+        assert_eq!(Some(keep_from), tool_rounds(5).compact_point(false));
         let entry = Entry::Compact {
             summary: "s".into(),
             keep_from,
+            keep_thinking: false,
         };
         writer.record(&entry).unwrap();
         transcript.apply(entry);
@@ -1259,6 +1316,90 @@ mod tests {
         let (session, _) = Session::resume(&path).unwrap();
         assert_eq!(session.meta.format, FORMAT);
         assert_eq!(session.transcript, transcript);
+    }
+
+    #[test]
+    fn manual_thinking_compacts_a_turn_whole_and_keeps_thinking() {
+        // Manual extended thinking without interleaving: only the turn's
+        // first reply thinks.
+        let mut messages = vec![Message::user_text("go"), thinking_call("toolu_0")];
+        messages.push(tool_results("toolu_0", "out", false));
+        for i in 1..6 {
+            let id = format!("toolu_{i}");
+            messages.push(tool_call(&id));
+            messages.push(tool_results(&id, "out", false));
+        }
+        let transcript = transcript_of(messages);
+        // A cut inside the turn would leave it starting with a reply that
+        // has no thinking block.
+        assert_eq!(transcript.compact_point(false), Some(9));
+        assert_eq!(transcript.compact_point(true), Some(13));
+        assert_eq!(tool_rounds(1).compact_point(true), None);
+        assert_eq!(tool_rounds(2).compact_point(true), Some(5));
+
+        let mut compacted = transcript.clone();
+        compacted.apply(Entry::Compact {
+            summary: "did 0 to 5".into(),
+            keep_from: 13,
+            keep_thinking: true,
+        });
+        assert_eq!(
+            compacted.messages,
+            [Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text {
+                        text: format!("{SUMMARY_HEADER}did 0 to 5"),
+                    },
+                    ContentBlock::Text { text: "go".into() },
+                ],
+            }]
+        );
+
+        // Cuts before a user input stay where they were, and the kept
+        // turns keep their thinking.
+        let mut transcript = transcript;
+        transcript.apply(Entry::Message(assistant("done")));
+        transcript.apply(Entry::Message(Message::user_text("next")));
+        transcript.apply(Entry::Message(thinking_call("toolu_9")));
+        transcript.apply(Entry::Message(tool_results("toolu_9", "x", false)));
+        assert_eq!(transcript.compact_point(true), Some(14));
+        let entry = Entry::Compact {
+            summary: "s".into(),
+            keep_from: 14,
+            keep_thinking: true,
+        };
+        transcript.apply(entry);
+        assert_eq!(transcript.messages[1], thinking_call("toolu_9"));
+    }
+
+    #[test]
+    fn manual_thinking_clears_tool_output_and_keeps_thinking() {
+        let mut transcript = transcript_of(thinking_rounds(5));
+        let before = transcript.clone();
+        let entry = transcript.clear_entry(true).unwrap();
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap(),
+            json!({"type": "clear_tool_results", "upto": 6, "keep_thinking": true})
+        );
+        transcript.apply(entry);
+        assert_eq!(
+            transcript.messages[2],
+            tool_results("toolu_0", CLEARED, false)
+        );
+        for i in [1, 3, 5, 7, 9] {
+            assert_eq!(transcript.messages[i], before.messages[i]);
+        }
+        // Entries without the field (format 2, other modes) drop thinking.
+        let entry: Entry =
+            serde_json::from_value(json!({"type": "clear_tool_results", "upto": 6})).unwrap();
+        assert_eq!(
+            entry,
+            Entry::ClearToolResults {
+                upto: 6,
+                keep_thinking: false
+            }
+        );
     }
 
     fn assistant(text: &str) -> Message {
@@ -1278,13 +1419,13 @@ mod tests {
 
     #[test]
     fn a_single_turn_is_cut_after_a_closed_tool_round() {
-        assert_eq!(Transcript::default().compact_point(), None);
+        assert_eq!(Transcript::default().compact_point(false), None);
         // The first reply answers the input itself: nothing to cut yet.
-        assert_eq!(tool_rounds(1).compact_point(), None);
+        assert_eq!(tool_rounds(1).compact_point(false), None);
         // Replies sit at 1, 3, 5, ...; each after the first follows a
         // message of tool results only. The last two rounds stay.
-        assert_eq!(tool_rounds(2).compact_point(), Some(3));
-        assert_eq!(tool_rounds(6).compact_point(), Some(9));
+        assert_eq!(tool_rounds(2).compact_point(false), Some(3));
+        assert_eq!(tool_rounds(6).compact_point(false), Some(9));
 
         // Results that carry typed input too (a failed turn) are no round
         // boundary.
@@ -1301,18 +1442,19 @@ mod tests {
             tool_call("toolu_3"),
             tool_results("toolu_3", "out", false),
         ]);
-        assert_eq!(transcript.compact_point(), Some(5));
+        assert_eq!(transcript.compact_point(false), Some(5));
     }
 
     #[test]
     fn compacting_inside_a_turn_keeps_its_input_word_for_word() {
         let mut transcript = tool_rounds(4);
         let before = transcript.clone();
-        let keep_from = transcript.compact_point().unwrap();
+        let keep_from = transcript.compact_point(false).unwrap();
         assert_eq!(keep_from, 5);
         transcript.apply(Entry::Compact {
             summary: "did 0 to 1".into(),
             keep_from,
+            keep_thinking: false,
         });
 
         let head = Message {
@@ -1342,11 +1484,12 @@ mod tests {
             transcript.apply(Entry::Message(tool_call(&id)));
             transcript.apply(Entry::Message(tool_results(&id, "more", false)));
         }
-        let keep_from = transcript.compact_point().unwrap();
+        let keep_from = transcript.compact_point(false).unwrap();
         assert_eq!(keep_from, 5);
         transcript.apply(Entry::Compact {
             summary: "did 0 to 3".into(),
             keep_from,
+            keep_thinking: false,
         });
         assert_eq!(
             transcript.messages[0].content,
@@ -1366,15 +1509,15 @@ mod tests {
         let mut transcript = tool_rounds(2); // input at 0, results at 2 and 4
         transcript.apply(Entry::Message(assistant("done")));
         transcript.apply(Entry::Message(Message::user_text("second")));
-        assert_eq!(transcript.compact_point(), Some(6));
+        assert_eq!(transcript.compact_point(false), Some(6));
         transcript.apply(Entry::Message(assistant("ok")));
         transcript.apply(Entry::Message(Message::user_text("third")));
-        assert_eq!(transcript.compact_point(), Some(6));
+        assert_eq!(transcript.compact_point(false), Some(6));
         transcript.apply(Entry::Message(tool_call("toolu_8")));
         transcript.apply(Entry::Message(tool_results("toolu_8", "x", false)));
         transcript.apply(Entry::Message(assistant("ok")));
         transcript.apply(Entry::Message(Message::user_text("fourth")));
-        assert_eq!(transcript.compact_point(), Some(8));
+        assert_eq!(transcript.compact_point(false), Some(8));
     }
 
     #[test]
@@ -1394,7 +1537,7 @@ mod tests {
             tool_call("toolu_2"),
             tool_results("toolu_2", "out", false),
         ]);
-        assert_eq!(transcript.compact_point(), Some(4));
+        assert_eq!(transcript.compact_point(false), Some(4));
 
         // Nor right after a message with tool calls, should one show up.
         let odd = transcript_of(vec![
@@ -1402,7 +1545,7 @@ mod tests {
             tool_call("toolu_1"),
             Message::user_text("no result"),
         ]);
-        assert_eq!(odd.compact_point(), None);
+        assert_eq!(odd.compact_point(false), None);
         // A message with tool results never leads, even after one without
         // calls.
         let mut orphan = tool_results("toolu_7", "out", false);
@@ -1410,7 +1553,7 @@ mod tests {
             .content
             .push(ContentBlock::Text { text: "hi".into() });
         let odd = transcript_of(vec![Message::user_text("first"), assistant("hm"), orphan]);
-        assert_eq!(odd.compact_point(), None);
+        assert_eq!(odd.compact_point(false), None);
     }
 
     #[test]
@@ -1424,12 +1567,13 @@ mod tests {
             input_tokens: 900,
             ..Default::default()
         }));
-        let keep_from = transcript.compact_point().unwrap();
+        let keep_from = transcript.compact_point(false).unwrap();
         assert_eq!(keep_from, 4);
         let tail = transcript.messages[4..].to_vec();
         let entry = Entry::Compact {
             summary: "did things".into(),
             keep_from,
+            keep_thinking: false,
         };
         assert_eq!(
             serde_json::to_value(&entry).unwrap(),

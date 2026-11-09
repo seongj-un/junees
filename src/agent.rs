@@ -397,7 +397,10 @@ impl Agent {
     async fn shrink(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
         let cleared = self.clear_tool_results(on_event);
         let compacted = self.summarize(on_event).await;
-        let cleared_latest = match self.transcript.clear_entry_keeping(0) {
+        let cleared_latest = match self
+            .transcript
+            .clear_entry_keeping(0, self.provider.manual_thinking())
+        {
             Some(entry) => {
                 self.record(entry, on_event);
                 true
@@ -433,7 +436,11 @@ impl Agent {
     /// Returns whether it did; if there is nothing to compact yet or the
     /// summary fails, it says so in a warning and changes nothing.
     pub async fn compact(&mut self, mut on_event: impl FnMut(Event<'_>)) -> bool {
-        if self.transcript.compact_point().is_none() {
+        if self
+            .transcript
+            .compact_point(self.provider.manual_thinking())
+            .is_none()
+        {
             on_event(Event::Warning(
                 "nothing to compact yet: the conversation is too short to summarize",
             ));
@@ -444,7 +451,8 @@ impl Agent {
 
     /// Compacts at [`Transcript::compact_point`], if there is one.
     async fn summarize(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
-        let Some(keep_from) = self.transcript.compact_point() else {
+        let manual_thinking = self.provider.manual_thinking();
+        let Some(keep_from) = self.transcript.compact_point(manual_thinking) else {
             return false;
         };
         let request = [context::summary_request(
@@ -498,7 +506,12 @@ impl Agent {
         }
 
         let before_messages = self.transcript.messages.len();
-        self.record(Entry::Compact { summary, keep_from }, on_event);
+        let entry = Entry::Compact {
+            summary,
+            keep_from,
+            keep_thinking: manual_thinking,
+        };
+        self.record(entry, on_event);
         self.cleared = false;
         on_event(Event::Compacted {
             before_messages,
@@ -510,7 +523,7 @@ impl Agent {
     /// Clears the output of all but the latest tool results. Returns
     /// whether there was anything to clear.
     fn clear_tool_results(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
-        match self.transcript.clear_entry() {
+        match self.transcript.clear_entry(self.provider.manual_thinking()) {
             Some(entry) => {
                 self.record(entry, on_event);
                 true
@@ -562,6 +575,8 @@ mod tests {
         responses: Arc<Mutex<VecDeque<Reply>>>,
         seen: Arc<Mutex<Vec<Vec<Message>>>>,
         settings: Arc<Mutex<Vec<Settings>>>,
+        /// What [`Provider::manual_thinking`] says.
+        manual_thinking: bool,
     }
 
     impl Scripted {
@@ -592,6 +607,10 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .expect("no scripted response left")
+        }
+
+        fn manual_thinking(&self) -> bool {
+            self.manual_thinking
         }
     }
 
@@ -1324,8 +1343,14 @@ mod tests {
         assert_eq!(
             clears,
             [
-                &Entry::ClearToolResults { upto: 4 },
-                &Entry::ClearToolResults { upto: 8 }
+                &Entry::ClearToolResults {
+                    upto: 4,
+                    keep_thinking: false
+                },
+                &Entry::ClearToolResults {
+                    upto: 8,
+                    keep_thinking: false
+                }
             ]
         );
         assert_valid(agent.messages());
@@ -1376,6 +1401,50 @@ mod tests {
         assert_eq!(thinking_in(&seen[6]), ["\"sig-5\"", "\"sig-6\""]);
         assert_valid(agent.messages());
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
+    #[tokio::test]
+    async fn manual_thinking_keeps_thinking_and_compacts_a_turn_whole() {
+        // Manual extended thinking: only the turn's first reply thinks.
+        let mut script = resized(tool_rounds(5, 1), &[100, 100, 100, 900, 900]);
+        if let Ok(response) = &mut script[0] {
+            response.content.insert(0, thinking_block("sig-1"));
+        }
+        script.push(sized(text("SUMMARY"), 50));
+        script.push(sized(text("done"), 100));
+        let provider = Scripted {
+            manual_thinking: true,
+            ..Scripted::new(script)
+        };
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        agent.run("go", |_| {}).await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 7);
+        // Old tool output was cleared before the fifth call; the models
+        // that take a thinking budget do not check what came before a
+        // thinking block, and the turn has to keep starting with it.
+        assert_eq!(tool_output(&seen[4][2])[0].1, session::CLEARED);
+        assert_eq!(thinking_in(&seen[4]), ["\"sig-1\""]);
+        // Still over, so the turn was compacted: all of it, since a kept
+        // tail would start with a reply that has no thinking. The model
+        // starts the turn again, thinking first, from summary and input.
+        assert_eq!(seen[6].len(), 1, "{:#?}", seen[6]);
+        assert_eq!(summary_text(&seen[6][0]).as_deref(), Some("SUMMARY"));
+        assert_eq!(
+            seen[6][0].content[1],
+            ContentBlock::Text { text: "go".into() }
+        );
+        let entries = entries_of(&journal);
+        assert!(entries.contains(&Entry::Compact {
+            summary: "SUMMARY".into(),
+            keep_from: 11,
+            keep_thinking: true,
+        }));
+        assert_valid(agent.messages());
+        assert_eq!(replay(entries), agent.transcript);
     }
 
     fn summary_text(message: &Message) -> Option<String> {
@@ -1487,7 +1556,8 @@ mod tests {
         let entries = entries_of(&journal);
         assert!(entries.contains(&Entry::Compact {
             summary: "SUMMARY".into(),
-            keep_from: 12
+            keep_from: 12,
+            keep_thinking: false,
         }));
         assert_eq!(replay(entries), agent.transcript);
     }
@@ -1683,7 +1753,8 @@ mod tests {
         assert_eq!(compacted, [(13, 5)]);
         assert!(entries_of(&journal).contains(&Entry::Compact {
             summary: "SUMMARY".into(),
-            keep_from: 9
+            keep_from: 9,
+            keep_thinking: false,
         }));
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }

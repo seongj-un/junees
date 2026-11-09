@@ -285,6 +285,10 @@ impl Provider for AnthropicProvider {
             }
         }
     }
+
+    fn manual_thinking(&self) -> bool {
+        self.thinking_budget > 0
+    }
 }
 
 fn is_retryable(status: StatusCode) -> bool {
@@ -363,6 +367,13 @@ mod tests {
             let value = body(thinking, budget);
             assert!(value.get("thinking").is_none(), "{value}");
         }
+        let provider = |budget| {
+            AnthropicProvider::new("k".into(), "http://localhost".into(), "m".into())
+                .unwrap()
+                .with_thinking(budget)
+        };
+        assert!(provider(2048).manual_thinking());
+        assert!(!provider(0).manual_thinking());
     }
 
     #[test]
