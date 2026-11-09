@@ -348,7 +348,7 @@ impl CommandPolicy {
         // With the rules off, `command_words` looks through `sudo` and
         // friends instead of failing on them.
         let reader = Self::default().allow_dangerous(true);
-        reader.add_cautions(command, workspace, 0, &mut found);
+        reader.add_cautions(command, workspace, Some(workspace.root()), 0, &mut found);
         let mut unique: Vec<Caution> = Vec::with_capacity(found.len());
         for caution in found {
             if !unique.contains(&caution) {
@@ -358,10 +358,14 @@ impl CommandPolicy {
         unique
     }
 
+    /// `cwd` is the folder relative paths start from, `None` once a `cd`
+    /// went somewhere unknown (`cd -`, `cd "$DIR"`): relative paths then
+    /// count as elsewhere.
     fn add_cautions(
         &self,
         script: &str,
         workspace: &Workspace,
+        cwd: Option<&Path>,
         depth: usize,
         found: &mut Vec<Caution>,
     ) {
@@ -370,14 +374,16 @@ impl CommandPolicy {
             return;
         }
         let parsed = parse(script);
-        for body in &parsed.nested {
-            self.add_cautions(body, workspace, depth + 1, found);
-        }
+        let start = cwd.map(Path::to_path_buf);
+        let mut cwd = start.clone();
+        let mut pushed: Vec<Option<PathBuf>> = Vec::new();
         for pipeline in &parsed.pipelines {
             let mut piped: Option<String> = None;
             for command in pipeline {
                 for (op, target) in &command.redirects {
-                    if redirect_writes(op, target) && !workspace.contains(target) {
+                    if redirect_writes(op, target)
+                        && !workspace.contains_from(cwd.as_deref(), target)
+                    {
                         found.push(outside(target));
                     }
                 }
@@ -388,17 +394,41 @@ impl CommandPolicy {
                         continue;
                     }
                 };
-                self.simple_cautions(words, workspace, depth, found);
+                self.simple_cautions(words, workspace, cwd.as_deref(), depth, found);
                 let name = basename(&words[0]);
                 let stdin = command.input.as_deref().or(piped.as_deref());
                 if SHELLS.contains(&name)
                     && reads_stdin_script(&words[1..])
                     && let Some(script) = stdin
                 {
-                    self.add_cautions(script, workspace, depth + 1, found);
+                    self.add_cautions(script, workspace, cwd.as_deref(), depth + 1, found);
                 }
                 piped = printed_text(name, &words[1..], command.input.as_deref());
+                // Pipelines and subshells are taken as if they ran in this
+                // shell: a `cd` there may count where it does not apply,
+                // which only asks more.
+                match name {
+                    "cd" | "pushd" => {
+                        let next = workspace.cd(cwd.as_deref(), &words[1..]);
+                        if name == "pushd" {
+                            pushed.push(cwd.take());
+                        }
+                        cwd = next;
+                    }
+                    "popd" => cwd = pushed.pop().flatten(),
+                    _ => {}
+                }
             }
+        }
+        // `$(...)` and friends run where the shell is at that point; after
+        // a `cd` that is not known here.
+        let nested_cwd = if cwd == start && pushed.is_empty() {
+            start
+        } else {
+            None
+        };
+        for body in &parsed.nested {
+            self.add_cautions(body, workspace, nested_cwd.as_deref(), depth + 1, found);
         }
     }
 
@@ -406,6 +436,7 @@ impl CommandPolicy {
         &self,
         words: &[String],
         workspace: &Workspace,
+        cwd: Option<&Path>,
         depth: usize,
         found: &mut Vec<Caution>,
     ) {
@@ -417,7 +448,8 @@ impl CommandPolicy {
         match name {
             "rm" | "rmdir" | "unlink" | "shred" => {
                 found.push(caution(DELETE, format!("`{name}` deletes files")));
-                for target in operands(args).filter(|target| !workspace.contains(target)) {
+                for target in operands(args).filter(|target| !workspace.contains_from(cwd, target))
+                {
                     found.push(outside(target));
                 }
             }
@@ -437,7 +469,7 @@ impl CommandPolicy {
                         .position(|arg| arg == ";" || arg == "+")
                         .unwrap_or(after.len());
                     if let Ok(words) = self.command_words(&after[..end], depth) {
-                        self.simple_cautions(words, workspace, depth + 1, found);
+                        self.simple_cautions(words, workspace, cwd, depth + 1, found);
                     }
                     rest = &after[end.min(after.len())..];
                 }
@@ -461,18 +493,20 @@ impl CommandPolicy {
             }
             "cp" | "ln" | "install" => {
                 if let Some(target) = copy_target(args)
-                    && !workspace.contains(target)
+                    && !workspace.contains_from(cwd, target)
                 {
                     found.push(outside(target));
                 }
             }
             "mv" | "tee" | "touch" | "mkdir" | "truncate" => {
-                for target in operands(args).filter(|target| !workspace.contains(target)) {
+                for target in operands(args).filter(|target| !workspace.contains_from(cwd, target))
+                {
                     found.push(outside(target));
                 }
             }
             "sed" => {
-                for target in sed_in_place_files(args).filter(|target| !workspace.contains(target))
+                for target in
+                    sed_in_place_files(args).filter(|target| !workspace.contains_from(cwd, target))
                 {
                     found.push(outside(target));
                 }
@@ -481,15 +515,15 @@ impl CommandPolicy {
                 for target in args
                     .iter()
                     .filter_map(|arg| arg.strip_prefix("of="))
-                    .filter(|target| !workspace.contains(target))
+                    .filter(|target| !workspace.contains_from(cwd, target))
                 {
                     found.push(outside(target));
                 }
             }
-            "eval" => self.add_cautions(&args.join(" "), workspace, depth + 1, found),
+            "eval" => self.add_cautions(&args.join(" "), workspace, cwd, depth + 1, found),
             _ if SHELLS.contains(&name) => {
                 if let Some(script) = shell_script(args) {
-                    self.add_cautions(script, workspace, depth + 1, found);
+                    self.add_cautions(script, workspace, cwd, depth + 1, found);
                 }
             }
             _ => {
@@ -776,24 +810,75 @@ impl Workspace {
     /// another user's home (`~user`), count as elsewhere; device files
     /// (`/dev/null`) as inside, since the command rules cover them.
     pub fn contains(&self, path: &str) -> bool {
+        self.contains_from(Some(&self.root), path)
+    }
+
+    /// Like [`Workspace::contains`] for a relative `path` from `cwd`; with
+    /// `cwd` unknown (`None`) such a path counts as elsewhere.
+    pub fn contains_from(&self, cwd: Option<&Path>, path: &str) -> bool {
         if path.is_empty() || path.starts_with("/dev/") {
             return true;
         }
+        self.locate(cwd, path)
+            .and_then(|path| resolve(&path))
+            .is_some_and(|path| {
+                path.starts_with(&self.root) || self.scratch.iter().any(|dir| path.starts_with(dir))
+            })
+    }
+
+    /// The absolute path `path` names from `cwd`, without resolving it;
+    /// `None` when that depends on something unknown here.
+    fn locate(&self, cwd: Option<&Path>, path: &str) -> Option<PathBuf> {
         let home_rest = ["~", "$HOME", "${HOME}"].iter().find_map(|home| {
             path.strip_prefix(home)
                 .filter(|rest| rest.is_empty() || rest.starts_with('/'))
         });
-        let path = match home_rest {
-            Some(rest) => match &self.home {
-                Some(home) => home.join(rest.trim_start_matches('/')),
-                None => return false,
-            },
-            None if path.starts_with('~') || path.contains(['$', '`']) => return false,
-            None => self.root.join(path),
+        match home_rest {
+            Some(rest) => Some(self.home.as_ref()?.join(rest.trim_start_matches('/'))),
+            None if path.starts_with('~') || path.contains(['$', '`']) => None,
+            None if path.starts_with('/') => Some(PathBuf::from(path)),
+            None => Some(cwd?.join(path)),
+        }
+    }
+
+    /// Where `cd args` (or `pushd args`) from `cwd` goes, `None` when that
+    /// is not known here (`cd -`, a variable, `CDPATH` aside). As in bash,
+    /// `..` is taken off the path as written unless `-P` is given.
+    fn cd(&self, cwd: Option<&Path>, args: &[String]) -> Option<PathBuf> {
+        let mut physical = false;
+        let mut args = args.iter().map(String::as_str);
+        let mut target = None;
+        while let Some(arg) = args.next() {
+            if arg == "--" {
+                target = args.next();
+                break;
+            }
+            if arg.starts_with('-') && arg.len() > 1 {
+                physical |= arg.contains('P');
+                continue;
+            }
+            target = Some(arg);
+            break;
+        }
+        let path = match target {
+            None => self.home.clone()?,
+            Some("-") => return None,
+            Some(target) => self.locate(cwd, target)?,
         };
-        resolve(&path).is_some_and(|path| {
-            path.starts_with(&self.root) || self.scratch.iter().any(|dir| path.starts_with(dir))
-        })
+        if physical {
+            return Some(path);
+        }
+        let mut logical = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    logical.pop();
+                }
+                other => logical.push(other),
+            }
+        }
+        Some(logical)
     }
 }
 
@@ -2266,6 +2351,51 @@ mod tests {
             kinds(&CommandPolicy::default(), "ls", &workspace),
             [] as [&str; 0]
         );
+    }
+
+    #[test]
+    fn cautions_follow_a_cd_within_the_command() {
+        let (dir, workspace) = workspace();
+        let root = workspace.root().to_path_buf();
+        std::fs::create_dir(root.join("src")).unwrap();
+        let policy = CommandPolicy::default();
+        let elsewhere = dir.path().display();
+        for command in [
+            "cd ~ && echo x >> .bashrc".to_string(),
+            format!("cd {elsewhere} && echo x > note.txt"),
+            format!("cd {elsewhere} && mv a b"),
+            "cd .. && touch a".into(),
+            "cd src && cd ../.. && touch a".into(),
+            "cd -- .. && touch a".into(),
+            "cd; touch a".into(),
+            // Where these go is not known.
+            "cd - && touch a".into(),
+            "cd \"$DIR\" && touch a".into(),
+            "pushd /etc && touch a".into(),
+            "popd && touch a".into(),
+            // What runs after the cd inherits it.
+            "cd /etc && sh -c 'echo x > a'".into(),
+            "cd /etc && echo $(touch a)".into(),
+            "cd /etc && find . -exec touch {} \\;".into(),
+        ] {
+            let mut found = kinds(&policy, &command, &workspace);
+            found.dedup();
+            assert_eq!(found, [OUTSIDE], "`{command}` writes elsewhere");
+        }
+        for command in [
+            "cd src && echo x > note.txt".to_string(),
+            "cd src && cd .. && touch a".into(),
+            "cd ./src/../src && mkdir -p out".into(),
+            format!("cd {} && touch a", root.display()),
+            "pushd /etc && popd && touch a".into(),
+            "cd /etc && cat hosts".into(),
+        ] {
+            assert_eq!(
+                kinds(&policy, &command, &workspace),
+                [] as [&str; 0],
+                "`{command}` stays inside"
+            );
+        }
     }
 
     #[test]
