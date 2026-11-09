@@ -6,4 +6,5 @@ pub mod config;
 pub mod message;
 pub mod prompt;
 pub mod provider;
+pub mod session;
 pub mod tools;
