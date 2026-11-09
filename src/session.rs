@@ -157,8 +157,16 @@ pub struct Transcript {
     pub messages: Vec<Message>,
     pub usage: Usage,
     /// Size of the conversation as of the last model call that searched
-    /// nothing (see [`Usage::context_tokens`]); 0 until one is measured.
+    /// nothing (see [`Usage::context_tokens`]); 0 until one is measured,
+    /// and again after a compaction.
     pub context_tokens: u64,
+    /// Estimated size of what the history gained since `context_tokens`
+    /// was measured (see [`estimate_tokens`]): tool results, inputs, and
+    /// the replies of calls that searched the web, which measure nothing.
+    /// After a compaction, the estimate of the whole history.
+    pub unmeasured_tokens: u64,
+    /// The last call measured the size, which counts its reply already.
+    pub(crate) reply_measured: bool,
 }
 
 impl Transcript {
@@ -167,23 +175,40 @@ impl Transcript {
     pub fn apply(&mut self, entry: Entry) {
         match entry {
             Entry::Meta(_) | Entry::Format { .. } => {}
-            Entry::Message(message) => self.messages.push(message),
-            Entry::AppendText { text } => match self.messages.last_mut() {
-                Some(last) if last.role == Role::User => {
-                    last.content.push(ContentBlock::text(text))
+            Entry::Message(message) => {
+                if !(self.reply_measured && message.role == Role::Assistant) {
+                    self.unmeasured_tokens += estimate_tokens(&message.content);
                 }
-                _ => self.messages.push(Message::user_text(text)),
-            },
+                self.reply_measured = false;
+                self.messages.push(message);
+            }
+            Entry::AppendText { text } => {
+                let block = ContentBlock::text(text);
+                self.unmeasured_tokens += estimate_tokens(std::slice::from_ref(&block));
+                self.reply_measured = false;
+                match self.messages.last_mut() {
+                    Some(last) if last.role == Role::User => last.content.push(block),
+                    _ => self.messages.push(Message {
+                        role: Role::User,
+                        content: vec![block],
+                    }),
+                }
+            }
             Entry::Usage(usage) => {
                 self.usage.add(usage);
                 // A call that searched the web reports the cache reads of
                 // every step of the API's own search loop, far more than
                 // the conversation holds (context editing docs, "Server-side
-                // tools"), so it says nothing about the size. The next call
-                // without one measures it again; until then the last size
-                // stands, and an overflow still shrinks the history.
+                // tools"), so it says nothing about the size. Its reply,
+                // search results included, is estimated instead, on top of
+                // the last size measured, until a call without a search
+                // measures it again.
                 if usage.web_searches() == 0 {
                     self.context_tokens = usage.context_tokens();
+                    self.unmeasured_tokens = 0;
+                    self.reply_measured = true;
+                } else {
+                    self.reply_measured = false;
                 }
             }
             Entry::ClearToolResults {
@@ -243,10 +268,23 @@ impl Transcript {
                 if !keep_thinking {
                     self.drop_thinking();
                 }
-                // Unknown until the next model call measures it.
+                // Unknown until the next model call measures it; estimated
+                // until then.
                 self.context_tokens = 0;
+                self.unmeasured_tokens = self
+                    .messages
+                    .iter()
+                    .map(|message| estimate_tokens(&message.content))
+                    .sum();
+                self.reply_measured = false;
             }
         }
+    }
+
+    /// Estimated size of the conversation: the last measured size plus the
+    /// estimate of what came after it.
+    pub fn context_size(&self) -> u64 {
+        self.context_tokens + self.unmeasured_tokens
     }
 
     /// Drops every `thinking` and `redacted_thinking` block, after a change
@@ -399,6 +437,16 @@ impl Transcript {
             content: results,
         })
     }
+}
+
+/// A rough token count of content blocks: a token per 4 bytes of their
+/// JSON. Keys and quotes make it err high for plain text, and so do the
+/// base64 `encrypted_content` of web search results; Hangul, at 3 bytes a
+/// character, comes out near its real count. Erring high only compacts a
+/// little early.
+pub fn estimate_tokens(content: &[ContentBlock]) -> u64 {
+    let bytes = serde_json::to_string(content).map_or(0, |json| json.len());
+    bytes.div_ceil(4) as u64
 }
 
 fn has_tool_result(message: &Message) -> bool {
@@ -1157,7 +1205,10 @@ mod tests {
 
         let err = Session::load(&path).unwrap_err().to_string();
         assert!(err.contains("written by a newer Junees"), "{err}");
-        assert!(err.contains("session format 4"), "{err}");
+        assert!(
+            err.contains(&format!("session format {}", FORMAT + 1)),
+            "{err}"
+        );
         assert!(Session::resume(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
     }
@@ -1225,7 +1276,10 @@ mod tests {
         write_lines(&path, &[line(&meta()), newer.to_string()], "");
         let err = Session::load(&path).unwrap_err().to_string();
         assert!(err.contains("written by a newer Junees"), "{err}");
-        assert!(err.contains("session format 4"), "{err}");
+        assert!(
+            err.contains(&format!("session format {}", FORMAT + 1)),
+            "{err}"
+        );
     }
 
     fn tool_results(id: &str, output: &str, is_error: bool) -> Message {
@@ -1778,6 +1832,62 @@ mod tests {
         );
         transcript.apply(Entry::Usage(plain(300)));
         assert_eq!(transcript.context_tokens, 300);
+    }
+
+    #[test]
+    fn estimates_the_size_no_call_measured() {
+        let mut transcript = Transcript::default();
+        let plain = Usage {
+            input_tokens: 100,
+            ..Default::default()
+        };
+        let searched = Usage {
+            cache_read_input_tokens: 9_000,
+            server_tool_use: crate::message::ServerToolUsage {
+                web_search_requests: 2,
+            },
+            ..Default::default()
+        };
+        let reply = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::text("a".repeat(400))],
+        };
+        let results = tool_results("toolu_1", &"b".repeat(400), false);
+        transcript.apply(Entry::Message(Message::user_text("hi")));
+        transcript.apply(Entry::Usage(plain));
+        // The reply of a measured call is in its size already.
+        transcript.apply(Entry::Message(reply.clone()));
+        assert_eq!(transcript.context_size(), 100);
+        transcript.apply(Entry::Message(results.clone()));
+        let results_size = estimate_tokens(&results.content);
+        assert!(results_size > 100, "{results_size}");
+        assert_eq!(transcript.context_size(), 100 + results_size);
+        // A searching call measures nothing; its reply is estimated.
+        transcript.apply(Entry::Usage(searched));
+        transcript.apply(Entry::Message(reply.clone()));
+        let reply_size = estimate_tokens(&reply.content);
+        assert_eq!(transcript.context_size(), 100 + results_size + reply_size);
+        transcript.apply(Entry::AppendText { text: "x".into() });
+        assert!(transcript.context_size() > 100 + results_size + reply_size);
+        // A compaction estimates what it leaves.
+        let mut compacted = transcript.clone();
+        compacted.apply(Entry::Compact {
+            summary: "s".into(),
+            keep_from: 3,
+            keep_thinking: false,
+        });
+        assert_eq!(compacted.context_tokens, 0);
+        assert_eq!(
+            compacted.context_size(),
+            compacted
+                .messages
+                .iter()
+                .map(|message| estimate_tokens(&message.content))
+                .sum::<u64>()
+        );
+        // The next measurement replaces the estimate.
+        transcript.apply(Entry::Usage(plain));
+        assert_eq!(transcript.context_size(), 100);
     }
 
     #[test]
