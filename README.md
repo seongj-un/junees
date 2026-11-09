@@ -70,6 +70,16 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - 알림: `JUNEES_NOTIFY_WEBHOOK`에 디스코드 웹훅 URL을 넣으면 `task run`이 정지 이유를 기록한 뒤 웹훅에 한 번 POST한다. 내용은 저장소 이름, 정지 이유(키와 문장), 통과 수/전체, 세션 수, 누적 토큰. `JUNEES_NOTIFY_EACH_SESSION=1`이면 세션이 끝날 때마다 `session N done: ...` 한 줄도 보낸다 세션 알림도 그 세션의 토큰과 (마지막 세션이면) 정지 기록을 `state.json`에 저장한 뒤에 보내므로, 알림을 기다리는 동안 프로세스가 죽어도 기록은 남는다. 예산 소진(`budget`)과 시그널(`interrupted`) 정지도 같은 형식으로 알린다. 시그널을 받은 뒤에는 세션 한 줄 알림은 건너뛰고 정지 알림만 보낸다(두 번째 시그널은 알림을 기다리지 않고 바로 끝낸다). 본문은 `{"content": "...", "allowed_mentions": {"parse": []}}`(멘션 알림 없음)이고, 저장소 이름, 정지 문장, 세션 요약, 오류처럼 바뀌는 부분은 인라인 코드(`` ` ``)로 감싸 마크다운 링크나 서식이 적용되지 않게 한다(백틱은 `'`로, 줄바꿈은 공백으로 바꾸고 한 부분은 1500자까지). `content`는 2000자에서 자른다(UTF-16 단위로 세어 이모지도 안전). 요청 하나의 제한 시간은 10초, 리다이렉트는 따라가지 않는다. 실패(연결 실패, 시간 초과, 2xx가 아닌 응답)는 `!! notification to <호스트> failed: ...` 경고만 띄우고 종료 코드는 바꾸지 않는다. URL에는 웹훅 토큰이 들어 있어서 경고와 오류에는 호스트만 나오고, 세션의 `bash`와 하네스 git에도 이 변수를 넘기지 않는다. 정지를 기록하기 전에 실패하면(작업 트리가 더러움, 기능 목록을 읽지 못함, 상태 파일을 쓰지 못함 등) `task in <저장소> run failed: <오류>` 한 줄을 대신 보낸다. 설정 오류(API 키 없음 등)처럼 `task run`이 작업을 열기도 전에 끝나는 경우는 알림이 없다.
 - 세션의 `bash`와 verify 명령에는 대화 모드와 같은 명령 정책과 숨김 변수 설정(`JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`, `JUNEES_HIDDEN_ENV`)이 걸리고, 세션의 컨텍스트 관리도 같은 설정(`JUNEES_CONTEXT_WINDOW`, `JUNEES_COMPACT_THRESHOLD`)을 쓴다. 정책에 막힌 verify 명령은 실패로 친다.
 
+### 스트리밍 출력
+
+모델 응답은 SSE 스트리밍(`stream: true`)으로 받아서, 텍스트를 도착하는 대로 stdout에 찍는다(대화 모드, `-p`, `task` 세션 모두). 응답이 끝난 뒤 다시 찍지 않으므로 텍스트는 한 번만 나온다. thinking 블록은 지금처럼 내용 없이 `(thinking...)`만, 도구 호출과 결과도 지금처럼 stderr에 나온다. `JUNEES_STREAM=0`이면 응답을 한 번에 받아 끝난 뒤 찍는다. 압축 요약 호출은 늘 한 번에 받는다.
+
+- 조립: 이벤트(`message_start`, `content_block_start/delta/stop`, `message_delta`, `message_stop`)로 스트리밍하지 않은 응답과 같은 값을 만든다. 블록은 index 순서, 도구 입력은 `input_json_delta` 조각을 이어 블록이 끝난 뒤 JSON으로 읽고, thinking 블록은 `thinking_delta`와 `signature_delta`로 signature까지 채운다. 모르는 블록 종류(서버 도구 결과 등)는 시작 이벤트의 원본 JSON 그대로 남는다. `message_delta`의 usage는 누적값이라 더하지 않고 덮어쓴다(입력 쪽 값이 없으면 `message_start` 값 유지). `ping`과 모르는 이벤트, 모르는 delta 종류는 무시한다(API 버전 정책상 새 종류가 생길 수 있다). 출력 한도(`max_tokens`)에 걸려 도구 입력 JSON이 잘렸으면 입력을 `{}`로 둔다(어차피 실행하지 않는다).
+- 재시도: 스트림이 끊기거나(연결 끊김, `message_stop` 전에 끝남), 재시도할 만한 `error` 이벤트(`overloaded_error` 등, 같은 오류의 HTTP 상태로 판단: 429, 5xx, 529)가 오거나, 다음 이벤트가 300초 동안 오지 않으면 기존 정책(최대 4번, 0.5초부터 두 배 대기)대로 처음부터 다시 요청한다. 이미 텍스트나 `(thinking...)`을 보여 줬으면 줄을 끝내고 stderr에 `(retrying)`을 찍은 뒤 다시 받은 응답 전체를 찍는다. 부분 응답은 기록하지 않는다. `invalid_request_error` 같은 오류 이벤트는 같은 상태의 HTTP 오류처럼 바로 실패한다(컨텍스트 초과도 같은 방식으로 감지).
+- 시간 제한: 스트리밍 호출에는 전체 시간 제한이 없고, 응답 시작과 다음 이벤트(`ping` 포함)까지의 대기만 300초로 제한한다. 문서는 오래 걸리는 요청에 스트리밍을 권하고, 도구 입력은 값 하나를 다 만든 뒤에 보내므로 큰 파일을 쓸 때 이벤트 사이가 길 수 있다. 300초는 예전 전체 제한과 같아서, 예전에 끝나던 호출은 여기서 시간 초과되지 않는다. 스트리밍하지 않는 호출(요약, `JUNEES_STREAM=0`)은 지금처럼 전체 300초다.
+- 취소: Ctrl-C/SIGTERM으로 턴을 취소하면 스트림 연결을 바로 닫는다. 찍던 줄은 끝내고, 응답은 기록하지 않는다.
+- 스트리밍을 요청했는데 서버(프록시 등)가 `text/event-stream`이 아닌 JSON 응답 전체를 주면 그대로 읽는다.
+
 ### 확장 사고
 
 `JUNEES_THINKING_BUDGET`을 1024 이상으로 주면 모델 호출마다 `thinking: {"type": "enabled", "budget_tokens": N}`을 보낸다(`task` 세션 포함, 압축 요약 호출 제외). 사고 토큰도 출력 한도에 들어가므로 예산은 `JUNEES_MAX_TOKENS`보다 작아야 한다.
@@ -111,6 +121,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `JUNEES_NOTIFY_EACH_SESSION` | `0` | `1`이면 작업 세션마다 한 줄 알림도 보낸다 |
 | `JUNEES_TASK_MAX_TOKENS` | (없음) | `task run --max-tokens`의 기본값 (작업 전체 누적 토큰) |
 | `JUNEES_TASK_MAX_TIME` | (없음) | `task run --max-time`의 기본값 (이번 실행 시간, 예: `2h`, `1h30m`) |
+| `JUNEES_STREAM` | `1` | `0`이면 스트리밍을 끄고 응답을 한 번에 받아 찍는다 |
 
 기본 도구는 `bash`, `read_file`, `write_file`, `edit_file` 네 가지다(`task` 작업 세션도 같은 네 가지에 `mark_feature_passing`을 더해 쓴다). `bash`는 승인 절차 없이 바로 실행되니(로드맵 3단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다. 리눅스에서는 junees가 시작할 때 자기 프로세스를 dump 불가(`PR_SET_DUMPABLE` 0)로 만들어, 같은 사용자의 프로세스도 `/proc/<junees pid>/environ`과 `mem`을 읽지 못한다. 그래서 `bash`가 `/proc/$PPID/environ`처럼 부모를 거슬러 올라가도 이 변수들을 읽을 수 없다. 자식 프로세스는 exec할 때 다시 보통 프로세스가 되므로 도구 동작은 그대로이고, junees 자신의 코어 덤프만 남지 않는다.
 
@@ -151,7 +162,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ```
 src/
   main.rs            CLI 진입점 (대화 모드, -p 실행, 세션 열기/이어 가기, SIGINT/SIGTERM 처리)
-  agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인)
+  agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인, 스트리밍 이벤트 전달)
   cancel.rs          취소 플래그 (시그널 처리기와 에이전트 루프가 공유)
   session.rs         세션 기록(JSONL) 쓰기, 재생, 이어 가기, 세션 찾기/목록, 비우기/압축 지점 계산
   context.rs         압축 요약 요청(시스템 프롬프트, 앞부분을 텍스트로 옮기기)
@@ -167,13 +178,14 @@ src/
     git.rs             저장소 확인, 커밋, 로그
   message.rs         대화 메시지 타입 (Messages API 형식, 모르는 블록은 원본 JSON 그대로)
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
-  provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정)
+  provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
+    stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
   tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책(policy.rs)
   config.rs          환경 변수 설정 (도구 설정 ToolSettings 포함)
   prompt.rs          시스템 프롬프트
   cli.rs             인자 파싱(task 서브커맨드 포함), 출력 보조 함수
 tests/
-  common/              테스트용 가짜 Anthropic API 서버
+  common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림)
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행, 이어 간 세션의 thinking 블록 보존 검증
   secret_env.rs        기본 bash에서 API 키와 웹훅 URL이 보이지 않는지 검증
@@ -184,6 +196,7 @@ tests/
   cancel.rs            실제 바이너리로 -p 중 SIGTERM(종료 코드 143), 대화 모드 Ctrl-C(턴 취소 후 다음 입력, 두 번이면 종료) 검증
   task_git_env.rs      GIT_DIR이나 GIT_CONFIG_PARAMETERS가 있어도 task 모드가 제 저장소와 설정으로만 git을 쓰는지 검증
   task_git_secret.rs   하네스 git이 심어진 훅을 실행하지 않고 git이 실행하는 필터에도 API 키를 넘기지 않는지 검증
+  streaming.rs         조각내 보내는 가짜 SSE 서버로 조립 결과가 일반 응답과 같은지, 오류 이벤트/끊김/대기 초과 재시도, 취소 시 연결 종료, 바이너리가 텍스트를 한 번만 찍는지 검증
 ```
 
 ## 로드맵
