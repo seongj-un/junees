@@ -25,7 +25,8 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// `clear_tool_results` and `compact`. Format 3 keeps the content blocks
 /// Junees does not handle itself (thinking and the like) as the API sent
 /// them, which older versions would read as placeholders the API rejects.
-/// Format 1 and 2 journals still load.
+/// Format 1 and 2 journals still load; continuing one first writes an
+/// [`Entry::Format`] line.
 pub const FORMAT: u32 = 3;
 
 /// Result recorded for a tool call the process died in the middle of.
@@ -66,7 +67,7 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 7] = [
+const ENTRY_TYPES: [&str; 8] = [
     "meta",
     "message",
     "append_text",
@@ -74,6 +75,7 @@ const ENTRY_TYPES: [&str; 7] = [
     "clear_tool_results",
     "summary_usage",
     "compact",
+    "format",
 ];
 
 /// One line of a journal.
@@ -116,6 +118,13 @@ pub enum Entry {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keep_thinking: bool,
     },
+    /// The lines after it are in journal format `format`, newer than the
+    /// meta line's: a later Junees continued the session. Versions that
+    /// do not know the entry refuse the file with a clear error instead
+    /// of misreading what follows.
+    Format {
+        format: u32,
+    },
 }
 
 /// An entry as a journal line stores it: stamped with when it was written.
@@ -153,10 +162,11 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    /// Applies one journal entry. `Meta` entries change nothing.
+    /// Applies one journal entry. `Meta` and `Format` entries change
+    /// nothing.
     pub fn apply(&mut self, entry: Entry) {
         match entry {
-            Entry::Meta(_) => {}
+            Entry::Meta(_) | Entry::Format { .. } => {}
             Entry::Message(message) => self.messages.push(message),
             Entry::AppendText { text } => match self.messages.last_mut() {
                 Some(last) if last.role == Role::User => {
@@ -472,7 +482,16 @@ impl Journal for SessionWriter {
             Some(file) => file,
             None => self.start()?,
         };
-        let result = write_line(&mut file, entry);
+        let mut result = Ok(());
+        // A journal from an older version is continued in this one's
+        // format; say so before the first line that may use it.
+        if self.meta.format < FORMAT {
+            result = write_line(&mut file, &Entry::Format { format: FORMAT });
+            if result.is_ok() {
+                self.meta.format = FORMAT;
+            }
+        }
+        let result = result.and_then(|()| write_line(&mut file, entry));
         self.file = Some(file);
         result
     }
@@ -546,14 +565,16 @@ impl Session {
             }
             match serde_json::from_slice::<LineIn>(line).map(|line| line.entry) {
                 Ok(entry) => {
-                    if let Entry::Meta(meta) = &entry
-                        && meta.format > FORMAT
-                    {
+                    let format = match &entry {
+                        Entry::Meta(meta) => meta.format,
+                        Entry::Format { format } => *format,
+                        _ => 0,
+                    };
+                    if format > FORMAT {
                         bail!(
-                            "{} was written by a newer Junees (session format {}, \
+                            "{} was written by a newer Junees (session format {format}, \
                              this version reads up to {FORMAT}); update Junees to open it",
                             path.display(),
-                            meta.format
                         );
                     }
                     entries.push(entry);
@@ -582,13 +603,16 @@ impl Session {
         }
 
         let mut entries = entries.into_iter();
-        let Some(Entry::Meta(meta)) = entries.next() else {
+        let Some(Entry::Meta(mut meta)) = entries.next() else {
             bail!("{} is not a Junees session (no meta line)", path.display());
         };
         let mut transcript = Transcript::default();
         for entry in entries {
-            if matches!(entry, Entry::Meta(_)) {
-                bail!("{}: unexpected second meta line", path.display());
+            match entry {
+                Entry::Meta(_) => bail!("{}: unexpected second meta line", path.display()),
+                // The format the journal is in from here on.
+                Entry::Format { format } => meta.format = meta.format.max(format),
+                _ => {}
             }
             transcript.apply(entry);
         }
@@ -833,7 +857,7 @@ fn civil_from_days(days: i64) -> Ymd {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -1060,6 +1084,7 @@ mod tests {
                 keep_from: 1,
                 keep_thinking: false,
             },
+            Entry::Format { format: FORMAT },
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -1119,15 +1144,53 @@ mod tests {
         assert_eq!(session.meta.format, 1);
         assert_eq!(session.transcript.messages.len(), 2);
         assert_eq!(session.transcript.context_tokens, 34);
-        // New entries are appended to it as they are.
-        writer
-            .record(&Entry::ClearToolResults {
-                upto: 0,
-                keep_thinking: false,
-            })
-            .unwrap();
+        // New entries are appended after a line that says they are in this
+        // version's format, so an older Junees refuses the file instead of
+        // misreading them.
+        let clear = Entry::ClearToolResults {
+            upto: 0,
+            keep_thinking: false,
+        };
+        writer.record(&clear).unwrap();
+        writer.record(&clear).unwrap();
         drop(writer);
-        assert_eq!(Session::load(&path).unwrap().transcript, session.transcript);
+        let written = fs::read_to_string(&path).unwrap();
+        let kinds: Vec<String> = written
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["type"].to_string())
+            .collect();
+        assert_eq!(
+            kinds[4..],
+            [
+                "\"format\"",
+                "\"clear_tool_results\"",
+                "\"clear_tool_results\""
+            ]
+        );
+        let format_line: Value = serde_json::from_str(written.lines().nth(4).unwrap()).unwrap();
+        assert_eq!(format_line["format"], json!(FORMAT));
+        let reloaded = Session::load(&path).unwrap();
+        assert_eq!(reloaded.transcript, session.transcript);
+        assert_eq!(reloaded.meta.format, FORMAT);
+
+        // Continued again: already in this format, so no second marker.
+        let (_, mut writer) = Session::resume(&path).unwrap();
+        writer.record(&clear).unwrap();
+        drop(writer);
+        let written = fs::read_to_string(&path).unwrap();
+        assert_eq!(written.lines().count(), 8);
+        assert_eq!(written.matches(r#""type":"format""#).count(), 1);
+    }
+
+    #[test]
+    fn refuses_a_session_continued_in_a_newer_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let newer = json!({"type": "format", "format": FORMAT + 1});
+        write_lines(&path, &[line(&meta()), newer.to_string()], "");
+        let err = Session::load(&path).unwrap_err().to_string();
+        assert!(err.contains("written by a newer Junees"), "{err}");
+        assert!(err.contains("session format 4"), "{err}");
     }
 
     fn tool_results(id: &str, output: &str, is_error: bool) -> Message {
