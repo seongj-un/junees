@@ -306,7 +306,8 @@ pub async fn run(
     if prepare_dir(root)? && git::is_dirty(root)? {
         git::commit_all(root, IGNORE_COMMIT)?;
     }
-    let rechecked = recheck_passing(env, &ledger, report).await?;
+    let unchecked =
+        recheck_passing(env, &ledger, budget::tokens(state.usage), started, report).await?;
     // A run that stopped on its own does not hold its stall streak against
     // the next one; after a crash (no stop recorded) the streak carries on.
     if state.stop.take().is_some() {
@@ -338,10 +339,18 @@ pub async fn run(
             session,
             detail: None,
         };
-        // Passes the cancelled recheck did not get to are unconfirmed, so
-        // they cannot complete the task.
-        if !rechecked {
-            break stop(StopReason::Interrupted, state.sessions);
+        // Passes the recheck did not get to are unconfirmed, so they
+        // cannot complete the task.
+        match &unchecked {
+            Some(Unchecked::Cancelled) => break stop(StopReason::Interrupted, state.sessions),
+            Some(Unchecked::Budget(detail)) => {
+                break Stop {
+                    reason: StopReason::Budget,
+                    session: state.sessions,
+                    detail: Some(detail.clone()),
+                };
+            }
+            None => {}
         }
         if ledger.lock().unwrap().all_pass() {
             break stop(StopReason::Complete, state.sessions);
@@ -722,6 +731,14 @@ async fn work_session(
     (result, agent.usage())
 }
 
+/// Why [`recheck_passing`] stopped before it checked every pass.
+enum Unchecked {
+    /// `env.cancel` was set.
+    Cancelled,
+    /// The budget ran out, for this reason.
+    Budget(String),
+}
+
 /// Runs the verify command of every feature the list marks as passing and
 /// takes back the passes that do not hold. The harness's copy of the list
 /// is made from the file at the start of a run, and the file may say
@@ -729,12 +746,17 @@ async fn work_session(
 /// could undo its edits, or a list written by hand. Running the commands
 /// again also catches features a later change broke.
 ///
-/// Returns false, having changed nothing, if `env.cancel` was set first.
+/// The budget (`used` tokens, the run `started`) is checked before each
+/// command, as each may take as long as the verify timeout. Returns why it
+/// stopped, having changed nothing, if `env.cancel` was set or the budget
+/// ran out first.
 async fn recheck_passing(
     env: &TaskEnv<'_>,
     ledger: &Arc<Mutex<Ledger>>,
+    used: u64,
+    started: std::time::Instant,
     report: &mut Reporter<'_>,
-) -> Result<bool> {
+) -> Result<Option<Unchecked>> {
     let marked: Vec<(String, String)> = ledger
         .lock()
         .unwrap()
@@ -744,7 +766,7 @@ async fn recheck_passing(
         .map(|feature| (feature.id.clone(), feature.verify.clone()))
         .collect();
     if marked.is_empty() {
-        return Ok(true);
+        return Ok(None);
     }
     line(
         report,
@@ -756,9 +778,12 @@ async fn recheck_passing(
     let verifier = env.verifier();
     let mut failed = Vec::new();
     for (id, verify) in marked {
+        if let Some(detail) = env.budget.exceeded(used, started) {
+            return Ok(Some(Unchecked::Budget(detail)));
+        }
         let output = tokio::select! {
             biased;
-            _ = env.cancel.cancelled() => return Ok(false),
+            _ = env.cancel.cancelled() => return Ok(Some(Unchecked::Cancelled)),
             output = verifier.run(&verify) => output,
         };
         if output.is_error {
@@ -766,7 +791,7 @@ async fn recheck_passing(
         }
     }
     if failed.is_empty() {
-        return Ok(true);
+        return Ok(None);
     }
     {
         let mut ledger = ledger.lock().unwrap();
@@ -781,7 +806,7 @@ async fn recheck_passing(
     );
     warn(report, &text);
     append_progress(env.root.as_path(), &format!("run start: {text}"))?;
-    Ok(true)
+    Ok(None)
 }
 
 /// Checks the list a new task starts from and returns its length. Besides
@@ -2186,6 +2211,44 @@ mod tests {
         assert!(!git::is_dirty(root).unwrap());
         assert_eq!(subjects(root)[0], "mark by hand");
         assert_eq!(State::load(root).unwrap().running, None);
+    }
+
+    #[tokio::test]
+    async fn the_time_budget_stops_the_recheck_between_verify_commands() {
+        let home = tempfile::tempdir().unwrap();
+        let ran = home.path().join("ran");
+        let second = format!("touch '{}'", ran.display());
+        let repo = task_repo_marked(&[("true", true), (second.as_str(), true)]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        // Each reading of the clock is 40 seconds after the one before:
+        // the run starts at 0s, F1 is checked at 40s, F2 would be at 80s.
+        let readings = Arc::new(AtomicU64::new(0));
+        let start = std::time::Instant::now();
+        env.budget.clock = Arc::new(move || {
+            start + Duration::from_secs(40 * readings.fetch_add(1, Ordering::SeqCst))
+        });
+        env.budget.max_time = Some(Duration::from_secs(60));
+        let stop = run(&env, 0, &mut |_| {}).await.unwrap();
+
+        assert_eq!(stop.reason, StopReason::Budget);
+        assert_eq!(stop.session, 0);
+        assert_eq!(
+            stop.detail.as_deref(),
+            Some("time budget used up: 1m20s of 1m")
+        );
+        assert!(!ran.exists());
+        // The passes not checked yet stay as they were, unconfirmed.
+        let passes: Vec<bool> = features::load(root)
+            .unwrap()
+            .iter()
+            .map(|f| f.passes)
+            .collect();
+        assert_eq!(passes, [true, true]);
+        assert!(!git::is_dirty(root).unwrap());
+        assert_eq!(State::load(root).unwrap().stop, Some(stop));
     }
 
     #[tokio::test]

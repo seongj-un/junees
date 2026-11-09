@@ -50,7 +50,7 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 
 ### L4. 무인 실행 안정성
 - 예산: 작업 전체 토큰 상한, 시간 상한, 세션 수 상한
-  - L4b: `task run --max-tokens N`/`JUNEES_TASK_MAX_TOKENS`(작업 전체 누적: init 세션, 요약 호출, 캐시 읽기/쓰기 포함, `state.json`에서 이어 셈), `--max-time`/`JUNEES_TASK_MAX_TIME`(이번 실행의 실제 경과 시간, `90s`/`30m`/`2h`/`1h30m`). 세션 사이와, 세션 안에서는 모델 호출 직전마다(`Agent::with_limit`, 압축 요약 호출 포함) 확인하고, 넘으면 그 세션을 마무리(체크포인트 커밋)한 뒤 `budget`으로 정지(종료 코드 0). 시계는 테스트에서 주입
+  - L4b: `task run --max-tokens N`/`JUNEES_TASK_MAX_TOKENS`(작업 전체 누적: init 세션, 요약 호출, 캐시 읽기/쓰기 포함, `state.json`에서 이어 셈), `--max-time`/`JUNEES_TASK_MAX_TIME`(이번 실행의 실제 경과 시간, `90s`/`30m`/`2h`/`1h30m`). 세션 사이와, 세션 안에서는 모델 호출 직전마다(`Agent::with_limit`, 압축 요약 호출 포함), 시작 시 재검증에서는 verify 명령마다 확인하고, 넘으면 그 세션을 마무리(체크포인트 커밋)한 뒤 `budget`으로 정지(종료 코드 0). 시계는 테스트에서 주입
 - Ctrl-C/SIGTERM: 현재 도구를 끝내고 짝 없는 tool_use를 채움(#2)
   - L4b: 공유 취소 플래그(`Cancel`, tokio `watch`)를 `Agent::with_cancel`로 넘긴다. 설정되면 모델 호출은 버리고, 실행 중인 도구 호출은 drop되어 bash가 프로세스 그룹 전체를 SIGKILL로 끝내며(정상 종료한 명령의 백그라운드 프로세스는 그대로), 결과 없는 tool_use는 `cancelled by the user` 오류 결과로 채운 뒤 `Cancelled` 오류로 끝난다. 기록은 user 메시지로 끝나서 다음 입력이 붙는다
   - 대화 모드: Ctrl-C는 턴만 취소, 프롬프트에서 두 번(또는 Ctrl-D)이면 종료, SIGTERM은 취소 후 143. `-p`: 취소 후 130/143. `task run`: 세션을 마무리하고 체크포인트 커밋, `interrupted` 정지 이유, 130/143. 두 번째 시그널은 즉시 종료
