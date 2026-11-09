@@ -1137,9 +1137,10 @@ impl Repl {
         if index.skills.is_empty() {
             println!("(no skills in {})", store.dir().display());
         } else {
+            let count = index.skills.len();
             println!(
-                "{} skills in {} (prompt list {} / {} characters):",
-                index.skills.len(),
+                "{count} {} in {} (prompt list {} / {} characters):",
+                if count == 1 { "skill" } else { "skills" },
                 store.dir().display(),
                 index.listing_chars(),
                 skills::INDEX_MAX_CHARS
