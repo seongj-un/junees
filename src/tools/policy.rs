@@ -18,7 +18,8 @@ pub enum Verdict {
 /// Decides whether bash may run a command.
 ///
 /// The default policy applies the built-in rules: recursive `rm` of `/`, a
-/// top-level system folder, the home folder or a parent folder; `mkfs`,
+/// top-level system folder, the home folder or a parent folder, also as
+/// `rm -rf *` after a `cd` into one of them; `mkfs`,
 /// `wipefs`, `dd` or a redirect onto a device; `shutdown` and friends; fork
 /// bombs; `curl`/`wget` piped into a shell; force push; `sudo`. Extra denied
 /// prefixes always apply, even with [`CommandPolicy::allow_dangerous`].
@@ -70,13 +71,15 @@ impl CommandPolicy {
     }
 
     pub fn check(&self, command: &str) -> Verdict {
-        match self.violation(command, 0) {
+        match self.violation(command, 0, None) {
             Some(reason) => Verdict::Deny(reason),
             None => Verdict::Allow,
         }
     }
 
-    fn violation(&self, script: &str, depth: usize) -> Option<String> {
+    /// `risky_cwd` is the folder a `cd` earlier in the same script moved to
+    /// when that folder must not be emptied (see [`risky_cd_target`]).
+    fn violation(&self, script: &str, depth: usize, risky_cwd: Option<&str>) -> Option<String> {
         if depth > MAX_DEPTH {
             return Some("commands are nested too deeply to check".into());
         }
@@ -85,10 +88,11 @@ impl CommandPolicy {
         }
         let parsed = parse(script);
         for body in &parsed.nested {
-            if let Some(reason) = self.violation(body, depth + 1) {
+            if let Some(reason) = self.violation(body, depth + 1, None) {
                 return Some(reason);
             }
         }
+        let mut risky_cwd = risky_cwd.map(str::to_string);
         for pipeline in &parsed.pipelines {
             let mut fetched = false;
             for command in pipeline {
@@ -101,11 +105,14 @@ impl CommandPolicy {
                     Ok(words) => words,
                     Err(reason) => return Some(reason),
                 };
-                if let Some(reason) = self.simple_violation(words, depth) {
+                if let Some(reason) = self.simple_violation(words, depth, risky_cwd.as_deref()) {
                     return Some(reason);
                 }
                 let Some(first) = words.first() else { continue };
                 let name = basename(first);
+                if matches!(name, "cd" | "pushd") {
+                    risky_cwd = risky_cd_target(&words[1..]).map(str::to_string);
+                }
                 if !self.allow_dangerous && fetched && SHELLS.contains(&name) {
                     return Some(format!("downloaded script piped into `{name}`"));
                 }
@@ -168,7 +175,12 @@ impl CommandPolicy {
         Ok(&words[i.min(words.len())..])
     }
 
-    fn simple_violation(&self, words: &[String], depth: usize) -> Option<String> {
+    fn simple_violation(
+        &self,
+        words: &[String],
+        depth: usize,
+        risky_cwd: Option<&str>,
+    ) -> Option<String> {
         let first = words.first()?;
         let name = basename(first);
         let args = &words[1..];
@@ -187,12 +199,12 @@ impl CommandPolicy {
 
         if SHELLS.contains(&name)
             && let Some(script) = shell_script(args)
-            && let Some(reason) = self.violation(script, depth + 1)
+            && let Some(reason) = self.violation(script, depth + 1, risky_cwd)
         {
             return Some(reason);
         }
         if name == "eval"
-            && let Some(reason) = self.violation(&args.join(" "), depth + 1)
+            && let Some(reason) = self.violation(&args.join(" "), depth + 1, risky_cwd)
         {
             return Some(reason);
         }
@@ -203,6 +215,12 @@ impl CommandPolicy {
             && args.iter().any(|arg| runs_download(arg))
         {
             return Some(format!("downloaded script run by `{name}`"));
+        }
+        if name == "rm"
+            && let Some(dir) = risky_cwd
+            && let Some(target) = rm_targets(args).find(|target| is_whole_folder(target))
+        {
+            return Some(format!("recursive `rm` of `{target}` after `cd {dir}`"));
         }
         builtin_violation(name, args)
     }
@@ -234,6 +252,13 @@ fn builtin_violation(name: &str, args: &[String]) -> Option<String> {
 }
 
 fn rm_violation(args: &[String]) -> Option<String> {
+    rm_targets(args)
+        .find(|target| dangerous_rm_target(target))
+        .map(|target| format!("recursive `rm` of `{target}`"))
+}
+
+/// The targets of a recursive `rm`, or none when it is not recursive.
+fn rm_targets(args: &[String]) -> impl Iterator<Item = &String> {
     let mut recursive = false;
     let mut options_done = false;
     let mut targets = Vec::new();
@@ -248,13 +273,35 @@ fn rm_violation(args: &[String]) -> Option<String> {
             targets.push(arg);
         }
     }
-    if !recursive {
-        return None;
+    targets.into_iter().filter(move |_| recursive)
+}
+
+/// True for targets that mean everything in the current folder: `*`, `.`,
+/// `./`, `./*`, `.*`.
+fn is_whole_folder(target: &str) -> bool {
+    let target = target.strip_suffix('*').unwrap_or(target);
+    normalize(target) == (Vec::new(), 0)
+}
+
+/// The target of `cd`/`pushd` (given its arguments) when emptying that
+/// folder would be a disaster or its place is unknown: no target (the home
+/// folder), `-`, anything [`dangerous_rm_target`] refuses, and paths built
+/// from `$` expansions, which may be empty at run time.
+fn risky_cd_target(args: &[String]) -> Option<&str> {
+    let mut args = args
+        .iter()
+        .skip_while(|arg| arg.starts_with('-') && arg.len() > 1 && arg.as_str() != "--");
+    let target = match args.next().map(String::as_str) {
+        Some("--") => args.next().map(String::as_str),
+        target => target,
+    };
+    match target {
+        None => Some("~"),
+        Some(target) if target == "-" || target.contains('$') || dangerous_rm_target(target) => {
+            Some(target)
+        }
+        Some(_) => None,
     }
-    targets
-        .into_iter()
-        .find(|target| dangerous_rm_target(target))
-        .map(|target| format!("recursive `rm` of `{target}`"))
 }
 
 /// True for `/`, `/*`, a top-level system folder, the home folder (`~`,
@@ -795,6 +842,47 @@ mod tests {
             "rm /",
             "rm -f ~/notes.txt",
             "rmdir ..",
+        ] {
+            allowed(command);
+        }
+    }
+
+    #[test]
+    fn denies_emptying_a_dangerous_folder_after_cd() {
+        for command in [
+            "cd ~ && rm -rf *",
+            "cd / && rm -rf *",
+            "cd .. && rm -rf ./*",
+            "cd && rm -rf *",
+            "cd \"$BUILD_DIR\" && rm -rf *",
+            "cd $HOME; rm -r .",
+            "cd -P /usr && rm -rf .*",
+            "pushd ../.. && rm -fr ./",
+            "cd - && rm -rf *",
+            "cd ~ && ls && rm -rf *",
+            "cd ~ && bash -c 'rm -rf *'",
+            "cd ~\nrm -rf *",
+        ] {
+            assert!(denied(command).contains("after `cd"), "{command}");
+        }
+        assert_eq!(
+            denied("cd ~ && rm -rf *"),
+            "recursive `rm` of `*` after `cd ~`"
+        );
+    }
+
+    #[test]
+    fn allows_emptying_an_ordinary_folder_after_cd() {
+        for command in [
+            "cd build && rm -rf *",
+            "cd ~/project/build && rm -rf ./*",
+            "cd /tmp/junees && rm -rf .",
+            "cd ../sibling && rm -rf *",
+            "cd ~ && cd build && rm -rf *",
+            "cd ~ && rm -rf build",
+            "cd ~ && rm -f *.log",
+            "cd / && ls",
+            "bash -c 'cd ~' && rm -rf *",
         ] {
             allowed(command);
         }
