@@ -60,7 +60,7 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
   - `.junees/run.log`: 실행 시작/정지(이유, 토큰, 경과 시간), 세션 시작/끝, 크래시 복구를 UTC 시각과 함께 한 줄씩. git 제외(예전 작업은 첫 실행에서 `.gitignore`를 고쳐 따로 커밋)
   - 남은 것: 크래시 난 세션의 토큰은 누적에 들어가지 않음, 세션이 `.junees/`를 통째로 지우면 잠금과 실행 중 표시도 사라짐
 - 무인 모드 명령 정책: 위험 명령 차단 목록, 작업 폴더 밖 쓰기 경고
-  - L4a: `bash` 명령 정책(`src/tools/policy.rs`). 실행 전에 루트/홈/상위 폴더 재귀 삭제(그 폴더로 `cd` 한 뒤 `rm -rf *` 포함), 디스크 파괴, 시스템 종료, fork bomb, `curl | sh`, 강제 push, `sudo` 같은 권한 상승을 막고(셸의 표준 입력으로 넘긴 스크립트도 검사) `blocked by policy: <이유>` 오류 결과를 돌려준다. `JUNEES_DENY_COMMANDS`로 접두사 추가, `JUNEES_ALLOW_DANGEROUS=1`로 기본 규칙 끔. 숨길 환경 변수 `JUNEES_HIDDEN_ENV`(#4). 작업 폴더 밖 쓰기 경고와 대화형 승인은 아직
+  - L4a: `bash` 명령 정책(`src/tools/policy.rs`). 실행 전에 루트/홈/상위 폴더 재귀 삭제(그 폴더로 `cd` 한 뒤 `rm -rf *` 포함), 디스크 파괴, 시스템 종료, fork bomb, `curl | sh`, 강제 push, `sudo` 같은 권한 상승을 막고(셸의 표준 입력으로 넘긴 스크립트도 검사) `blocked by policy: <이유>` 오류 결과를 돌려준다. `JUNEES_DENY_COMMANDS`로 접두사 추가, `JUNEES_ALLOW_DANGEROUS=1`로 기본 규칙 끔. 숨길 환경 변수 `JUNEES_HIDDEN_ENV`(#4). 작업 폴더 밖 쓰기와 그 밖의 주의 신호(삭제, `git push`, 패키지 설치 등)는 정책 모듈의 주의 등급(`CommandPolicy::cautions`)으로 찾아 대화 모드에서만 실행 전에 묻는다(`JUNEES_APPROVAL`, `src/approval.rs`). 무인 모드(`-p`, `task`)는 묻지도 경고하지도 않는다
 
 ### L5. 상태 보기와 알림
 - `junees task status [--json]`: `.junees/`를 읽기만 한다(실행 중인 run 옆에서도 안전, API 키 불필요). 목표, 통과 수/전체와 진행 막대, 기능별 id/통과 여부/설명 첫 줄, 세션 수, 연속 무진전 수, 누적 토큰(입력/출력/캐시), 마지막 정지 이유와 시각, `progress.md` 마지막 5줄. `--json` 필드는 README에 정리. `.junees/`가 없으면 `task init`을 먼저 하라는 오류

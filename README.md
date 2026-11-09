@@ -24,7 +24,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ### 중단 (Ctrl-C, SIGTERM)
 
-- 대화 모드: 턴 실행 중 Ctrl-C는 그 턴만 취소하고 프롬프트로 돌아온다. 모델 호출 중이면 응답을 버리고, 도구 실행 중이면 그 도구의 프로세스 그룹 전체(백그라운드로 띄운 자식 포함)를 끝낸다. 결과가 없는 도구 호출은 `cancelled by the user` 오류 결과로 채워 기록하므로(세션 파일에도) 다음 입력이 그대로 이어진다. 프롬프트에서 Ctrl-C를 연달아 두 번 누르거나 Ctrl-D를 누르면 종료한다. `/compact` 중 Ctrl-C는 압축만 취소한다(기록은 그대로). SIGTERM은 턴을 같은 방식으로 취소하고 종료 코드 143으로 끝난다.
+- 대화 모드: 턴 실행 중 Ctrl-C는 그 턴만 취소하고 프롬프트로 돌아온다. 모델 호출 중이면 응답을 버리고, 도구 실행 중이면 그 도구의 프로세스 그룹 전체(백그라운드로 띄운 자식 포함)를 끝낸다. 결과가 없는 도구 호출은 `cancelled by the user` 오류 결과로 채워 기록하므로(세션 파일에도) 다음 입력이 그대로 이어진다. 프롬프트에서 Ctrl-C를 연달아 두 번 누르거나 Ctrl-D를 누르면 종료한다. `/compact` 중 Ctrl-C는 압축만 취소한다(기록은 그대로). SIGTERM은 턴을 같은 방식으로 취소하고 종료 코드 143으로 끝난다. 승인 질문을 기다리는 중 Ctrl-C는 그 호출을 실행하지 않고 턴을 취소한다.
 - `-p`: SIGINT/SIGTERM을 받으면 같은 방식으로 턴을 취소하고(도구 종료, 짝 채움, 세션 파일에 기록) `interrupted by SIGINT|SIGTERM`을 출력한 뒤 종료 코드 130/143으로 끝난다.
 - `task init`/`task run`: 아래 장기 작업 모드 참고. 어느 모드든 두 번째 시그널은 정리 없이 바로 끝낸다(`task run`이면 다음 실행이 크래시로 보고 복구한다).
 - 정상적으로 끝난 도구가 남긴 백그라운드 프로세스(`server > log 2>&1 &`)는 취소와 상관없이 그대로 둔다. 취소는 아직 실행 중인 도구에만 적용된다.
@@ -106,13 +106,14 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `JUNEES_HOME` | `~/.junees` | 세션 기록 등 상태를 두는 폴더 |
 | `JUNEES_DENY_COMMANDS` | (없음) | `bash`에서 추가로 막을 명령 접두사, 쉼표 구분 (예: `docker rm,kubectl delete`) |
 | `JUNEES_ALLOW_DANGEROUS` | `0` | `1`이면 기본 명령 차단 규칙을 끈다 (사용자 책임) |
+| `JUNEES_APPROVAL` | `risky` | 대화 모드에서 실행 전에 물을 도구 호출: `off`, `risky`(위험 신호가 있는 명령, 작업 폴더 밖 쓰기), `all`(모든 `bash`/`write_file`/`edit_file`) |
 | `JUNEES_HIDDEN_ENV` | (없음) | `bash`에서 추가로 숨길 환경 변수 이름, 쉼표 구분 (예: `DB_PASSWORD,GITHUB_TOKEN`) |
 | `JUNEES_NOTIFY_WEBHOOK` | (없음) | `task run`이 멈출 때 알림을 보낼 디스코드 웹훅 URL (https만; 평문 http는 localhost와 루프백 주소에만 허용) |
 | `JUNEES_NOTIFY_EACH_SESSION` | `0` | `1`이면 작업 세션마다 한 줄 알림도 보낸다 |
 | `JUNEES_TASK_MAX_TOKENS` | (없음) | `task run --max-tokens`의 기본값 (작업 전체 누적 토큰) |
 | `JUNEES_TASK_MAX_TIME` | (없음) | `task run --max-time`의 기본값 (이번 실행 시간, 예: `2h`, `1h30m`) |
 
-기본 도구는 `bash`, `read_file`, `write_file`, `edit_file` 네 가지다(`task` 작업 세션도 같은 네 가지에 `mark_feature_passing`을 더해 쓴다). `bash`는 승인 절차 없이 바로 실행되니(로드맵 3단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다. 리눅스에서는 junees가 시작할 때 자기 프로세스를 dump 불가(`PR_SET_DUMPABLE` 0)로 만들어, 같은 사용자의 프로세스도 `/proc/<junees pid>/environ`과 `mem`을 읽지 못한다. 그래서 `bash`가 `/proc/$PPID/environ`처럼 부모를 거슬러 올라가도 이 변수들을 읽을 수 없다. 자식 프로세스는 exec할 때 다시 보통 프로세스가 되므로 도구 동작은 그대로이고, junees 자신의 코어 덤프만 남지 않는다.
+기본 도구는 `bash`, `read_file`, `write_file`, `edit_file` 네 가지다(`task` 작업 세션도 같은 네 가지에 `mark_feature_passing`을 더해 쓴다). 대화 모드는 위험할 수 있는 호출을 실행하기 전에 묻는다(아래 "실행 전 승인"). `-p`와 `task` 모드는 묻지 않고 명령 정책만 적용하므로 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다. 리눅스에서는 junees가 시작할 때 자기 프로세스를 dump 불가(`PR_SET_DUMPABLE` 0)로 만들어, 같은 사용자의 프로세스도 `/proc/<junees pid>/environ`과 `mem`을 읽지 못한다. 그래서 `bash`가 `/proc/$PPID/environ`처럼 부모를 거슬러 올라가도 이 변수들을 읽을 수 없다. 자식 프로세스는 exec할 때 다시 보통 프로세스가 되므로 도구 동작은 그대로이고, junees 자신의 코어 덤프만 남지 않는다.
 
 `edit_file {path, old_string, new_string, replace_all?}`은 파일의 일부만 고치는 도구다. 큰 파일을 고칠 때 `write_file`로 전체를 다시 쓰지 않아도 되므로 출력 토큰이 줄고, 긴 출력이 `max_tokens`에 잘리는 일도 줄어든다. 시스템 프롬프트에도 "부분 수정은 `edit_file`, 새 파일이나 전체 교체는 `write_file`"이라고 적혀 있다.
 
@@ -146,12 +147,49 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - `JUNEES_DENY_COMMANDS`의 접두사는 단어 단위로 비교한다. `docker rm`은 `docker rm -f web`을 막지만 `docker rmi`는 막지 않는다. 이 규칙은 `JUNEES_ALLOW_DANGEROUS=1`이어도 적용된다.
 - `JUNEES_ALLOW_DANGEROUS`는 `1`/`true`/`yes`/`on` 또는 `0`/`false`/`no`/`off`만 받고, 다른 값이면 시작할 때 오류로 멈춘다.
 
+### 실행 전 승인
+
+대화 모드에서는 위험할 수 있는 도구 호출을 실행하기 전에 터미널에서 묻는다. 묻는 범위는 `JUNEES_APPROVAL`로 정한다.
+
+- `risky`(기본): 명령 정책이 막지는 않지만 주의할 신호가 있는 `bash` 명령, 그리고 작업 폴더 밖 경로를 고치는 `write_file`/`edit_file`.
+- `all`: 모든 `bash`, `write_file`, `edit_file` 호출. `read_file`은 묻지 않는다.
+- `off`: 묻지 않는다(이전 동작).
+
+`bash`의 주의 신호는 명령 정책과 같은 파서로 찾는다(`$(...)`, `sh -c`, `eval`, 셸에 파이프로 넘긴 스크립트, `timeout`/`env` 같은 래퍼, `find -exec` 안까지).
+
+- 파일 삭제: `rm`, `rmdir`, `unlink`, `shred`, `find -delete`
+- git: `git push`(모든 push), `git reset --hard`, `git clean`(`-n`/`--dry-run` 제외)
+- 패키지 설치/제거: `apt`/`apt-get`/`dnf`/`yum`/`brew`/`pacman`/`apk` 등의 install/remove/upgrade, `pip install`, `python -m pip install`, `npm`/`pnpm`/`yarn`/`bun`의 install/add/ci/update, `cargo install`, `go install`, `gem install`, `uv pip install`/`uv add`, 그리고 레지스트리에서 받아 바로 실행하는 `npx`/`pnpx`/`bunx`/`uvx`
+- 파일로 내려받기: `curl -o`/`-O`, `wget`(`-O -`처럼 표준 출력으로 받거나 `--spider`면 제외). 내려받은 스크립트를 셸에 바로 넘기는 것은 명령 정책이 막는다
+- 권한 변경: `chmod`, `chown`, `chgrp`, `chattr`, `setfacl`
+- 작업 폴더 밖에 쓰기: 리다이렉트(`>`, `>>`, `2>`, `&>`; `2>&1`과 `/dev/null` 같은 장치는 제외), `cp`/`ln`/`install`의 대상(`-t` 포함), `mv`/`tee`/`touch`/`mkdir`/`truncate`의 인자, `sed -i`의 파일, `dd of=`, 삭제 명령의 대상
+- `JUNEES_ALLOW_DANGEROUS=1`일 때는 기본 규칙이 막았을 명령(`sudo` 등)도 주의 신호로 묻는다
+
+작업 폴더는 junees를 실행한 폴더다. 경로는 그 폴더 기준으로 풀고 이미 있는 부분은 심볼릭 링크를 따라가서 판단한다(폴더 안의 링크가 밖을 가리키면 밖). `/tmp`와 `TMPDIR`은 안으로 친다. `~`, `$HOME`은 홈으로 풀고, 그 밖의 변수나 `` ` ``가 들어간 경로, 다른 사용자의 홈(`~user`), 대상이 없는 심볼릭 링크는 알 수 없으므로 밖으로 친다. 명령 정책이 막는 명령은 묻지 않고 그대로 막힌다.
+
+질문은 표준 오류에 도구 이름, 명령이나 경로, 이유를 보여 준다. `edit_file`이면 바꿀 부분(`- 원래`, `+ 새 내용`, 각 8줄까지)을, `write_file`이면 새 파일인지 덮어쓰는지와 내용 앞부분을 함께 보여 준다.
+
+```
+  ?? approve bash: rm marker
+     * `rm` deletes files
+     always allows: bash: delete files
+  [y] run  [n] decline  [a] always allow this kind this session  [e] decline with a reason >
+```
+
+- `y` 실행, `n` 거절, `a` 이번 실행 동안 같은 종류(도구별: 예 `bash: delete files`, `edit_file: write outside the working folder`)는 묻지 않고 허용, `e` 거절 이유 입력(`e 이유`처럼 한 줄로도 된다). 다른 입력이면 다시 묻는다.
+- 거절하면 도구를 실행하지 않고 `the user declined: <이유>`(이유가 없으면 `no reason given`) 오류 결과를 모델에 돌려줘서 모델이 계획을 바꾸게 한다. Ctrl-D(입력 끝)도 거절이다.
+- 질문을 기다리는 중 Ctrl-C는 그 호출을 실행하지 않고 턴을 취소한다(실행 중인 도구를 Ctrl-C로 취소할 때와 같이 그 호출과 남은 호출을 `cancelled by the user` 결과로 채운다). 질문과 프롬프트가 표준 입력을 함께 쓰므로 그 뒤에 입력한 줄은 프롬프트로 간다.
+- "항상 허용"은 junees를 끝낼 때까지 유지된다(`/reset`으로 새 세션을 시작해도 남는다).
+- 표준 입력이 터미널이 아니면(파이프) 대화 모드라도 물을 수 없으므로 시작할 때 안내를 띄우고, 승인이 필요한 호출은 실행하지 않고 `not run: this call needs the user's approval ...` 오류 결과를 돌려준다. 그런 호출까지 실행하려면 `JUNEES_APPROVAL=off`.
+- `-p`와 `task` 모드는 사람이 없으므로 묻지 않는다(명령 정책만 적용).
+
 ## 구조
 
 ```
 src/
   main.rs            CLI 진입점 (대화 모드, -p 실행, 세션 열기/이어 가기, SIGINT/SIGTERM 처리)
-  agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인)
+  agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인, 도구 호출 전 승인 훅 ToolGate)
+  approval.rs        실행 전 승인 (JUNEES_APPROVAL, 묻는 범위 판단, 터미널 질문, 세션 동안 항상 허용, 프롬프트와 공유하는 표준 입력)
   cancel.rs          취소 플래그 (시그널 처리기와 에이전트 루프가 공유)
   session.rs         세션 기록(JSONL) 쓰기, 재생, 이어 가기, 세션 찾기/목록, 비우기/압축 지점 계산
   context.rs         압축 요약 요청(시스템 프롬프트, 앞부분을 텍스트로 옮기기)
@@ -168,7 +206,7 @@ src/
   message.rs         대화 메시지 타입 (Messages API 형식, 모르는 블록은 원본 JSON 그대로)
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정)
-  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책(policy.rs)
+  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs)
   config.rs          환경 변수 설정 (도구 설정 ToolSettings 포함)
   prompt.rs          시스템 프롬프트
   cli.rs             인자 파싱(task 서브커맨드 포함), 출력 보조 함수
@@ -183,6 +221,7 @@ tests/
   task_mode.rs         실제 바이너리로 임시 git 저장소에서 task init -> task run -> task status, task run 중 SIGTERM, 가짜 웹훅으로 알림 검증
   cancel.rs            실제 바이너리로 -p 중 SIGTERM(종료 코드 143), 대화 모드 Ctrl-C(턴 취소 후 다음 입력, 두 번이면 종료) 검증
   task_git_env.rs      GIT_DIR이나 GIT_CONFIG_PARAMETERS가 있어도 task 모드가 제 저장소와 설정으로만 git을 쓰는지 검증
+  approval.rs          실제 바이너리로 파이프 입력 대화 모드의 위험 명령 거절과 안내, JUNEES_APPROVAL=off, -p에서는 묻지 않음 검증
   task_git_secret.rs   하네스 git이 심어진 훅을 실행하지 않고 git이 실행하는 필터에도 API 키를 넘기지 않는지 검증
 ```
 
