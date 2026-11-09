@@ -11,6 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -174,14 +175,20 @@ impl SessionWriter {
         &self.path
     }
 
-    /// Creates the file, locks it and writes the meta line.
+    /// Creates the file, locks it and writes the meta line. Journals hold
+    /// every tool output (files read, command output), so the directories
+    /// it creates are 0700 and the file is 0600 whatever the umask.
     fn start(&self) -> io::Result<File> {
         if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
         }
         let mut file = OpenOptions::new()
             .append(true)
             .create_new(true)
+            .mode(0o600)
             .open(&self.path)?;
         lock(&file, &self.path)?;
         write_line(&mut file, &Entry::Meta(self.meta.clone()))?;
@@ -643,6 +650,21 @@ mod tests {
             .unwrap();
         let session = Session::load(writer.path()).unwrap();
         assert_eq!(session.transcript.messages, [Message::user_text("hi")]);
+    }
+
+    #[test]
+    fn session_files_and_their_folders_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("junees");
+        let (_, mut writer) = SessionWriter::create(&home, Path::new("/w"), "m").unwrap();
+        writer
+            .record(&Entry::Message(Message::user_text("cat .env")))
+            .unwrap();
+        for path in [home.as_path(), &sessions_dir(&home), writer.path()] {
+            let mode = fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{} has mode {mode:o}", path.display());
+        }
     }
 
     #[test]
