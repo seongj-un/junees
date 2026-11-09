@@ -10,6 +10,8 @@
 
 pub mod budget;
 pub mod claude_code;
+#[cfg(test)]
+mod claude_tests;
 pub mod features;
 pub mod git;
 pub mod lock;

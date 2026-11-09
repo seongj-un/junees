@@ -10,13 +10,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 
 use super::budget::{self, Budget, format_duration};
+use super::claude_code::{ClaudeCode, End, NotLoggedIn, Request};
 use super::features::{self, Ledger};
 use super::lock::RunLock;
 use super::state::{Running, State, Stop, StopReason};
 use super::tools::{MarkFeaturePassing, Verifier, session_tools};
 use super::{
     STALL_LIMIT, append_run_log, dir, features_path, git, progress_path, prompt,
-    rejected_features_path, run_log_path,
+    rejected_features_path, run_log_path, sessions_dir,
 };
 use crate::agent::{Agent, AgentOptions, Cancelled, Event, Limit, LimitReached, TurnLimit};
 use crate::cancel::Cancel;
@@ -44,7 +45,13 @@ pub const RECHECK_COMMIT: &str = "junees: recheck passing features at run start"
 
 /// What `.junees/.gitignore` keeps out of git: harness files that change
 /// on every run.
-const IGNORED: &[&str] = &["state.json", ".*.tmp", "*.rejected.json", "run.log"];
+const IGNORED: &[&str] = &[
+    "state.json",
+    ".*.tmp",
+    "*.rejected.json",
+    "run.log",
+    "sessions/",
+];
 
 const NO_TASK: &str = "cannot load the feature list (start a task with `junees task init`)";
 
@@ -93,6 +100,9 @@ pub struct TaskEnv<'a> {
     /// Set by SIGINT/SIGTERM: the session that runs is cancelled (its tool
     /// stopped), wrapped up and checkpointed, and the run stops.
     pub cancel: Cancel,
+    /// Runs the sessions with the Claude Code CLI instead of `provider`
+    /// (the `claude-code` backend).
+    pub claude: Option<ClaudeCode>,
 }
 
 /// What the runner tells the user: its own status lines and the events of
@@ -114,6 +124,32 @@ impl TaskEnv<'_> {
 
     fn verifier(&self) -> Verifier {
         Verifier::new(self.root.clone(), &self.tool_settings)
+    }
+
+    /// With the `claude-code` backend, checks that `claude` runs and tells
+    /// the user which one.
+    async fn check_claude(&self, report: &mut Reporter<'_>) -> Result<()> {
+        if let Some(claude) = &self.claude {
+            let version = claude.check(&self.root, &self.tool_settings).await?;
+            line(
+                report,
+                &format!("== sessions run by Claude Code {version} =="),
+            );
+        }
+        Ok(())
+    }
+
+    /// A Claude Code session in the task's repository, its output saved as
+    /// `.junees/sessions/<name>.jsonl`.
+    fn claude_request<'r>(&'r self, system: &'r str, input: &'r str, log: &'r Path) -> Request<'r> {
+        Request {
+            root: &self.root,
+            system,
+            input,
+            max_turns: self.max_turns,
+            settings: &self.tool_settings,
+            log: Some(log),
+        }
     }
 
     /// A new agent with a fresh context, recording to a new session journal
@@ -173,6 +209,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
         bail!(DIRTY_TREE);
     }
     prepare_dir(root)?;
+    env.check_claude(report).await?;
 
     let (count, usage) = match plan(env, goal, report).await {
         Ok(planned) => planned,
@@ -198,6 +235,9 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
 /// The init session: writes the feature list and gets one chance to fix
 /// it. Returns the number of features and the tokens used.
 async fn plan(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> Result<(usize, Usage)> {
+    if let Some(claude) = &env.claude {
+        return plan_with_claude(env, claude, goal, report).await;
+    }
     let root = &env.root;
     let (mut agent, journal) = env.agent(prompt::init_system(root), env.tools(), report)?;
     line(
@@ -233,6 +273,82 @@ async fn plan(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> Resul
     // Writes the list in the harness's own formatting.
     Ledger::load(root)?;
     Ok((count, agent.usage()))
+}
+
+/// [`plan`] with Claude Code. Claude Code keeps its own session, so the
+/// fix is a second session, told the goal and what was wrong.
+async fn plan_with_claude(
+    env: &TaskEnv<'_>,
+    claude: &ClaudeCode,
+    goal: &str,
+    report: &mut Reporter<'_>,
+) -> Result<(usize, Usage)> {
+    let root = &env.root;
+    let system = prompt::claude_init_system();
+    let verifier = env.verifier();
+    let mut usage = Usage::default();
+    let mut input = prompt::init_input(goal);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let name = if attempt == 1 { "init" } else { "init-fix" };
+        let log = sessions_dir(root).join(format!("{name}.jsonl"));
+        line(
+            report,
+            &format!(
+                "== {name} session, Claude Code, output in {} ==",
+                shown(root, &log)
+            ),
+        );
+        let outcome = claude
+            .run(
+                &env.claude_request(&system, &input, &log),
+                &env.cancel,
+                None,
+                report,
+            )
+            .await;
+        usage.add(outcome.usage);
+        match outcome.end.context("the init session failed")? {
+            End::Answered => {}
+            End::Interrupted => {
+                return Err(anyhow::Error::new(Cancelled).context("the init session failed"));
+            }
+            End::TurnLimit => bail!(
+                "the init session failed: it stopped at --max-turns {}",
+                env.max_turns
+            ),
+            End::Budget(reason) => bail!("the init session failed: {reason}"),
+        }
+        match check_new_list(root, &verifier, report).await {
+            Ok(count) => {
+                // Writes the list in the harness's own formatting.
+                Ledger::load(root)?;
+                return Ok((count, usage));
+            }
+            Err(err) if attempt == 1 => {
+                let problem = format!("{err:#}");
+                warn(
+                    report,
+                    &format!("{problem}; asking a new init session to fix it"),
+                );
+                input = format!(
+                    "{}\n\n{}",
+                    prompt::init_input(goal),
+                    prompt::fix_input(&problem)
+                );
+            }
+            Err(err) => return Err(err.context("the feature list is still invalid after one fix")),
+        }
+    }
+}
+
+/// `path` relative to `root` when it is inside it, for status lines.
+fn shown(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 /// After a failed init, moves the list the session wrote out of the way:
@@ -328,6 +444,7 @@ async fn run_until_stop(
     if git::is_dirty(root)? {
         bail!(DIRTY_TREE);
     }
+    env.check_claude(report).await?;
     let ledger = Ledger::load(root)?;
     let ledger = Arc::new(Mutex::new(ledger));
     // A task from an older Junees learns to ignore the run log here, in its
@@ -410,7 +527,10 @@ async fn run_until_stop(
         let before = ledger.lock().unwrap().passing_ids();
 
         let limit = env.budget.session_limit(used, started);
-        let (result, usage) = work_session(env, n, &ledger, limit, report).await;
+        let (result, usage) = match &env.claude {
+            Some(claude) => claude_session(env, claude, n, &ledger, limit, started, report).await,
+            None => work_session(env, n, &ledger, limit, report).await,
+        };
         state.usage.add(usage);
 
         let (summary, progressed, passing, total) =
@@ -804,6 +924,123 @@ async fn work_session(
     (result, agent.usage())
 }
 
+/// [`work_session`] with Claude Code. Claude Code cannot mark a feature
+/// as passing, so afterwards the harness runs the verify command of every
+/// feature that does not pass yet (see [`record_passes`]), unless the
+/// session was interrupted or Claude Code is not signed in.
+async fn claude_session(
+    env: &TaskEnv<'_>,
+    claude: &ClaudeCode,
+    n: u64,
+    ledger: &Arc<Mutex<Ledger>>,
+    mut limit: Option<Limit>,
+    started: std::time::Instant,
+    report: &mut Reporter<'_>,
+) -> (Result<Ended>, Usage) {
+    let root = &env.root;
+    let progress = fs::read_to_string(progress_path(root)).unwrap_or_default();
+    let git_log = git::recent_log(root, GIT_LOG_LINES);
+    let (system, passing, total) = {
+        let ledger = ledger.lock().unwrap();
+        let system = prompt::claude_work_system(n, ledger.features(), &progress, &git_log);
+        (system, ledger.passing(), ledger.total())
+    };
+    let output = sessions_dir(root).join(format!("session-{n}.jsonl"));
+    line(
+        report,
+        &format!(
+            "== session {n} start: {passing}/{total} passing, Claude Code, output in {} ==",
+            shown(root, &output)
+        ),
+    );
+    let outcome = claude
+        .run(
+            &env.claude_request(&system, prompt::WORK_INPUT, &output),
+            &env.cancel,
+            limit.as_mut(),
+            report,
+        )
+        .await;
+    log(
+        root,
+        report,
+        &format!("session {n} claude-code: {}", outcome.summary()),
+    );
+    let result = outcome.end.map(|end| match end {
+        End::Answered => Ended::Answered,
+        End::TurnLimit => Ended::TurnLimit,
+        End::Budget(reason) => Ended::Budget(reason),
+        End::Interrupted => Ended::Interrupted,
+    });
+    let verify = match &result {
+        Ok(Ended::Interrupted) => false,
+        Ok(_) => true,
+        Err(err) => err.downcast_ref::<NotLoggedIn>().is_none(),
+    };
+    if verify && let Err(err) = record_passes(env, ledger, started, report).await {
+        return (Err(err), outcome.usage);
+    }
+    (result, outcome.usage)
+}
+
+/// The harness's part of a Claude Code session: runs the verify command of
+/// every feature that does not pass yet, as `mark_feature_passing` would,
+/// and records the ones that exit 0. It stops early, leaving the rest for
+/// a later session, when `env.cancel` is set or the run's time is up.
+async fn record_passes(
+    env: &TaskEnv<'_>,
+    ledger: &Arc<Mutex<Ledger>>,
+    started: std::time::Instant,
+    report: &mut Reporter<'_>,
+) -> Result<()> {
+    let pending: Vec<(String, String)> = ledger
+        .lock()
+        .unwrap()
+        .features()
+        .iter()
+        .filter(|feature| !feature.passes)
+        .map(|feature| (feature.id.clone(), feature.verify.clone()))
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    line(
+        report,
+        &format!(
+            "== running the verify commands of the {} feature(s) that do not pass yet ==",
+            pending.len()
+        ),
+    );
+    let verifier = env.verifier();
+    let mut passed = Vec::new();
+    for (id, verify) in pending {
+        // The tokens are spent already; only the time limit applies here.
+        if let Some(reason) = env.budget.exceeded(0, started) {
+            warn(
+                report,
+                &format!("{reason}; the other verify commands wait for the next run"),
+            );
+            break;
+        }
+        let output = tokio::select! {
+            biased;
+            _ = env.cancel.cancelled() => break,
+            output = verifier.run(&verify) => output,
+        };
+        if !output.is_error {
+            ledger.lock().unwrap().mark_passing(&id)?;
+            passed.push(id);
+        }
+    }
+    if !passed.is_empty() {
+        line(
+            report,
+            &format!("verified by the harness: {}", passed.join(", ")),
+        );
+    }
+    Ok(())
+}
+
 /// Why [`recheck_passing`] stopped before it checked every pass.
 enum Unchecked {
     /// `env.cancel` was set.
@@ -1128,6 +1365,7 @@ mod tests {
             notify: Notifier::default(),
             budget: Budget::default(),
             cancel: Cancel::new(),
+            claude: None,
         }
     }
 

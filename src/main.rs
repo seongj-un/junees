@@ -274,6 +274,7 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         budget,
         cancel: Cancel::new(),
         notify: Notifier::from_env()?,
+        claude: None,
     };
     let received = cancel_on_signals(Signals::install()?, env.cancel.clone());
     let interrupted = || signal_exit(received.load(Ordering::SeqCst));
