@@ -14,7 +14,8 @@ use super::features::{self, Ledger};
 use super::state::{State, Stop, StopReason};
 use super::tools::{MarkFeaturePassing, Verifier, session_tools};
 use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt, rejected_features_path};
-use crate::agent::{Agent, AgentOptions, Event, Limit, LimitReached, TurnLimit};
+use crate::agent::{Agent, AgentOptions, Cancelled, Event, Limit, LimitReached, TurnLimit};
+use crate::cancel::Cancel;
 use crate::cli::preview;
 use crate::message::Usage;
 use crate::provider::Provider;
@@ -64,6 +65,9 @@ pub struct TaskEnv<'a> {
     pub provider: &'a ProviderFactory<'a>,
     /// Token and time limits of `task run`.
     pub budget: Budget,
+    /// Set by SIGINT/SIGTERM: the session that runs is cancelled (its tool
+    /// stopped), wrapped up and checkpointed, and the run stops.
+    pub cancel: Cancel,
 }
 
 /// What the runner tells the user: its own status lines and the events of
@@ -105,7 +109,8 @@ impl TaskEnv<'_> {
                 context_window: self.context_window,
                 compact_threshold: self.compact_threshold,
             },
-        );
+        )
+        .with_cancel(self.cancel.clone());
         let Some(home) = &self.home else {
             return Ok((agent, None));
         };
@@ -230,8 +235,9 @@ fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
 
 /// Runs work sessions on the task in `env.root` until every feature passes,
 /// `max_sessions` sessions have run, [`STALL_LIMIT`] sessions in a row
-/// passed no new feature, a session fails, or the budget runs out. Returns
-/// why it stopped, which is also recorded in state.json.
+/// passed no new feature, a session fails, the budget runs out, or
+/// `env.cancel` is set. Returns why it stopped, which is also recorded in
+/// state.json.
 ///
 /// The budget is checked before each session and, inside a session, before
 /// each model call; a session that runs out ends there and is wrapped up
@@ -258,7 +264,7 @@ pub async fn run(
     let ledger = Ledger::load(root)?;
     let ledger = Arc::new(Mutex::new(ledger));
     prepare_dir(root)?;
-    recheck_passing(env, &ledger, report).await?;
+    let rechecked = recheck_passing(env, &ledger, report).await?;
     let mut state = State::load(root)?;
     // A run that stopped on its own does not hold its stall streak against
     // the next one; after a crash (no stop recorded) the streak carries on.
@@ -276,6 +282,9 @@ pub async fn run(
         };
         if ledger.lock().unwrap().all_pass() {
             break stop(StopReason::Complete, state.sessions);
+        }
+        if !rechecked || env.cancel.is_cancelled() {
+            break stop(StopReason::Interrupted, state.sessions);
         }
         if ran == max_sessions {
             break stop(StopReason::MaxSessions, state.sessions);
@@ -328,6 +337,9 @@ pub async fn run(
         };
         if passing == total {
             break stop(StopReason::Complete, n);
+        }
+        if let Ended::Interrupted = ended {
+            break stop(StopReason::Interrupted, n);
         }
         if let Ended::Budget(detail) = ended {
             break Stop {
@@ -399,6 +411,7 @@ fn wrap_up(
             env.max_turns
         ),
         Ok(Ended::Budget(reason)) => format!("{passes}, ended early: {reason}"),
+        Ok(Ended::Interrupted) => format!("{passes}, interrupted"),
         Err(err) => format!("failed: {}", preview(&format!("{err:#}"), ERROR_CHARS)),
     };
     append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
@@ -425,6 +438,8 @@ enum Ended {
     TurnLimit,
     /// The budget ran out before a model call; the run stops after it.
     Budget(String),
+    /// The session was cancelled (SIGINT/SIGTERM); the run stops after it.
+    Interrupted,
 }
 
 /// How a session whose agent returned `err` ended: the turn limit and the
@@ -435,6 +450,9 @@ fn ended_early(err: anyhow::Error) -> Result<Ended> {
     }
     if let Some(LimitReached(reason)) = err.downcast_ref::<LimitReached>() {
         return Ok(Ended::Budget(reason.clone()));
+    }
+    if err.downcast_ref::<Cancelled>().is_some() {
+        return Ok(Ended::Interrupted);
     }
     Err(err)
 }
@@ -489,11 +507,13 @@ async fn work_session(
 /// things the harness never decided: a session killed before the harness
 /// could undo its edits, or a list written by hand. Running the commands
 /// again also catches features a later change broke.
+///
+/// Returns false, having changed nothing, if `env.cancel` was set first.
 async fn recheck_passing(
     env: &TaskEnv<'_>,
     ledger: &Arc<Mutex<Ledger>>,
     report: &mut Reporter<'_>,
-) -> Result<()> {
+) -> Result<bool> {
     let marked: Vec<(String, String)> = ledger
         .lock()
         .unwrap()
@@ -503,7 +523,7 @@ async fn recheck_passing(
         .map(|feature| (feature.id.clone(), feature.verify.clone()))
         .collect();
     if marked.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     line(
         report,
@@ -515,12 +535,17 @@ async fn recheck_passing(
     let verifier = env.verifier();
     let mut failed = Vec::new();
     for (id, verify) in marked {
-        if verifier.run(&verify).await.is_error {
+        let output = tokio::select! {
+            biased;
+            _ = env.cancel.cancelled() => return Ok(false),
+            output = verifier.run(&verify) => output,
+        };
+        if output.is_error {
             failed.push(id);
         }
     }
     if failed.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     {
         let mut ledger = ledger.lock().unwrap();
@@ -534,7 +559,8 @@ async fn recheck_passing(
         failed.join(", ")
     );
     warn(report, &text);
-    append_progress(env.root.as_path(), &format!("run start: {text}"))
+    append_progress(env.root.as_path(), &format!("run start: {text}"))?;
+    Ok(true)
 }
 
 /// Checks the list a new task starts from and returns its length. Besides
@@ -759,6 +785,7 @@ mod tests {
             compact_threshold: 0.8,
             provider: factory,
             budget: Budget::default(),
+            cancel: Cancel::new(),
         }
     }
 
@@ -1535,6 +1562,72 @@ mod tests {
         let stop = run(&env, 1, &mut |_| {}).await.unwrap();
         assert_eq!(stop.reason, StopReason::MaxSessions);
         assert_eq!(provider.left(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_session_is_checkpointed_and_the_run_stops() {
+        let repo = task_repo(&["false", "false"]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let pid_file = home.path().join("pid");
+        let provider = Scripted::new(vec![calls(&[
+            write(&root.join("wip.txt"), "half done"),
+            bash(format!(
+                "sleep 30 & echo $! > '{}'; wait",
+                pid_file.display()
+            )),
+            write(&root.join("never.txt"), "x"),
+        ])]);
+        let factory = factory(&provider);
+        let env = env(root, home.path(), &factory);
+        let cancel = env.cancel.clone();
+        let canceller = tokio::spawn(async move {
+            loop {
+                let text = fs::read_to_string(&pid_file).unwrap_or_default();
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    cancel.cancel();
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let mut out = Collected::default();
+        let stop = run(&env, 5, &mut out.reporter()).await.unwrap();
+        let pid = canceller.await.unwrap();
+
+        assert_eq!(stop.reason, StopReason::Interrupted);
+        assert_eq!(stop.session, 1);
+        assert!(!stop.reason.is_failure());
+        assert!(
+            crate::tools::testing::gone_soon(pid).await,
+            "{pid} survived"
+        );
+        assert!(!root.join("never.txt").exists());
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        assert!(!git::is_dirty(root).unwrap());
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains("- [junees] session 1: 0/2 passing, nothing new, interrupted, "),
+            "{progress}"
+        );
+        assert_eq!(State::load(root).unwrap().stop, Some(stop));
+        // No model call after the cancel, and the journal answers the
+        // cancelled calls.
+        assert_eq!(provider.seen.lock().unwrap().len(), 1);
+        let journal: String = fs::read_dir(home.path().join("sessions"))
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert_eq!(
+            journal.matches(crate::agent::CANCELLED).count(),
+            2,
+            "{journal}"
+        );
+
+        // Still set: the next run stops before starting a session.
+        let stop = run(&env, 5, &mut |_| {}).await.unwrap();
+        assert_eq!(stop.reason, StopReason::Interrupted);
+        assert_eq!(stop.session, 1);
     }
 
     #[tokio::test]

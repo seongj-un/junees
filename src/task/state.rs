@@ -55,6 +55,9 @@ pub enum StopReason {
     Error,
     /// The task used up its token budget, or the run its time budget.
     Budget,
+    /// SIGINT or SIGTERM: the running session was cancelled, wrapped up
+    /// and checkpointed.
+    Interrupted,
 }
 
 impl StopReason {
@@ -83,6 +86,7 @@ impl fmt::Display for Stop {
             StopReason::Budget => {
                 write!(f, "{}", self.detail.as_deref().unwrap_or("budget used up"))
             }
+            StopReason::Interrupted => write!(f, "interrupted"),
         }
     }
 }

@@ -14,6 +14,7 @@ use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::task::budget::Budget;
+use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -60,10 +61,7 @@ async fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
-        Command::Task(command) => {
-            run_task(command).await?;
-            return Ok(ExitCode::SUCCESS);
-        }
+        Command::Task(command) => return run_task(command).await,
     };
 
     let config = Config::from_env()?;
@@ -194,8 +192,9 @@ fn signal_exit(signal: i32) -> ExitCode {
 }
 
 /// `junees task init|run`, in the root of the git repository the current
-/// folder is in.
-async fn run_task(command: TaskCommand) -> Result<()> {
+/// folder is in. SIGINT/SIGTERM stop the session that runs; `task run`
+/// then checkpoints it, records the stop and exits with 130/143.
+async fn run_task(command: TaskCommand) -> Result<ExitCode> {
     let config = Config::from_env()?;
     let root = task::git::toplevel(&std::env::current_dir()?)?;
     // The tools resolve relative paths from the process's folder.
@@ -231,20 +230,33 @@ async fn run_task(command: TaskCommand) -> Result<()> {
         compact_threshold: config.compact_threshold,
         provider: &provider,
         budget,
+        cancel: Cancel::new(),
     };
-    let mut report = |report: Report<'_>| match report {
+    let received = cancel_on_signals(Signals::install()?, env.cancel.clone());
+    let interrupted = || signal_exit(received.load(Ordering::SeqCst));
+    let mut reporter = |report: Report<'_>| match report {
         Report::Line(line) => println!("{line}"),
         Report::Event(event) => print_event(event),
     };
     match command {
-        TaskCommand::Init { goal } => task::init(&env, &goal, &mut report).await,
+        TaskCommand::Init { goal } => match task::init(&env, &goal, &mut reporter).await {
+            Ok(()) => Ok(ExitCode::SUCCESS),
+            Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
+                report(&err);
+                Ok(interrupted())
+            }
+            Err(err) => Err(err),
+        },
         TaskCommand::Run { max_sessions, .. } => {
-            let stop = task::run(&env, max_sessions, &mut report).await?;
+            let stop = task::run(&env, max_sessions, &mut reporter).await?;
             if stop.reason.is_failure() {
                 bail!("task stopped: {stop}");
             }
             println!("task stopped: {stop}");
-            Ok(())
+            if stop.reason == StopReason::Interrupted {
+                return Ok(interrupted());
+            }
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
