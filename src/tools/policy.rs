@@ -105,7 +105,7 @@ impl CommandPolicy {
                 {
                     return Some(reason);
                 }
-                let words = match self.command_words(&command.words) {
+                let words = match self.command_words(&command.words, depth) {
                     Ok(words) => words,
                     Err(reason) => return Some(reason),
                 };
@@ -146,7 +146,7 @@ impl CommandPolicy {
     /// keywords (`then`, `do`, `!`, ...) and wrappers (`env`, `nohup`,
     /// `timeout`, `setsid`, `taskset`, `busybox`, ...), so the rules see the
     /// program that actually runs.
-    fn command_words<'a>(&self, words: &'a [String]) -> Result<&'a [String], String> {
+    fn command_words<'a>(&self, words: &'a [String], depth: usize) -> Result<&'a [String], String> {
         let mut i = 0;
         while let Some(word) = words.get(i) {
             if is_assignment(word) {
@@ -155,11 +155,27 @@ impl CommandPolicy {
             }
             let name = basename(word);
             let takes_value: &[&str] = match name {
-                "sudo" | "doas" => {
-                    if !self.allow_dangerous {
-                        return Err(format!("`{name}` is not allowed"));
+                "sudo" | "doas" | "pkexec" | "su" | "runuser" if !self.allow_dangerous => {
+                    return Err(format!("`{name}` is not allowed"));
+                }
+                "sudo" | "doas" => &["-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t"],
+                "pkexec" => &["--user"],
+                "su" | "runuser" => {
+                    if let Some(script) = su_command(&words[i + 1..]) {
+                        return self.violation(script, depth + 1, None).map_or(Ok(&[]), Err);
                     }
-                    &["-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t"]
+                    &[
+                        "-u",
+                        "--user",
+                        "-g",
+                        "--group",
+                        "-G",
+                        "--supp-group",
+                        "-s",
+                        "--shell",
+                        "-w",
+                        "--whitelist-environment",
+                    ]
                 }
                 "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!" | "{" | "time"
                 | "command" | "builtin" | "nohup" | "setsid" | "busybox" | "taskset" => &[],
@@ -422,6 +438,22 @@ fn shell_script(args: &[String]) -> Option<&str> {
             found_c |= arg.starts_with('-') && arg.contains('c');
         } else {
             return found_c.then_some(arg.as_str());
+        }
+    }
+    None
+}
+
+/// The command of `su -c 'command'` or `runuser --command=command`.
+fn su_command(args: &[String]) -> Option<&str> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if let Some(command) = arg.strip_prefix("--command=") {
+            return Some(command);
+        }
+        if arg == "--command"
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg.ends_with('c'))
+        {
+            return args.next().map(String::as_str);
         }
     }
     None
@@ -1128,8 +1160,13 @@ mod tests {
         assert_eq!(denied("sudo apt-get install foo"), "`sudo` is not allowed");
         denied("/usr/bin/sudo -u root ls");
         denied("doas ls");
+        assert_eq!(denied("pkexec reboot"), "`pkexec` is not allowed");
+        assert_eq!(denied("su -c 'ls' root"), "`su` is not allowed");
+        denied("su - root");
+        denied("runuser -u nobody -- ls");
         allowed("echo sudo");
         allowed("grep -r sudo .");
+        allowed("grep -rn pkexec src/");
     }
 
     #[test]
@@ -1292,6 +1329,16 @@ mod tests {
             assert_eq!(policy.check(command), Verdict::Allow, "{command}");
         }
         assert!(reason(&policy, "sudo docker rm web").is_some());
+        for command in [
+            "pkexec --user root docker rm web",
+            "su -c 'docker rm web' root",
+            "su -lc 'docker rm web'",
+            "runuser --command='docker rm web' nobody",
+            "runuser -u nobody -- docker rm web",
+        ] {
+            assert!(reason(&policy, command).is_some(), "{command}");
+        }
+        assert_eq!(policy.check("su -c 'docker ps' root"), Verdict::Allow);
         assert!(reason(&policy, "bash -c 'docker rm web'").is_some());
     }
 
