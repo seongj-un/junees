@@ -12,5 +12,6 @@ pub mod notify;
 pub mod prompt;
 pub mod provider;
 pub mod session;
+pub mod setup;
 pub mod task;
 pub mod tools;
