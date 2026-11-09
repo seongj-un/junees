@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::message::{ContentBlock, Message, Role, Usage};
 
+/// The journal format this version writes and the newest it can read.
+/// Raise it when old binaries could misread new journals.
+pub const FORMAT: u32 = 1;
+
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
 
@@ -26,11 +30,18 @@ pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool fini
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
     pub id: String,
+    /// Journal format version; files from before the field are format 1.
+    #[serde(default = "first_format")]
+    pub format: u32,
     /// Unix seconds.
     pub created_at: u64,
     pub cwd: String,
     pub model: String,
     pub version: String,
+}
+
+fn first_format() -> u32 {
+    1
 }
 
 /// One line of a journal.
@@ -143,6 +154,7 @@ impl SessionWriter {
             }
             let meta = Meta {
                 id,
+                format: FORMAT,
                 created_at: now,
                 cwd: cwd.to_string_lossy().into_owned(),
                 model: model.to_string(),
@@ -254,6 +266,16 @@ impl Session {
             }
             match serde_json::from_slice::<Entry>(line) {
                 Ok(entry) => {
+                    if let Entry::Meta(meta) = &entry
+                        && meta.format > FORMAT
+                    {
+                        bail!(
+                            "{} was written by a newer Junees (session format {}, \
+                             this version reads up to {FORMAT}); update Junees to open it",
+                            path.display(),
+                            meta.format
+                        );
+                    }
                     entries.push(entry);
                     valid_len = next;
                 }
@@ -541,6 +563,7 @@ mod tests {
     fn meta() -> Entry {
         Entry::Meta(Meta {
             id: "20261109-061704-3fa2".into(),
+            format: FORMAT,
             created_at: 1_794_205_024,
             cwd: "/work".into(),
             model: "m".into(),
@@ -661,6 +684,36 @@ mod tests {
 
         let err = Session::load(&path).unwrap_err();
         assert!(err.to_string().contains("line 3 is corrupt"), "{err}");
+        assert!(Session::resume(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn meta_lines_carry_the_format_version() {
+        let value = serde_json::to_value(meta()).unwrap();
+        assert_eq!(value["format"], 1);
+        // Journals written before the field existed are format 1.
+        let old =
+            r#"{"type":"meta","id":"a","created_at":1,"cwd":"/w","model":"m","version":"0.1.0"}"#;
+        let Entry::Meta(old) = serde_json::from_str(old).unwrap() else {
+            panic!("not a meta line");
+        };
+        assert_eq!(old.format, 1);
+    }
+
+    #[test]
+    fn refuses_a_session_from_a_newer_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut newer = serde_json::to_value(meta()).unwrap();
+        newer["format"] = json!(FORMAT + 1);
+        let compact = r#"{"type":"compact","summary":"so far","keep_from":0}"#;
+        write_lines(&path, &[newer.to_string(), compact.into()], "");
+        let before = fs::read(&path).unwrap();
+
+        let err = Session::load(&path).unwrap_err().to_string();
+        assert!(err.contains("written by a newer Junees"), "{err}");
+        assert!(err.contains("session format 2"), "{err}");
         assert!(Session::resume(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
     }
