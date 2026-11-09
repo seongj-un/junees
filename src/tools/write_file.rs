@@ -3,10 +3,22 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolOutput, str_arg};
+use super::{SettingsFile, Tool, ToolOutput, ToolSettings, str_arg};
 
 /// Writes a whole file, creating parent directories as needed.
-pub struct WriteFile;
+#[derive(Default)]
+pub struct WriteFile {
+    settings_file: Option<SettingsFile>,
+}
+
+impl WriteFile {
+    /// Refuses the settings file of `settings`.
+    pub fn with_settings(settings: &ToolSettings) -> Self {
+        Self {
+            settings_file: settings.settings_file.clone(),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for WriteFile {
@@ -39,6 +51,11 @@ impl Tool for WriteFile {
             Ok(content) => content,
             Err(err) => return err,
         };
+        if let Some(file) = &self.settings_file
+            && file.is(Path::new(path))
+        {
+            return ToolOutput::error(file.refusal(path));
+        }
 
         if let Some(parent) = Path::new(path).parent()
             && !parent.as_os_str().is_empty()
@@ -61,7 +78,7 @@ mod tests {
     async fn writes_and_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a/b/note.txt");
-        let output = WriteFile
+        let output = WriteFile::default()
             .run(json!({"path": path, "content": "안녕"}))
             .await;
         assert!(!output.is_error, "{}", output.content);
@@ -74,13 +91,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "old content").unwrap();
-        WriteFile.run(json!({"path": path, "content": "new"})).await;
+        WriteFile::default()
+            .run(json!({"path": path, "content": "new"}))
+            .await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
     #[tokio::test]
+    async fn refuses_the_settings_file() {
+        let (_dir, root, file) = crate::tools::settings_file::testing::home();
+        let config = root.join(".junees/config.toml");
+        std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
+        let tool = WriteFile {
+            settings_file: Some(file),
+        };
+        for path in [
+            config.clone(),
+            root.join(".junees/sessions/../config.toml"),
+            root.join("link"),
+            crate::tools::settings_file::testing::relative(&config),
+        ] {
+            let output = tool
+                .run(json!({"path": path, "content": "allow_dangerous = \"1\"\n"}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(output.content.contains("private Junees settings file"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "api_key = \"secret-key\"\n"
+        );
+        // Nor may it create the file before `junees setup` does.
+        std::fs::remove_file(&config).unwrap();
+        let output = tool
+            .run(json!({"path": root.join("link"), "content": "x"}))
+            .await;
+        assert!(output.is_error, "{}", output.content);
+        assert!(!config.exists());
+        // The rest of the folder is not protected.
+        let other = root.join(".junees/notes.txt");
+        let output = tool.run(json!({"path": other, "content": "x"})).await;
+        assert!(!output.is_error, "{}", output.content);
+    }
+
+    #[tokio::test]
     async fn requires_content() {
-        let output = WriteFile.run(json!({"path": "x.txt"})).await;
+        let output = WriteFile::default().run(json!({"path": "x.txt"})).await;
         assert!(output.is_error);
         assert!(output.content.contains("`content`"));
     }

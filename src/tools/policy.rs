@@ -11,7 +11,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::ToolSettings;
+use super::settings_file::Named;
+use super::{SettingsFile, ToolSettings};
 
 /// Whether a command may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,17 +30,26 @@ pub enum Verdict {
 /// `wipefs`, `dd` or a redirect onto a device; `shutdown` and friends; fork
 /// bombs; `curl`/`wget` piped into a shell; force push; `sudo`, `su` and
 /// other privilege escalation. Extra denied
-/// prefixes always apply, even with [`CommandPolicy::allow_dangerous`].
+/// prefixes and the settings file rule
+/// ([`CommandPolicy::protect_settings_file`]) always apply, even with
+/// [`CommandPolicy::allow_dangerous`].
 #[derive(Debug, Clone, Default)]
 pub struct CommandPolicy {
     deny_prefixes: Vec<Vec<String>>,
     allow_dangerous: bool,
+    settings_file: Option<SettingsFile>,
 }
 
 /// How deep `sh -c`, `eval` and `$(...)` may nest before a command is refused.
 const MAX_DEPTH: usize = 8;
 
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
+/// Programs that may name the settings folder (`$JUNEES_HOME`) itself: they
+/// look at names and metadata, never at file contents.
+const LISTS_FOLDER: &[&str] = &[
+    "cd", "pushd", "ls", "stat", "du", "test", "[", "realpath", "readlink", "echo",
+];
 
 /// Top-level folders whose recursive removal breaks the machine.
 const SYSTEM_DIRS: &[&str] = &[
@@ -77,6 +87,19 @@ impl CommandPolicy {
         self
     }
 
+    /// Also refuses commands that name the settings file as an argument or
+    /// redirect target, directly or through a glob or braces, and commands
+    /// other than [`LISTS_FOLDER`] that name its folder
+    /// ([`SettingsFile::names`]), relative paths taken from the current
+    /// folder and the `cd`/`pushd` targets before them in the same script.
+    /// A deny list: a path built at run time (`cat $(echo ~/.junees)/x`) or
+    /// a command on a folder above it (`grep -r key ~`) still reaches the
+    /// file.
+    pub fn protect_settings_file(mut self, file: Option<SettingsFile>) -> Self {
+        self.settings_file = file;
+        self
+    }
+
     pub fn check(&self, command: &str) -> Verdict {
         match self.violation(command, 0, None) {
             Some(reason) => Verdict::Deny(reason),
@@ -100,11 +123,43 @@ impl CommandPolicy {
             }
         }
         let mut risky_cwd = risky_cwd.map(str::to_string);
+        // Where relative paths start, for the settings file rule.
+        let mut cwd = self
+            .settings_file
+            .as_ref()
+            .and_then(|_| std::env::current_dir().ok());
         for pipeline in &parsed.pipelines {
             let mut fetched = false;
             // What the previous command of the pipeline prints, when known.
             let mut piped: Option<String> = None;
             for command in pipeline {
+                if let Some(file) = &self.settings_file {
+                    // Only these may use the settings folder as a whole:
+                    // they look at names, not contents.
+                    let lists_folder = self
+                        .command_words(&command.words, depth)
+                        .ok()
+                        .and_then(|words| words.first())
+                        .is_some_and(|program| LISTS_FOLDER.contains(&basename(program)));
+                    let reason = command
+                        .words
+                        .iter()
+                        .chain(
+                            command
+                                .redirects
+                                .iter()
+                                .filter(|(op, _)| !op.starts_with("<<"))
+                                .map(|(_, target)| target),
+                        )
+                        .find_map(|word| match file.names(word, cwd.as_deref())? {
+                            Named::File => Some(file.named_reason(word)),
+                            Named::Folder if !lists_folder => Some(file.folder_reason(word)),
+                            Named::Folder => None,
+                        });
+                    if reason.is_some() {
+                        return reason;
+                    }
+                }
                 if !self.allow_dangerous
                     && let Some(reason) = redirect_violation(&command.redirects)
                 {
@@ -137,6 +192,9 @@ impl CommandPolicy {
                 piped = printed_text(name, &words[1..], command.input.as_deref());
                 if matches!(name, "cd" | "pushd") {
                     risky_cwd = risky_cd_target(&words[1..]).map(str::to_string);
+                    if let Some(file) = &self.settings_file {
+                        cwd = file.cd(&words[1..], cwd.as_deref());
+                    }
                 }
                 if !self.allow_dangerous && fetched && SHELLS.contains(&name) {
                     return Some(format!("downloaded script piped into `{name}`"));
@@ -325,6 +383,7 @@ impl CommandPolicy {
         Self::default()
             .deny_prefixes(&settings.deny_commands)
             .allow_dangerous(settings.allow_dangerous)
+            .protect_settings_file(settings.settings_file.clone())
     }
 
     /// Why a person should look at `command` before it runs, if at all:
@@ -931,7 +990,7 @@ impl Workspace {
 /// Like the kernel, it follows a link before applying a `..` after it:
 /// with `out -> /elsewhere/sub`, `out/../x` is `/elsewhere/x`. Only the
 /// part that does not exist yet is taken as written.
-fn resolve(path: &Path) -> Option<PathBuf> {
+pub(super) fn resolve(path: &Path) -> Option<PathBuf> {
     let mut resolved = PathBuf::new();
     // How many of the last components of `resolved` do not exist.
     let mut missing: usize = 0;
@@ -2515,6 +2574,98 @@ mod tests {
     }
 
     #[test]
+    fn denies_commands_that_name_the_settings_file() {
+        let (_dir, root, file) = super::super::settings_file::testing::home();
+        let config = root.join(".junees/config.toml");
+        std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
+        // The rule protects a secret, so it holds even with the built-in
+        // rules off.
+        let policy = CommandPolicy::default()
+            .allow_dangerous(true)
+            .protect_settings_file(Some(file));
+        let relative = super::super::settings_file::testing::relative(&config);
+        for command in [
+            "cat ~/.junees/config.toml".to_string(),
+            "cat \"$HOME/.junees/config.toml\"".into(),
+            "cat ${HOME}/.junees/config.toml".into(),
+            "cat $JUNEES_HOME/config.toml".into(),
+            "cat ${JUNEES_HOME}/config.toml".into(),
+            format!("cat {}", config.display()),
+            format!("head -n 3 {}", relative.display()),
+            "cat ~/.junees/sessions/../config.toml".into(),
+            "cat ~/link".into(),
+            "grep api_key < ~/.junees/config.toml".into(),
+            "echo 'allow_dangerous = \"1\"' >> ~/.junees/config.toml".into(),
+            "cp ~/.junees/config.toml /tmp/k".into(),
+            "dd if=$HOME/.junees/config.toml".into(),
+            "cd ~/.junees && cat config.toml".into(),
+            "cd $JUNEES_HOME; cat sessions/../config.toml".into(),
+            "cd; cat .junees/config.toml".into(),
+            "bash -c 'cat ~/.junees/config.toml'".into(),
+            "echo $(cat ~/.junees/config.toml)".into(),
+            "KEY=$(< ~/.junees/config.toml) true".into(),
+            // The whole folder: copies, archives and swaps reach the file
+            // without naming it.
+            "grep -r api_key ~/.junees".into(),
+            "cp -r ~/.junees /tmp/j".into(),
+            "tar -cf - ~/.junees".into(),
+            "find ~/.junees -name 'config*' -exec cat {} +".into(),
+            "mv ~/.junees /tmp/old && mv /tmp/evil ~/.junees".into(),
+            "mv /tmp/evil $JUNEES_HOME".into(),
+            "rsync -a ~/.junees/ /tmp/j".into(),
+            "ln -s ~/.junees /tmp/j".into(),
+            "rm -r ~/.junees/sessions/..".into(),
+            "tar -C ~/.junees -cf - config.toml".into(),
+            "git -C ~/.junees status".into(),
+            "cd ~/.junees && tar -cf - .".into(),
+            "cd; zip -r /tmp/j.zip .junees".into(),
+            "env grep -r key ~/.junees".into(),
+            // Keeping the folder in a variable is the first step of most
+            // ways around the rule.
+            "dir=~/.junees; cat $dir/config.toml".into(),
+            // Globs and braces that can match the file.
+            "cat ~/.junees/*".into(),
+            "cat ~/.junees/conf*.toml".into(),
+            "cat ~/.junees/{config.toml,x}".into(),
+            "cat ~/.jun*/config.toml".into(),
+            "cat ~/.jun*".into(),
+            "cd ~/.junees && cat /proc/self/cwd/config.toml".into(),
+        ] {
+            match policy.check(&command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("private Junees settings file"),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        for command in [
+            "cat ~/.junees/sessions/s.jsonl",
+            "ls -la ~/.junees",
+            "cd ~/.junees && ls -la . && stat ~/.junees && du -sh .",
+            "test -d $JUNEES_HOME && echo ~/.junees",
+            "cp -r ~/.junees/sessions /tmp/s",
+            "cat ~/.junees/sessions/*",
+            "cat config.toml",
+            "cd ~/.junees/sessions && cat s.jsonl",
+            "cat <<config.toml\nx\nconfig.toml",
+            // Not caught: this is a deny list, not a sandbox. A variable,
+            // a path built at run time or a folder above it still reaches
+            // the file.
+            "dir=~; cat $dir/.junees/config.toml",
+            "cat $(echo ~/.junees)/config.toml",
+            "grep -r api_key ~",
+        ] {
+            assert_eq!(policy.check(command), Verdict::Allow, "{command}");
+        }
+        assert_eq!(
+            CommandPolicy::default().check("cat ~/.junees/config.toml"),
+            Verdict::Allow,
+            "only a policy given the file protects it"
+        );
+    }
+
+    #[test]
     fn with_settings_uses_the_users_rules() {
         let settings = ToolSettings {
             deny_commands: vec!["docker rm".into()],
@@ -2524,5 +2675,14 @@ mod tests {
         let policy = CommandPolicy::with_settings(&settings);
         assert!(matches!(policy.check("docker rm -f web"), Verdict::Deny(_)));
         assert_eq!(policy.check("sudo ls"), Verdict::Allow);
+
+        let (_dir, root, file) = super::super::settings_file::testing::home();
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        let command = format!("cat {}/.junees/config.toml", root.display());
+        let policy = CommandPolicy::with_settings(&settings);
+        assert!(matches!(policy.check(&command), Verdict::Deny(_)));
     }
 }

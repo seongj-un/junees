@@ -27,9 +27,9 @@ pub const VERIFY_TIMEOUT_SECS: u64 = 600;
 pub fn session_tools(settings: &ToolSettings) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     tools.register(session_bash(settings));
-    tools.register(ReadFile);
-    tools.register(WriteFile);
-    tools.register(EditFile);
+    tools.register(ReadFile::with_settings(settings));
+    tools.register(WriteFile::with_settings(settings));
+    tools.register(EditFile::with_settings(settings));
     tools
 }
 
@@ -253,6 +253,7 @@ mod tests {
             hidden_env: vec!["HOME".into()],
             deny_commands: vec!["touch".into()],
             allow_dangerous: false,
+            settings_file: None,
         };
         let verifier = Verifier::new(root.path().to_path_buf(), &settings);
         let output = verifier.run("test -z \"$HOME\"").await;

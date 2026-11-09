@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{MAX_FILE_BYTES, Tool, ToolOutput, opt_bool_arg, str_arg, truncate_middle};
+use super::{
+    MAX_FILE_BYTES, SettingsFile, Tool, ToolOutput, ToolSettings, opt_bool_arg, str_arg,
+    truncate_middle,
+};
 
 /// Lines of context shown above and below each change.
 const CONTEXT_LINES: usize = 3;
@@ -24,7 +27,19 @@ const MAX_OUTPUT_CHARS: usize = 20_000;
 
 /// Replaces an exact string in a file, so a small change does not need the
 /// whole file written out again.
-pub struct EditFile;
+#[derive(Default)]
+pub struct EditFile {
+    settings_file: Option<SettingsFile>,
+}
+
+impl EditFile {
+    /// Refuses the settings file of `settings`.
+    pub fn with_settings(settings: &ToolSettings) -> Self {
+        Self {
+            settings_file: settings.settings_file.clone(),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for EditFile {
@@ -70,6 +85,11 @@ impl Tool for EditFile {
             Ok(replace_all) => replace_all.unwrap_or(false),
             Err(err) => return err,
         };
+        if let Some(file) = &self.settings_file
+            && file.is(Path::new(path))
+        {
+            return ToolOutput::error(file.refusal(path));
+        }
         match edit(path, old, new, replace_all).await {
             Ok(output) | Err(output) => output,
         }
@@ -534,9 +554,41 @@ mod tests {
     }
 
     async fn run(path: &Path, old: &str, new: &str) -> ToolOutput {
-        EditFile
+        EditFile::default()
             .run(json!({"path": path, "old_string": old, "new_string": new}))
             .await
+    }
+
+    #[tokio::test]
+    async fn refuses_the_settings_file() {
+        let (_dir, root, file) = crate::tools::settings_file::testing::home();
+        let config = root.join(".junees/config.toml");
+        std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
+        let tool = EditFile {
+            settings_file: Some(file),
+        };
+        for path in [
+            config.clone(),
+            root.join(".junees/sessions/../config.toml"),
+            root.join("link"),
+            crate::tools::settings_file::testing::relative(&config),
+        ] {
+            let output = tool
+                .run(json!({"path": path, "old_string": "secret-key", "new_string": "x"}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(output.content.contains("private Junees settings file"));
+            assert!(!output.content.contains("secret-key"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "api_key = \"secret-key\"\n"
+        );
+        let session = root.join(".junees/sessions/s.jsonl");
+        let output = tool
+            .run(json!({"path": session, "old_string": "{}", "new_string": "[]"}))
+            .await;
+        assert!(!output.is_error, "{}", output.content);
     }
 
     fn entries(dir: &tempfile::TempDir) -> Vec<String> {
@@ -626,7 +678,7 @@ mod tests {
     async fn replace_all_replaces_every_occurrence() {
         let dir = tempfile::tempdir().unwrap();
         let path = temp_file(&dir, "x = 1\ny = 2\nx = 1\n\nx = 1\n");
-        let output = EditFile
+        let output = EditFile::default()
             .run(json!({"path": path, "old_string": "x = 1", "new_string": "x = 9", "replace_all": true}))
             .await;
         assert!(!output.is_error, "{}", output.content);
@@ -642,7 +694,7 @@ mod tests {
     async fn replace_all_must_be_a_boolean() {
         let dir = tempfile::tempdir().unwrap();
         let path = temp_file(&dir, "a\n");
-        let output = EditFile
+        let output = EditFile::default()
             .run(json!({"path": path, "old_string": "a", "new_string": "b", "replace_all": "yes"}))
             .await;
         assert_eq!(output, ToolOutput::error("`replace_all` must be a boolean"));
@@ -659,7 +711,9 @@ mod tests {
         assert!(output.is_error);
         assert!(output.content.contains("are the same"));
         assert!(run(&path, "a", "").await.content.starts_with("edited"));
-        let output = EditFile.run(json!({"path": path, "old_string": "a"})).await;
+        let output = EditFile::default()
+            .run(json!({"path": path, "old_string": "a"}))
+            .await;
         assert!(output.content.contains("`new_string`"));
     }
 
@@ -863,7 +917,7 @@ mod tests {
             })
             .collect();
         let path = temp_file(&dir, &content);
-        let output = EditFile
+        let output = EditFile::default()
             .run(json!({"path": path, "old_string": "hit", "new_string": "HIT", "replace_all": true}))
             .await;
         let body = output.content.split_once('\n').unwrap().1;
@@ -940,7 +994,7 @@ mod tests {
     async fn replace_all_takes_line_endings_from_each_match() {
         let dir = tempfile::tempdir().unwrap();
         let path = temp_file(&dir, "p\r\nk\r\nq\r\nr\nk\ns\n");
-        let output = EditFile
+        let output = EditFile::default()
             .run(json!({"path": path, "old_string": "\nk", "new_string": "\nK\nK", "replace_all": true}))
             .await;
         assert!(!output.is_error, "{}", output.content);
@@ -987,7 +1041,7 @@ mod tests {
             "{}",
             output.content
         );
-        let output = EditFile
+        let output = EditFile::default()
             .run(json!({"path": path, "old_string": "aa", "new_string": "b", "replace_all": true}))
             .await;
         assert!(output.content.contains(": replaced 2 occurrences\n"));

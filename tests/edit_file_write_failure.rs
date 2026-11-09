@@ -24,7 +24,7 @@ async fn a_failed_write_keeps_the_original_and_reports_an_error() {
         assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
     }
 
-    let output = EditFile
+    let output = EditFile::default()
         .run(json!({"path": path, "old_string": "HEAD", "new_string": "HEAD2"}))
         .await;
     assert!(output.is_error, "{}", output.content);
