@@ -47,7 +47,7 @@ impl Tool for EditFile {
                 "path": {"type": "string", "description": "File path, absolute or relative to the working directory"},
                 "old_string": {"type": "string", "description": "The exact text to replace"},
                 "new_string": {"type": "string", "description": "The text to put in its place"},
-                "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of exactly one (default false)"}
+                "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of exactly one (overlapping ones left to right, skipping those that overlap a replaced one; default false)"}
             },
             "required": ["path", "old_string", "new_string"]
         })
@@ -178,9 +178,17 @@ fn plan_edit(text: &str, old: &str, new: &str, replace_all: bool) -> Result<Edit
         } else {
             ""
         };
+        // replace_all replaces matches left to right, so of overlapping ones
+        // only those that do not overlap an earlier replaced one.
+        let disjoint = text.matches(old.as_str()).count();
+        let which = if disjoint == starts.len() {
+            "every one".to_string()
+        } else {
+            format!("{disjoint} of them that do not overlap, from the start")
+        };
         return Err(format!(
             "old_string occurs {} times (at lines {}{more}). Include more surrounding \
-             lines to make it unique, or set replace_all to true to replace every one.",
+             lines to make it unique, or set replace_all to true to replace {which}.",
             starts.len(),
             lines.join(", ")
         ));
@@ -934,6 +942,27 @@ mod tests {
         let path = temp_file(&dir, "a\nb\n");
         let output = run(&path, "zz", "x").await;
         assert!(!output.content.contains("\\r\\n"), "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn overlapping_matches_say_what_replace_all_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(&dir, "aaaa\n");
+        let output = run(&path, "aa", "b").await;
+        assert!(output.is_error);
+        assert!(
+            output.content.ends_with(
+                "Include more surrounding lines to make it unique, or set replace_all \
+                 to true to replace 2 of them that do not overlap, from the start."
+            ),
+            "{}",
+            output.content
+        );
+        let output = EditFile
+            .run(json!({"path": path, "old_string": "aa", "new_string": "b", "replace_all": true}))
+            .await;
+        assert!(output.content.contains(": replaced 2 occurrences\n"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "bb\n");
     }
 
     #[test]
