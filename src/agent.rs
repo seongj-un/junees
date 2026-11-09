@@ -252,13 +252,22 @@ impl Agent {
     }
 
     /// After the API said the conversation does not fit: clears old tool
-    /// output and compacts, whatever the tracked size says. Returns whether
-    /// the history got any smaller.
+    /// output and compacts, whatever the tracked size says, then clears the
+    /// latest tool output too. That is often what did not fit (several
+    /// large reads in one reply), and compaction keeps it; the model can
+    /// ask again for less. Returns whether the history got any smaller.
     async fn shrink(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
         let cleared = self.clear_tool_results(on_event);
         let compacted = self.summarize(on_event).await;
+        let cleared_latest = match self.transcript.clear_entry_keeping(0) {
+            Some(entry) => {
+                self.record(entry, on_event);
+                true
+            }
+            None => false,
+        };
         self.cleared = false;
-        cleared || compacted
+        cleared || compacted || cleared_latest
     }
 
     /// Keeps the conversation under the compaction threshold: once the
@@ -1439,6 +1448,43 @@ mod tests {
         assert_eq!(retried.len(), 5);
         assert_valid(retried);
         assert_valid(agent.messages());
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
+    /// The overflow comes from the results of one reply's parallel calls:
+    /// there is nothing older to clear or compact, so those results are
+    /// cleared and the retry goes through.
+    #[tokio::test]
+    async fn an_overflow_from_the_latest_tool_results_clears_them() {
+        let calls = Ok(CompletionResponse {
+            content: ["a", "b"]
+                .map(|id| ContentBlock::ToolUse {
+                    id: id.into(),
+                    name: "upper".into(),
+                    input: json!({"text": "a big file"}),
+                })
+                .to_vec(),
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        });
+        let provider = Scripted::new(vec![calls, overflow(), text("done")]);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        assert_eq!(agent.run("read both", |_| {}).await.unwrap(), "done");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(tool_output(&seen[1][2])[0].1, "A BIG FILE");
+        let retried = &seen[2];
+        assert_eq!(
+            tool_output(&retried[2]),
+            [
+                ("a", session::CLEARED, false),
+                ("b", session::CLEARED, false)
+            ]
+        );
+        assert_valid(retried);
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }
 

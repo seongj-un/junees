@@ -253,14 +253,23 @@ impl Transcript {
     /// their `tool_use_id` and `is_error`, so every tool call keeps its
     /// result.
     pub fn clear_entry(&self) -> Option<Entry> {
-        let with_results: Vec<usize> = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(_, message)| has_tool_result(message))
-            .map(|(i, _)| i)
-            .collect();
-        let upto = *with_results.iter().rev().nth(KEEP_TOOL_RESULTS - 1)?;
+        self.clear_entry_keeping(KEEP_TOOL_RESULTS)
+    }
+
+    /// Like [`Transcript::clear_entry`], but keeps the output of the last
+    /// `keep` messages with tool results; 0 clears every tool result.
+    pub fn clear_entry_keeping(&self, keep: usize) -> Option<Entry> {
+        let upto = match keep.checked_sub(1) {
+            None => self.messages.len(),
+            Some(skip) => self
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| has_tool_result(message))
+                .map(|(i, _)| i)
+                .rev()
+                .nth(skip)?,
+        };
         let uncleared = self.messages[..upto].iter().any(|message| {
             message.content.iter().any(
                 |block| matches!(block, ContentBlock::ToolResult { content, .. } if content != CLEARED),
@@ -1056,6 +1065,20 @@ mod tests {
             transcript.clear_entry(),
             Some(Entry::ClearToolResults { upto: 8 })
         );
+    }
+
+    #[test]
+    fn clearing_can_take_the_latest_tool_results_too() {
+        let mut transcript = tool_rounds(2);
+        let entry = transcript.clear_entry_keeping(0).unwrap();
+        assert_eq!(entry, Entry::ClearToolResults { upto: 5 });
+        transcript.apply(entry);
+        assert_eq!(
+            transcript.messages[4],
+            tool_results("toolu_1", CLEARED, false)
+        );
+        assert_eq!(transcript.clear_entry_keeping(0), None);
+        assert_eq!(Transcript::default().clear_entry_keeping(0), None);
     }
 
     fn assistant(text: &str) -> Message {
