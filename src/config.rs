@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::approval::ApprovalMode;
 use crate::task::budget::parse_duration;
-use crate::tools::ToolSettings;
+use crate::tools::{SettingsFile, ToolSettings};
 use crate::web_search::WebSearch;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -163,6 +163,9 @@ impl Config {
             hidden_env: comma_list(get("JUNEES_HIDDEN_ENV")),
             deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),
             allow_dangerous: parse_flag(get("JUNEES_ALLOW_DANGEROUS"), "JUNEES_ALLOW_DANGEROUS")?,
+            settings_file: crate::config_file::path(get).map(|path| {
+                SettingsFile::new(path, get("HOME").map(|home| PathBuf::from(home.trim())))
+            }),
         };
         let approval = ApprovalMode::parse(get("JUNEES_APPROVAL").as_deref())?;
 
@@ -297,7 +300,25 @@ mod tests {
         assert_eq!(config.compact_threshold, 0.8);
         assert_eq!(config.thinking_budget, 0);
         assert_eq!(config.home, Some(PathBuf::from("/home/tester/.junees")));
-        assert_eq!(config.tools, ToolSettings::default());
+        assert_eq!(
+            config.tools,
+            ToolSettings {
+                settings_file: Some(SettingsFile::new(
+                    "/home/tester/.junees/config.toml",
+                    Some(PathBuf::from("/home/tester")),
+                )),
+                ..ToolSettings::default()
+            }
+        );
+        let elsewhere =
+            self::config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_HOME", "/data/j")]).unwrap();
+        assert_eq!(
+            elsewhere.tools.settings_file,
+            Some(SettingsFile::new(
+                "/data/j/config.toml",
+                Some(PathBuf::from("/home/tester"))
+            ))
+        );
         assert_eq!(config.approval, ApprovalMode::Risky);
         assert_eq!(config.task_max_tokens, None);
         assert_eq!(config.task_max_time, None);
