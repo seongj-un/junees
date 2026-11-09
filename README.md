@@ -16,9 +16,17 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ./target/release/junees --no-session  # 기록하지 않음
 ./target/release/junees task init "할 일 관리 웹 앱을 만들어"   # 장기 작업 계획 (git 저장소 안에서)
 ./target/release/junees task run --max-sessions 5             # 기능 하나씩 작업 세션 반복
+./target/release/junees task run --max-tokens 2000000 --max-time 2h   # 토큰/시간 예산 안에서만
 ```
 
 대화 모드 명령: `/sessions` 최근 세션 10개(id, 마지막 기록 시각, 첫 입력), `/reset` 새 세션 시작, `/usage` 현재 세션의 토큰 사용량(캐시 쓰기/읽기 포함), `/context` 현재 컨텍스트 크기와 한도, `/compact` 앞부분을 요약으로 압축, `/exit` 종료.
+
+### 중단 (Ctrl-C, SIGTERM)
+
+- 대화 모드: 턴 실행 중 Ctrl-C는 그 턴만 취소하고 프롬프트로 돌아온다. 모델 호출 중이면 응답을 버리고, 도구 실행 중이면 그 도구의 프로세스 그룹 전체(백그라운드로 띄운 자식 포함)를 끝낸다. 결과가 없는 도구 호출은 `cancelled by the user` 오류 결과로 채워 기록하므로(세션 파일에도) 다음 입력이 그대로 이어진다. 프롬프트에서 Ctrl-C를 연달아 두 번 누르거나 Ctrl-D를 누르면 종료한다. `/compact` 중 Ctrl-C는 압축만 취소한다(기록은 그대로). SIGTERM은 턴을 같은 방식으로 취소하고 종료 코드 143으로 끝난다.
+- `-p`: SIGINT/SIGTERM을 받으면 같은 방식으로 턴을 취소하고(도구 종료, 짝 채움, 세션 파일에 기록) `interrupted by SIGINT|SIGTERM`을 출력한 뒤 종료 코드 130/143으로 끝난다.
+- `task init`/`task run`: 아래 장기 작업 모드 참고. 어느 모드든 두 번째 시그널은 정리 없이 바로 끝낸다(`task run`이면 다음 실행이 크래시로 보고 복구한다).
+- 정상적으로 끝난 도구가 남긴 백그라운드 프로세스(`server > log 2>&1 &`)는 취소와 상관없이 그대로 둔다. 취소는 아직 실행 중인 도구에만 적용된다.
 
 ### 세션 기록
 
@@ -44,12 +52,16 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 - `task init "<목표>"`: git 저장소 안에서만 동작한다(자동으로 `git init`하지 않음). 이미 `.junees/features.json`이 있거나, 작업 트리에 커밋하지 않은 변경이나 추적하지 않는 파일이 있으면(`.junees/`는 제외) 오류. 초기화 세션이 목표를 검증 가능한 기능 목록으로 쪼개 `.junees/features.json`과 `.junees/progress.md`를 쓰고(필요하면 `.junees/init.sh`), 하네스가 목록을 검사한다. 이때 verify 명령을 하나씩 실행해서 아직 아무것도 만들지 않았는데 이미 통과하는 것(`true`, 테스트가 하나도 걸리지 않는 필터 등)도 거절한다. 틀리면 오류 내용을 같은 세션에 보내 한 번 고치게 하고, 그래도 틀리면(또는 세션이 실패하면) 커밋하지 않고 오류로 끝나며, 거절된 목록은 `.junees/features.rejected.json`(git 제외)으로 옮겨서 `task init`을 다시 할 수 있게 한다. 통과하면 커밋한다(커밋 방식은 아래 체크포인트와 같음).
 - `features.json`은 `[{"id": "F1", "description": "...", "verify": "<셸 명령>", "passes": false}]` 형식이다. 비어 있지 않은 배열, 유일한 id, 비어 있지 않은 verify가 조건이고 새 작업은 전부 `passes: false`여야 한다. 다른 필드(steps 등)는 그대로 둔다.
-- `task run [--max-sessions N]`(기본 20): 작업 트리가 깨끗해야 시작한다(아니면 커밋하거나 `git stash -u` 하라는 오류). 시작할 때 `features.json`에서 `passes: true`인 기능의 verify를 모두 다시 실행해서, 실패하는 것은 통과로 치지 않는다(경고와 `progress.md` 한 줄). 실패한 init이나 하네스가 되돌리기 전에 죽은 세션이 남긴 목록, 나중 변경으로 깨진 기능을 걸러 내기 위해서다. 세션마다 새 에이전트(새 컨텍스트, 세션 기록은 `$JUNEES_HOME/sessions/`에 따로 남음)가 기능 목록과 통과 여부, `progress.md` 끝부분(4000자), `git log --oneline -20`을 system 프롬프트로 받고, 안 끝난 기능 하나를 구현, 검증, 커밋하고 `progress.md`를 갱신한다.
+- `task run [--max-sessions N] [--max-tokens N] [--max-time 2h]`(세션 수 기본 20, 예산은 아래): 이전 실행이 크래시로 끝났으면 먼저 복구하고(아래), 작업 트리가 깨끗해야 시작한다(아니면 커밋하거나 `git stash -u` 하라는 오류). 시작할 때 `features.json`에서 `passes: true`인 기능의 verify를 모두 다시 실행해서, 실패하는 것은 통과로 치지 않는다(경고와 `progress.md` 한 줄). 실패한 init이나 하네스가 되돌리기 전에 죽은 세션이 남긴 목록, 나중 변경으로 깨진 기능을 걸러 내기 위해서다. 세션마다 새 에이전트(새 컨텍스트, 세션 기록은 `$JUNEES_HOME/sessions/`에 따로 남음)가 기능 목록과 통과 여부, `progress.md` 끝부분(4000자), `git log --oneline -20`을 system 프롬프트로 받고, 안 끝난 기능 하나를 구현, 검증, 커밋하고 `progress.md`를 갱신한다.
 - 기능 통과는 `mark_feature_passing {id}` 도구로만 바뀐다. 하네스가 그 기능의 verify 명령을 저장소 루트에서 bash 도구와 같은 방식(출력 제한, API 키 변수 제거, 타임아웃 600초)으로, `set -o pipefail`을 앞에 붙여 실행하고(`cargo test 2>&1 | tail`도 테스트가 실패하면 실패) 종료 코드 0일 때만 `passes: true`로 저장한다. 실패하면 출력과 함께 오류 결과를 돌려준다.
 - 하네스는 기능 목록의 권위 있는 사본을 들고 있다. 세션이 `features.json`을 직접 고치면(지우거나 `passes`를 바꾸는 것 포함) 세션이 끝날 때 사본으로 되돌려 쓰고 경고와 `progress.md` 한 줄을 남긴다. 서식만 다른 것은 편집으로 치지 않는다.
 - 세션이 끝나면 하네스가 `progress.md`에 `- [junees] session N: 통과 수/전체, 새로 통과한 기능, 토큰` 한 줄을 붙이고, 작업 트리가 더러우면 `junees: checkpoint after session N`으로 커밋한다(하네스 줄이 붙으므로 사실상 세션마다 하나). 하네스의 커밋은 `git add -A`에서 이름이 비밀 파일 같은 새 파일(`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa`/`id_ed25519` 등 ssh 키, `.netrc`)을 빼고 경고한다. 이미 추적 중인 파일은 그대로 커밋한다. 세션이 `.junees/`나 `.junees/.gitignore`를 지워도 커밋 전에 다시 만든다.
-- 정지: 모든 기능 통과, `--max-sessions`만큼 실행, 연속 3세션 동안 새로 통과한 기능 없음(stalled), 세션 하나가 오류로 끝남(공급자 오류 등. 오류를 `progress.md`에 남기고 체크포인트 커밋 후 정지), 세션 뒤 하네스 작업(되돌리기, progress 기록, 커밋)이 실패함. 정지 이유를 `task stopped: ...`로 출력하고 `state.json`에 기록한다. stalled와 오류는 종료 코드 1.
-- `.junees/state.json`(실행한 세션 수, 연속 무진전 세션 수, 누적 토큰, 정지 이유)은 `.junees/.gitignore`로 git에서 뺀다. 다음 `task run`은 세션 번호와 토큰을 여기서 이어 간다. 이전 실행이 스스로 멈췄으면(`--max-sessions` 포함) 무진전 횟수를 0부터 다시 세고, 정지 이유 없이 끝났으면(크래시) 이어서 센다. 그래서 `--max-sessions 1`로 여러 번 나눠 실행하면 stalled로는 멈추지 않는다.
+- 정지: 모든 기능 통과, `--max-sessions`만큼 실행, 연속 3세션 동안 새로 통과한 기능 없음(stalled), 세션 하나가 오류로 끝남(공급자 오류 등. 오류를 `progress.md`에 남기고 체크포인트 커밋 후 정지), 세션 뒤 하네스 작업(되돌리기, progress 기록, 커밋)이 실패함, 예산 소진(`budget`), 시그널(`interrupted`). 정지 이유를 `task stopped: ...`로 출력하고 `state.json`에 기록한다. stalled와 오류는 종료 코드 1, 예산 소진은 `--max-sessions`처럼 0, 시그널은 130(SIGINT)/143(SIGTERM).
+- 예산: `--max-tokens N`(기본값 `JUNEES_TASK_MAX_TOKENS`)은 작업의 모든 세션(init 세션과 요약 호출 포함)이 쓴 토큰의 합이다. 입력, 캐시 쓰기, 캐시 읽기, 출력 토큰을 모두 센다(캐시 읽기도 1토큰으로 센다. 비용이 아니라 처리한 양 기준). `state.json`의 누적값에서 이어 세므로 다시 실행해도 줄지 않는다(늘리려면 더 큰 값을 주고 실행). `--max-time`(기본값 `JUNEES_TASK_MAX_TIME`, `90s`, `30m`, `2h`, `1h30m` 형식)은 이번 `task run`이 시작한 뒤 흐른 실제 시간이다. 예산은 세션을 시작하기 전과, 세션 안에서는 모델 호출마다 그 직전에 확인한다(컨텍스트 압축의 요약 호출도 모델 호출로 따로 확인하므로, 요약 직후 예산이 다 되면 다음 호출 없이 끝난다). 시작할 때의 재검증도 verify 명령마다 그 직전에 예산을 확인해서(명령 하나가 최대 600초), 넘으면 남은 재검증 없이 목록을 그대로 두고 `budget`으로 정지한다. 확인하지 못한 통과는 확정되지 않았으므로 작업 완료로 치지 않는다. 세션 중에 넘으면 그 세션은 다음 모델 호출을 하지 않고 끝나며(진행 중인 도구는 끝까지 실행), 다른 세션과 똑같이 기능 목록 복원, `progress.md` 한 줄(`ended early: token budget used up: ...`), 체크포인트 커밋을 거친 뒤 `budget`으로 정지한다. 한 번의 모델 호출이 쓰는 양만큼은 넘을 수 있다.
+- 시그널: `task run` 중 SIGINT(Ctrl-C)나 SIGTERM을 받으면 실행 중인 도구의 프로세스 그룹을 끝내고, 짝 없는 tool_use를 `cancelled by the user` 오류 결과로 채운 뒤, 그 세션을 보통 세션처럼 마무리(기능 목록 복원, `progress.md`에 `interrupted` 한 줄, 체크포인트 커밋)하고 `interrupted`로 정지한다. 시작할 때 verify를 다시 실행하는 중이었으면 아무것도 바꾸지 않고 정지한다. `task init` 중이면 init이 실패한 것과 같이 처리하고 130/143으로 끝난다.
+- 동시 실행 방지와 크래시 복구: `task run`은 실행하는 동안 저장소 루트 폴더에 `flock`을 잡고(close-on-exec라서 세션이 남긴 백그라운드 프로세스는 잠금을 물려받지 않음. 잠금은 폴더의 inode에 걸리므로, 세션이 지웠다가 하네스가 다시 만들 수 있는 `.junees/`가 아니라 루트에 건다), `state.json`에 실행 중 표시(`running`: pid, 시작 시각)를 남긴다. 다른 실행이 잠금을 잡고 있으면 그 pid와 시작 시각을 알려 주며 거절한다. 정상 정지(위 모든 정지 이유)에서는 표시를 지운다. 시작할 때 표시가 남아 있는데 잠금은 비어 있으면 이전 실행이 죽은 것(kill -9, 전원 등)으로 보고 먼저 복구한다: `features.json`의 기능 정의(id, 설명, verify)를 작업의 init 커밋(가장 오래된 `junees: initialize task` 커밋, `git replace`는 무시)에서 가져와 되돌리고, `state.json`의 하네스 사본과 파일에서는 `passes: true`인 기능만 가져와서 시작 시 재검증이 init 커밋의 verify로 확인한다. `state.json`도 세션이 고칠 수 있는 파일이라 그 사본의 정의는 믿지 않는다(사본의 정의가 init 커밋과 다르면 경고와 `progress.md` 기록). 그래서 init 뒤에 손으로 고친 기능 정의는 크래시 복구 때 init 커밋 기준으로 돌아가니 다시 적용해야 하고, 이력에 init 커밋이 없으면(squash 등) 복구를 거절한다. 이어서 `progress.md`에 한 줄, 작업 트리가 더러우면 `junees: recover after crash`로 커밋(체크포인트와 같은 방식). 그다음 보통 실행처럼 이어 간다.
+- 실행 로그: `.junees/run.log`에 실행 시작(pid, 통과 수, 예산 사용량), 세션 시작/끝(요약), 크래시 복구, 정지 이유가 UTC 시각과 함께 한 줄씩 쌓인다(`tail -f .junees/run.log`). git에서는 뺀다. 이 로그가 생기기 전에 만든 작업은 첫 실행 때 `.junees/.gitignore`에 `run.log`를 더하고 `junees: keep the run log out of git`로 따로 커밋한다.
+- `.junees/state.json`(실행한 세션 수, 연속 무진전 세션 수, 누적 토큰, 정지 이유, 실행 중 표시, 기능 목록의 하네스 사본)은 `.junees/.gitignore`로 git에서 뺀다. 다음 `task run`은 세션 번호와 토큰을 여기서 이어 간다. 이전 실행이 스스로 멈췄으면(`--max-sessions`, 예산, 시그널 포함) 무진전 횟수를 0부터 다시 세고, 정지 이유 없이 끝났으면(크래시) 이어서 센다. 그래서 `--max-sessions 1`로 여러 번 나눠 실행하면 stalled로는 멈추지 않는다. 크래시 난 세션이 쓴 토큰은 세션이 끝나야 더해지므로 누적값에 들어가지 않는다.
 - 하위 폴더에서 실행해도 저장소 루트로 옮겨서 작업한다. 하네스의 git 명령과 세션의 `bash`(verify 포함)에서는 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` 같은 저장소 지정 변수와 상위 git이 넘기는 설정(`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`)을 지운다. git 훅이나 worktree의 `git rebase -x`처럼 이 변수가 설정된 곳에서 실행해도 다른 저장소에 커밋하지 않게 하기 위해서다. 하네스의 git은 세션이 심었을 수 있는 훅과 fsmonitor를 실행하지 않고(`-c core.hooksPath=/dev/null -c core.fsmonitor=false`, 커밋은 `--no-verify`), API 키 변수도 받지 않는다. 세션당 모델 호출 상한은 `JUNEES_MAX_TURNS`이고, 넘으면 그 세션만 끝난다. 작업은 체크포인트로 남고 다음 세션으로 넘어가며, 진전이 없으면 stalled 규칙이 멈춘다.
 - 세션의 `bash`와 verify 명령에는 대화 모드와 같은 명령 정책과 숨김 변수 설정(`JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`, `JUNEES_HIDDEN_ENV`)이 걸리고, 세션의 컨텍스트 관리도 같은 설정(`JUNEES_CONTEXT_WINDOW`, `JUNEES_COMPACT_THRESHOLD`)을 쓴다. 정책에 막힌 verify 명령은 실패로 친다.
 
@@ -78,6 +90,8 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `JUNEES_DENY_COMMANDS` | (없음) | `bash`에서 추가로 막을 명령 접두사, 쉼표 구분 (예: `docker rm,kubectl delete`) |
 | `JUNEES_ALLOW_DANGEROUS` | `0` | `1`이면 기본 명령 차단 규칙을 끈다 (사용자 책임) |
 | `JUNEES_HIDDEN_ENV` | (없음) | `bash`에서 추가로 숨길 환경 변수 이름, 쉼표 구분 (예: `DB_PASSWORD,GITHUB_TOKEN`) |
+| `JUNEES_TASK_MAX_TOKENS` | (없음) | `task run --max-tokens`의 기본값 (작업 전체 누적 토큰) |
+| `JUNEES_TASK_MAX_TIME` | (없음) | `task run --max-time`의 기본값 (이번 실행 시간, 예: `2h`, `1h30m`) |
 
 기본 도구는 `bash`, `read_file`, `write_file` 세 가지다. `bash`는 승인 절차 없이 바로 실행되니(로드맵 3단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다.
 
@@ -108,15 +122,18 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ```
 src/
-  main.rs            CLI 진입점 (대화 모드, -p 실행, 세션 열기/이어 가기)
-  agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도)
+  main.rs            CLI 진입점 (대화 모드, -p 실행, 세션 열기/이어 가기, SIGINT/SIGTERM 처리)
+  agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인)
+  cancel.rs          취소 플래그 (시그널 처리기와 에이전트 루프가 공유)
   session.rs         세션 기록(JSONL) 쓰기, 재생, 이어 가기, 세션 찾기/목록, 비우기/압축 지점 계산
   context.rs         압축 요약 요청(시스템 프롬프트, 앞부분을 텍스트로 옮기기)
   task/              장기 작업 모드
-    runner.rs          task init/run 세션 루프, 체크포인트 커밋, 정지 조건
+    runner.rs          task init/run 세션 루프, 체크포인트 커밋, 정지 조건, 크래시 복구, 실행 로그
+    budget.rs          토큰/시간 예산, 기간 파싱(90s, 30m, 2h)
+    lock.rs            동시 실행 방지(저장소 루트 flock)
     features.rs        features.json 검증, 하네스의 권위 있는 사본(Ledger)
     tools.rs           mark_feature_passing (verify 명령을 하네스가 실행)
-    state.rs           state.json (세션 수, 무진전 횟수, 토큰, 정지 이유)
+    state.rs           state.json (세션 수, 무진전 횟수, 토큰, 정지 이유, 실행 중 표시, 기능 목록 사본)
     prompt.rs          초기화/작업 세션 프롬프트
     git.rs             저장소 확인, 커밋, 로그
   message.rs         대화 메시지 타입 (Messages API 형식)
@@ -132,7 +149,8 @@ tests/
   secret_env.rs        기본 bash에서 API 키가 보이지 않는지 검증
   hidden_env.rs        JUNEES_HIDDEN_ENV로 지정한 변수가 bash에서 보이지 않는지 검증
   context_management.rs 가짜 API 서버로 도구 결과 비우기, 압축, 캐시 표시, 기록 재생 검증
-  task_mode.rs         실제 바이너리로 임시 git 저장소에서 task init -> task run 검증
+  task_mode.rs         실제 바이너리로 임시 git 저장소에서 task init -> task run, task run 중 SIGTERM 검증
+  cancel.rs            실제 바이너리로 -p 중 SIGTERM(종료 코드 143), 대화 모드 Ctrl-C(턴 취소 후 다음 입력, 두 번이면 종료) 검증
   task_git_env.rs      GIT_DIR이나 GIT_CONFIG_PARAMETERS가 있어도 task 모드가 제 저장소와 설정으로만 git을 쓰는지 검증
   task_git_secret.rs   하네스 git이 심어진 훅을 실행하지 않고 git이 실행하는 필터에도 API 키를 넘기지 않는지 검증
 ```

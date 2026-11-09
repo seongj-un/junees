@@ -50,10 +50,16 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 
 ### L4. 무인 실행 안정성
 - 예산: 작업 전체 토큰 상한, 시간 상한, 세션 수 상한
-- Ctrl-C/SIGTERM: 현재 도구가 끝나면 멈추고 짝 없는 tool_use를 채움(#2)
+  - L4b: `task run --max-tokens N`/`JUNEES_TASK_MAX_TOKENS`(작업 전체 누적: init 세션, 요약 호출, 캐시 읽기/쓰기 포함, `state.json`에서 이어 셈), `--max-time`/`JUNEES_TASK_MAX_TIME`(이번 실행의 실제 경과 시간, `90s`/`30m`/`2h`/`1h30m`). 세션 사이와, 세션 안에서는 모델 호출 직전마다(`Agent::with_limit`, 압축 요약 호출 포함), 시작 시 재검증에서는 verify 명령마다 확인하고, 넘으면 그 세션을 마무리(체크포인트 커밋)한 뒤 `budget`으로 정지(종료 코드 0). 시계는 테스트에서 주입
+- Ctrl-C/SIGTERM: 현재 도구를 끝내고 짝 없는 tool_use를 채움(#2)
+  - L4b: 공유 취소 플래그(`Cancel`, tokio `watch`)를 `Agent::with_cancel`로 넘긴다. 설정되면 모델 호출은 버리고, 실행 중인 도구 호출은 drop되어 bash가 프로세스 그룹 전체를 SIGKILL로 끝내며(정상 종료한 명령의 백그라운드 프로세스는 그대로), 결과 없는 tool_use는 `cancelled by the user` 오류 결과로 채운 뒤 `Cancelled` 오류로 끝난다. 기록은 user 메시지로 끝나서 다음 입력이 붙는다
+  - 대화 모드: Ctrl-C는 턴만 취소, 프롬프트에서 두 번(또는 Ctrl-D)이면 종료, SIGTERM은 취소 후 143. `-p`: 취소 후 130/143. `task run`: 세션을 마무리하고 체크포인트 커밋, `interrupted` 정지 이유, 130/143. 두 번째 시그널은 즉시 종료
+- 크래시 복구와 실행 로그
+  - L4b: `task run`이 저장소 루트 폴더에 `flock`을 잡고(`.junees/`는 세션이 지웠다 다시 만들어지면 잠금이 풀리므로) `state.json`에 `running {pid, started}`와 기능 목록의 하네스 사본을 남긴다. 잠금이 잡혀 있으면 거절, 표시만 남아 있으면 크래시로 보고 `features.json`의 기능 정의를 init 커밋에서 되돌림(사본과 파일에서는 `passes: true`만 가져와 init 커밋의 verify로 시작 시 재검증. 세션이 고칠 수 있는 `state.json` 사본의 정의는 믿지 않음), `progress.md` 한 줄, `junees: recover after crash` 커밋 후 이어 간다
+  - `.junees/run.log`: 실행 시작/정지(이유, 토큰, 경과 시간), 세션 시작/끝, 크래시 복구를 UTC 시각과 함께 한 줄씩. git 제외(예전 작업은 첫 실행에서 `.gitignore`를 고쳐 따로 커밋)
+  - 남은 것: 크래시 난 세션의 토큰은 누적에 들어가지 않음, 세션이 `.junees/`를 통째로 지우면 잠금과 실행 중 표시도 사라짐
 - 무인 모드 명령 정책: 위험 명령 차단 목록, 작업 폴더 밖 쓰기 경고
   - L4a: `bash` 명령 정책(`src/tools/policy.rs`). 실행 전에 루트/홈/상위 폴더 재귀 삭제(그 폴더로 `cd` 한 뒤 `rm -rf *` 포함), 디스크 파괴, 시스템 종료, fork bomb, `curl | sh`, 강제 push, `sudo` 같은 권한 상승을 막고(셸의 표준 입력으로 넘긴 스크립트도 검사) `blocked by policy: <이유>` 오류 결과를 돌려준다. `JUNEES_DENY_COMMANDS`로 접두사 추가, `JUNEES_ALLOW_DANGEROUS=1`로 기본 규칙 끔. 숨길 환경 변수 `JUNEES_HIDDEN_ENV`(#4). 작업 폴더 밖 쓰기 경고와 대화형 승인은 아직
-- 실행 로그 파일, 크래시 후 `task run`이 기록에서 이어서 시작
 
 ### L5. 상태 보기와 알림
 - `junees task status`: 기능별 통과 여부, 세션 수, 토큰 사용량, 최근 진행 기록
@@ -64,6 +70,6 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - [x] 1단계 에이전트 루프 (PR #1)
 - [x] L1 세션 기록과 재개 (PR #5)
 - [x] L2 컨텍스트 관리 (PR #6)
-- [ ] L3 장기 작업 모드
-- [ ] L4 무인 실행 안정성
+- [x] L3 장기 작업 모드 (PR #8)
+- [ ] L4 무인 실행 안정성 (L4a 명령 정책 PR #7 완료, L4b 진행 중)
 - [ ] L5 상태 보기와 알림
