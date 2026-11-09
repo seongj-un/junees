@@ -13,3 +13,4 @@ pub mod provider;
 pub mod session;
 pub mod task;
 pub mod tools;
+pub mod web_search;

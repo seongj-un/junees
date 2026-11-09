@@ -39,6 +39,7 @@ async fn call(
         max_tokens: 2048,
         cache: true,
         thinking: false,
+        web_search: false,
     };
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let result = provider.complete_streaming(request, &sender).await;

@@ -33,6 +33,9 @@ pub struct CompletionRequest<'a> {
     /// Let the model think before it answers, if the provider was set up
     /// with a thinking budget. Off for summary calls.
     pub thinking: bool,
+    /// Offer the API's web search tool too, if the provider was set up
+    /// with it. Off for summary calls.
+    pub web_search: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::approval::ApprovalMode;
 use crate::task::budget::parse_duration;
 use crate::tools::ToolSettings;
+use crate::web_search::WebSearch;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -55,6 +56,9 @@ pub struct Config {
     /// Stream model replies, showing text as it is written
     /// (`JUNEES_STREAM`, on by default).
     pub stream: bool,
+    /// The API's web search tool, when it is turned on (`JUNEES_WEB_SEARCH`
+    /// and its settings; see [`WebSearch::read`]).
+    pub web_search: Option<WebSearch>,
 }
 
 impl Config {
@@ -63,7 +67,8 @@ impl Config {
     /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_THINKING_BUDGET`, `JUNEES_HOME`, `HOME`,
     /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
     /// `JUNEES_HIDDEN_ENV`, `JUNEES_APPROVAL`, `JUNEES_TASK_MAX_TOKENS`,
-    /// `JUNEES_TASK_MAX_TIME` and `JUNEES_STREAM`.
+    /// `JUNEES_TASK_MAX_TIME`, `JUNEES_STREAM` and the `JUNEES_WEB_SEARCH*`
+    /// settings.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -169,6 +174,7 @@ impl Config {
             None => true,
             raw => parse_flag(raw, "JUNEES_STREAM")?,
         };
+        let web_search = WebSearch::read(get)?;
 
         Ok(Self {
             api_key,
@@ -185,6 +191,7 @@ impl Config {
             task_max_tokens,
             task_max_time,
             stream,
+            web_search,
         })
     }
 
@@ -290,6 +297,7 @@ mod tests {
         assert_eq!(config.task_max_tokens, None);
         assert_eq!(config.task_max_time, None);
         assert!(config.stream);
+        assert_eq!(config.web_search, None);
     }
 
     #[test]
@@ -302,6 +310,28 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.to_string(), "JUNEES_STREAM must be 1 or 0, got `maybe`");
+    }
+
+    #[test]
+    fn reads_the_web_search_settings() {
+        let on = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_WEB_SEARCH", " on "),
+            ("JUNEES_WEB_SEARCH_MAX_USES", " 2 "),
+        ])
+        .unwrap();
+        assert_eq!(on.web_search.map(|search| search.max_uses), Some(2));
+        let err = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_WEB_SEARCH", "on"),
+            ("JUNEES_WEB_SEARCH_MAX_USES", "0"),
+        ])
+        .err()
+        .unwrap();
+        assert!(
+            err.to_string().contains("JUNEES_WEB_SEARCH_MAX_USES"),
+            "{err}"
+        );
     }
 
     #[test]

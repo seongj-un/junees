@@ -42,6 +42,24 @@ impl ProviderError {
         )
     }
 
+    /// The request offered web search, which an administrator turned off
+    /// for the organization: the docs say the API then answers 400 with a
+    /// message that web search is not enabled.
+    pub fn is_web_search_disabled(&self) -> bool {
+        match self {
+            Self::Api {
+                status: 400,
+                message,
+                ..
+            } => {
+                let message = message.to_lowercase().replace('_', " ");
+                message.contains("web search")
+                    && (message.contains("not enabled") || message.contains("disabled"))
+            }
+            _ => false,
+        }
+    }
+
     /// The credentials were rejected.
     pub fn is_auth(&self) -> bool {
         matches!(
@@ -74,6 +92,13 @@ impl fmt::Display for ProviderError {
                         f,
                         " (this model takes no thinking budget: set JUNEES_THINKING_BUDGET \
                          to 0; models that think by default keep doing so)"
+                    )?;
+                }
+                if self.is_web_search_disabled() {
+                    write!(
+                        f,
+                        " (web search is turned off for this organization in the Claude \
+                         Console: set JUNEES_WEB_SEARCH=off, or ask an admin to turn it on)"
                     )?;
                 }
                 Ok(())
@@ -154,6 +179,31 @@ mod tests {
                 .to_string()
                 .contains("JUNEES")
         );
+    }
+
+    #[test]
+    fn web_search_turned_off_for_the_organization_names_the_setting() {
+        let off = api(
+            400,
+            Some("invalid_request_error"),
+            "Web search is not enabled for this organization.",
+        );
+        assert!(off.is_web_search_disabled());
+        let shown = off.to_string();
+        assert!(shown.contains("set JUNEES_WEB_SEARCH=off"), "{shown}");
+        assert!(api(400, None, "web_search tool is disabled").is_web_search_disabled());
+        for other in [
+            api(400, None, "messages: field required"),
+            api(
+                400,
+                None,
+                "web search: allowed_domains and blocked_domains given",
+            ),
+            api(500, None, "web search is not enabled"),
+        ] {
+            assert!(!other.is_web_search_disabled(), "{other}");
+            assert!(!other.to_string().contains("JUNEES_WEB_SEARCH"), "{other}");
+        }
     }
 
     #[test]

@@ -98,7 +98,8 @@ async fn run() -> Result<ExitCode> {
         config.model.clone(),
     )?
     .with_thinking(config.thinking_budget)
-    .with_streaming(config.stream);
+    .with_streaming(config.stream)
+    .with_web_search(config.web_search.clone());
     let cwd = std::env::current_dir()?;
     let opened = open_session(&args.session, &config, &cwd)?;
     let mut agent = Agent::restore(
@@ -268,7 +269,8 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
                 config.model.clone(),
             )?
             .with_thinking(config.thinking_budget)
-            .with_streaming(config.stream),
+            .with_streaming(config.stream)
+            .with_web_search(config.web_search.clone()),
         ))
     };
     let budget = match &command {

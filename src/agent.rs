@@ -428,6 +428,7 @@ impl Agent {
                 max_tokens: self.options.max_tokens,
                 cache: true,
                 thinking: true,
+                web_search: true,
             },
             &events,
         );
@@ -527,6 +528,8 @@ impl Agent {
                 // Its own small output limit leaves no room for a thinking
                 // budget, and a summary needs none.
                 thinking: false,
+                // It works from the text it is given.
+                web_search: false,
             })
             .await;
         let response = match result {
@@ -630,9 +633,9 @@ mod tests {
     type Reply = std::result::Result<CompletionResponse, ProviderError>;
     use crate::tools::Tool;
 
-    /// System prompt, tool count, max_tokens, caching and thinking of a
-    /// request.
-    type Settings = (String, usize, u32, bool, bool);
+    /// System prompt, tool count, max_tokens, caching, thinking and web
+    /// search of a request.
+    type Settings = (String, usize, u32, bool, bool, bool);
 
     /// Replays canned responses and records the history it was sent.
     #[derive(Clone, Default)]
@@ -666,6 +669,7 @@ mod tests {
                 request.max_tokens,
                 request.cache,
                 request.thinking,
+                request.web_search,
             ));
             self.responses
                 .lock()
@@ -1618,15 +1622,15 @@ mod tests {
         let settings = settings.lock().unwrap();
         assert_eq!(seen.len(), 9);
         assert_eq!(tool_output(&seen[6][2])[0].1, session::CLEARED);
-        let (system, tools, max_tokens, cache, thinking) = &settings[7];
+        let (system, tools, max_tokens, cache, thinking, web_search) = &settings[7];
         assert_eq!(system, context::SUMMARY_SYSTEM);
         assert_eq!(
-            (*tools, *max_tokens, *cache, *thinking),
-            (0, 4096, false, false)
+            (*tools, *max_tokens, *cache, *thinking, *web_search),
+            (0, 4096, false, false, false)
         );
         assert_eq!(
-            (settings[8].1, settings[8].3, settings[8].4),
-            (1, true, true)
+            (settings[8].1, settings[8].3, settings[8].4, settings[8].5),
+            (1, true, true, true)
         );
         // The summary call saw the history before the second-last input
         // ("third", at 12) as text in one message.

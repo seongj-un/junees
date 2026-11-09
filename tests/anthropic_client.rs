@@ -28,6 +28,7 @@ async fn sends_headers_and_body() {
             max_tokens: 64,
             cache: true,
             thinking: false,
+            web_search: false,
         })
         .await
         .unwrap();
@@ -62,6 +63,7 @@ async fn retries_when_overloaded() {
             max_tokens: 64,
             cache: true,
             thinking: false,
+            web_search: false,
         })
         .await
         .unwrap();
@@ -82,6 +84,7 @@ async fn does_not_retry_auth_errors() {
             max_tokens: 64,
             cache: true,
             thinking: false,
+            web_search: false,
         })
         .await
         .unwrap_err();
@@ -100,6 +103,7 @@ async fn complete_hi(url: String) -> Result<CompletionResponse, ProviderError> {
             max_tokens: 64,
             cache: true,
             thinking: false,
+            web_search: false,
         })
         .await
 }
