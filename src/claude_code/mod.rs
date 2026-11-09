@@ -20,6 +20,7 @@
 //! `-> tool`, `<- tool`, see [`stream`]), saved raw to a file, and counted.
 //! [`rules`] turn Junees's command policy into Claude Code deny rules.
 
+pub mod chat;
 pub mod rules;
 mod stream;
 
@@ -238,6 +239,8 @@ impl std::fmt::Display for UsageLimit {
         write!(f, ": {}", self.message)
     }
 }
+
+impl std::error::Error for UsageLimit {}
 
 /// What a session did.
 pub struct Outcome {
