@@ -604,7 +604,9 @@ fn is_device(path: &str) -> bool {
     !harmless
 }
 
-/// Spots `name(){ name|name& };name` with any function name, outside quotes.
+/// Spots `name(){ name|name& };name` with any function name, outside quotes:
+/// a function whose own body pipes itself into itself and goes to the
+/// background.
 fn is_fork_bomb(script: &str) -> bool {
     let text: String = unquoted(script)
         .chars()
@@ -620,12 +622,37 @@ fn is_fork_bomb(script: &str) -> bool {
             .last()
             .map_or(at, |(i, _)| i);
         let name = &text[name_start..at];
-        if !name.is_empty() && text[at..].contains(&format!("{name}|{name}")) {
+        let body = function_body(&text[at + 3..]);
+        if !name.is_empty() && body.contains('&') && pipes_into_itself(body, name) {
             return true;
         }
         from = at + 3;
     }
     false
+}
+
+/// The text up to the `}` that closes a function body starting here.
+fn function_body(text: &str) -> &str {
+    let mut depth = 0usize;
+    for (i, c) in text.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth == 0 => return &text[..i],
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    text
+}
+
+/// True when `body` (without whitespace) runs `name|name` as whole commands.
+fn pipes_into_itself(body: &str, name: &str) -> bool {
+    let boundary = |c: Option<char>| c.is_none_or(|c| ";&|(){}".contains(c));
+    let pattern = format!("{name}|{name}");
+    body.match_indices(&pattern).any(|(at, _)| {
+        boundary(body[..at].chars().next_back())
+            && boundary(body[at + pattern.len()..].chars().next())
+    })
 }
 
 /// The script with the contents of quoted strings removed.
@@ -1203,8 +1230,14 @@ mod tests {
         assert_eq!(denied(":(){ :|:& };:"), "fork bomb");
         denied(":(){ :|: & }; :");
         denied("bomb() { bomb | bomb & }; bomb");
+        denied("f(){ x; f|f & }; f");
         allowed("echo ':(){ :|:& };:'");
         allowed("f() { echo hi; }; f | cat");
+        allowed("f(){ echo hi; }; f | f");
+        allowed("f(){ echo hi; }; f | f &");
+        allowed("log(){ echo \"$@\"; }; ls | log | logger");
+        allowed("f(){ g|g& }; f");
+        allowed("f(){ x f|f& }; f");
     }
 
     #[test]
