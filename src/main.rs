@@ -40,6 +40,8 @@ async fn run() -> Result<()> {
             return Ok(());
         }
         Command::Run(args) => args,
+        // Needs no API key, and writes nothing.
+        Command::Task(TaskCommand::Status { json }) => return task_status(json),
         Command::Task(command) => return run_task(command).await,
     };
 
@@ -92,6 +94,18 @@ async fn run() -> Result<()> {
     }
 }
 
+/// `junees task status`, for the git repository the current folder is in.
+fn task_status(json: bool) -> Result<()> {
+    let root = task::git::toplevel(&std::env::current_dir()?)?;
+    let status = task::status::load(&root)?;
+    if json {
+        println!("{}", status.to_json());
+    } else {
+        print!("{}", status.to_text());
+    }
+    Ok(())
+}
+
 /// `junees task init|run`, in the root of the git repository the current
 /// folder is in.
 async fn run_task(command: TaskCommand) -> Result<()> {
@@ -132,6 +146,7 @@ async fn run_task(command: TaskCommand) -> Result<()> {
             println!("task stopped: {stop}");
             Ok(())
         }
+        TaskCommand::Status { json } => task_status(json),
     }
 }
 

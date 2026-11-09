@@ -57,6 +57,21 @@ async fn junees(cwd: &Path, home: &Path, url: &str, args: &[&str]) -> Output {
     output
 }
 
+/// `junees task status` with the given arguments, without an API key: the
+/// status needs none.
+async fn status(cwd: &Path, home: &Path, args: &[&str]) -> Output {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    command
+        .args(["task", "status"])
+        .args(args)
+        .current_dir(cwd)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("JUNEES_HOME", home.join("junees"))
+        .stdin(Stdio::null());
+    isolate_git(&mut command, home);
+    command.output().await.unwrap()
+}
+
 /// A reply calling these tools, in order.
 fn tool_calls(calls: &[(&str, Value)]) -> Value {
     let content: Vec<Value> = calls
@@ -220,6 +235,40 @@ async fn init_then_run_builds_the_features_and_commits() {
         .count();
     assert_eq!(journals, 3);
 
+    // The status, from a subfolder, as JSON and as text.
+    let shown = status(&sub, home.path(), &["--json"]).await;
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["goal"], "make hello and world");
+    assert_eq!(
+        (shown["passing"].clone(), shown["total"].clone()),
+        (json!(2), json!(2))
+    );
+    assert_eq!(shown["features"][1]["id"], "F2");
+    assert_eq!(shown["sessions"], 2);
+    assert_eq!(shown["tokens"]["input"], 49);
+    assert_eq!(shown["stop"]["reason"], "complete");
+    assert!(shown["stop"]["at"].as_u64().is_some());
+    assert!(
+        shown["progress_tail"][4]
+            .as_str()
+            .unwrap()
+            .starts_with("- [junees] session 2: 2/2 passing, new: F2")
+    );
+    let shown = status(root, home.path(), &[]).await;
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(text.contains("\ngoal: make hello and world\n"), "{text}");
+    assert!(
+        text.contains("\n  [x] F1  hello.txt says hello\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nlast stop: every feature passes (session 2, "),
+        "{text}"
+    );
+    // Reading the status changed nothing.
+    assert_eq!(git(root, home.path(), &["status", "--porcelain"]).await, "");
+
     let requests = server.await.unwrap();
     assert_eq!(requests.len(), 7);
     let first_work = body_of(&requests[2]);
@@ -254,6 +303,22 @@ async fn init_then_run_builds_the_features_and_commits() {
             .to_string()
             .contains("junees: checkpoint after session 1")
     );
+}
+
+#[tokio::test]
+async fn status_without_a_task_says_to_run_init() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), home.path(), &["init", "-q"]).await;
+    let output = status(repo.path(), home.path(), &["--json"]).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("has no task (no .junees/ folder); start one with `junees task init"),
+        "{stderr}"
+    );
+    assert!(!repo.path().join(".junees").exists());
 }
 
 #[tokio::test]

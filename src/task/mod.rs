@@ -4,7 +4,8 @@
 //! The task lives in the repository it works on, under `.junees/`:
 //! `features.json` (the feature list, see [`features`]), `progress.md` (notes
 //! for the next session) and `state.json` (the harness's own counters, see
-//! [`state`]). Only the harness decides that a feature passes, by running the
+//! [`state`]). `task status` reads all three without writing (see
+//! [`status`]). Only the harness decides that a feature passes, by running the
 //! feature's verify command itself.
 
 pub mod features;
@@ -12,6 +13,7 @@ pub mod git;
 mod prompt;
 pub mod runner;
 pub mod state;
+pub mod status;
 pub mod tools;
 
 pub use runner::{Report, TaskEnv, init, run};
