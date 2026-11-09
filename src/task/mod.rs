@@ -8,6 +8,7 @@
 //! feature's verify command itself.
 
 pub mod features;
+pub mod git;
 
 use std::fs;
 use std::io;
