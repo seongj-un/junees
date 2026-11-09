@@ -9,11 +9,29 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::features::Ledger;
-use crate::tools::{Bash, SECRET_ENV_VARS, Tool, ToolOutput};
+use super::git::REPO_ENV_VARS;
+use crate::tools::{Bash, ReadFile, SECRET_ENV_VARS, Tool, ToolOutput, ToolRegistry, WriteFile};
 
 /// Verify commands may run a whole test suite, so they get the longest
 /// timeout the bash tool allows.
 pub const VERIFY_TIMEOUT_SECS: u64 = 600;
+
+/// bash, read_file and write_file for task sessions. Their bash, like the
+/// default one, cannot see the API key, and it cannot see
+/// [`REPO_ENV_VARS`] either: a session's git commands must act on the
+/// repository the task is in, even when Junees itself was started from a
+/// git hook or `git rebase --exec`.
+pub fn session_tools() -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    tools.register(session_bash());
+    tools.register(ReadFile);
+    tools.register(WriteFile);
+    tools
+}
+
+fn session_bash() -> Bash {
+    Bash::default().hide_env(SECRET_ENV_VARS.iter().chain(REPO_ENV_VARS).copied())
+}
 
 pub struct MarkFeaturePassing {
     ledger: Arc<Mutex<Ledger>>,
@@ -22,13 +40,13 @@ pub struct MarkFeaturePassing {
 }
 
 impl MarkFeaturePassing {
-    /// Verify commands run in `root`, with the bash tool's output limits and
-    /// without the API key variables.
+    /// Verify commands run in `root` like the session's bash commands: with
+    /// the bash tool's output limits and without the hidden variables.
     pub fn new(ledger: Arc<Mutex<Ledger>>, root: PathBuf) -> Self {
         Self {
             ledger,
             root,
-            bash: Bash::default().hide_env(SECRET_ENV_VARS.iter().copied()),
+            bash: session_bash(),
         }
     }
 }
@@ -184,6 +202,16 @@ mod tests {
         assert!(output.is_error);
         assert!(output.content.contains("the ids are F1, F2"));
         assert!(tool.run(json!({})).await.is_error);
+    }
+
+    #[test]
+    fn session_tools_are_the_default_three() {
+        let names: Vec<String> = session_tools()
+            .specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(names, ["bash", "read_file", "write_file"]);
     }
 
     #[test]

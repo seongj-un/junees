@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 
 use super::features::{self, Ledger};
 use super::state::{State, Stop, StopReason};
-use super::tools::MarkFeaturePassing;
+use super::tools::{MarkFeaturePassing, session_tools};
 use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt};
 use crate::agent::{Agent, AgentOptions, Event};
 use crate::cli::preview;
@@ -110,11 +110,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     }
     prepare_dir(root)?;
 
-    let (mut agent, journal) = env.agent(
-        prompt::init_system(root),
-        ToolRegistry::with_defaults(),
-        report,
-    )?;
+    let (mut agent, journal) = env.agent(prompt::init_system(root), session_tools(), report)?;
     line(
         report,
         &format!("== init session{} ==", journal_note(&journal)),
@@ -293,7 +289,7 @@ async fn work_session(
         let system = prompt::work_system(root, n, ledger.features(), &progress, &git_log);
         (system, ledger.passing(), ledger.total())
     };
-    let mut tools = ToolRegistry::with_defaults();
+    let mut tools = session_tools();
     tools.register(MarkFeaturePassing::new(Arc::clone(ledger), root.clone()));
     let (mut agent, journal) = match env.agent(system, tools, report) {
         Ok(created) => created,

@@ -48,7 +48,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - 세션이 끝나면 하네스가 `progress.md`에 `- [junees] session N: 통과 수/전체, 새로 통과한 기능, 토큰` 한 줄을 붙이고, 작업 트리가 더러우면 `junees: checkpoint after session N`으로 커밋한다(하네스 줄이 붙으므로 사실상 세션마다 하나).
 - 정지: 모든 기능 통과, `--max-sessions`만큼 실행, 연속 3세션 동안 새로 통과한 기능 없음(stalled), 세션 하나가 오류로 끝남(오류를 `progress.md`에 남기고 체크포인트 커밋 후 정지). 정지 이유를 `task stopped: ...`로 출력하고 `state.json`에 기록한다. stalled와 오류는 종료 코드 1.
 - `.junees/state.json`(실행한 세션 수, 연속 무진전 세션 수, 누적 토큰, 정지 이유)은 `.junees/.gitignore`로 git에서 뺀다. 다음 `task run`은 세션 번호와 토큰을 여기서 이어 간다. 이전 실행이 스스로 멈췄으면 무진전 횟수를 0부터 다시 세고, 정지 이유 없이 끝났으면(크래시) 이어서 센다.
-- 하위 폴더에서 실행해도 저장소 루트로 옮겨서 작업한다. 세션당 모델 호출 상한은 `JUNEES_MAX_TURNS`이고, 넘으면 그 세션은 오류로 끝난다.
+- 하위 폴더에서 실행해도 저장소 루트로 옮겨서 작업한다. 하네스의 git 명령과 세션의 `bash`(verify 포함)에서는 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` 같은 저장소 지정 변수를 지운다. git 훅이나 worktree의 `git rebase -x`처럼 이 변수가 설정된 곳에서 실행해도 다른 저장소에 커밋하지 않게 하기 위해서다. 세션당 모델 호출 상한은 `JUNEES_MAX_TURNS`이고, 넘으면 그 세션은 오류로 끝난다.
 - `bash`에 아직 승인 절차나 명령 정책이 없으므로(L4 예정) 믿을 수 있는 저장소에서만 쓴다.
 
 | 환경 변수 | 기본값 | 설명 |
@@ -87,6 +87,7 @@ tests/
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행 검증
   task_mode.rs         실제 바이너리로 임시 git 저장소에서 task init -> task run 검증
+  task_git_env.rs      GIT_DIR이 다른 저장소를 가리켜도 task 모드가 제 저장소에서만 git을 쓰는지 검증
 ```
 
 ## 로드맵
