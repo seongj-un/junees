@@ -3,26 +3,73 @@
 Rust로 만드는 AI 에이전트 하네스. LLM이 도구를 호출하며 일을 처리하는 루프를 바닥부터 직접 만든다.
 [Hermes Agent](https://github.com/NousResearch/hermes-agent)에서 영감을 받았고, 단일 바이너리와 적은 메모리 사용을 목표로 한다.
 
-## 사용법
+## 빠른 시작
 
 ```sh
-cargo build --release
-export ANTHROPIC_API_KEY=sk-ant-...
-./target/release/junees              # 대화 모드
-./target/release/junees -p "이 폴더에 뭐가 있어?"   # 한 번만 실행
-./target/release/junees -c            # 이 폴더의 마지막 세션 이어서
-./target/release/junees -c -p "계속"   # 이어서 한 번만 실행
-./target/release/junees --resume 20261109-0617   # 지정한 세션 (id 앞부분만 써도 유일하면 됨)
-./target/release/junees --no-session  # 기록하지 않음
-./target/release/junees task init "할 일 관리 웹 앱을 만들어"   # 장기 작업 계획 (git 저장소 안에서)
-./target/release/junees task run --max-sessions 5             # 기능 하나씩 작업 세션 반복
-./target/release/junees task run --max-tokens 2000000 --max-time 2h   # 토큰/시간 예산 안에서만
-./target/release/junees task status            # 작업 상태 보기 (--json이면 JSON)
-./target/release/junees task init --backend claude-code "할 일 관리 웹 앱을 만들어"   # Claude 구독으로 (아래)
-JUNEES_BACKEND=claude-code ./target/release/junees task run --max-time 2h
+cargo install --path .              # 한 번 설치하면 어디서나 junees (~/.cargo/bin)
+junees                              # 대화 (처음이면 설정 마법사가 먼저 뜸)
+junees "이 폴더에 뭐가 있어?"        # 한 번만 묻기
+junees -c                           # 이 폴더의 마지막 대화 이어서
+junees task "할 일 관리 웹 앱을 만들어"   # 장기 작업: 계획하고 바로 실행 (git 저장소 안에서)
+junees setup                        # 설정 다시
 ```
 
-대화 모드 명령: `/sessions` 최근 세션 10개(id, 마지막 기록 시각, 첫 입력), `/reset` 새 세션 시작, `/usage` 현재 세션의 토큰 사용량(캐시 쓰기/읽기 포함), `/context` 현재 컨텍스트 크기와 한도, `/compact` 앞부분을 요약으로 압축, `/exit` 종료.
+대화 안에서 쓰는 명령:
+
+- `/task <목표>`: 지금 폴더의 git 저장소에서 장기 작업을 계획하고 바로 실행한다(`junees task "목표"`와 같음). `/task`만 쓰면 멈춘 작업을 이어서 한다(`junees task`).
+- `/status`: 작업 상태(`junees status`와 같음).
+- `/sessions`: 최근 세션 10개를 번호와 함께 보여 주고, 번호를 넣으면 그 세션으로 이어 간다(Enter는 그대로).
+- `/new`: 새 대화(예전 이름 `/reset`도 됨).
+- `/model [이름]`: 지금 모델을 보여 주거나, 이 실행 동안만 다른 모델로 바꾼다.
+- `/backend [api|claude-code]`: `/task`를 무엇으로 돌릴지 보여 주거나, 이 실행 동안만 바꾼다. 대화 자체는 늘 API를 쓴다.
+- `/compact`, `/context`, `/usage`, `/help`, `/exit`.
+
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+
+### 설정 파일과 처음 설정
+
+설정은 `$JUNEES_HOME/config.toml`(기본 `~/.junees/config.toml`)에 있다. 처음 실행할 때 설정 파일도 `ANTHROPIC_API_KEY`도 없고 표준 입력과 표준 오류가 모두 터미널이면 설정 마법사가 먼저 뜬다(`junees setup`으로 언제든 다시).
+
+1. Claude에 닿는 방법: `1) Claude subscription`(Claude Code CLI 로그인 필요) 또는 `2) Anthropic API key`.
+2. 구독이면 `claude --version`과 `claude auth status --json`으로 확인한다(작업 모드가 쓰는 것과 같은 검사). 로그인이 안 돼 있으면 방법(`claude` 실행 후 `/login`, 브라우저가 없으면 `claude setup-token`, Linux면 bubblewrap 설치)을 보여 주고 설정은 저장한다. 구독은 지금 장기 작업(`junees task`, `/task`)만 돌린다. 대화(`junees`, `junees "질문"`)는 API를 직접 부르므로 API 키가 따로 필요하고, 마법사가 그 자리에서 키를 넣을지 묻는다.
+3. API 키는 화면에 보이지 않게 입력한다(터미널 echo를 끔). `sk-ant-`로 시작하지 않으면 다시 묻고, 잘못 넣은 값도 화면에 다시 찍지 않는다.
+4. 대화 모델(기본 `claude-sonnet-4-6`)과 작업 기본 예산(시간 기본 `2h`, 토큰 상한은 선택)을 묻고 저장한다.
+
+Ctrl-C나 입력 끝(Ctrl-D)이면 아무것도 저장하지 않고 끝난다. 터미널이 아니면(cron, 파이프) 마법사를 띄우지 않고 `no API key: run `junees setup`, or set ANTHROPIC_API_KEY` 오류로 끝난다. `claude-code` 백엔드로 고른 작업 명령은 키가 필요 없으므로 마법사 없이 실행한다.
+
+파일은 TOML의 단순한 부분만 쓴다: 한 줄에 `키 = 값`, 값은 따옴표 문자열이나 숫자, `true`/`false`, `#` 주석. 표(`[...]`)와 배열은 받지 않는다. 키마다 환경 변수 하나에 대응하고, **환경 변수가 있으면 파일보다 우선한다**(`/model`, `/backend`로 바꾼 값은 그보다도 우선하지만 이 실행에만 적용되고 파일은 바꾸지 않는다). 모르는 키, 따옴표 없는 문자열(`model = claude-...`), 같은 키 두 번은 `<경로> is not a valid settings file ... line N: ...` 오류로 알려 준다.
+
+```toml
+backend = "claude-code"          # JUNEES_BACKEND
+api_key = "sk-ant-..."           # ANTHROPIC_API_KEY
+model = "claude-sonnet-4-6"      # JUNEES_MODEL
+task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
+task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
+```
+
+그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
+
+파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 다만 모델이 bash로 이 파일을 직접 읽는 것은 막지 않는다(`~/.ssh`처럼 같은 사용자의 파일. 아래 실행 전 승인과 명령 정책 참고).
+
+## 고급 사용법
+
+예전 명령과 플래그는 그대로 동작한다. `junees --help`도 첫 부분은 위 사용법, 나머지는 `Advanced` 절이다.
+
+```sh
+junees -p "이 폴더에 뭐가 있어?"        # 한 번만 실행 (위치 인자와 같음)
+junees -c -p "계속"                     # 이어서 한 번만 실행 (junees -c "계속"도 됨)
+junees --resume 20261109-0617           # 지정한 세션 (id 앞부분만 써도 유일하면 됨)
+junees --no-session                     # 기록하지 않음
+junees task init "할 일 관리 웹 앱을 만들어"   # 계획만 (git 저장소 안에서)
+junees task run --max-sessions 5        # 기능 하나씩 작업 세션 반복 (junees task 와 같음)
+junees task --max-tokens 2000000 --max-time 2h   # 토큰/시간 예산 안에서만 (task run 도 같은 옵션)
+junees task --max-time 30m "목표"        # 계획 + 실행에 옵션
+junees task status --json               # 작업 상태 JSON (junees status --json)
+junees task --backend claude-code "할 일 관리 웹 앱을 만들어"   # 이번만 Claude 구독으로 (아래)
+JUNEES_BACKEND=claude-code junees task --max-time 2h
+```
+
+`cargo install` 없이 `cargo build --release` 후 `./target/release/junees`로 써도 된다. 설정 파일 없이 환경 변수만으로도 예전처럼 동작한다(`export ANTHROPIC_API_KEY=sk-ant-...`).
 
 ### 중단 (Ctrl-C, SIGTERM)
 
@@ -108,7 +155,7 @@ JUNEES_BACKEND=claude-code ./target/release/junees task run --max-time 2h
 
 ### 구독 모드 (claude-code 백엔드)
 
-`task init`과 `task run`의 세션을 Junees 자신의 에이전트 대신 공식 Claude Code CLI(`claude`)가 실행하게 할 수 있다. Claude Pro/Max 구독으로 Junees를 쓰는 방법이다. `--backend claude-code`나 `JUNEES_BACKEND=claude-code`로 고르고(기본은 `api`), 이때는 `ANTHROPIC_API_KEY`가 필요 없고 읽지도 않는다.
+`task init`과 `task run`(그리고 둘을 합친 `junees task "목표"`, 대화의 `/task`)의 세션을 Junees 자신의 에이전트 대신 공식 Claude Code CLI(`claude`)가 실행하게 할 수 있다. Claude Pro/Max 구독으로 Junees를 쓰는 방법이다. 설정 마법사에서 `1) Claude subscription`을 고르면 설정 파일에 `backend = "claude-code"`가 들어간다. 한 번만 쓰려면 `--backend claude-code`, 환경 변수는 `JUNEES_BACKEND=claude-code`, 대화 안에서는 `/backend claude-code`(기본은 `api`). 이때는 `ANTHROPIC_API_KEY`가 필요 없고 읽지도 않는다. 대화 모드는 아직 구독으로 돌지 않는다(API 키 필요).
 
 로그인은 직접 한다. Junees는 로그인을 대신하지 않고, 구독으로 로그인돼 있는지 `claude auth status`로 확인만 한다(아래).
 
@@ -117,8 +164,9 @@ claude            # 처음 한 번: Claude Code를 열고
 /login            # 그 안에서 구독 계정으로 로그인한 뒤 /exit
 # 브라우저 없는 서버라면: claude setup-token 으로 토큰을 만들어
 # export CLAUDE_CODE_OAUTH_TOKEN=... 을 자기 셸에 둔다 (Junees는 claude에게 물려줄 뿐 읽지 않는다)
-junees task init --backend claude-code "목표"
-junees task run --backend claude-code --max-time 2h
+junees setup      # 1) Claude subscription 을 고르면 기본 백엔드가 claude-code
+junees task "목표"     # 계획 + 실행 (설정의 백엔드로)
+junees task --backend claude-code --max-time 2h   # 설정과 상관없이 이번만
 ```
 
 왜 이 방식만 지원하나: Anthropic 약관([Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance))은 구독(OAuth) 자격 증명을 다른 도구가 직접 쓰거나 대신 저장, 중계하는 것을 금지하고, 사용자가 **수정하지 않은 Claude Code**에 자기 구독으로 로그인해 쓰는 것은 허용한다. 그래서 Junees는 `claude` 프로그램을 자식 프로세스로 실행하기만 한다. `~/.claude`의 자격 증명이나 `CLAUDE_CODE_OAUTH_TOKEN`을 읽거나 저장하거나 복사하지 않고, Junees의 API 클라이언트가 Claude Code인 척하지도 않는다(헤더, 시스템 프롬프트). 환경에 `CLAUDE_CODE_OAUTH_TOKEN`이 있으면 다른 변수처럼 `claude`에 상속될 뿐이다.
@@ -137,7 +185,7 @@ junees task run --backend claude-code --max-time 2h
 - 토큰과 예산: stream-json의 응답별 usage(같은 응답 id는 한 번만)를 세션 중에 세어 예산을 확인하고(응답마다, 그리고 시간 때문에 1초마다), 넘으면 세션의 명령을 끝내고 Claude Code의 프로세스 그룹에 SIGINT를 보내 턴을 끝내게 한 뒤, 10초 안에 끝나지 않으면 SIGKILL한다(아래 취소와 같은 방식). 응답의 usage를 읽지 못하면(값이 `null` 등) 처음 한 번 경고한다. 그 응답은 예산에 세지 않는다. 세션이 끝나면 `result` 이벤트의 `modelUsage`(모든 모델 합계, 없으면 `usage`)가 더 크면 그것을 누적에 더한다. Claude Code가 추정한 비용(`total_cost_usd`)과 턴 수, Claude Code 세션 id는 `run.log`에 `session N claude-code: ...` 한 줄로 남는다(구독은 이 금액으로 과금되지 않는다). 구독의 사용 한도는 Junees가 알 수 없다.
 - 취소: SIGINT/SIGTERM이면 먼저 Claude Code의 자손 프로세스를 모두 끝낸다. Claude Code의 Bash 도구는 명령을 별도 세션(`detached`)으로 띄우므로 프로세스 그룹 신호가 닿지 않는다. 그래서 `/proc`의 부모 관계로 자손을 찾아, 새 프로세스가 더 나오지 않을 때까지 SIGSTOP으로 멈춘 뒤 모두 SIGKILL한다. 그다음 Claude Code의 프로세스 그룹에 SIGINT를 보내고, 유예 뒤에는 자손을 한 번 더 정리하고 SIGKILL한다. 세션을 마무리한 뒤 `interrupted`로 정지한다. 세션이 스스로 끝나면 그 세션이 띄운 백그라운드 프로세스는 bash 도구처럼 그대로 둔다. 한계: 정지 신호 전에 `claude`가 스스로 죽은 경우(크래시)에는 그 명령이 init의 자식이 되어 찾을 수 없으므로 남는다.
 - 출력: 세션 중에 stream-json 이벤트를 다른 백엔드와 같은 형식(텍스트, `-> Read {...}`, `<- Read ok: ...`)으로 보여 준다. 원본은 `.junees/sessions/init.jsonl`, `init-fix.jsonl`, `session-N.jsonl`에 저장한다(0600, git 제외). Junees의 세션 기록(`$JUNEES_HOME/sessions/`)은 남지 않고, Claude Code가 자기 대화를 따로 저장하므로 `claude --resume <id>`로 열어 볼 수 있다.
-- 설정: `JUNEES_CLAUDE_BIN`(기본 `PATH`의 `claude`), `JUNEES_CLAUDE_MODEL`(`--model`로 전달, 없으면 Claude Code의 기본), `JUNEES_MAX_TURNS`(`--max-turns`). `JUNEES_MODEL`, `JUNEES_MAX_TOKENS`, 컨텍스트 관리 설정은 이 백엔드에서 쓰지 않는다(압축은 Claude Code가 한다).
+- 설정: `JUNEES_CLAUDE_BIN`(설정 파일 `claude_bin`, 기본 `PATH`의 `claude`), `JUNEES_CLAUDE_MODEL`(`--model`로 전달, 없으면 Claude Code의 기본), `JUNEES_MAX_TURNS`(`--max-turns`). `JUNEES_MODEL`, `JUNEES_MAX_TOKENS`, 컨텍스트 관리 설정은 이 백엔드에서 쓰지 않는다(압축은 Claude Code가 한다).
 
 ### 컨텍스트 관리
 
@@ -151,9 +199,11 @@ junees task run --backend claude-code --max-time 2h
 - `/compact`는 한도와 상관없이 지금 압축한다.
 - API가 컨텍스트 초과(400 "prompt is too long")로 거절하면, 크기 추적과 상관없이 비우기와 압축을 하고, 이어서 최근 3개를 포함한 모든 도구 결과도 비운다(한 응답의 병렬 `read_file` 결과처럼 최근 결과가 원인일 수 있어서). 줄어든 게 있으면 한 번만 다시 보내고, 그래도 실패하면 오류로 끝난다.
 
+`JUNEES_HOME` 말고는 모두 설정 파일 키로도 줄 수 있고(위 설정 파일 절), 둘 다 있으면 환경 변수가 이긴다.
+
 | 환경 변수 | 기본값 | 설명 |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | (필수) | Anthropic API 키 |
+| `ANTHROPIC_API_KEY` | (필수, 또는 설정 파일 `api_key`) | Anthropic API 키 |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API 주소 |
 | `JUNEES_MODEL` | `claude-sonnet-4-6` | 모델 |
 | `JUNEES_MAX_TOKENS` | `8192` | 모델 호출 1회의 최대 출력 토큰 |
@@ -242,7 +292,7 @@ junees task run --backend claude-code --max-time 2h
 - `y` 실행, `n` 거절, `a` 이번 실행 동안 같은 종류(도구별: 예 `bash: delete files`, `edit_file: write outside the working folder`)는 묻지 않고 허용, `e` 거절 이유 입력(`e 이유`처럼 한 줄로도 된다). 다른 입력이면 다시 묻는다.
 - 거절하면 도구를 실행하지 않고 `the user declined: <이유>`(이유가 없으면 `no reason given`) 오류 결과를 모델에 돌려줘서 모델이 계획을 바꾸게 한다. Ctrl-D(입력 끝)도 거절이다.
 - 질문을 기다리는 중 Ctrl-C는 그 호출을 실행하지 않고 턴을 취소한다(실행 중인 도구를 Ctrl-C로 취소할 때와 같이 그 호출과 남은 호출을 `cancelled by the user` 결과로 채운다). 질문과 프롬프트가 표준 입력을 함께 쓰므로 그 뒤에 입력한 줄은 프롬프트로 간다.
-- "항상 허용"은 junees를 끝낼 때까지 유지된다(`/reset`으로 새 세션을 시작해도 남는다).
+- "항상 허용"은 junees를 끝낼 때까지 유지된다(`/new`로 새 세션을 시작해도, `/sessions`로 다른 세션으로 옮겨도 남는다).
 - 표준 입력이나 표준 오류가 터미널이 아니면(파이프, `2>log`) 대화 모드라도 물을 수 없으므로(질문이 보이지 않는다) 시작할 때 안내를 띄우고, 승인이 필요한 호출은 실행하지 않고 `not run: this call needs the user's approval ...` 오류 결과를 돌려준다. 그런 호출까지 실행하려면 `JUNEES_APPROVAL=off`.
 - 질문은 모델 응답이 끝난 뒤, 도구 호출 줄(`-> bash ...`) 다음에 나온다. 스트리밍으로 찍던 텍스트 줄은 그 전에 끝나므로 질문이 텍스트 줄 중간에 붙지 않는다. stdout이 터미널이 아니면(`junees | tee log`) 그 응답의 텍스트는 도구 호출 줄 직전에 한 번에 찍힌다.
 - `-p`와 `task` 모드는 사람이 없으므로 묻지 않는다(명령 정책만 적용).
@@ -252,7 +302,7 @@ junees task run --backend claude-code --max-time 2h
 
 ```
 src/
-  main.rs            CLI 진입점 (대화 모드, -p 실행, 세션 열기/이어 가기, SIGINT/SIGTERM 처리)
+  main.rs            CLI 진입점 (처음 실행 설정과 junees setup, 대화 모드와 슬래시 명령, -p 실행, task 명령(계획 + 실행), 세션 열기/이어 가기, SIGINT/SIGTERM 처리)
   agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인, 도구 호출 전 승인 훅 ToolGate, 스트리밍 이벤트 전달, pause_turn 이어 가기와 인용 출처 보고)
   approval.rs        실행 전 승인 (JUNEES_APPROVAL, 묻는 범위 판단, 터미널 질문, 세션 동안 항상 허용, 프롬프트와 공유하는 표준 입력)
   cancel.rs          취소 플래그 (시그널 처리기와 에이전트 루프가 공유)
@@ -276,9 +326,12 @@ src/
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
   tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs)
-  config.rs          환경 변수 설정 (도구 설정 ToolSettings 포함)
+  config.rs          설정 값 읽기와 검사 (from_lookup 이음새, 도구 설정 ToolSettings 포함)
+  config_file.rs     설정 파일 config.toml (단순 TOML 읽기/쓰기, 0600), Settings: 실행 중 변경 -> 환경 변수 -> 파일 순서로 찾기
+  setup.rs           설정 마법사 (Prompter 트레이트, Claude Code 확인 ClaudeProbe, 키 입력 때 터미널 echo 끄기 EchoOff)
+  slash.rs           대화 안 슬래시 명령 파싱, /sessions 번호 고르기
   prompt.rs          시스템 프롬프트
-  cli.rs             인자 파싱(task 서브커맨드 포함), 출력 보조 함수
+  cli.rs             인자 파싱(위치 인자 질문, task/status/setup 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
 tests/
   common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림)
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
@@ -295,6 +348,7 @@ tests/
   streaming.rs         조각내 보내는 가짜 SSE 서버로 조립 결과가 일반 응답과 같은지, 오류 이벤트/끊김/대기 초과 재시도, 취소 시 연결 종료, 바이너리가 텍스트를 한 번만 찍는지(stdout이 파이프일 때 재시도로 끊긴 조각을 버리는지) 검증
   web_search.rs        가짜 API 서버(JSON, SSE)로 웹 검색 도구 정의, pause_turn 이어 가기(멈춘 응답을 그대로, 뒤에 user 메시지 없이), 검색 블록과 citations 재전송, 클라이언트 도구 미실행, 바이너리의 출처 목록과 조직 비활성 안내 검증
   claude_code.rs       실제 바이너리와 가짜 claude로 API 키 없이 task init/run, claude 환경에 API 변수 없음, 로그인 실패 안내와 알림, SIGTERM 검증
+  simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend, /task, /status, /sessions 고르기, /model, /new 검증
 ```
 
 ## 로드맵

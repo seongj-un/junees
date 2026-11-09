@@ -149,7 +149,7 @@ pub struct StopStatus {
 pub fn load(root: &Path) -> Result<Status> {
     if !dir(root).is_dir() {
         bail!(
-            "{} has no task (no .junees/ folder); start one with `junees task init \"<goal>\"`",
+            "{} has no task (no .junees/ folder); start one with `junees task \"<goal>\"`",
             root.display()
         );
     }
@@ -549,7 +549,8 @@ mod tests {
         let repo = repo();
         let err = load(repo.path()).unwrap_err();
         assert!(
-            err.to_string().contains("start one with `junees task init"),
+            err.to_string()
+                .contains("start one with `junees task \"<goal>\"`"),
             "{err}"
         );
         assert!(!dir(repo.path()).exists());
