@@ -24,6 +24,7 @@ fn command(cwd: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
         .env_remove("JUNEES_MAX_TURNS")
         .env_remove("JUNEES_CONTEXT_WINDOW")
         .env_remove("JUNEES_COMPACT_THRESHOLD")
+        .env_remove("JUNEES_THINKING_BUDGET")
         .stdin(Stdio::null());
     command
 }
@@ -252,4 +253,77 @@ async fn without_home_it_runs_unsaved_and_only_continuing_fails() {
     );
 
     assert_eq!(server.await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn thinking_blocks_survive_a_resumed_session() {
+    let thinking = json!({"type": "thinking", "thinking": "Check the folder first.",
+                          "signature": "WaUjzkypQ2mUEVM36O2Txu+/=="});
+    let mut call = bash_call("echo junees-thinking");
+    call["content"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, thinking.clone());
+    let (url, server) = fake_api(vec![
+        (200, call.clone()),
+        (200, text_reply("It printed junees-thinking.")),
+        (200, text_reply("Still the same.")),
+    ])
+    .await;
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let thinking_on = |args: &'static [&'static str]| {
+        let mut command = command(project.path(), &url, args);
+        command
+            .env("JUNEES_HOME", home.path())
+            .env("HOME", home.path())
+            .env("JUNEES_THINKING_BUDGET", "1024")
+            .env("JUNEES_MAX_TOKENS", "2048");
+        command
+    };
+
+    let first = thinking_on(&["-p", "run echo"]).output().await.unwrap();
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(
+        stderr(&first).contains("(thinking...)"),
+        "{}",
+        stderr(&first)
+    );
+    assert!(
+        !stderr(&first).contains("Check the folder"),
+        "{}",
+        stderr(&first)
+    );
+    let second = thinking_on(&["-c", "-p", "again?"]).output().await.unwrap();
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert_eq!(String::from_utf8_lossy(&second.stdout), "Still the same.\n");
+
+    let requests = server.await.unwrap();
+    let assistant_turn = json!({"role": "assistant", "content": call["content"]});
+    for (i, request) in requests.iter().enumerate() {
+        let body = body_of(request);
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1024}),
+            "request {i}"
+        );
+        assert_eq!(body["max_tokens"], 2048);
+        if i > 0 {
+            assert_eq!(body["messages"][1], assistant_turn, "request {i}");
+        }
+    }
+    // The resumed run read it back from the journal, which keeps it as is.
+    let sessions = home.path().join("sessions");
+    let file = std::fs::read_dir(sessions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let journal = std::fs::read_to_string(file.path()).unwrap();
+    let lines: Vec<Value> = journal
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines[0]["format"], junees::session::FORMAT);
+    assert!(lines.iter().any(|line| line["content"][0] == thinking));
 }

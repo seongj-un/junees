@@ -202,3 +202,68 @@ async fn agent_runs_bash_through_the_real_client() {
     assert_eq!(result["tool_use_id"], "toolu_1");
     assert_eq!(result["content"], "junees-e2e\n[exit code 0]");
 }
+
+#[tokio::test]
+async fn thinking_blocks_go_back_with_the_tool_results_unchanged() {
+    let thinking = json!({
+        "type": "thinking",
+        "thinking": "The user wants an echo. 먼저 bash로 확인한다.",
+        "signature": "EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMOYds+/==",
+    });
+    let redacted = json!({"type": "redacted_thinking", "data": "EmwKAhgBEgy3va3pzix/LafPsn4a"});
+    let tool_call = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+        "content": [
+            thinking,
+            redacted,
+            {"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {"command": "echo junees-think"}}
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 50}
+    });
+    let (url, server) = fake_api(vec![
+        (200, tool_call.clone()),
+        (200, text_reply("It printed junees-think.")),
+    ])
+    .await;
+
+    let mut agent = Agent::new(
+        Box::new(provider(url).with_thinking(1024)),
+        ToolRegistry::with_defaults(&ToolSettings::default()),
+        AgentOptions {
+            system: "sys".into(),
+            max_tokens: 2048,
+            max_turns: 5,
+            context_window: 200_000,
+            compact_threshold: 0.8,
+        },
+    );
+    let mut thoughts = 0;
+    let answer = agent
+        .run("run echo", |event| {
+            thoughts += matches!(event, junees::agent::Event::Thinking) as usize;
+        })
+        .await
+        .unwrap();
+    assert_eq!(answer, "It printed junees-think.");
+    assert_eq!(thoughts, 2);
+
+    let requests = server.await.unwrap();
+    for request in &requests {
+        assert_eq!(
+            body_of(request)["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1024})
+        );
+    }
+    // The assistant turn goes back exactly as it came, signature and all,
+    // and the cache mark sits on the tool result, not on a thinking block.
+    let second = body_of(&requests[1]);
+    assert_eq!(
+        second["messages"][1],
+        json!({"role": "assistant", "content": tool_call["content"]})
+    );
+    let result = &second["messages"][2]["content"][0];
+    assert_eq!(result["tool_use_id"], "toolu_1");
+    assert_eq!(result["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(second.to_string().matches("cache_control").count(), 3);
+}
