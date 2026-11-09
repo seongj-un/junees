@@ -59,14 +59,39 @@ pub const LOGIN_HINT: &str = "sign in to Claude Code yourself: run `claude` and 
 /// The built-in tools a session gets, all of them allowed without asking.
 pub const TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
 
-/// Variables Claude Code would use as API credentials or an API endpoint
-/// instead of the subscription login. They never reach `claude`, nor do
-/// the secrets bash never sees and the repository variables.
+/// Variables that would make Claude Code bill something other than the
+/// subscription, so they never reach `claude` (nor do the secrets bash
+/// never sees and the repository variables). By the authentication
+/// precedence (<https://code.claude.com/docs/en/authentication#authentication-precedence>),
+/// these rank above the `/login` subscription: a cloud provider
+/// (`CLAUDE_CODE_USE_*`, 1), `ANTHROPIC_AUTH_TOKEN` (2), `ANTHROPIC_API_KEY`
+/// (3), and a named Anthropic profile or federation credentials (6). The
+/// rest are the endpoint and the provider keys that go with them
+/// (<https://code.claude.com/docs/en/env-vars>). An `apiKeyHelper` (4) and
+/// an `env` block in Claude Code's own settings are no variables of ours:
+/// [`ClaudeCode::check_auth`] catches those.
 pub const API_ENV_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_MANTLE",
+    "ANTHROPIC_AWS_API_KEY",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+    "ANTHROPIC_PROFILE",
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_ORGANIZATION_ID",
 ];
+
+/// The `authMethod`s of `claude auth status` that use the subscription:
+/// a `/login` (`claude.ai`) or `CLAUDE_CODE_OAUTH_TOKEN` (`oauth_token`).
+/// The others are `none`, `api_key`, `api_key_helper` and `third_party`
+/// (<https://code.claude.com/docs/en/cli-reference>).
+pub const SUBSCRIPTION_AUTH: &[&str] = &["claude.ai", "oauth_token"];
 
 /// How long Claude Code gets to end its turn after SIGINT before its
 /// process group is killed.
@@ -228,8 +253,8 @@ impl ClaudeCode {
     }
 
     /// Checks that `claude --version` runs and is at least
-    /// [`MIN_VERSION`]; returns what it printed. Whether it is signed in
-    /// shows in the first session.
+    /// [`MIN_VERSION`], and that Claude Code signs in with the subscription
+    /// ([`ClaudeCode::check_auth`]); returns what `--version` printed.
     pub async fn check(&self, root: &Path, settings: &ToolSettings) -> Result<String> {
         let bin = self.bin.display();
         let mut command = self.command(root, settings);
@@ -271,7 +296,61 @@ impl ClaudeCode {
                 preview(&stdout, 100)
             );
         }
+        self.check_auth(settings).await?;
         Ok(stdout)
+    }
+
+    /// Checks with `claude auth status --json`, in the environment of a
+    /// session, that Claude Code signs in with the subscription
+    /// ([`SUBSCRIPTION_AUTH`]): not signed in is [`NotLoggedIn`], any other
+    /// method an error. [`API_ENV_VARS`] never reach `claude`, but an
+    /// `apiKeyHelper` or an `env` block in Claude Code's user settings, or
+    /// an active federation profile, would still win over the subscription.
+    /// Runs before every session, because a session's commands can change
+    /// those settings. It runs in `/`, so that a repository's
+    /// `.claude/settings.json`, which sessions do not load, plays no part.
+    pub async fn check_auth(&self, settings: &ToolSettings) -> Result<()> {
+        let bin = self.bin.display();
+        let mut command = self.command(Path::new("/"), settings);
+        command.args(["auth", "status", "--json"]);
+        let output = match tokio::time::timeout(VERSION_TIMEOUT, command.output()).await {
+            Err(_) => bail!(
+                "`{bin} auth status` did not answer within {}s",
+                VERSION_TIMEOUT.as_secs()
+            ),
+            Ok(result) => result.with_context(|| format!("cannot run `{bin} auth status`"))?,
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let status = serde_json::from_str::<Value>(stdout.trim()).ok();
+        let method = status
+            .as_ref()
+            .and_then(|status| status["authMethod"].as_str());
+        match method {
+            Some(method) if SUBSCRIPTION_AUTH.contains(&method) && output.status.success() => {
+                Ok(())
+            }
+            Some(method) if SUBSCRIPTION_AUTH.contains(&method) || method == "none" => Err(
+                NotLoggedIn(format!("`claude auth status`: {method}, {}", output.status)).into(),
+            ),
+            None if status.is_some() && !output.status.success() => {
+                Err(NotLoggedIn(format!("`claude auth status`: {}", output.status)).into())
+            }
+            Some(method) => bail!(
+                "Claude Code would not use the Claude subscription: `{bin} auth status` says it \
+                 signs in with `{}`. Junees runs Claude Code only on the subscription, so remove \
+                 that sign-in (an `apiKeyHelper`, or API or cloud provider variables in the `env` \
+                 of ~/.claude/settings.json; see \
+                 https://code.claude.com/docs/en/authentication#authentication-precedence)",
+                preview(method, 100)
+            ),
+            None => bail!(
+                "cannot tell how Claude Code signs in: `{bin} auth status --json` ({}) printed \
+                 `{}` {}",
+                output.status,
+                preview(stdout.trim(), ERROR_CHARS),
+                preview(String::from_utf8_lossy(&output.stderr).trim(), ERROR_CHARS)
+            ),
+        }
     }
 
     /// The arguments of a session. The session runs unattended, so nothing
@@ -369,6 +448,7 @@ impl ClaudeCode {
         stream: &mut Stream,
         report: &mut Reporter<'_>,
     ) -> Result<Exit> {
+        self.check_auth(request.settings).await?;
         let mut command = self.command(request.root, request.settings);
         command.args(self.arguments(request));
         let mut child = command
@@ -1034,17 +1114,27 @@ pub(crate) mod testing {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    /// What a fake signed in with the subscription answers to `auth`.
+    pub const SIGNED_IN: &str = r#"echo '{"loggedIn":true,"authMethod":"claude.ai"}'; exit 0"#;
+
     /// Writes an executable bash script standing in for `claude`, and
     /// waits until it can be run: a test that forks while the file is open
-    /// for writing would make `exec` fail with ETXTBSY. `--version` prints
-    /// a current version unless `body` answers it first.
+    /// for writing would make `exec` fail with ETXTBSY. `auth status` says
+    /// it is signed in with the subscription, and `--version` prints a
+    /// current version unless `body` answers it first.
     pub fn fake_claude(dir: &Path, body: &str) -> PathBuf {
+        fake_claude_auth(dir, SIGNED_IN, body)
+    }
+
+    /// [`fake_claude`] answering `auth` (`auth status --json`) with `auth`.
+    pub fn fake_claude_auth(dir: &Path, auth: &str, body: &str) -> PathBuf {
         let path = dir.join("fake-claude");
         std::fs::write(
             &path,
             format!(
                 "#!/bin/bash\n\
                  [ -n \"$JUNEES_FAKE_PROBE\" ] && exit 0\n\
+                 if [ \"$1\" = auth ]; then\n{auth}\nfi\n\
                  {body}\n\
                  [ \"$1\" = --version ] && echo '2.1.319 (Claude Code)' && exit 0\n\
                  exit 0\n"
@@ -1074,7 +1164,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::testing::fake_claude;
+    use super::testing::{fake_claude, fake_claude_auth};
     use super::*;
 
     /// Collects what a session reports, one string per event.
@@ -1454,6 +1544,103 @@ mod tests {
             format!("{err:#}").contains("install Claude Code"),
             "{err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn only_a_subscription_sign_in_passes_the_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = ToolSettings::default();
+        let answering = |json: &str, code: i32| {
+            claude(fake_claude_auth(
+                dir.path(),
+                &format!("echo '{json}'; exit {code}"),
+                "",
+            ))
+        };
+        for method in ["claude.ai", "oauth_token"] {
+            let json = format!(r#"{{"loggedIn":true,"authMethod":"{method}"}}"#);
+            answering(&json, 0).check_auth(&settings).await.unwrap();
+        }
+        for method in ["api_key", "api_key_helper", "third_party", "something_new"] {
+            let json = format!(r#"{{"loggedIn":true,"authMethod":"{method}"}}"#);
+            let err = answering(&json, 0).check_auth(&settings).await.unwrap_err();
+            assert!(err.downcast_ref::<NotLoggedIn>().is_none(), "{err:#}");
+            assert!(
+                format!("{err:#}").contains(&format!("signs in with `{method}`")),
+                "{err:#}"
+            );
+        }
+        for json in [
+            r#"{"loggedIn":false,"authMethod":"none"}"#,
+            r#"{"loggedIn":false}"#,
+        ] {
+            let err = answering(json, 1).check_auth(&settings).await.unwrap_err();
+            assert!(err.downcast_ref::<NotLoggedIn>().is_some(), "{err:#}");
+        }
+        // A subscription login `auth status` fails on is no login.
+        let json = r#"{"loggedIn":false,"authMethod":"claude.ai"}"#;
+        let err = answering(json, 1).check_auth(&settings).await.unwrap_err();
+        assert!(err.downcast_ref::<NotLoggedIn>().is_some(), "{err:#}");
+        let err = answering("nonsense", 2)
+            .check_auth(&settings)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").starts_with("cannot tell how Claude Code signs in"),
+            "{err:#}"
+        );
+
+        // `check` asks too, after the version.
+        let json = r#"{"loggedIn":true,"authMethod":"api_key"}"#;
+        let err = answering(json, 0)
+            .check(dir.path(), &settings)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("signs in with `api_key`"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_session_checks_the_sign_in_first() {
+        let dir = tempfile::tempdir().unwrap();
+        // Records where and how it was asked; the session records that it ran.
+        let calls = dir.path().join("auth-calls");
+        let ran = dir.path().join("ran");
+        let fake = |method: &str| {
+            claude(fake_claude_auth(
+                dir.path(),
+                &format!(
+                    "printf '%s\\n' \"$PWD\" \"$*\" >> '{}'\n\
+                     echo '{{\"loggedIn\":true,\"authMethod\":\"{method}\"}}'; exit 0",
+                    calls.display()
+                ),
+                &format!("touch '{}'\n{}", ran.display(), print(SESSION)),
+            ))
+        };
+        let settings = ToolSettings::default();
+        let request = request(dir.path(), &settings, None);
+        let run = async |claude: ClaudeCode| {
+            claude
+                .run(&request, &Cancel::new(), None, &mut |_| {})
+                .await
+        };
+        let outcome = run(fake("api_key_helper")).await;
+        let err = outcome.end.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("signs in with `api_key_helper`"),
+            "{err:#}"
+        );
+        assert!(!ran.exists(), "the session ran");
+        assert_eq!(
+            std::fs::read_to_string(&calls).unwrap(),
+            "/\nauth status --json\n"
+        );
+
+        let outcome = run(fake("claude.ai")).await;
+        assert_eq!(outcome.end.unwrap(), End::Answered);
+        assert!(ran.exists());
     }
 
     /// Whether a process is gone (a zombie counts as gone).

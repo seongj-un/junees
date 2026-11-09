@@ -39,12 +39,14 @@ async fn git(repo: &Path, home: &Path, args: &[&str]) -> String {
 }
 
 /// A fake `claude` playing `sessions` in order (after answering
-/// `--version`), saving each run's environment as `env-<n>` in `dir`.
+/// `--version`, and `auth status` as signed in with the subscription),
+/// saving each run's environment as `env-<n>` in `dir`.
 fn fake_claude(dir: &Path, sessions: &[String]) -> PathBuf {
     let mut body = format!(
         "#!/bin/bash\n\
          [ -n \"$JUNEES_FAKE_PROBE\" ] && exit 0\n\
          [ \"$1\" = --version ] && echo '2.1.319 (Claude Code)' && exit 0\n\
+         [ \"$1\" = auth ] && echo '{{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}}' && exit 0\n\
          F='{}'\n\
          n=$(( $(cat \"$F/count\" 2>/dev/null || echo 0) + 1 ))\n\
          echo $n > \"$F/count\"\n\
@@ -131,6 +133,13 @@ fn junees(cwd: &Path, home: &Path, bin: &Path, args: &[&str]) -> tokio::process:
         .env("ANTHROPIC_AUTH_TOKEN", "auth-must-not-reach-claude")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
         .env("CLAUDE_CODE_OAUTH_TOKEN", "the-users-own-fake-token")
+        // Each would bill something other than the subscription.
+        .env("CLAUDE_CODE_USE_BEDROCK", "1")
+        .env("CLAUDE_CODE_USE_VERTEX", "1")
+        .env("CLAUDE_CODE_USE_FOUNDRY", "1")
+        .env("ANTHROPIC_PROFILE", "profile-must-not-reach-claude")
+        .env("ANTHROPIC_FEDERATION_RULE_ID", "rule-must-not-reach-claude")
+        .env("ANTHROPIC_ORGANIZATION_ID", "org-must-not-reach-claude")
         .env("JUNEES_HOME", home.join("junees"))
         .env_remove("JUNEES_MAX_TURNS")
         .env_remove("JUNEES_CLAUDE_MODEL")
@@ -200,7 +209,9 @@ async fn claude_code_runs_a_task_without_an_api_key_and_sees_none() {
         let env = env_of(fake.path(), n);
         for (key, value) in &env {
             assert!(
-                !key.starts_with("ANTHROPIC_") && !value.contains("must-not-reach"),
+                !key.starts_with("ANTHROPIC_")
+                    && !key.starts_with("CLAUDE_CODE_USE_")
+                    && !value.contains("must-not-reach"),
                 "{key} reached claude"
             );
         }
