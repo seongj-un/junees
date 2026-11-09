@@ -9,11 +9,19 @@
 
 pub mod features;
 pub mod git;
+pub mod state;
 pub mod tools;
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// Work sessions one `task run` starts at most, unless told otherwise.
+pub const DEFAULT_MAX_SESSIONS: usize = 20;
+
+/// A run stops after this many sessions in a row without a newly passing
+/// feature.
+pub const STALL_LIMIT: u32 = 3;
 
 /// The folder of a task inside the repository at `root`.
 pub fn dir(root: &Path) -> PathBuf {
