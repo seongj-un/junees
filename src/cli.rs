@@ -47,6 +47,9 @@ Environment:
                             cleared and the conversation compacted (default 0.8)
   JUNEES_HOME         where Junees keeps sessions (default ~/.junees;
                       with neither it nor HOME set, sessions are not saved)
+  JUNEES_APPROVAL     which tool calls the conversation mode asks about first:
+                      off, risky (default: risky commands, writes outside
+                      the folder) or all (every bash/write_file/edit_file)
   JUNEES_NOTIFY_WEBHOOK       Discord webhook URL `task run` posts to when it stops
   JUNEES_NOTIFY_EACH_SESSION  1 to also post a line after every task session
   JUNEES_TASK_MAX_TOKENS  default --max-tokens of task run
@@ -60,7 +63,8 @@ pub const REPL_HELP: &str = "\
 /context   show the context size and its limit
 /compact   replace the earlier conversation with a summary
 /exit      quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
-Ctrl-C during a turn cancels the turn and stops a running tool.";
+Ctrl-C during a turn cancels the turn and stops a running tool; at an
+approval question it declines the call and cancels the turn.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
