@@ -195,6 +195,10 @@ pub struct Spawn<'a> {
     pub settings: &'a ToolSettings,
     /// Where the raw stream-json output is saved, if anywhere.
     pub log: Option<&'a Path>,
+    /// `args` hold `--include-partial-messages`: text is shown as it comes.
+    pub partial: bool,
+    /// `args` hold `--resume`: the session continues an earlier one.
+    pub resumed: bool,
 }
 
 /// How a session that did not fail ended.
@@ -245,6 +249,8 @@ pub struct Outcome {
     pub turns: Option<u64>,
     /// Claude Code's id of the session (`claude --resume <id>` opens it).
     pub session_id: Option<String>,
+    /// The final answer (the `result` text), when the session answered.
+    pub answer: Option<String>,
 }
 
 impl Outcome {
@@ -446,7 +452,7 @@ impl ClaudeCode {
         limit: Option<&mut Limit>,
         sink: &mut Sink<'_>,
     ) -> Outcome {
-        let mut stream = Stream::default();
+        let mut stream = Stream::new(spawn.partial, spawn.resumed);
         let exit = self.drive(spawn, cancel, limit, &mut stream, sink).await;
         stream.outcome(exit)
     }

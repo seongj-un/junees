@@ -101,6 +101,8 @@ impl ClaudeCode {
             args: self.arguments(request),
             settings: request.settings,
             log: request.log,
+            partial: false,
+            resumed: false,
         };
         self.session(&spawn, cancel, limit, &mut |event| {
             report(Report::Event(event))
