@@ -105,6 +105,15 @@ impl Usage {
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
         self.cache_read_input_tokens += other.cache_read_input_tokens;
     }
+
+    /// Size of the conversation after this call: everything it read plus
+    /// what it wrote, which the next request sends back.
+    pub fn context_tokens(&self) -> u64 {
+        self.input_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+            + self.output_tokens
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +209,17 @@ mod tests {
                 cache_read_input_tokens: 10,
             }
         );
+    }
+
+    #[test]
+    fn context_size_counts_cached_input_and_output() {
+        let usage = Usage {
+            input_tokens: 5,
+            output_tokens: 40,
+            cache_creation_input_tokens: 300,
+            cache_read_input_tokens: 9000,
+        };
+        assert_eq!(usage.context_tokens(), 9345);
     }
 
     #[test]

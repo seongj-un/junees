@@ -27,6 +27,9 @@ Environment:
   JUNEES_MODEL        model id (default claude-sonnet-4-6)
   JUNEES_MAX_TOKENS   max output tokens per model call (default 8192)
   JUNEES_MAX_TURNS    max model calls per prompt (default 50)
+  JUNEES_CONTEXT_WINDOW     model context window in tokens (default 200000)
+  JUNEES_COMPACT_THRESHOLD  share of the window at which old tool output is
+                            cleared and the conversation compacted (default 0.8)
   JUNEES_HOME         where Junees keeps sessions (default ~/.junees;
                       with neither it nor HOME set, sessions are not saved)
 ";
@@ -35,6 +38,7 @@ pub const REPL_HELP: &str = "\
 /sessions  list recent sessions
 /reset     start a new session
 /usage     show token usage of this session
+/context   show the context size and its limit
 /exit      quit (also /quit or Ctrl-D)";
 
 #[derive(Debug, PartialEq, Eq)]

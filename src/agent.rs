@@ -15,6 +15,17 @@ pub struct AgentOptions {
     pub max_tokens: u32,
     /// Model calls allowed per user input before the loop gives up.
     pub max_turns: usize,
+    /// The model's context window in tokens.
+    pub context_window: u64,
+    /// Share of the window at which the history is shrunk, in (0, 1].
+    pub compact_threshold: f64,
+}
+
+impl AgentOptions {
+    /// Context size in tokens from which the history is shrunk.
+    pub fn compact_limit(&self) -> u64 {
+        (self.context_window as f64 * self.compact_threshold) as u64
+    }
 }
 
 /// Progress reported while [`Agent::run`] works.
@@ -76,6 +87,15 @@ impl Agent {
     /// Tokens used by this session.
     pub fn usage(&self) -> Usage {
         self.transcript.usage
+    }
+
+    /// Size of the conversation as of the last model call, in tokens.
+    pub fn context_tokens(&self) -> u64 {
+        self.transcript.context_tokens
+    }
+
+    pub fn options(&self) -> &AgentOptions {
+        &self.options
     }
 
     /// Starts a new session: forgets the conversation and its token usage,
@@ -327,6 +347,8 @@ mod tests {
                 system: "test".into(),
                 max_tokens: 100,
                 max_turns,
+                context_window: 1000,
+                compact_threshold: 0.8,
             },
         )
     }
@@ -656,8 +678,9 @@ mod tests {
         );
         assert_eq!(agent.messages().len(), 6);
         let replayed = replay(entries);
-        assert_eq!(replayed.messages, agent.messages());
-        assert_eq!(replayed.usage, agent.usage());
+        assert_eq!(replayed, agent.transcript);
+        // The size is the last call's, not a sum.
+        assert_eq!(agent.context_tokens(), 11);
     }
 
     #[tokio::test]
@@ -676,6 +699,7 @@ mod tests {
         let (session, writer) = Session::resume(&path).unwrap();
         assert_eq!(session.transcript.messages, messages);
         assert_eq!(session.transcript.usage, usage);
+        assert_eq!(session.transcript.context_tokens, 11);
 
         let provider = Scripted::new(vec![text("again")]);
         let seen = provider.seen.clone();

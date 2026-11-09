@@ -89,6 +89,9 @@ pub trait Journal: Send {
 pub struct Transcript {
     pub messages: Vec<Message>,
     pub usage: Usage,
+    /// Size of the conversation as of the last model call (see
+    /// [`Usage::context_tokens`]); 0 until one is measured.
+    pub context_tokens: u64,
 }
 
 impl Transcript {
@@ -103,7 +106,10 @@ impl Transcript {
                 }
                 _ => self.messages.push(Message::user_text(text)),
             },
-            Entry::Usage(usage) => self.usage.add(usage),
+            Entry::Usage(usage) => {
+                self.usage.add(usage);
+                self.context_tokens = usage.context_tokens();
+            }
         }
     }
 

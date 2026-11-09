@@ -56,6 +56,8 @@ async fn run() -> Result<()> {
             system: prompt::system_prompt(&cwd),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
+            context_window: config.context_window,
+            compact_threshold: config.compact_threshold,
         },
         opened.transcript,
     );
@@ -209,6 +211,15 @@ impl Repl<'_> {
                         usage.cache_creation_input_tokens,
                         usage.cache_read_input_tokens,
                         usage.output_tokens
+                    );
+                }
+                "/context" => {
+                    let options = self.agent.options();
+                    println!(
+                        "context {} / {} tokens; old tool output is cleared from {} tokens",
+                        self.agent.context_tokens(),
+                        options.context_window,
+                        options.compact_limit()
                     );
                 }
                 input => {

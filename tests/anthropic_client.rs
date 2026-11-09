@@ -171,6 +171,8 @@ async fn agent_runs_bash_through_the_real_client() {
             system: "sys".into(),
             max_tokens: 64,
             max_turns: 5,
+            context_window: 200_000,
+            compact_threshold: 0.8,
         },
     );
     let answer = agent.run("run echo", |_| {}).await.unwrap();
