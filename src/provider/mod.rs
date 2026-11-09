@@ -26,6 +26,9 @@ pub struct CompletionRequest<'a> {
     pub messages: &'a [Message],
     pub tools: &'a [ToolSpec],
     pub max_tokens: u32,
+    /// Ask the provider to cache the request's prefix for the next call.
+    /// Off for one-off calls, whose prefix is never sent again.
+    pub cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

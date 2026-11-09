@@ -55,6 +55,9 @@ pub struct TaskEnv<'a> {
     pub max_tokens: u32,
     /// Model calls one session may make.
     pub max_turns: usize,
+    /// Context management of every session, as in a normal session.
+    pub context_window: u64,
+    pub compact_threshold: f64,
     pub provider: &'a ProviderFactory<'a>,
 }
 
@@ -94,6 +97,8 @@ impl TaskEnv<'_> {
                 system,
                 max_tokens: self.max_tokens,
                 max_turns: self.max_turns,
+                context_window: self.context_window,
+                compact_threshold: self.compact_threshold,
             },
         );
         let Some(home) = &self.home else {
@@ -643,6 +648,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 1,
+                ..Usage::default()
             },
         })
     }
@@ -663,6 +669,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 5,
                 output_tokens: 2,
+                ..Usage::default()
             },
         })
     }
@@ -694,6 +701,8 @@ mod tests {
             model: "m".into(),
             max_tokens: 100,
             max_turns: 10,
+            context_window: 200_000,
+            compact_threshold: 0.8,
             provider: factory,
         }
     }

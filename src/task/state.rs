@@ -118,6 +118,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 100,
                 output_tokens: 7,
+                ..Usage::default()
             },
             stop: Some(Stop {
                 reason: StopReason::Error,

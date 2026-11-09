@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
-use super::{Tool, ToolOutput, opt_u64_arg, str_arg, truncate_middle};
+use super::{CommandPolicy, Tool, ToolOutput, Verdict, opt_u64_arg, str_arg, truncate_middle};
 
 const MAX_OUTPUT_CHARS: usize = 30_000;
 /// Bytes kept from each end of a stream while it is read. Everything in
@@ -23,10 +23,12 @@ const DRAIN_GRACE: Duration = Duration::from_millis(200);
 ///
 /// The command gets its own process group, so a timeout kills everything it
 /// started. bash exiting ends the call even if background processes it
-/// started still hold the output pipes.
+/// started still hold the output pipes. Commands the [`CommandPolicy`]
+/// denies are not run at all; the default policy has the built-in rules.
 pub struct Bash {
     default_timeout: Duration,
     hidden_env: Vec<String>,
+    policy: CommandPolicy,
 }
 
 impl Default for Bash {
@@ -34,6 +36,7 @@ impl Default for Bash {
         Self {
             default_timeout: Duration::from_secs(120),
             hidden_env: Vec::new(),
+            policy: CommandPolicy::default(),
         }
     }
 }
@@ -49,6 +52,12 @@ impl Bash {
         self.hidden_env.extend(names.into_iter().map(Into::into));
         self
     }
+
+    /// Replaces the policy that decides which commands may run.
+    pub fn policy(mut self, policy: CommandPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
 }
 
 #[async_trait]
@@ -61,7 +70,9 @@ impl Tool for Bash {
         "Run a shell command with `bash -c` in the current working directory. \
          Returns stdout, stderr and the exit code. Stdin is closed, so interactive \
          commands will not work. To leave a process running in the background, \
-         redirect its output to a file, e.g. `server > server.log 2>&1 &`."
+         redirect its output to a file, e.g. `server > server.log 2>&1 &`. \
+         Destructive commands (for example `rm -rf /`, `sudo`, `shutdown`, force push) \
+         are blocked by policy and not run."
     }
 
     fn input_schema(&self) -> Value {
@@ -88,6 +99,9 @@ impl Tool for Bash {
             Ok(None) => self.default_timeout,
             Err(err) => return err,
         };
+        if let Verdict::Deny(reason) = self.policy.check(command) {
+            return ToolOutput::error(format!("blocked by policy: {reason}"));
+        }
 
         let mut cmd = Command::new("bash");
         cmd.arg("-c")
@@ -351,6 +365,45 @@ mod tests {
             .await;
         assert!(output.is_error, "{}", output.content);
         assert_eq!(output.content, "[exit code 1]");
+    }
+
+    #[tokio::test]
+    async fn denied_commands_are_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let output = Bash::default()
+            .run(json!({"command": format!("touch {}; ls && rm -rf ~", marker.display())}))
+            .await;
+        assert_eq!(
+            output,
+            ToolOutput::error("blocked by policy: recursive `rm` of `~`")
+        );
+        assert!(!marker.exists(), "part of a blocked command ran");
+    }
+
+    #[tokio::test]
+    async fn policy_can_be_replaced() {
+        // A function named like a denied program, so nothing real runs.
+        let command = "shutdown() { echo fake shutdown; }; shutdown";
+        let output = Bash::default().run(json!({"command": command})).await;
+        assert!(output.content.starts_with("blocked by policy:"));
+
+        let output = Bash::default()
+            .policy(CommandPolicy::default().allow_dangerous(true))
+            .run(json!({"command": command}))
+            .await;
+        assert_eq!(output, ToolOutput::ok("fake shutdown\n[exit code 0]"));
+
+        let output = Bash::default()
+            .policy(CommandPolicy::default().deny_prefixes(["echo secret"]))
+            .run(json!({"command": "echo secret"}))
+            .await;
+        assert_eq!(
+            output,
+            ToolOutput::error(
+                "blocked by policy: matches JUNEES_DENY_COMMANDS entry `echo secret`"
+            )
+        );
     }
 
     #[tokio::test]

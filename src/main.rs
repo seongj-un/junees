@@ -53,11 +53,13 @@ async fn run() -> Result<()> {
     let opened = open_session(&args.session, &config, &cwd)?;
     let mut agent = Agent::restore(
         Box::new(provider),
-        ToolRegistry::with_defaults(),
+        ToolRegistry::with_defaults(&config.tools),
         AgentOptions {
             system: prompt::system_prompt(&cwd),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
+            context_window: config.context_window,
+            compact_threshold: config.compact_threshold,
         },
         opened.transcript,
     );
@@ -111,6 +113,8 @@ async fn run_task(command: TaskCommand) -> Result<()> {
         model: config.model.clone(),
         max_tokens: config.max_tokens,
         max_turns: config.max_turns,
+        context_window: config.context_window,
+        compact_threshold: config.compact_threshold,
         provider: &provider,
     };
     let mut report = |report: Report<'_>| match report {
@@ -246,8 +250,23 @@ impl Repl<'_> {
                 "/usage" => {
                     let usage = self.agent.usage();
                     println!(
-                        "input {} tokens, output {} tokens",
-                        usage.input_tokens, usage.output_tokens
+                        "input {} tokens (cache write {}, cache read {}), output {} tokens",
+                        usage.input_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.cache_read_input_tokens,
+                        usage.output_tokens
+                    );
+                }
+                "/compact" => {
+                    self.agent.compact(print_event).await;
+                }
+                "/context" => {
+                    let options = self.agent.options();
+                    println!(
+                        "context {} / {} tokens; old tool output is cleared from {} tokens",
+                        self.agent.context_tokens(),
+                        options.context_window,
+                        options.compact_limit()
                     );
                 }
                 input => {
@@ -295,8 +314,8 @@ fn report(err: &anyhow::Error) {
     if let Some(provider_error) = err.downcast_ref::<ProviderError>() {
         if provider_error.is_context_overflow() {
             eprintln!(
-                "hint: the conversation no longer fits the model's context window. \
-                 /reset starts a new one."
+                "hint: the conversation no longer fits the model's context window, \
+                 even after clearing old tool output and compacting. /reset starts a new one."
             );
         } else if provider_error.is_auth() {
             eprintln!("hint: check ANTHROPIC_API_KEY.");
@@ -314,6 +333,12 @@ fn print_event(event: Event<'_>) {
                 cli::preview(&input.to_string(), PREVIEW_CHARS)
             );
         }
+        Event::Compacted {
+            before_messages,
+            after_messages,
+        } => eprintln!(
+            "  (compacted the conversation: {before_messages} messages -> {after_messages})"
+        ),
         Event::ToolResult { name, output } => {
             let status = if output.is_error { "error" } else { "ok" };
             eprintln!(
