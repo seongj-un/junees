@@ -3,12 +3,10 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolOutput, opt_u64_arg, str_arg, truncate_middle};
+use super::{MAX_FILE_BYTES, Tool, ToolOutput, opt_u64_arg, str_arg, truncate_middle};
 
 const DEFAULT_LIMIT: u64 = 2000;
 const MAX_OUTPUT_CHARS: usize = 50_000;
-/// Larger files are refused instead of being loaded into memory whole.
-const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Reads a text file and returns it with line numbers.
 pub struct ReadFile;

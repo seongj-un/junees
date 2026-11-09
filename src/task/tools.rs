@@ -10,13 +10,15 @@ use serde_json::{Value, json};
 
 use super::features::Ledger;
 use super::git::REPO_ENV_VARS;
-use crate::tools::{Bash, ReadFile, Tool, ToolOutput, ToolRegistry, ToolSettings, WriteFile};
+use crate::tools::{
+    Bash, EditFile, ReadFile, Tool, ToolOutput, ToolRegistry, ToolSettings, WriteFile,
+};
 
 /// Verify commands may run a whole test suite, so they get the longest
 /// timeout the bash tool allows.
 pub const VERIFY_TIMEOUT_SECS: u64 = 600;
 
-/// bash, read_file and write_file for task sessions, with the user's tool
+/// bash, read_file, write_file and edit_file for task sessions, with the user's tool
 /// settings like the default tools. Their bash, like the default one,
 /// cannot see the API key or the user's hidden variables, and it cannot see
 /// [`REPO_ENV_VARS`] either: a session's git commands must act on the
@@ -27,6 +29,7 @@ pub fn session_tools(settings: &ToolSettings) -> ToolRegistry {
     tools.register(session_bash(settings));
     tools.register(ReadFile);
     tools.register(WriteFile);
+    tools.register(EditFile);
     tools
 }
 
@@ -264,13 +267,13 @@ mod tests {
     }
 
     #[test]
-    fn session_tools_are_the_default_three() {
+    fn session_tools_are_the_default_four() {
         let names: Vec<String> = session_tools(&ToolSettings::default())
             .specs()
             .into_iter()
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(names, ["bash", "read_file", "write_file"]);
+        assert_eq!(names, ["bash", "read_file", "write_file", "edit_file"]);
     }
 
     #[test]

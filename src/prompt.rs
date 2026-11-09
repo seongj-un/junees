@@ -8,6 +8,8 @@ pub fn system_prompt(cwd: &Path) -> String {
          You can run shell commands and read and write files with your tools. \
          Inspect before you change things, verify your changes, and answer in short, \
          plain language. Reply in the language the user writes in.\n\
+         Use edit_file to change part of a file and write_file for new files \
+         or full rewrites.\n\
          \n\
          Environment:\n\
          - Working directory: {}\n\
@@ -26,5 +28,6 @@ mod tests {
         let prompt = system_prompt(Path::new("/tmp/project"));
         assert!(prompt.starts_with("You are Junees"));
         assert!(prompt.contains("Working directory: /tmp/project"));
+        assert!(prompt.contains("Use edit_file to change part of a file"));
     }
 }
