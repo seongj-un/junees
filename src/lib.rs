@@ -13,5 +13,6 @@ pub mod prompt;
 pub mod provider;
 pub mod session;
 pub mod setup;
+pub mod slash;
 pub mod task;
 pub mod tools;
