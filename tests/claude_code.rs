@@ -143,6 +143,7 @@ fn junees(cwd: &Path, home: &Path, bin: &Path, args: &[&str]) -> tokio::process:
         .env("JUNEES_HOME", home.join("junees"))
         .env_remove("JUNEES_MAX_TURNS")
         .env_remove("JUNEES_CLAUDE_MODEL")
+        .env_remove("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")
         .env_remove("JUNEES_NOTIFY_WEBHOOK")
         .env_remove("JUNEES_NOTIFY_EACH_SESSION")
         .env_remove("JUNEES_TASK_MAX_TOKENS")
@@ -191,8 +192,15 @@ async fn claude_code_runs_a_task_without_an_api_key_and_sees_none() {
     );
     assert!(stdout.contains("Planned.\n"), "{stdout}");
 
-    let (out, stdout, stderr) = output(junees(root, home.path(), &bin, &["task", "run"])).await;
+    // The user may turn Claude Code's credential scrub off, and is told.
+    let mut run = junees(root, home.path(), &bin, &["task", "run"]);
+    run.env("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "0");
+    let (out, stdout, stderr) = output(run).await;
     assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("!! CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is off"),
+        "{stderr}"
+    );
     assert!(stdout.contains("Built F1.\n"), "{stdout}");
     assert!(stdout.contains("verified by the harness: F1"), "{stdout}");
     assert!(
@@ -205,8 +213,12 @@ async fn claude_code_runs_a_task_without_an_api_key_and_sees_none() {
     );
     assert_eq!(git(root, home.path(), &["status", "--porcelain"]).await, "");
 
-    for n in [1, 2] {
+    for (n, scrub) in [(1, "1"), (2, "0")] {
         let env = env_of(fake.path(), n);
+        assert!(
+            env.contains(&("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), scrub.into())),
+            "run {n}"
+        );
         for (key, value) in &env {
             assert!(
                 !key.starts_with("ANTHROPIC_")

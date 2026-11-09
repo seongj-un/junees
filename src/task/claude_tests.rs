@@ -43,6 +43,7 @@ fn env<'a>(root: &Path, factory: &'a ProviderFactory<'a>, bin: &Path) -> TaskEnv
             bin: bin.to_path_buf(),
             model: None,
             grace: Duration::from_millis(300),
+            scrub: true,
         }),
     }
 }

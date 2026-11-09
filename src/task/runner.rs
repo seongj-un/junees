@@ -126,8 +126,9 @@ impl TaskEnv<'_> {
         Verifier::new(self.root.clone(), &self.tool_settings)
     }
 
-    /// With the `claude-code` backend, checks that `claude` runs and tells
-    /// the user which one.
+    /// With the `claude-code` backend, checks that `claude` runs on the
+    /// subscription and tells the user which one, and whether the commands
+    /// it runs can see its credentials.
     async fn check_claude(&self, report: &mut Reporter<'_>) -> Result<()> {
         if let Some(claude) = &self.claude {
             let version = claude.check(&self.root, &self.tool_settings).await?;
@@ -135,6 +136,9 @@ impl TaskEnv<'_> {
                 report,
                 &format!("== sessions run by Claude Code {version} =="),
             );
+            for notice in claude.notices() {
+                warn(report, &notice);
+            }
         }
         Ok(())
     }

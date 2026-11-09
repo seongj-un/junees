@@ -46,6 +46,11 @@ pub const BACKEND_ENV: &str = "JUNEES_BACKEND";
 pub const BIN_ENV: &str = "JUNEES_CLAUDE_BIN";
 /// The model Claude Code uses (`--model`); Claude Code's own choice if unset.
 pub const MODEL_ENV: &str = "JUNEES_CLAUDE_MODEL";
+/// Claude Code's own switch that keeps credentials, `CLAUDE_CODE_OAUTH_TOKEN`
+/// included, out of the commands it runs
+/// (<https://code.claude.com/docs/en/env-vars#what-the-subprocess-environment-scrub-removes>).
+/// Junees turns it on for every session unless the user turned it off.
+pub const SCRUB_ENV: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
 
 /// The oldest Claude Code that knows every flag Junees passes:
 /// `--permission-prompts` came in 2.1.259.
@@ -153,6 +158,9 @@ pub struct ClaudeCode {
     pub model: Option<String>,
     /// See [`DEFAULT_GRACE`].
     pub grace: Duration,
+    /// Whether sessions run with [`SCRUB_ENV`]` = 1`: false only when the
+    /// user set it to an off value, which then reaches `claude` unchanged.
+    pub scrub: bool,
 }
 
 /// One session for [`ClaudeCode::run`].
@@ -249,7 +257,33 @@ impl ClaudeCode {
             bin: get(BIN_ENV).map_or_else(|| PathBuf::from("claude"), PathBuf::from),
             model: get(MODEL_ENV),
             grace: DEFAULT_GRACE,
+            scrub: !get(SCRUB_ENV).is_some_and(|value| is_off(&value)),
         }
+    }
+
+    /// What the user should know before the sessions start: whether the
+    /// commands Claude Code runs can read its credentials.
+    pub fn notices(&self) -> Vec<String> {
+        self.notices_with(std::env::var_os("PATH").as_deref())
+    }
+
+    fn notices_with(&self, path: Option<&std::ffi::OsStr>) -> Vec<String> {
+        if !self.scrub {
+            return vec![format!(
+                "{SCRUB_ENV} is off: the commands Claude Code runs see its environment, \
+                 CLAUDE_CODE_OAUTH_TOKEN included if you set it"
+            )];
+        }
+        if cfg!(target_os = "linux") && !on_path("bwrap", path) {
+            return vec![format!(
+                "`bwrap` is not on PATH: on Linux Claude Code needs bubblewrap to hide \
+                 credentials from the commands it runs ({SCRUB_ENV}), and its sessions fail \
+                 without it (unless managed settings name it in sandbox.bwrapPath). Install \
+                 bubblewrap, or set {SCRUB_ENV}=0 to let the commands see \
+                 CLAUDE_CODE_OAUTH_TOKEN"
+            )];
+        }
+        Vec::new()
     }
 
     /// Checks that `claude --version` runs and is at least
@@ -258,7 +292,7 @@ impl ClaudeCode {
     pub async fn check(&self, root: &Path, settings: &ToolSettings) -> Result<String> {
         let bin = self.bin.display();
         let mut command = self.command(root, settings);
-        command.arg("--version");
+        command.arg("--version").env_remove(SCRUB_ENV);
         let output = match tokio::time::timeout(VERSION_TIMEOUT, command.output()).await {
             Err(_) => bail!(
                 "`{bin} --version` did not answer within {}s",
@@ -312,7 +346,9 @@ impl ClaudeCode {
     pub async fn check_auth(&self, settings: &ToolSettings) -> Result<()> {
         let bin = self.bin.display();
         let mut command = self.command(Path::new("/"), settings);
-        command.args(["auth", "status", "--json"]);
+        command
+            .args(["auth", "status", "--json"])
+            .env_remove(SCRUB_ENV);
         let output = match tokio::time::timeout(VERSION_TIMEOUT, command.output()).await {
             Err(_) => bail!(
                 "`{bin} auth status` did not answer within {}s",
@@ -451,6 +487,9 @@ impl ClaudeCode {
         self.check_auth(request.settings).await?;
         let mut command = self.command(request.root, request.settings);
         command.args(self.arguments(request));
+        if self.scrub {
+            command.env(SCRUB_ENV, "1");
+        }
         let mut child = command
             .spawn()
             .with_context(|| format!("cannot run `{}`", self.bin.display()))?;
@@ -738,6 +777,20 @@ fn parse_version(text: &str) -> Option<[u32; 3]> {
     let mut parts = word.split('.').map(|part| part.parse::<u32>().ok());
     let version = [parts.next()??, parts.next()??, parts.next()??];
     parts.next().is_none().then_some(version)
+}
+
+/// An off value of a Claude Code switch, as Claude Code reads it.
+fn is_off(value: &str) -> bool {
+    ["0", "false", "no", "off"].contains(&value.trim().to_lowercase().as_str())
+}
+
+/// Whether an executable file `name` is in one of the folders of `path`.
+fn on_path(name: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.into_iter().flat_map(std::env::split_paths).any(|dir| {
+        fs::metadata(dir.join(name))
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    })
 }
 
 fn looks_like_login_failure(text: &str) -> bool {
@@ -1190,6 +1243,7 @@ mod tests {
             bin,
             model: None,
             grace: Duration::from_millis(300),
+            scrub: true,
         }
     }
 
@@ -1245,7 +1299,8 @@ mod tests {
             ClaudeCode {
                 bin: PathBuf::from("claude"),
                 model: None,
-                grace: DEFAULT_GRACE
+                grace: DEFAULT_GRACE,
+                scrub: true,
             }
         );
         let claude = ClaudeCode::from_lookup(|key| match key {
@@ -1255,6 +1310,49 @@ mod tests {
         });
         assert_eq!(claude.bin, PathBuf::from("/opt/claude"));
         assert_eq!(claude.model.as_deref(), Some("opus"));
+        for (value, scrub) in [
+            ("1", true),
+            ("yes", true),
+            (" ", true),
+            ("0", false),
+            (" Off ", false),
+            ("FALSE", false),
+            ("no", false),
+        ] {
+            let claude = ClaudeCode::from_lookup(|key| (key == SCRUB_ENV).then(|| value.into()));
+            assert_eq!(claude.scrub, scrub, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn warns_when_commands_can_see_the_credentials() {
+        let mut claude = claude(PathBuf::from("claude"));
+        let dir = tempfile::tempdir().unwrap();
+        let bwrap = dir.path().join("bwrap");
+        std::fs::write(&bwrap, "").unwrap();
+        let with_bwrap = Some(dir.path().as_os_str());
+        // Not executable yet.
+        let without = claude.notices_with(with_bwrap);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bwrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(claude.notices_with(with_bwrap), Vec::<String>::new());
+        if cfg!(target_os = "linux") {
+            assert_eq!(without.len(), 1);
+            assert!(
+                without[0].starts_with("`bwrap` is not on PATH"),
+                "{without:?}"
+            );
+            assert_eq!(claude.notices_with(None), without);
+        }
+
+        claude.scrub = false;
+        let notices = claude.notices_with(with_bwrap);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].starts_with("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is off")
+                && notices[0].contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "{notices:?}"
+        );
     }
 
     #[test]
@@ -1475,6 +1573,7 @@ mod tests {
             &format!(
                 "[ \"$1\" = --version ] && exit 3\n\
                  printf '%s\\0' \"$@\" > args\n\
+                 echo \"${{CLAUDE_CODE_SUBPROCESS_ENV_SCRUB-unset}}\" > scrub\n\
                  echo made > made.txt\n\
                  echo 'not json'\n\
                  {}",
@@ -1495,6 +1594,11 @@ mod tests {
         assert_eq!(outcome.end.unwrap(), End::Answered);
         assert_eq!(tokens(outcome.usage), 187);
         assert!(dir.path().join("made.txt").exists());
+        // Claude Code keeps credentials from the commands it runs.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("scrub")).unwrap(),
+            "1\n"
+        );
         let args = std::fs::read(dir.path().join("args")).unwrap();
         let args: Vec<String> = args
             .split(|&b| b == 0)
@@ -1612,7 +1716,7 @@ mod tests {
             claude(fake_claude_auth(
                 dir.path(),
                 &format!(
-                    "printf '%s\\n' \"$PWD\" \"$*\" >> '{}'\n\
+                    "printf '%s\\n' \"$PWD\" \"$*\" \"${{{SCRUB_ENV}-unset}}\" >> '{}'\n\
                      echo '{{\"loggedIn\":true,\"authMethod\":\"{method}\"}}'; exit 0",
                     calls.display()
                 ),
@@ -1635,7 +1739,7 @@ mod tests {
         assert!(!ran.exists(), "the session ran");
         assert_eq!(
             std::fs::read_to_string(&calls).unwrap(),
-            "/\nauth status --json\n"
+            "/\nauth status --json\nunset\n"
         );
 
         let outcome = run(fake("claude.ai")).await;
