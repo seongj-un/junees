@@ -95,7 +95,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
     Ok(Command::Run(run))
 }
 
-/// One `/sessions` line: id, last write (UTC), message count, first input.
+/// One `/sessions` line: id, last write (UTC), first input.
 pub fn session_line(summary: &Summary, current: bool) -> String {
     let marker = if current { '*' } else { ' ' };
     let first = if summary.first_input.trim().is_empty() {
@@ -104,10 +104,9 @@ pub fn session_line(summary: &Summary, current: bool) -> String {
         preview(&summary.first_input, SESSION_PREVIEW_CHARS)
     };
     format!(
-        "{marker} {}  {} UTC  {:>3} msgs  {first}",
+        "{marker} {}  {} UTC  {first}",
         summary.id,
-        format_utc(summary.updated),
-        summary.messages
+        format_utc(summary.updated)
     )
 }
 
@@ -208,14 +207,11 @@ mod tests {
             id: "20261109-061704-3fa2".into(),
             updated: 1_794_205_024,
             cwd: "/work".into(),
-            messages: 12,
             first_input: "이 폴더에\n뭐가 있어? ".repeat(10),
         };
         let line = session_line(&summary, true);
         assert!(
-            line.starts_with(
-                "* 20261109-061704-3fa2  2026-11-09 06:17 UTC   12 msgs  이 폴더에 뭐가"
-            ),
+            line.starts_with("* 20261109-061704-3fa2  2026-11-09 06:17 UTC  이 폴더에 뭐가"),
             "{line}"
         );
         assert!(line.ends_with("..."));
@@ -223,7 +219,7 @@ mod tests {
             first_input: String::new(),
             ..summary
         };
-        assert!(session_line(&empty, false).ends_with("msgs  (empty)"));
+        assert!(session_line(&empty, false).ends_with("UTC  (empty)"));
     }
 
     #[test]

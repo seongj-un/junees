@@ -385,7 +385,6 @@ pub struct Summary {
     /// Last write, in Unix seconds.
     pub updated: u64,
     pub cwd: String,
-    pub messages: usize,
     /// Text of the first user message.
     pub first_input: String,
 }
@@ -423,17 +422,25 @@ fn session_files(home: &Path) -> Result<Vec<SessionFile>> {
     Ok(files)
 }
 
-/// The meta line of a journal, if its first line is one.
-fn read_meta(path: &Path) -> Option<Meta> {
-    use std::io::BufRead;
-    let mut first = String::new();
-    io::BufReader::new(File::open(path).ok()?)
-        .read_line(&mut first)
-        .ok()?;
-    match serde_json::from_str::<LineIn>(&first).ok()?.entry {
-        Entry::Meta(meta) => Some(meta),
+/// Reads one line of a journal as an entry.
+fn read_entry(reader: &mut impl io::BufRead) -> Option<Entry> {
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    Some(serde_json::from_str::<LineIn>(&line).ok()?.entry)
+}
+
+/// The meta line of a journal, if its first line is one, and a reader
+/// positioned after it.
+fn read_head(path: &Path) -> Option<(Meta, io::BufReader<File>)> {
+    let mut reader = io::BufReader::new(File::open(path).ok()?);
+    match read_entry(&mut reader)? {
+        Entry::Meta(meta) => Some((meta, reader)),
         _ => None,
     }
+}
+
+fn read_meta(path: &Path) -> Option<Meta> {
+    read_head(path).map(|(meta, _)| meta)
 }
 
 /// The most recently written session started in `cwd`.
@@ -471,28 +478,26 @@ pub fn find_by_prefix(home: &Path, prefix: &str) -> Result<PathBuf> {
     }
 }
 
-/// Up to `limit` readable sessions, most recently written first.
+/// Up to `limit` sessions with a readable meta line, most recently written
+/// first. Only the meta line and the first entry (the first user input) of
+/// each file are read, so long sessions do not slow the list down.
 pub fn list_recent(home: &Path, limit: usize) -> Result<Vec<Summary>> {
     Ok(session_files(home)?
         .into_iter()
         .filter_map(|file| {
-            let session = Session::load(&file.path).ok()?;
-            let first_input = session
-                .transcript
-                .messages
-                .iter()
-                .find(|message| message.role == Role::User)
-                .map(Message::text)
-                .unwrap_or_default();
+            let (meta, mut rest) = read_head(&file.path)?;
+            let first_input = match read_entry(&mut rest) {
+                Some(Entry::Message(message)) if message.role == Role::User => message.text(),
+                _ => String::new(),
+            };
             Some(Summary {
-                id: session.meta.id,
+                id: meta.id,
                 updated: file
                     .modified
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-                cwd: session.meta.cwd,
-                messages: session.transcript.messages.len(),
+                cwd: meta.cwd,
                 first_input,
             })
         })
@@ -1016,14 +1021,28 @@ mod tests {
 
         let list = list_recent(home, 2).unwrap();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].messages, 1);
         assert_eq!(list[0].first_input, "third");
         assert_eq!(list[1].first_input, "두 번째");
         assert_eq!(list[1].updated, 2_000);
         assert_eq!(list[1].cwd, "/y");
         let all = list_recent(home, 10).unwrap();
         assert_eq!(all.len(), 3);
-        assert_eq!(all[2].messages, 2);
         assert_eq!(all[2].first_input, "first question");
+    }
+
+    #[test]
+    fn listing_reads_only_the_head_of_each_session() {
+        let home = tempfile::tempdir().unwrap();
+        let path = new_session(home.path(), "/x", &["first", "second"], 1_000);
+        // A broken later line would stop a replay, but the list never
+        // reads that far.
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"not json\n").unwrap();
+        drop(file);
+        assert!(Session::load(&path).is_err());
+
+        let list = list_recent(home.path(), 10).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].first_input, "first");
     }
 }
