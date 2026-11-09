@@ -760,6 +760,7 @@ impl Repl {
             },
             None => TaskCommand::Run(TaskRun::default()),
         };
+        eprintln!("(task mode asks no approval questions; only the command policy applies)");
         self.cancel.reset();
         let mut terminated = false;
         let result = {
@@ -799,6 +800,11 @@ impl Repl {
             println!("model: {}", self.config.model);
             return;
         };
+        if !model.starts_with("claude-") {
+            eprintln!(
+                "  !! `{model}` does not look like a Claude model name; the next question may fail"
+            );
+        }
         let mut config = self.config.clone();
         config.model = model.clone();
         match make_provider(&config) {
