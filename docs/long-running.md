@@ -56,8 +56,9 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 실행 로그 파일, 크래시 후 `task run`이 기록에서 이어서 시작
 
 ### L5. 상태 보기와 알림
-- `junees task status`: 기능별 통과 여부, 세션 수, 토큰 사용량, 최근 진행 기록
-- 작업 완료나 정지 시 알림(디스코드 웹훅)
+- `junees task status [--json]`: `.junees/`를 읽기만 한다(실행 중인 run 옆에서도 안전, API 키 불필요). 목표, 통과 수/전체와 진행 막대, 기능별 id/통과 여부/설명 첫 줄, 세션 수, 연속 무진전 수, 누적 토큰(입력/출력/캐시), 마지막 정지 이유와 시각, `progress.md` 마지막 5줄. `--json` 필드는 README에 정리. `.junees/`가 없으면 `task init`을 먼저 하라는 오류
+- 이를 위해 `state.json`에 `goal`(init 때 기록)과 `stopped_at`(정지 기록 시각, unix 초)을 추가했다. 둘 다 선택 필드라 예전 파일도 읽힌다. 실행 중 표시는 L4b가 `state.json`에 넣으면 `running` 필드로 보여 주도록 자리만 두었다(없으면 JSON에서 빠짐)
+- 알림: `JUNEES_NOTIFY_WEBHOOK`(디스코드 웹훅 URL)이 있으면 `task run`이 정지를 기록한 뒤 한 번 POST(저장소 이름, 정지 이유 키와 문장, 통과 수/전체, 세션 수, 토큰). 정지 이유는 `state.json`의 값을 그대로 쓰므로 L4b의 `budget`/`interrupted`도 따로 손대지 않고 알림에 나온다. `JUNEES_NOTIFY_EACH_SESSION=1`이면 세션마다 한 줄. `allowed_mentions: {"parse": []}`, 2000자 제한, 타임아웃 10초, 리다이렉트 안 따라감. 실패는 경고만 하고 종료 코드는 그대로. URL은 출력하지 않고 호스트만 보여 주며, 세션의 bash와 하네스 git에도 넘기지 않는다
 
 ## 상태
 

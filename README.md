@@ -16,6 +16,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ./target/release/junees --no-session  # 기록하지 않음
 ./target/release/junees task init "할 일 관리 웹 앱을 만들어"   # 장기 작업 계획 (git 저장소 안에서)
 ./target/release/junees task run --max-sessions 5             # 기능 하나씩 작업 세션 반복
+./target/release/junees task status            # 작업 상태 보기 (--json이면 JSON)
 ```
 
 대화 모드 명령: `/sessions` 최근 세션 10개(id, 마지막 기록 시각, 첫 입력), `/reset` 새 세션 시작, `/usage` 현재 세션의 토큰 사용량(캐시 쓰기/읽기 포함), `/context` 현재 컨텍스트 크기와 한도, `/compact` 앞부분을 요약으로 압축, `/exit` 종료.
@@ -49,8 +50,11 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - 하네스는 기능 목록의 권위 있는 사본을 들고 있다. 세션이 `features.json`을 직접 고치면(지우거나 `passes`를 바꾸는 것 포함) 세션이 끝날 때 사본으로 되돌려 쓰고 경고와 `progress.md` 한 줄을 남긴다. 서식만 다른 것은 편집으로 치지 않는다.
 - 세션이 끝나면 하네스가 `progress.md`에 `- [junees] session N: 통과 수/전체, 새로 통과한 기능, 토큰` 한 줄을 붙이고, 작업 트리가 더러우면 `junees: checkpoint after session N`으로 커밋한다(하네스 줄이 붙으므로 사실상 세션마다 하나). 하네스의 커밋은 `git add -A`에서 이름이 비밀 파일 같은 새 파일(`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa`/`id_ed25519` 등 ssh 키, `.netrc`)을 빼고 경고한다. 이미 추적 중인 파일은 그대로 커밋한다. 세션이 `.junees/`나 `.junees/.gitignore`를 지워도 커밋 전에 다시 만든다.
 - 정지: 모든 기능 통과, `--max-sessions`만큼 실행, 연속 3세션 동안 새로 통과한 기능 없음(stalled), 세션 하나가 오류로 끝남(공급자 오류 등. 오류를 `progress.md`에 남기고 체크포인트 커밋 후 정지), 세션 뒤 하네스 작업(되돌리기, progress 기록, 커밋)이 실패함. 정지 이유를 `task stopped: ...`로 출력하고 `state.json`에 기록한다. stalled와 오류는 종료 코드 1.
-- `.junees/state.json`(실행한 세션 수, 연속 무진전 세션 수, 누적 토큰, 정지 이유)은 `.junees/.gitignore`로 git에서 뺀다. 다음 `task run`은 세션 번호와 토큰을 여기서 이어 간다. 이전 실행이 스스로 멈췄으면(`--max-sessions` 포함) 무진전 횟수를 0부터 다시 세고, 정지 이유 없이 끝났으면(크래시) 이어서 센다. 그래서 `--max-sessions 1`로 여러 번 나눠 실행하면 stalled로는 멈추지 않는다.
+- `.junees/state.json`(실행한 세션 수, 연속 무진전 세션 수, 누적 토큰, 정지 이유와 시각 `stopped_at`, init 때의 목표 `goal`)은 `.junees/.gitignore`로 git에서 뺀다. 다음 `task run`은 세션 번호와 토큰을 여기서 이어 간다. 이전 실행이 스스로 멈췄으면(`--max-sessions` 포함) 무진전 횟수를 0부터 다시 세고, 정지 이유 없이 끝났으면(크래시) 이어서 센다. 그래서 `--max-sessions 1`로 여러 번 나눠 실행하면 stalled로는 멈추지 않는다.
 - 하위 폴더에서 실행해도 저장소 루트로 옮겨서 작업한다. 하네스의 git 명령과 세션의 `bash`(verify 포함)에서는 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` 같은 저장소 지정 변수와 상위 git이 넘기는 설정(`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`)을 지운다. git 훅이나 worktree의 `git rebase -x`처럼 이 변수가 설정된 곳에서 실행해도 다른 저장소에 커밋하지 않게 하기 위해서다. 하네스의 git은 세션이 심었을 수 있는 훅과 fsmonitor를 실행하지 않고(`-c core.hooksPath=/dev/null -c core.fsmonitor=false`, 커밋은 `--no-verify`), API 키 변수도 받지 않는다. 세션당 모델 호출 상한은 `JUNEES_MAX_TURNS`이고, 넘으면 그 세션만 끝난다. 작업은 체크포인트로 남고 다음 세션으로 넘어가며, 진전이 없으면 stalled 규칙이 멈춘다.
+- `task status [--json]`: 저장소의 `.junees/`를 읽기만 하고(아무것도 쓰지 않으므로 실행 중인 `task run` 옆에서 써도 된다) 목표, 통과 수/전체와 진행 막대, 기능별 통과 여부와 설명 첫 줄(72자에서 자름), 세션 수와 연속 무진전 수, 누적 토큰(입력/출력/캐시 쓰기/캐시 읽기), 마지막 정지 이유와 시각, `progress.md`의 비어 있지 않은 마지막 5줄을 보여 준다. API 키가 필요 없다. `.junees/`가 없으면 `task init`을 먼저 하라는 오류. 정지 기록이 없으면 첫 실행 전이거나, 실행 중이거나, 마지막 실행이 정지를 기록하지 못하고 끝난 것이다.
+- `task status --json` 필드: `repo`(저장소 폴더 이름), `root`(저장소 경로), `goal`(문자열 또는 `null`: 목표가 기록되기 전에 만든 작업), `passing`, `total`, `features`(`[{id, passes, description}]`, 설명 전체), `sessions`, `stalled`, `tokens`(`{input, output, cache_write, cache_read}`), `stop`(`null` 또는 `{reason, session, detail, message, at}`: `reason`은 `complete`/`max_sessions`/`stalled`/`error`처럼 `state.json`과 같은 값, `detail`은 오류 내용 또는 `null`, `message`는 사람이 읽는 한 문장, `at`은 unix 초 또는 `null`), `running`(실행 중 여부; 상태 파일이 기록하는 경우에만 나옴), `progress_tail`(문자열 배열).
+- 알림: `JUNEES_NOTIFY_WEBHOOK`에 디스코드 웹훅 URL을 넣으면 `task run`이 정지 이유를 기록한 뒤 웹훅에 한 번 POST한다. 내용은 저장소 이름, 정지 이유(키와 문장), 통과 수/전체, 세션 수, 누적 토큰. `JUNEES_NOTIFY_EACH_SESSION=1`이면 세션이 끝날 때마다 `session N done: ...` 한 줄도 보낸다. 본문은 `{"content": "...", "allowed_mentions": {"parse": []}}`(멘션 알림 없음)이고 `content`는 2000자에서 자른다(UTF-16 단위로 세어 이모지도 안전). 요청 하나의 제한 시간은 10초, 리다이렉트는 따라가지 않는다. 실패(연결 실패, 시간 초과, 2xx가 아닌 응답)는 `!! notification to <호스트> failed: ...` 경고만 띄우고 종료 코드는 바꾸지 않는다. URL에는 웹훅 토큰이 들어 있어서 경고와 오류에는 호스트만 나오고, 세션의 `bash`와 하네스 git에도 이 변수를 넘기지 않는다. 시작 전 오류(작업 트리가 더러움 등)로 정지 기록 없이 끝나면 알림도 없다.
 - 세션의 `bash`와 verify 명령에는 대화 모드와 같은 명령 정책과 숨김 변수 설정(`JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`, `JUNEES_HIDDEN_ENV`)이 걸리고, 세션의 컨텍스트 관리도 같은 설정(`JUNEES_CONTEXT_WINDOW`, `JUNEES_COMPACT_THRESHOLD`)을 쓴다. 정책에 막힌 verify 명령은 실패로 친다.
 
 ### 컨텍스트 관리
@@ -78,8 +82,10 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `JUNEES_DENY_COMMANDS` | (없음) | `bash`에서 추가로 막을 명령 접두사, 쉼표 구분 (예: `docker rm,kubectl delete`) |
 | `JUNEES_ALLOW_DANGEROUS` | `0` | `1`이면 기본 명령 차단 규칙을 끈다 (사용자 책임) |
 | `JUNEES_HIDDEN_ENV` | (없음) | `bash`에서 추가로 숨길 환경 변수 이름, 쉼표 구분 (예: `DB_PASSWORD,GITHUB_TOKEN`) |
+| `JUNEES_NOTIFY_WEBHOOK` | (없음) | `task run`이 멈출 때 알림을 보낼 디스코드 웹훅 URL (http/https) |
+| `JUNEES_NOTIFY_EACH_SESSION` | `0` | `1`이면 작업 세션마다 한 줄 알림도 보낸다 |
 
-기본 도구는 `bash`, `read_file`, `write_file` 세 가지다. `bash`는 승인 절차 없이 바로 실행되니(로드맵 3단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다.
+기본 도구는 `bash`, `read_file`, `write_file` 세 가지다. `bash`는 승인 절차 없이 바로 실행되니(로드맵 3단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다.
 
 ### 명령 정책
 
@@ -116,10 +122,12 @@ src/
     runner.rs          task init/run 세션 루프, 체크포인트 커밋, 정지 조건
     features.rs        features.json 검증, 하네스의 권위 있는 사본(Ledger)
     tools.rs           mark_feature_passing (verify 명령을 하네스가 실행)
-    state.rs           state.json (세션 수, 무진전 횟수, 토큰, 정지 이유)
+    state.rs           state.json (세션 수, 무진전 횟수, 토큰, 정지 이유와 시각, 목표)
+    status.rs          task status (읽기 전용, 텍스트/JSON)
     prompt.rs          초기화/작업 세션 프롬프트
     git.rs             저장소 확인, 커밋, 로그
   message.rs         대화 메시지 타입 (Messages API 형식)
+  notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시)
   tools/             도구 트레이트, 레지스트리, bash/read_file/write_file, bash 명령 정책(policy.rs)
   config.rs          환경 변수 설정 (도구 설정 ToolSettings 포함)
@@ -129,10 +137,10 @@ tests/
   common/              테스트용 가짜 Anthropic API 서버
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행 검증
-  secret_env.rs        기본 bash에서 API 키가 보이지 않는지 검증
+  secret_env.rs        기본 bash에서 API 키와 웹훅 URL이 보이지 않는지 검증
   hidden_env.rs        JUNEES_HIDDEN_ENV로 지정한 변수가 bash에서 보이지 않는지 검증
   context_management.rs 가짜 API 서버로 도구 결과 비우기, 압축, 캐시 표시, 기록 재생 검증
-  task_mode.rs         실제 바이너리로 임시 git 저장소에서 task init -> task run 검증
+  task_mode.rs         실제 바이너리로 임시 git 저장소에서 task init -> task run -> task status, 가짜 웹훅으로 알림 검증
   task_git_env.rs      GIT_DIR이나 GIT_CONFIG_PARAMETERS가 있어도 task 모드가 제 저장소와 설정으로만 git을 쓰는지 검증
   task_git_secret.rs   하네스 git이 심어진 훅을 실행하지 않고 git이 실행하는 필터에도 API 키를 넘기지 않는지 검증
 ```
