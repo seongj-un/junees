@@ -17,7 +17,7 @@ pub mod tools;
 pub use runner::{Report, TaskEnv, init, run};
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Work sessions one `task run` starts at most, unless told otherwise.
@@ -50,11 +50,26 @@ pub fn state_path(root: &Path) -> PathBuf {
 }
 
 /// Replaces a file through a temporary file and a rename, so a crash leaves
-/// either the old or the new content, never half of it.
+/// either the old or the new content, never half of it. Sessions can change
+/// anything in the repository, so the folder is created again if it is
+/// gone, and whatever sits at the temporary name (a symlink out of the
+/// repository, say) is removed rather than written through.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let tmp = path.with_file_name(format!(".{name}.tmp"));
-    fs::write(&tmp, bytes)?;
+    match fs::remove_file(&tmp) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => return Err(err),
+        _ => {}
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
+    drop(file);
     fs::rename(&tmp, path)
 }
 
@@ -70,5 +85,20 @@ mod tests {
         write_atomic(&path, b"two").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "two");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn write_atomic_recreates_the_folder_and_does_not_follow_a_planted_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone/x.json");
+        write_atomic(&path, b"one").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one");
+
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.path().join("gone/.x.json.tmp")).unwrap();
+        write_atomic(&path, b"two").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
     }
 }

@@ -326,6 +326,9 @@ fn wrap_up(
     report: &mut Reporter<'_>,
 ) -> Result<(String, bool, usize, usize)> {
     let root = &env.root;
+    // The session may have deleted .junees/ or its .gitignore, which keeps
+    // state.json out of the checkpoint commit.
+    prepare_dir(root)?;
     let (edited, newly, passing, total) = {
         let mut ledger = ledger.lock().unwrap();
         let edited = ledger.restore()?;
@@ -1294,6 +1297,37 @@ mod tests {
         // The work is kept.
         assert_eq!(subjects(root)[1], checkpoint_message(1));
         assert!(root.join("step9.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_session_that_deletes_the_task_folder_does_not_break_the_run() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let original = fs::read_to_string(features_path(root)).unwrap();
+        let provider = Scripted::new(vec![
+            calls(&[bash(format!("rm -rf '{}'", dir(root).display()))]),
+            text("cleaned up"),
+        ]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 1, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(fs::read_to_string(features_path(root)).unwrap(), original);
+        assert!(dir(root).join(".gitignore").exists());
+        assert!(!git::is_dirty(root).unwrap());
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        // state.json stays out of git.
+        let mut ls_files = std::process::Command::new("git");
+        ls_files.args(["ls-files", ".junees"]).current_dir(root);
+        for name in git::REPO_ENV_VARS {
+            ls_files.env_remove(name);
+        }
+        let tracked = ls_files.output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&tracked.stdout),
+            ".junees/.gitignore\n.junees/features.json\n.junees/progress.md\n"
+        );
+        assert_eq!(State::load(root).unwrap().stop, Some(stop));
     }
 
     fn bash(command: String) -> (&'static str, Value) {
