@@ -338,10 +338,15 @@ pub async fn run(
             session,
             detail: None,
         };
+        // Passes the cancelled recheck did not get to are unconfirmed, so
+        // they cannot complete the task.
+        if !rechecked {
+            break stop(StopReason::Interrupted, state.sessions);
+        }
         if ledger.lock().unwrap().all_pass() {
             break stop(StopReason::Complete, state.sessions);
         }
-        if !rechecked || env.cancel.is_cancelled() {
+        if env.cancel.is_cancelled() {
             break stop(StopReason::Interrupted, state.sessions);
         }
         if ran == max_sessions {
@@ -2017,6 +2022,31 @@ mod tests {
             log.ends_with(" run stop (max_sessions): reached --max-sessions; task tokens 22 of 1000, run time 0s\n"),
             "{log}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_recheck_changes_nothing_and_completes_nothing() {
+        // Both marked passing; F2's verify would take the full timeout.
+        let repo = task_repo_marked(&[("true", true), ("sleep 30", true)]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let env = env(root, home.path(), &factory);
+        let cancel = env.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            cancel.cancel();
+        });
+        let started = std::time::Instant::now();
+        let stop = run(&env, 5, &mut |_| {}).await.unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(stop.reason, StopReason::Interrupted);
+        assert_eq!(stop.session, 0);
+        assert!(!git::is_dirty(root).unwrap());
+        assert_eq!(subjects(root)[0], "mark by hand");
+        assert_eq!(State::load(root).unwrap().running, None);
     }
 
     #[tokio::test]
