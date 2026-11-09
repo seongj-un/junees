@@ -221,9 +221,19 @@ impl Agent {
         self.transcript.usage
     }
 
-    /// Size of the conversation as of the last model call, in tokens.
+    /// Size of the conversation in tokens: as the last model call that
+    /// searched nothing measured it, plus an estimate of what the history
+    /// gained since (see [`Transcript::context_size`]). Before any such
+    /// measurement (none yet, or none since a compaction) the system
+    /// prompt and the tools, which the history leaves out, are estimated
+    /// too.
     pub fn context_tokens(&self) -> u64 {
-        self.transcript.context_tokens
+        let mut size = self.transcript.context_size();
+        if self.transcript.context_tokens == 0 && !self.transcript.messages.is_empty() {
+            let tools = serde_json::to_string(&self.tools.specs()).map_or(0, |json| json.len());
+            size += (self.options.system.len() + tools).div_ceil(4) as u64;
+        }
+        size
     }
 
     pub fn options(&self) -> &AgentOptions {
@@ -263,6 +273,7 @@ impl Agent {
         input: &str,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
+        self.drop_open_server_calls(&mut on_event);
         let entry = self.transcript.user_text_entry(input);
         self.record(entry, &mut on_event);
         let specs = self.tools.specs();
@@ -420,6 +431,22 @@ impl Agent {
         Err(TurnLimit(self.options.max_turns).into())
     }
 
+    /// Drops the server tool calls the last turn left without a result
+    /// (see [`Transcript::open_server_calls`]), before a new input ends
+    /// that turn for good: the API would reject the history otherwise.
+    fn drop_open_server_calls(&mut self, on_event: &mut impl FnMut(Event<'_>)) {
+        let ids = self.transcript.open_server_calls();
+        if ids.is_empty() {
+            return;
+        }
+        let count = ids.len();
+        self.record(Entry::DropServerCalls { ids }, on_event);
+        on_event(Event::Warning(&format!(
+            "dropped {count} web search call(s) the last turn stopped before running; \
+             the model goes on from your new message"
+        )));
+    }
+
     /// Runs one tool call, unless the gate turns it down.
     async fn call_tool(&mut self, name: &str, input: Value) -> ToolOutput {
         if let Some(gate) = &mut self.gate
@@ -532,7 +559,7 @@ impl Agent {
     /// the conversation is compacted. Returns whether it tried to, which
     /// takes a summary call.
     async fn manage_context(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
-        if self.transcript.context_tokens < self.options.compact_limit() {
+        if self.context_tokens() < self.options.compact_limit() {
             self.cleared = false;
             return false;
         }
@@ -912,6 +939,122 @@ mod tests {
             agent.transcript.user_text_entry("go on"),
             Entry::Message(_)
         ));
+    }
+
+    /// A reply that searched once and got `bytes` of encrypted results.
+    fn big_search(bytes: usize) -> Reply {
+        searched(StopReason::EndTurn, "found", "https://a.example").map(|mut reply| {
+            if let ContentBlock::Other(result) = &mut reply.content[1] {
+                result["content"][0]["encrypted_content"] = json!("E".repeat(bytes));
+            }
+            reply
+        })
+    }
+
+    #[tokio::test]
+    async fn searching_calls_alone_still_compact_before_an_overflow() {
+        // Every call searches, so none measures the size; each reply holds
+        // about 270 tokens of search results. The limit is 800 of 1000.
+        let mut script: Vec<Reply> = (0..3).map(|_| big_search(1000)).collect();
+        script.push(text("summary"));
+        script.extend((0..2).map(|_| big_search(1000)));
+        let provider = Scripted::new(script);
+        let seen = provider.seen.clone();
+        let settings = provider.settings.clone();
+        let mut agent = agent(provider, 5);
+        let mut log = Vec::new();
+        for input in ["one", "two", "three", "four", "five"] {
+            agent.run(input, notable(&mut log)).await.unwrap();
+        }
+
+        let seen = seen.lock().unwrap();
+        let settings = settings.lock().unwrap();
+        // The fourth request summarized: the size estimated from the three
+        // replies before it crossed the limit.
+        assert_eq!(
+            settings.iter().map(|s| s.5).collect::<Vec<_>>(),
+            [true, true, true, false, true, true]
+        );
+        assert!(
+            agent.messages()[0]
+                .text()
+                .starts_with(session::SUMMARY_HEADER)
+        );
+        // No request came near the window.
+        for (sent, setting) in seen.iter().zip(settings.iter()) {
+            let size: u64 = sent
+                .iter()
+                .map(|message| session::estimate_tokens(&message.content))
+                .sum();
+            assert!(!setting.5 || size < 1000, "{size}");
+        }
+        assert!(
+            !log.iter().any(|line| line.contains("did not fit")),
+            "{log:?}"
+        );
+    }
+
+    /// A reply the API paused right after it called a search, the result of
+    /// the call `prev` before it first.
+    fn paused_on_search(prev: Option<usize>, id: usize) -> Reply {
+        let mut content = Vec::new();
+        if let Some(prev) = prev {
+            content.push(ContentBlock::Other(
+                json!({"type": "web_search_tool_result",
+                "tool_use_id": format!("srvtoolu_{prev}"), "content": []}),
+            ));
+        }
+        content.push(ContentBlock::text(format!("searching {id}")));
+        content.push(ContentBlock::Other(json!({"type": "server_tool_use",
+            "id": format!("srvtoolu_{id}"), "name": "web_search", "input": {"query": "q"}})));
+        Ok(CompletionResponse {
+            content,
+            stop_reason: StopReason::PauseTurn,
+            usage: Usage::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_new_input_drops_the_search_a_stopped_turn_left_open() {
+        let mut script: Vec<Reply> = (0..=MAX_PAUSES)
+            .map(|i| paused_on_search(i.checked_sub(1), i))
+            .collect();
+        script.push(text("ok"));
+        let provider = Scripted::new(script);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 50).with_journal(Box::new(journal.clone()));
+        agent.run("go", |_| {}).await.unwrap();
+        let open = format!("srvtoolu_{MAX_PAUSES}");
+        assert_eq!(
+            agent.transcript.open_server_calls(),
+            std::slice::from_ref(&open)
+        );
+
+        let mut log = Vec::new();
+        agent.run("go on", notable(&mut log)).await.unwrap();
+        assert_eq!(
+            log,
+            [
+                "warning dropped 1 web search call(s) the last turn stopped before running; \
+              the model goes on from your new message"
+            ]
+        );
+        let seen = seen.lock().unwrap();
+        let sent = seen.last().unwrap();
+        // Every search went with its result; the open one is gone and the
+        // reply that held it kept its text.
+        assert!(
+            !serde_json::to_string(sent)
+                .unwrap()
+                .contains(&format!("\"{open}\""))
+        );
+        assert_eq!(sent.len(), MAX_PAUSES + 3);
+        assert_eq!(sent[MAX_PAUSES + 1].content.len(), 2);
+        assert_eq!(sent[MAX_PAUSES + 2], Message::user_text("go on"));
+        assert!(agent.transcript.open_server_calls().is_empty());
+        // Recorded, so a replayed journal drops it too.
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }
 
     #[tokio::test]
@@ -1604,16 +1747,17 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_changes_below_the_threshold() {
-        // The limit is 800 of 1000 tokens.
-        let mut script = tool_rounds(5, 799);
-        script.push(sized(text("done"), 799));
+        // The limit is 800 of 1000 tokens; each round's small tool result
+        // adds its estimate (a few tokens) to the size measured before it.
+        let mut script = tool_rounds(5, 780);
+        script.push(sized(text("done"), 780));
         let provider = Scripted::new(script);
         let seen = provider.seen.clone();
         let journal = Memory::default();
         let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
         agent.run("go", |_| {}).await.unwrap();
 
-        assert_eq!(agent.context_tokens(), 799);
+        assert_eq!(agent.context_tokens(), 780);
         let history = agent.messages();
         assert_eq!(history.len(), 12);
         assert_eq!(tool_output(&history[4]), [("toolu_2", "T2", false)]);

@@ -5,7 +5,7 @@
 use std::process::{Output, Stdio};
 use std::time::Duration;
 
-use junees::agent::{Agent, AgentOptions, Event};
+use junees::agent::{Agent, AgentOptions, Event, MAX_PAUSES};
 use junees::provider::anthropic::AnthropicProvider;
 use junees::tools::ToolRegistry;
 use junees::web_search::{self, WebSearch};
@@ -71,6 +71,10 @@ fn search() -> WebSearch {
 }
 
 fn agent(url: String, stream: bool) -> Agent {
+    agent_with_turns(url, stream, 5)
+}
+
+fn agent_with_turns(url: String, stream: bool, max_turns: usize) -> Agent {
     let provider = AnthropicProvider::new("sk-test".into(), url, "test-model".into())
         .unwrap()
         .with_streaming(stream)
@@ -81,7 +85,7 @@ fn agent(url: String, stream: bool) -> Agent {
         AgentOptions {
             system: "sys".into(),
             max_tokens: 1024,
-            max_turns: 5,
+            max_turns,
             context_window: 200_000,
             compact_threshold: 0.8,
         },
@@ -255,4 +259,104 @@ async fn the_binary_names_the_setting_when_the_organization_has_search_off() {
     assert!(stderr.contains("set JUNEES_WEB_SEARCH=off"), "{stderr}");
     // A 400 is not retried.
     assert_eq!(server.await.unwrap().len(), 1);
+}
+
+/// A reply the API paused right after it called search `id`, with the
+/// result of the search before it first, as a continuation starts.
+fn paused_on_search(id: usize) -> Value {
+    let mut content = Vec::new();
+    if let Some(prev) = id.checked_sub(1) {
+        content.push(json!({"type": "web_search_tool_result",
+            "tool_use_id": format!("srvtoolu_{prev}"), "content": []}));
+    }
+    content.push(json!({"type": "text", "text": format!("searching {id}")}));
+    content.push(
+        json!({"type": "server_tool_use", "id": format!("srvtoolu_{id}"),
+        "name": "web_search", "input": {"query": "rust"}}),
+    );
+    json!({
+        "id": format!("msg_{id}"), "type": "message", "role": "assistant", "model": "m",
+        "content": content, "stop_reason": "pause_turn", "stop_sequence": null,
+        "usage": {"input_tokens": 10, "output_tokens": 5,
+                  "server_tool_use": {"web_search_requests": 1}}
+    })
+}
+
+/// The server tool calls in a request's messages that no result block
+/// answers, which the API rejects once a user input follows them.
+fn unanswered_calls(body: &Value) -> Vec<String> {
+    let blocks: Vec<&Value> = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .collect();
+    blocks
+        .iter()
+        .filter(|block| block["type"] == "server_tool_use")
+        .map(|block| block["id"].as_str().unwrap().to_string())
+        .filter(|id| {
+            !blocks
+                .iter()
+                .any(|block| block["tool_use_id"] == id.as_str())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn going_on_after_the_pause_limit_with_search_off_sends_no_open_search() {
+    let mut served: Vec<Served> = (0..=MAX_PAUSES)
+        .map(|id| Served::Json(200, paused_on_search(id)))
+        .collect();
+    served.push(Served::Json(200, text_reply("ok")));
+    let (url, server) = fake_stream_api(served).await;
+    let mut agent = agent_with_turns(url.clone(), false, 2 * MAX_PAUSES);
+    let mut warnings = Vec::new();
+    agent
+        .run("Rust 소식?", |event| {
+            if let Event::Warning(warning) = event {
+                warnings.push(warning.to_string());
+            }
+        })
+        .await
+        .unwrap();
+    // Web search turned off, the conversation goes on.
+    agent.set_provider(Box::new(
+        AnthropicProvider::new("sk-test".into(), url, "test-model".into()).unwrap(),
+    ));
+    agent
+        .run("계속해", |event| {
+            if let Event::Warning(warning) = event {
+                warnings.push(warning.to_string());
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings[1].starts_with("dropped 1 web search call(s)"),
+        "{warnings:?}"
+    );
+
+    let requests = tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(requests.len(), MAX_PAUSES + 2);
+    let last = body_of(requests.last().unwrap());
+    assert!(!last["tools"].to_string().contains("web_search"), "{last}");
+    assert_eq!(unanswered_calls(&last), Vec::<String>::new());
+    // The searches that ran went back with their results; the reply that
+    // called the open one kept its text, and the new input comes last.
+    let messages = last["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), MAX_PAUSES + 3);
+    assert_eq!(
+        messages[MAX_PAUSES + 1]["content"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(messages.last().unwrap()["role"], "user");
+    assert_eq!(messages.last().unwrap()["content"][0]["text"], "계속해");
 }
