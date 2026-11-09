@@ -196,6 +196,7 @@ pub async fn run(
         state.stalled = 0;
     }
     state.save(root)?;
+    recheck_passing(env, &ledger, report).await?;
 
     let mut ran = 0;
     let stop = loop {
@@ -318,6 +319,60 @@ async fn work_session(
         .await
         .map(|_| ());
     (result, agent.usage())
+}
+
+/// Runs the verify command of every feature the list marks as passing and
+/// takes back the passes that do not hold. The harness's copy of the list
+/// is made from the file at the start of a run, and the file may say
+/// things the harness never decided: a session killed before the harness
+/// could undo its edits, or a list written by hand. Running the commands
+/// again also catches features a later change broke.
+async fn recheck_passing(
+    env: &TaskEnv<'_>,
+    ledger: &Arc<Mutex<Ledger>>,
+    report: &mut Reporter<'_>,
+) -> Result<()> {
+    let marked: Vec<(String, String)> = ledger
+        .lock()
+        .unwrap()
+        .features()
+        .iter()
+        .filter(|feature| feature.passes)
+        .map(|feature| (feature.id.clone(), feature.verify.clone()))
+        .collect();
+    if marked.is_empty() {
+        return Ok(());
+    }
+    line(
+        report,
+        &format!(
+            "== checking the {} feature(s) marked as passing ==",
+            marked.len()
+        ),
+    );
+    let verifier = env.verifier();
+    let mut failed = Vec::new();
+    for (id, verify) in marked {
+        if verifier.run(&verify).await.is_error {
+            failed.push(id);
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    {
+        let mut ledger = ledger.lock().unwrap();
+        for id in &failed {
+            ledger.mark_failing(id)?;
+        }
+    }
+    let text = format!(
+        "marked as passing, but their verify commands fail: {}; \
+         they count as not passing",
+        failed.join(", ")
+    );
+    warn(report, &text);
+    append_progress(env.root.as_path(), &format!("run start: {text}"))
 }
 
 /// Checks the list a new task starts from and returns its length.
@@ -771,6 +826,66 @@ mod tests {
         let progress = fs::read_to_string(progress_path(root)).unwrap();
         assert!(progress.contains("session 1: .junees/features.json was edited directly"));
         assert!(progress.contains("session 1: 0/2 passing, nothing new"));
+    }
+
+    /// A repository whose committed task has these features, each
+    /// `(verify, passes)`.
+    fn task_repo_marked(features: &[(&str, bool)]) -> tempfile::TempDir {
+        let verifies: Vec<&str> = features.iter().map(|(verify, _)| *verify).collect();
+        let repo = task_repo(&verifies);
+        let root = repo.path();
+        let mut list = features::load(root).unwrap();
+        for (feature, (_, passes)) in list.iter_mut().zip(features) {
+            feature.passes = *passes;
+        }
+        fs::write(features_path(root), features::to_json(&list)).unwrap();
+        git::commit_all(root, "mark by hand").unwrap();
+        repo
+    }
+
+    #[tokio::test]
+    async fn a_run_believes_only_passes_whose_verify_still_passes() {
+        let repo = task_repo_marked(&[("true", true), ("false", true), ("false", false)]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![text("looking around")]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 1, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(provider.left(), 0);
+        let passes: Vec<bool> = features::load(root)
+            .unwrap()
+            .iter()
+            .map(|f| f.passes)
+            .collect();
+        assert_eq!(passes, [true, false, false]);
+        assert_eq!(
+            out.lines[0],
+            "== checking the 2 feature(s) marked as passing =="
+        );
+        assert_eq!(
+            out.warnings,
+            ["marked as passing, but their verify commands fail: F2; they count as not passing"]
+        );
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains(
+                "- [junees] run start: marked as passing, but their verify commands fail: F2;"
+            ),
+            "{progress}"
+        );
+        // The session saw the corrected list.
+        let seen = provider.seen.lock().unwrap();
+        assert!(seen[0].0.contains("- [ ] F2: feature 2"));
+    }
+
+    #[tokio::test]
+    async fn a_list_marked_passing_by_hand_does_not_complete_the_task() {
+        let repo = task_repo_marked(&[("false", true), ("false", true)]);
+        let provider = Scripted::new(vec![text("hm")]);
+        let stop = run_task(repo.path(), &provider, 1, &mut Collected::default()).await;
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(provider.left(), 0);
     }
 
     #[tokio::test]

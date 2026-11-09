@@ -166,6 +166,20 @@ impl Ledger {
         self.write()
     }
 
+    /// Records that a feature does not pass (any more) and saves the list.
+    pub fn mark_failing(&mut self, id: &str) -> Result<()> {
+        if self.get(id).is_none() {
+            bail!("no feature has the id `{id}`");
+        }
+        self.note_edits();
+        for feature in &mut self.features {
+            if feature.id == id {
+                feature.passes = false;
+            }
+        }
+        self.write()
+    }
+
     /// Puts the harness's copy back into the file. Returns whether the file
     /// had been changed outside the harness since the harness last wrote it,
     /// in content and not just formatting (a deleted file counts).
@@ -363,5 +377,19 @@ mod tests {
         assert!(ledger.all_pass());
         assert!(ledger.restore().unwrap());
         assert_eq!(load(root.path()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mark_failing_takes_a_pass_back() {
+        let root = task_root(serde_json::json!([
+            feature("F1", "true", true),
+            feature("F2", "true", true)
+        ]));
+        let mut ledger = Ledger::load(root.path()).unwrap();
+        ledger.mark_failing("F2").unwrap();
+        assert!(ledger.mark_failing("F9").is_err());
+        assert_eq!(ledger.passing(), 1);
+        assert!(!load(root.path()).unwrap()[1].passes);
+        assert!(!ledger.restore().unwrap());
     }
 }
