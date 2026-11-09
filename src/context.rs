@@ -5,6 +5,7 @@
 //! be left without their results.
 
 use crate::message::{ContentBlock, Message, Role};
+use crate::web_search;
 
 /// Output limit of a summary call.
 pub const SUMMARY_MAX_TOKENS: u32 = 4096;
@@ -27,7 +28,7 @@ pub fn summary_request(messages: &[Message]) -> Message {
         };
         for block in &message.content {
             match block {
-                ContentBlock::Text { text: body } => {
+                ContentBlock::Text { text: body, .. } => {
                     text.push_str(&format!("[{role}]\n{body}\n"));
                 }
                 ContentBlock::ToolUse { id, name, input } => {
@@ -44,9 +45,15 @@ pub fn summary_request(messages: &[Message]) -> Message {
                 // Thinking is the model's own working; its outcome is in
                 // the text and tool calls around it.
                 block if block.is_thinking() => {}
-                block => {
-                    let kind = block.other_type().unwrap_or("unknown");
-                    text.push_str(&format!("[{role}: {kind} block]\n"));
+                // Web searches by their query and results by title and
+                // URL: the pages themselves would blow up the summary call.
+                // Other raw blocks by their type.
+                ContentBlock::Other(value) => {
+                    let line = web_search::summary_line(value).unwrap_or_else(|| {
+                        let kind = value["type"].as_str().unwrap_or("unknown");
+                        format!("{kind} block")
+                    });
+                    text.push_str(&format!("[{role}: {line}]\n"));
                 }
             }
         }
@@ -106,9 +113,7 @@ mod tests {
                     ContentBlock::Other(json!({"type": "redacted_thinking", "data": "opaque"})),
                     ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_1",
                                                "name": "web_search", "input": {}})),
-                    ContentBlock::Text {
-                        text: "found it".into(),
-                    },
+                    ContentBlock::text("found it"),
                 ],
             },
         ];
@@ -116,8 +121,50 @@ mod tests {
             summary_request(&messages).text(),
             "Summarize this conversation:\n\n<conversation>\n\
              [user]\nsearch it\n\
-             [assistant: server_tool_use block]\n\
+             [assistant: web search]\n\
              [assistant]\nfound it\n\
+             </conversation>"
+        );
+    }
+
+    #[test]
+    fn web_search_blocks_shrink_to_queries_titles_and_urls() {
+        let results: Vec<_> = (0..20)
+            .map(|i| {
+                json!({"type": "web_search_result", "url": format!("https://{i}.example/"),
+                       "title": format!("Page {i}"), "encrypted_content": "E".repeat(50_000)})
+            })
+            .collect();
+        let messages = [
+            Message::user_text("what is new in rust?"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_1",
+                        "name": "web_search", "input": {"query": "rust release notes"}})),
+                    ContentBlock::Other(json!({"type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_1", "content": results})),
+                    ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_2",
+                        "name": "code_execution", "input": {"code": "print(1)"}})),
+                    ContentBlock::Text {
+                        text: "Rust 1.95 is out.".into(),
+                        citations: Some(json!([{"type": "web_search_result_location",
+                            "url": "https://0.example/", "encrypted_index": "Eo8B"}])),
+                    },
+                ],
+            },
+        ];
+        let text = summary_request(&messages).text();
+        assert_eq!(
+            text,
+            "Summarize this conversation:\n\n<conversation>\n\
+             [user]\nwhat is new in rust?\n\
+             [assistant: web search: rust release notes]\n\
+             [assistant: web search results: Page 0 (https://0.example/); \
+             Page 1 (https://1.example/); Page 2 (https://2.example/); \
+             Page 3 (https://3.example/); Page 4 (https://4.example/); 15 more]\n\
+             [assistant: server_tool_use block]\n\
+             [assistant]\nRust 1.95 is out.\n\
              </conversation>"
         );
     }

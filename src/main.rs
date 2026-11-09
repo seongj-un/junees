@@ -24,6 +24,7 @@ use junees::task::claude_code::{BACKEND_ENV, Backend, ClaudeCode};
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
+use junees::web_search;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -255,7 +256,8 @@ fn make_provider(config: &Config) -> Result<Box<dyn Provider>> {
             config.model.clone(),
         )?
         .with_thinking(config.thinking_budget)
-        .with_streaming(config.stream),
+        .with_streaming(config.stream)
+        .with_web_search(config.web_search.clone()),
     ))
 }
 
@@ -686,11 +688,13 @@ impl Repl {
             Slash::Usage => {
                 let usage = self.agent.usage();
                 println!(
-                    "input {} tokens (cache write {}, cache read {}), output {} tokens",
+                    "input {} tokens (cache write {}, cache read {}), output {} tokens, \
+                     web searches {}",
                     usage.input_tokens,
                     usage.cache_creation_input_tokens,
                     usage.cache_read_input_tokens,
-                    usage.output_tokens
+                    usage.output_tokens,
+                    usage.web_searches()
                 );
             }
             // Nothing is recorded until the summary is back, so the
@@ -980,7 +984,7 @@ impl Printer {
                 eprintln!("  (retrying)");
             }
             // Reported during the call; its text is not done yet.
-            Event::Thinking => print_event(event),
+            Event::Thinking | Event::ServerToolUse { .. } => print_event(event),
             // Anything else comes after a model call.
             event => {
                 self.end_line();
@@ -1018,6 +1022,14 @@ fn print_event(event: Event<'_>) {
                 cli::preview(&input.to_string(), PREVIEW_CHARS)
             );
         }
+        Event::ServerToolUse { name, input } => {
+            eprintln!(
+                "  -> {name} {} (run by the API)",
+                cli::preview(&input.to_string(), PREVIEW_CHARS)
+            );
+        }
+        // Part of the answer, after its text.
+        Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),
         Event::Compacted {
             before_messages,
             after_messages,

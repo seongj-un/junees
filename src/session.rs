@@ -156,8 +156,8 @@ pub trait Journal: Send {
 pub struct Transcript {
     pub messages: Vec<Message>,
     pub usage: Usage,
-    /// Size of the conversation as of the last model call (see
-    /// [`Usage::context_tokens`]); 0 until one is measured.
+    /// Size of the conversation as of the last model call that searched
+    /// nothing (see [`Usage::context_tokens`]); 0 until one is measured.
     pub context_tokens: u64,
 }
 
@@ -170,13 +170,21 @@ impl Transcript {
             Entry::Message(message) => self.messages.push(message),
             Entry::AppendText { text } => match self.messages.last_mut() {
                 Some(last) if last.role == Role::User => {
-                    last.content.push(ContentBlock::Text { text })
+                    last.content.push(ContentBlock::text(text))
                 }
                 _ => self.messages.push(Message::user_text(text)),
             },
             Entry::Usage(usage) => {
                 self.usage.add(usage);
-                self.context_tokens = usage.context_tokens();
+                // A call that searched the web reports the cache reads of
+                // every step of the API's own search loop, far more than
+                // the conversation holds (context editing docs, "Server-side
+                // tools"), so it says nothing about the size. The next call
+                // without one measures it again; until then the last size
+                // stands, and an overflow still shrinks the history.
+                if usage.web_searches() == 0 {
+                    self.context_tokens = usage.context_tokens();
+                }
             }
             Entry::ClearToolResults {
                 upto,
@@ -203,9 +211,7 @@ impl Transcript {
                     .messages
                     .drain(..keep_from.min(self.messages.len()))
                     .collect();
-                let block = ContentBlock::Text {
-                    text: format!("{SUMMARY_HEADER}{summary}"),
-                };
+                let block = ContentBlock::text(format!("{SUMMARY_HEADER}{summary}"));
                 match self.messages.first_mut() {
                     Some(first) if first.role == Role::User => first.content.insert(0, block),
                     _ => {
@@ -219,7 +225,7 @@ impl Transcript {
                                     .content
                                     .iter()
                                     .filter(|block| {
-                                        matches!(block, ContentBlock::Text { text }
+                                        matches!(block, ContentBlock::Text { text, .. }
                                             if !text.starts_with(SUMMARY_HEADER))
                                     })
                                     .cloned(),
@@ -272,6 +278,10 @@ impl Transcript {
     /// results, so every earlier tool call has its result. It keeps the
     /// last two such rounds when it can, else the last one.
     ///
+    /// A server tool called next to client tools (web search in the same
+    /// reply as bash) runs on the request after their results, so its
+    /// result block arrives in the next reply: no cut falls between the two.
+    ///
     /// With `manual_thinking` the API wants the turn in progress to start
     /// with a thinking block, and only the turn's first reply has one, so a
     /// cut inside the turn keeps none of it: where the cut above would go,
@@ -303,7 +313,9 @@ impl Transcript {
         }
         let rounds: Vec<usize> = (2..self.messages.len())
             .filter(|&i| {
-                self.messages[i].role == Role::Assistant && only_tool_results(&self.messages[i - 1])
+                self.messages[i].role == Role::Assistant
+                    && only_tool_results(&self.messages[i - 1])
+                    && !orphans_server_tool_result(&self.messages[i..])
             })
             .collect();
         if manual_thinking {
@@ -394,6 +406,31 @@ fn has_tool_result(message: &Message) -> bool {
         .content
         .iter()
         .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}
+
+/// Whether `kept` holds a server tool result (`web_search_tool_result` and
+/// the like) whose `server_tool_use` call is not in `kept` too.
+fn orphans_server_tool_result(kept: &[Message]) -> bool {
+    let blocks = || kept.iter().flat_map(|message| &message.content);
+    let calls: Vec<&str> = blocks()
+        .filter_map(|block| match block {
+            ContentBlock::Other(value) if value["type"] == "server_tool_use" => {
+                value["id"].as_str()
+            }
+            _ => None,
+        })
+        .collect();
+    blocks().any(|block| match block {
+        ContentBlock::Other(value) => {
+            value["type"]
+                .as_str()
+                .is_some_and(|kind| kind.ends_with("_tool_result"))
+                && value["tool_use_id"]
+                    .as_str()
+                    .is_some_and(|id| !calls.contains(&id))
+        }
+        _ => false,
+    })
 }
 
 /// A user message that answers tool calls and says nothing else.
@@ -865,9 +902,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text {
-                    text: "running".into(),
-                },
+                ContentBlock::text("running"),
                 ContentBlock::ToolUse {
                     id: id.into(),
                     name: "bash".into(),
@@ -1411,10 +1446,8 @@ mod tests {
             [Message {
                 role: Role::User,
                 content: vec![
-                    ContentBlock::Text {
-                        text: format!("{SUMMARY_HEADER}did 0 to 5"),
-                    },
-                    ContentBlock::Text { text: "go".into() },
+                    ContentBlock::text(format!("{SUMMARY_HEADER}did 0 to 5")),
+                    ContentBlock::text("go"),
                 ],
             }]
         );
@@ -1468,7 +1501,7 @@ mod tests {
     fn assistant(text: &str) -> Message {
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
         }
     }
 
@@ -1493,9 +1526,7 @@ mod tests {
         // Results that carry typed input too (a failed turn) are no round
         // boundary.
         let mut with_input = tool_results("toolu_1", "out", false);
-        with_input.content.push(ContentBlock::Text {
-            text: "and now?".into(),
-        });
+        with_input.content.push(ContentBlock::text("and now?"));
         let transcript = transcript_of(vec![
             Message::user_text("first"),
             tool_call("toolu_1"),
@@ -1506,6 +1537,52 @@ mod tests {
             tool_results("toolu_3", "out", false),
         ]);
         assert_eq!(transcript.compact_point(false), Some(5));
+    }
+
+    #[test]
+    fn a_cut_never_keeps_a_search_result_without_its_call() {
+        // Web search called next to bash: the search runs on the request
+        // after the bash result, so its result comes in the next reply.
+        let mut transcript = tool_rounds(4);
+        let mut mixed = tool_call("toolu_4");
+        mixed.content.insert(
+            1,
+            ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_1",
+                "name": "web_search", "input": {"query": "q"}})),
+        );
+        let mut answered = tool_call("toolu_5");
+        answered.content.insert(
+            0,
+            ContentBlock::Other(json!({"type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_1", "content": []})),
+        );
+        for message in [
+            mixed,
+            tool_results("toolu_4", "out", false),
+            answered,
+            tool_results("toolu_5", "out", false),
+            tool_call("toolu_6"),
+            tool_results("toolu_6", "out", false),
+        ] {
+            transcript.apply(Entry::Message(message));
+        }
+        // Rounds start at 3, 5, 7, 9, 11, 13; 11 holds the result of the
+        // call in 9, so the cut goes back to 9.
+        let keep_from = transcript.compact_point(false).unwrap();
+        assert_eq!(keep_from, 9);
+        transcript.apply(Entry::Compact {
+            summary: "s".into(),
+            keep_from,
+            keep_thinking: false,
+        });
+        assert!(!orphans_server_tool_result(&transcript.messages));
+        let kinds: Vec<_> = transcript
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(ContentBlock::other_type)
+            .collect();
+        assert_eq!(kinds, ["server_tool_use", "web_search_tool_result"]);
     }
 
     #[test]
@@ -1523,10 +1600,8 @@ mod tests {
         let head = Message {
             role: Role::User,
             content: vec![
-                ContentBlock::Text {
-                    text: format!("{SUMMARY_HEADER}did 0 to 1"),
-                },
-                ContentBlock::Text { text: "go".into() },
+                ContentBlock::text(format!("{SUMMARY_HEADER}did 0 to 1")),
+                ContentBlock::text("go"),
             ],
         };
         assert_eq!(transcript.messages[0], head);
@@ -1557,10 +1632,8 @@ mod tests {
         assert_eq!(
             transcript.messages[0].content,
             [
-                ContentBlock::Text {
-                    text: format!("{SUMMARY_HEADER}did 0 to 3"),
-                },
-                ContentBlock::Text { text: "go".into() },
+                ContentBlock::text(format!("{SUMMARY_HEADER}did 0 to 3")),
+                ContentBlock::text("go"),
             ]
         );
         assert_eq!(transcript.messages[1], tool_call("toolu_4"));
@@ -1588,9 +1661,7 @@ mod tests {
         // Input typed after a failed turn joins the tool results; that
         // message cannot lead the tail, since its calls are before it.
         let mut with_results = tool_results("toolu_1", "out", false);
-        with_results.content.push(ContentBlock::Text {
-            text: "and now?".into(),
-        });
+        with_results.content.push(ContentBlock::text("and now?"));
         let transcript = transcript_of(vec![
             Message::user_text("first"),
             tool_call("toolu_1"),
@@ -1612,9 +1683,7 @@ mod tests {
         // A message with tool results never leads, even after one without
         // calls.
         let mut orphan = tool_results("toolu_7", "out", false);
-        orphan
-            .content
-            .push(ContentBlock::Text { text: "hi".into() });
+        orphan.content.push(ContentBlock::text("hi"));
         let odd = transcript_of(vec![Message::user_text("first"), assistant("hm"), orphan]);
         assert_eq!(odd.compact_point(false), None);
     }
@@ -1649,12 +1718,8 @@ mod tests {
         assert_eq!(
             transcript.messages[0].content,
             [
-                ContentBlock::Text {
-                    text: "[Summary of the earlier conversation]\ndid things".into()
-                },
-                ContentBlock::Text {
-                    text: "second".into()
-                },
+                ContentBlock::text("[Summary of the earlier conversation]\ndid things"),
+                ContentBlock::text("second"),
             ]
         );
         assert_eq!(transcript.messages[1..], tail[1..]);
@@ -1681,6 +1746,38 @@ mod tests {
             serde_json::to_value(Entry::SummaryUsage(usage)).unwrap()["type"],
             "summary_usage"
         );
+    }
+
+    #[test]
+    fn a_call_that_searched_the_web_counts_but_does_not_size_the_context() {
+        let mut transcript = Transcript::default();
+        let plain = |input_tokens| Usage {
+            input_tokens,
+            ..Default::default()
+        };
+        transcript.apply(Entry::Usage(plain(100)));
+        let searched = Usage {
+            input_tokens: 40,
+            // Read again by every step of the API's search loop.
+            cache_read_input_tokens: 270_000,
+            server_tool_use: crate::message::ServerToolUsage {
+                web_search_requests: 3,
+            },
+            ..Default::default()
+        };
+        transcript.apply(Entry::Usage(searched));
+        assert_eq!(transcript.context_tokens, 100);
+        assert_eq!(transcript.usage.cache_read_input_tokens, 270_000);
+        assert_eq!(transcript.usage.web_searches(), 3);
+        // Journaled and read back, the count stays.
+        let line = serde_json::to_value(Entry::Usage(searched)).unwrap();
+        assert_eq!(line["server_tool_use"], json!({"web_search_requests": 3}));
+        assert_eq!(
+            serde_json::from_value::<Entry>(line).unwrap(),
+            Entry::Usage(searched)
+        );
+        transcript.apply(Entry::Usage(plain(300)));
+        assert_eq!(transcript.context_tokens, 300);
     }
 
     #[test]
@@ -1811,7 +1908,7 @@ mod tests {
         assert!(transcript.interrupted_results().is_none());
         transcript.apply(Entry::Message(Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text { text: "yo".into() }],
+            content: vec![ContentBlock::text("yo")],
         }));
         assert!(transcript.interrupted_results().is_none());
     }

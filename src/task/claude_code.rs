@@ -1105,6 +1105,7 @@ fn result_usage(event: &Value) -> Option<Usage> {
                 output_tokens: count("outputTokens"),
                 cache_creation_input_tokens: count("cacheCreationInputTokens"),
                 cache_read_input_tokens: count("cacheReadInputTokens"),
+                ..Default::default()
             });
         }
         return Some(total);
@@ -1518,7 +1519,8 @@ mod tests {
                 input_tokens: 70,
                 output_tokens: 15,
                 cache_creation_input_tokens: 2,
-                cache_read_input_tokens: 100
+                cache_read_input_tokens: 100,
+                ..Default::default()
             }
         );
         assert_eq!(outcome.turns, Some(2));

@@ -28,15 +28,11 @@ async fn sends_headers_and_body() {
             max_tokens: 64,
             cache: true,
             thinking: false,
+            web_search: false,
         })
         .await
         .unwrap();
-    assert_eq!(
-        response.content,
-        vec![ContentBlock::Text {
-            text: "hello".into()
-        }]
-    );
+    assert_eq!(response.content, vec![ContentBlock::text("hello")]);
 
     let requests = server.await.unwrap();
     let head = requests[0].to_lowercase();
@@ -67,13 +63,11 @@ async fn retries_when_overloaded() {
             max_tokens: 64,
             cache: true,
             thinking: false,
+            web_search: false,
         })
         .await
         .unwrap();
-    assert_eq!(
-        response.content,
-        vec![ContentBlock::Text { text: "ok".into() }]
-    );
+    assert_eq!(response.content, vec![ContentBlock::text("ok")]);
     assert_eq!(server.await.unwrap().len(), 2);
 }
 
@@ -90,6 +84,7 @@ async fn does_not_retry_auth_errors() {
             max_tokens: 64,
             cache: true,
             thinking: false,
+            web_search: false,
         })
         .await
         .unwrap_err();
@@ -108,6 +103,7 @@ async fn complete_hi(url: String) -> Result<CompletionResponse, ProviderError> {
             max_tokens: 64,
             cache: true,
             thinking: false,
+            web_search: false,
         })
         .await
 }
@@ -148,10 +144,7 @@ async fn context_overflow_is_typed_and_not_retried() {
 async fn retries_a_connection_closed_before_the_response() {
     let (url, server) = fake_api(vec![(0, Value::Null), (200, text_reply("ok"))]).await;
     let response = complete_hi(url).await.unwrap();
-    assert_eq!(
-        response.content,
-        vec![ContentBlock::Text { text: "ok".into() }]
-    );
+    assert_eq!(response.content, vec![ContentBlock::text("ok")]);
     assert_eq!(server.await.unwrap().len(), 2);
 }
 

@@ -381,6 +381,7 @@ mod tests {
                 output_tokens: 200,
                 cache_creation_input_tokens: 30,
                 cache_read_input_tokens: 400,
+                ..Default::default()
             },
             ..State::default()
         }

@@ -47,7 +47,7 @@ task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
 task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 ```
 
-그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
+그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열). 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
 파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 다만 모델이 bash로 이 파일을 직접 읽는 것은 막지 않는다(`~/.ssh`처럼 같은 사용자의 파일. 아래 실행 전 승인과 명령 정책 참고).
 
@@ -140,6 +140,19 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - 응답이 사고 중에 출력 한도(`max_tokens`)에 걸려 thinking 블록만 남으면 그 응답은 기록하지 않고, `JUNEES_MAX_TOKENS`를 올리거나 `JUNEES_THINKING_BUDGET`을 낮추라는 경고를 띄운다(기록은 입력으로 끝나 다음 입력이 거기에 붙는다). 한도에 걸리지 않았는데 thinking만 온 응답도 기록하지 않고, 모델이 생각만 하고 답하지 않았다는 경고를 띄운다.
 - `type: "enabled"` 방식은 Claude 4.6 모델(기본 `claude-sonnet-4-6`)에서는 동작하지만 폐기 예정이고, 4.7 이후 모델은 400으로 거절한다. 그런 모델에서는 켜지 않는다. 켜면 오류 메시지 끝에 `JUNEES_THINKING_BUDGET`을 0으로 하라는 안내가 붙는다(adaptive thinking은 아직 지원하지 않음. Claude 5 모델은 설정 없이도 adaptive로 생각한다).
 
+### 웹 검색
+
+`JUNEES_WEB_SEARCH=on`이면 모델이 Anthropic의 서버 도구 `web_search`로 웹을 검색할 수 있다(대화 모드, `-p`, `task` 세션, `api` 백엔드). 검색은 API가 실행하고 Junees는 실행하지 않는다. 기본은 꺼짐이다. 검색은 토큰과 별도로 1000회당 10달러가 청구되고, 검색 결과도 입력 토큰으로 계속 쌓이며, 조직 관리자가 Console에서 웹 검색을 꺼 두었으면 요청 전체가 400으로 거절되기 때문이다.
+
+- 요청: 도구 목록 끝(Junees 도구 다음)에 `{"type": "web_search_20250305", "name": "web_search", "max_uses": N}`을 넣고, 시스템 프롬프트 뒤에 "최신 정보가 필요하면 web_search로 찾고 출처를 밝히라"는 한 줄을 덧붙인다. 압축 요약 호출에는 넣지 않는다. 기본 버전을 쓰는 이유: `web_search_20260209` 이후 버전은 기본으로 코드 실행으로 결과를 거르므로(dynamic filtering) `pause_turn` 때 컨테이너 id를 돌려보내야 하고 블록 종류가 늘며, ZDR 대상이 아니고 일부 플랫폼에 없다. `allowed_callers: ["direct"]`로 쓰면 기본 버전과 같은 검색이다.
+- `max_uses`(`JUNEES_WEB_SEARCH_MAX_USES`, 기본 5)는 한 턴의 검색 횟수 상한이다. 넘으면 API가 `max_uses_exceeded` 오류 결과를 주고 모델이 처리한다. `JUNEES_WEB_SEARCH_ALLOWED_DOMAINS` 또는 `JUNEES_WEB_SEARCH_BLOCKED_DOMAINS`(쉼표 구분, 둘 다는 안 됨)로 도메인을 제한한다. `https://` 같은 스킴, ASCII가 아닌 글자(비슷한 모양의 키릴 문자 등), 도메인 부분의 `*`는 시작할 때 오류다(경로의 `*`는 된다: `example.com/blog/*`).
+- 응답의 `server_tool_use`, `web_search_tool_result`(암호화된 `encrypted_content` 포함)는 원본 그대로 기록과 세션 파일에 남기고 다음 요청에 그대로 보낸다(문서상 빠지거나 바뀌면 400). 클라이언트 도구로 실행하지 않고, 검색 결과의 오류 코드(`max_uses_exceeded`, `too_many_requests` 등)도 모델이 처리하도록 그대로 둔다. 텍스트 블록의 `citations`도 원본 그대로 보존해 다시 보낸다(`encrypted_index`를 돌려보내야 한다).
+- `stop_reason: "pause_turn"`(API의 서버 쪽 도구 반복이 한도에 걸려 턴을 멈춤)이면 그 응답을 기록하고, 사용자 메시지를 넣지 않고 같은 대화로 다시 요청해 이어 가게 한다. 연속 5번(`MAX_PAUSES`)까지이고, 넘으면 경고를 띄우고 멈춘다. 다음 입력은 멈춘 응답 뒤에 새 user 메시지로 붙는다. 이어 가는 요청도 `JUNEES_MAX_TURNS`에 센다.
+- 출력: 검색은 stderr에 `-> web_search {"query": ...} (run by the API)`로 응답이 오는 대로 나온다. 답이 끝나면 인용된 URL을 중복 없이 처음 나온 순서로 stdout에 `Sources:` 목록으로 찍는다(10개까지, 나머지는 개수). 출처도 답의 일부로 보므로 `-p` 결과를 파일이나 파이프로 받으면 이 목록이 답 뒤에 붙는다.
+- 사용량: `usage.server_tool_use.web_search_requests`를 세션마다 더해 `/usage`에 `web searches N`으로, `task run`의 실행 로그(run.log) 정지 줄에 `web searches N`으로 보여 준다. 토큰 예산(`--max-tokens`)에는 들어가지 않는다.
+- 컨텍스트: 검색한 호출의 사용량은 컨텍스트 크기로 쓰지 않는다. 그 호출의 캐시 읽기에는 API의 검색 반복 단계마다 읽은 양이 모두 들어 있어 실제보다 훨씬 커서, 압축이 너무 일찍 일어난다(context editing 문서의 서버 도구 주의). 검색하지 않은 다음 호출이 다시 잰다. 도구 결과 비우기는 검색 결과 블록을 건드리지 않는다. `encrypted_content`는 바꾸면 400이고, Junees가 대신 넣을 수 있는 유효한 자리표시가 없으며, 블록 짝을 지우면 뒤 텍스트의 인용이 가리킬 곳이 사라진다. 검색 결과는 압축 때 요약으로 정리된다(요약 텍스트에는 검색어와 앞 5개 결과의 제목/URL만 넣는다). 검색을 클라이언트 도구와 같은 응답에서 부르면 검색은 그 도구 결과를 보낸 다음 요청에서 실행되어 결과 블록이 다음 응답에 오는데, 턴 안 압축은 이 둘 사이를 자르지 않는다(검색 호출 없이 결과만 남지 않도록).
+- 조직에서 웹 검색이 꺼져 있다는 400이 오면 오류 끝에 `JUNEES_WEB_SEARCH=off`로 하거나 관리자에게 켜 달라는 안내가 붙는다.
+
 ### 구독 모드 (claude-code 백엔드)
 
 `task init`과 `task run`(그리고 둘을 합친 `junees task "목표"`, 대화의 `/task`)의 세션을 Junees 자신의 에이전트 대신 공식 Claude Code CLI(`claude`)가 실행하게 할 수 있다. Claude Pro/Max 구독으로 Junees를 쓰는 방법이다. 설정 마법사에서 `1) Claude subscription`을 고르면 설정 파일에 `backend = "claude-code"`가 들어간다. 한 번만 쓰려면 `--backend claude-code`, 환경 변수는 `JUNEES_BACKEND=claude-code`, 대화 안에서는 `/backend claude-code`(기본은 `api`). 이때는 `ANTHROPIC_API_KEY`가 필요 없고 읽지도 않는다. 대화 모드는 아직 구독으로 돌지 않는다(API 키 필요).
@@ -178,10 +191,10 @@ junees task --backend claude-code --max-time 2h   # 설정과 상관없이 이�
 
 긴 작업에서도 대화가 모델의 컨텍스트 창을 넘지 않게 하고, 반복되는 앞부분은 캐시한다.
 
-- 프롬프트 캐싱: 매 요청에서 도구 목록의 마지막 도구, 시스템 프롬프트, 마지막 메시지의 마지막 일반 블록(텍스트, 도구 호출, 도구 결과)에 `cache_control: ephemeral`을 붙인다. thinking 블록에는 붙일 수 없어서, 그런 블록은 건너뛰고 그 앞의 일반 블록에 붙인다. 한 번만 보내는 요약 호출에는 붙이지 않는다(캐시 쓰기는 일반 입력보다 비싸다). 응답의 캐시 쓰기/읽기 토큰은 `/usage`에 따로 나온다.
-- 컨텍스트 크기: 마지막 응답의 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`. 세션 기록의 `usage` 항목에서 복원되므로 이어 가도 유지된다. 한도는 `JUNEES_CONTEXT_WINDOW` x `JUNEES_COMPACT_THRESHOLD`(기본 200000 x 0.8 = 160000).
+- 프롬프트 캐싱: 매 요청에서 도구 목록의 마지막 도구(웹 검색이 켜졌으면 `web_search`), 시스템 프롬프트의 마지막 블록, 마지막 메시지의 마지막 일반 블록(텍스트, 도구 호출, 도구 결과)에 `cache_control: ephemeral`을 붙인다. thinking 블록에는 붙일 수 없어서, 그런 블록은 건너뛰고 그 앞의 일반 블록에 붙인다. 한 번만 보내는 요약 호출에는 붙이지 않는다(캐시 쓰기는 일반 입력보다 비싸다). 응답의 캐시 쓰기/읽기 토큰은 `/usage`에 따로 나온다.
+- 컨텍스트 크기: 마지막 응답의 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`(웹 검색을 한 응답은 제외, 위 웹 검색 참고). 세션 기록의 `usage` 항목에서 복원되므로 이어 가도 유지된다. 한도는 `JUNEES_CONTEXT_WINDOW` x `JUNEES_COMPACT_THRESHOLD`(기본 200000 x 0.8 = 160000).
 - 1차 대응(오래된 도구 결과 비우기): 모델 호출 직전에 크기가 한도 이상이면, 도구 결과가 든 메시지 중 최근 3개를 뺀 이전 것들의 출력을 `[tool output cleared to save context]`로 바꾼다. `tool_use_id`와 `is_error`는 그대로라 호출/결과 짝이 유지된다. 기록 항목은 `clear_tool_results { upto }`(수동 thinking 모드면 `keep_thinking: true`, 위 확장 사고 참고).
-- 2차 대응(압축): 비울 것이 없거나, 비운 뒤 다음 응답에서도 한도 이상이면 앞부분을 같은 모델로 요약한다. 꼬리는 최근 두 사용자 입력(안 되면 마지막 입력)부터 끝까지이고, 도구 결과가 든 메시지나 도구 호출 바로 뒤에서는 자르지 않는다. 입력이 첫 메시지 하나뿐인 긴 턴(`-p` 한 번으로 끝까지 가는 작업 등)은 그 턴 안에서 자른다: 도구 결과만 든 user 메시지 바로 다음 assistant 메시지(앞의 호출이 모두 결과를 받은 지점)에서, 최근 도구 왕복 두 번(안 되면 한 번)을 남긴다. 이때는 요약과 그 턴의 원래 입력(원문 그대로)을 담은 user 메시지를 꼬리 앞에 새로 넣는다. 사용자 입력에서 자를 수 있으면 그쪽을 먼저 쓴다. 요약 호출은 도구 없이, 사고(thinking) 없이, 요약 전용 시스템 프롬프트로, 앞부분을 텍스트로 옮긴 user 메시지 하나를 보낸다(`max_tokens` 4096). 텍스트로 옮길 때 thinking 블록은 빼고, 다른 원본 블록은 `[assistant: server_tool_use block]`처럼 종류만 적는다. 요약은 꼬리 첫 user 메시지 맨 앞에 `[Summary of the earlier conversation]` 블록으로 들어가 역할 교대가 유지된다. 기록 항목은 `compact { summary, keep_from }`이고, 요약 호출의 사용량은 `summary_usage`로 남아 `/usage`에는 더해지지만 컨텍스트 크기에는 쓰이지 않는다. 압축하면 `(compacted the conversation: N messages -> M)` 한 줄이 나온다.
+- 2차 대응(압축): 비울 것이 없거나, 비운 뒤 다음 응답에서도 한도 이상이면 앞부분을 같은 모델로 요약한다. 꼬리는 최근 두 사용자 입력(안 되면 마지막 입력)부터 끝까지이고, 도구 결과가 든 메시지나 도구 호출 바로 뒤에서는 자르지 않는다. 입력이 첫 메시지 하나뿐인 긴 턴(`-p` 한 번으로 끝까지 가는 작업 등)은 그 턴 안에서 자른다: 도구 결과만 든 user 메시지 바로 다음 assistant 메시지(앞의 호출이 모두 결과를 받은 지점)에서, 최근 도구 왕복 두 번(안 되면 한 번)을 남긴다. 이때는 요약과 그 턴의 원래 입력(원문 그대로)을 담은 user 메시지를 꼬리 앞에 새로 넣는다. 사용자 입력에서 자를 수 있으면 그쪽을 먼저 쓴다. 요약 호출은 도구 없이, 사고(thinking) 없이, 요약 전용 시스템 프롬프트로, 앞부분을 텍스트로 옮긴 user 메시지 하나를 보낸다(`max_tokens` 4096). 텍스트로 옮길 때 thinking 블록은 빼고, 웹 검색은 `[assistant: web search: <검색어>]`, 검색 결과는 앞 5개의 제목과 URL(`[assistant: web search results: 제목 (URL); ...; 15 more]`, 내용은 넣지 않음), 다른 원본 블록은 `[assistant: code_execution_tool_result block]`처럼 종류만 적는다. 요약은 꼬리 첫 user 메시지 맨 앞에 `[Summary of the earlier conversation]` 블록으로 들어가 역할 교대가 유지된다. 기록 항목은 `compact { summary, keep_from }`이고, 요약 호출의 사용량은 `summary_usage`로 남아 `/usage`에는 더해지지만 컨텍스트 크기에는 쓰이지 않는다. 압축하면 `(compacted the conversation: N messages -> M)` 한 줄이 나온다.
 - 요약 호출이 실패하거나, 빈 요약이 오거나, 요약이 출력 한도(`max_tokens`)에 걸려 잘리면 경고만 띄우고 기록은 그대로 둔다(요약 호출 사용량은 더한다).
 - `/compact`는 한도와 상관없이 지금 압축한다.
 - API가 컨텍스트 초과(400 "prompt is too long")로 거절하면, 크기 추적과 상관없이 비우기와 압축을 하고, 이어서 최근 3개를 포함한 모든 도구 결과도 비운다(한 응답의 병렬 `read_file` 결과처럼 최근 결과가 원인일 수 있어서). 줄어든 게 있으면 한 번만 다시 보내고, 그래도 실패하면 오류로 끝난다.
@@ -208,6 +221,10 @@ junees task --backend claude-code --max-time 2h   # 설정과 상관없이 이�
 | `JUNEES_TASK_MAX_TOKENS` | (없음) | `task run --max-tokens`의 기본값 (작업 전체 누적 토큰) |
 | `JUNEES_TASK_MAX_TIME` | (없음) | `task run --max-time`의 기본값 (이번 실행 시간, 예: `2h`, `1h30m`) |
 | `JUNEES_STREAM` | `1` | `0`이면 스트리밍을 끄고 응답을 한 번에 받아 찍는다 |
+| `JUNEES_WEB_SEARCH` | `0` | `on`/`1`이면 API의 웹 검색 도구를 켠다 (별도 과금, 위 "웹 검색") |
+| `JUNEES_WEB_SEARCH_MAX_USES` | `5` | 한 턴의 웹 검색 횟수 상한 (`max_uses`) |
+| `JUNEES_WEB_SEARCH_ALLOWED_DOMAINS` | (없음) | 이 도메인에서만 검색, 쉼표 구분 (예: `docs.rs,example.com/blog`) |
+| `JUNEES_WEB_SEARCH_BLOCKED_DOMAINS` | (없음) | 이 도메인은 검색하지 않음, 쉼표 구분. `ALLOWED`와 함께 쓸 수 없다 |
 
 기본 도구는 `bash`, `read_file`, `write_file`, `edit_file` 네 가지다(`task` 작업 세션도 같은 네 가지에 `mark_feature_passing`을 더해 쓴다). 대화 모드는 위험할 수 있는 호출을 실행하기 전에 묻는다(아래 "실행 전 승인"). `-p`와 `task` 모드는 묻지 않고 명령 정책만 적용하므로 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다. 리눅스에서는 junees가 시작할 때 자기 프로세스를 dump 불가(`PR_SET_DUMPABLE` 0)로 만들어, 같은 사용자의 프로세스도 `/proc/<junees pid>/environ`과 `mem`을 읽지 못한다. 그래서 `bash`가 `/proc/$PPID/environ`처럼 부모를 거슬러 올라가도 이 변수들을 읽을 수 없다. 자식 프로세스는 exec할 때 다시 보통 프로세스가 되므로 도구 동작은 그대로이고, junees 자신의 코어 덤프만 남지 않는다.
 
@@ -286,7 +303,7 @@ junees task --backend claude-code --max-time 2h   # 설정과 상관없이 이�
 ```
 src/
   main.rs            CLI 진입점 (처음 실행 설정과 junees setup, 대화 모드와 슬래시 명령, -p 실행, task 명령(계획 + 실행), 세션 열기/이어 가기, SIGINT/SIGTERM 처리)
-  agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인, 도구 호출 전 승인 훅 ToolGate, 스트리밍 이벤트 전달)
+  agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인, 도구 호출 전 승인 훅 ToolGate, 스트리밍 이벤트 전달, pause_turn 이어 가기와 인용 출처 보고)
   approval.rs        실행 전 승인 (JUNEES_APPROVAL, 묻는 범위 판단, 터미널 질문, 세션 동안 항상 허용, 프롬프트와 공유하는 표준 입력)
   cancel.rs          취소 플래그 (시그널 처리기와 에이전트 루프가 공유)
   session.rs         세션 기록(JSONL) 쓰기, 재생, 이어 가기, 세션 찾기/목록, 비우기/압축 지점 계산
@@ -303,7 +320,8 @@ src/
     status.rs          task status (읽기 전용, 텍스트/JSON)
     prompt.rs          초기화/작업 세션 프롬프트
     git.rs             저장소 확인, 커밋, 로그
-  message.rs         대화 메시지 타입 (Messages API 형식, 모르는 블록은 원본 JSON 그대로)
+  message.rs         대화 메시지 타입 (Messages API 형식, 모르는 블록은 원본 JSON 그대로, 텍스트의 citations 보존, 서버 도구 사용량)
+  web_search.rs      웹 검색 서버 도구 설정과 도구 정의, 인용 출처 목록, 압축용 검색 블록 요약
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
@@ -328,6 +346,7 @@ tests/
   approval.rs          실제 바이너리로 파이프 입력 대화 모드의 위험 명령 거절과 안내, JUNEES_APPROVAL=off, -p에서는 묻지 않음, 가상 터미널에서 스트리밍 텍스트와 승인 질문이 섞이지 않는지 검증
   task_git_secret.rs   하네스 git이 심어진 훅을 실행하지 않고 git이 실행하는 필터에도 API 키를 넘기지 않는지 검증
   streaming.rs         조각내 보내는 가짜 SSE 서버로 조립 결과가 일반 응답과 같은지, 오류 이벤트/끊김/대기 초과 재시도, 취소 시 연결 종료, 바이너리가 텍스트를 한 번만 찍는지(stdout이 파이프일 때 재시도로 끊긴 조각을 버리는지) 검증
+  web_search.rs        가짜 API 서버(JSON, SSE)로 웹 검색 도구 정의, pause_turn 이어 가기(멈춘 응답을 그대로, 뒤에 user 메시지 없이), 검색 블록과 citations 재전송, 클라이언트 도구 미실행, 바이너리의 출처 목록과 조직 비활성 안내 검증
   claude_code.rs       실제 바이너리와 가짜 claude로 API 키 없이 task init/run, claude 환경에 API 변수 없음, 로그인 실패 안내와 알림, SIGTERM 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend, /task, /status, /sessions 고르기, /model, /new 검증
 ```
@@ -336,7 +355,7 @@ tests/
 
 1. 에이전트 루프: Anthropic Messages API, 도구 호출 반복, 기본 도구(bash, 파일 읽기/쓰기), CLI (완료)
 2. 장기 실행 하네스: 세션 기록과 재개, 컨텍스트 압축, 여러 세션에 걸친 장기 작업 모드, 무인 실행 안정성. 자세한 계획과 진행 상황은 [docs/long-running.md](docs/long-running.md)
-3. 도구 체계: 스트리밍 출력, 위험 명령 승인, 파일 패치, 웹 검색
+3. 도구 체계: 스트리밍 출력, 위험 명령 승인, 파일 패치(edit_file), 웹 검색, 확장 사고 블록 보존 (완료)
 4. 메모리와 스킬: 세션을 넘어 남는 기억, 절차 문서화와 재사용
 5. 게이트웨이: 디스코드 봇
 6. 확장: 서브에이전트, 예약 작업, 플러그인, MCP 클라이언트

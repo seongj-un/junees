@@ -364,6 +364,7 @@ mod tests {
                 output_tokens: 340,
                 cache_creation_input_tokens: 50,
                 cache_read_input_tokens: 900,
+                ..Default::default()
             },
             goal: Some("웹 서버를 만들어".into()),
             ..State::default()
