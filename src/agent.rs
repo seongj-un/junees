@@ -51,6 +51,9 @@ pub struct Agent {
     transcript: Transcript,
     /// Where history changes are recorded. `None` records nothing.
     journal: Option<Box<dyn Journal>>,
+    /// Old tool output was cleared before the last model call, so the
+    /// context size measured since tells whether that was enough.
+    cleared: bool,
 }
 
 impl Agent {
@@ -71,6 +74,7 @@ impl Agent {
             options,
             transcript,
             journal: None,
+            cleared: false,
         }
     }
 
@@ -103,6 +107,7 @@ impl Agent {
     pub fn reset(&mut self, journal: Option<Box<dyn Journal>>) {
         self.transcript = Transcript::default();
         self.journal = journal;
+        self.cleared = false;
     }
 
     /// Handles one user input and returns the model's final text.
@@ -119,6 +124,7 @@ impl Agent {
         let specs = self.tools.specs();
 
         for _ in 0..self.options.max_turns {
+            self.manage_context(&mut on_event);
             let response = self
                 .provider
                 .complete(CompletionRequest {
@@ -221,6 +227,32 @@ impl Agent {
         )
     }
 
+    /// Keeps the conversation under the compaction threshold: once the
+    /// context size reaches it, old tool output is cleared first.
+    fn manage_context(&mut self, on_event: &mut impl FnMut(Event<'_>)) {
+        if self.transcript.context_tokens < self.options.compact_limit() {
+            self.cleared = false;
+            return;
+        }
+        if !self.cleared && self.clear_tool_results(on_event) {
+            self.cleared = true;
+            return;
+        }
+        self.cleared = false;
+    }
+
+    /// Clears the output of all but the latest tool results. Returns
+    /// whether there was anything to clear.
+    fn clear_tool_results(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
+        match self.transcript.clear_entry() {
+            Some(entry) => {
+                self.record(entry, on_event);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Applies a history change and records it in the journal. If the
     /// journal cannot be written, the turn goes on without it: one warning,
     /// and nothing more is recorded, so the file stays a clean prefix of the
@@ -250,7 +282,7 @@ mod tests {
 
     use super::*;
     use crate::provider::{CompletionResponse, ProviderError};
-    use crate::session::{Session, SessionWriter};
+    use crate::session::{self, Session, SessionWriter};
 
     type Reply = std::result::Result<CompletionResponse, ProviderError>;
     use crate::tools::Tool;
@@ -759,5 +791,158 @@ mod tests {
         let entries = new.0.lock().unwrap().clone();
         assert_eq!(entries[0], Entry::Message(Message::user_text("two")));
         assert_eq!(replay(entries).messages, agent.messages());
+    }
+
+    /// The reply with its usage set so the context size reads `tokens`.
+    fn sized(reply: Reply, tokens: u64) -> Reply {
+        reply.map(|mut r| {
+            r.usage = Usage {
+                input_tokens: tokens - 1,
+                output_tokens: 1,
+                ..Default::default()
+            };
+            r
+        })
+    }
+
+    /// `n` calls of the `upper` tool, toolu_1..=toolu_n; the first is an
+    /// unknown tool, so its result is an error.
+    fn tool_rounds(n: usize, tokens: u64) -> Vec<Reply> {
+        (1..=n)
+            .map(|i| {
+                let name = if i == 1 { "missing" } else { "upper" };
+                let text = format!("t{i}");
+                sized(
+                    tool_use(&format!("toolu_{i}"), name, json!({ "text": text })),
+                    tokens,
+                )
+            })
+            .collect()
+    }
+
+    fn tool_output(message: &Message) -> Vec<(&str, &str, bool)> {
+        message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => Some((tool_use_id.as_str(), content.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Roles alternate starting with the user, and every tool call is
+    /// answered in the next message by a result with its id (and only then).
+    fn assert_valid(messages: &[Message]) {
+        for (i, message) in messages.iter().enumerate() {
+            let expected = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            assert_eq!(message.role, expected, "message {i}: {messages:#?}");
+            let calls: Vec<&str> = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let answered: Vec<&str> = messages
+                .get(i + 1)
+                .map(|next| tool_output(next).into_iter().map(|(id, _, _)| id).collect())
+                .unwrap_or_default();
+            assert_eq!(calls, answered, "message {i}: {messages:#?}");
+            if i == 0 {
+                assert!(tool_output(message).is_empty(), "{messages:#?}");
+            }
+        }
+    }
+
+    fn entries_of(journal: &Memory) -> Vec<Entry> {
+        journal.0.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn nothing_changes_below_the_threshold() {
+        // The limit is 800 of 1000 tokens.
+        let mut script = tool_rounds(5, 799);
+        script.push(sized(text("done"), 799));
+        let provider = Scripted::new(script);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        agent.run("go", |_| {}).await.unwrap();
+
+        assert_eq!(agent.context_tokens(), 799);
+        let history = agent.messages();
+        assert_eq!(history.len(), 12);
+        assert_eq!(tool_output(&history[4]), [("toolu_2", "T2", false)]);
+        // Each call saw the history exactly as it was built.
+        for (i, sent) in seen.lock().unwrap().iter().enumerate() {
+            assert_eq!(sent[..], history[..2 * i + 1]);
+        }
+        assert!(
+            entries_of(&journal)
+                .iter()
+                .all(|entry| matches!(entry, Entry::Message(_) | Entry::Usage(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn clears_all_but_the_last_three_tool_results_over_the_threshold() {
+        let mut script = tool_rounds(6, 900);
+        script.push(sized(text("done"), 900));
+        let provider = Scripted::new(script);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        agent.run("go", |_| {}).await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        // Before the fifth call: results at 2, 4, 6, 8; the first is cleared,
+        // keeping its id and error flag.
+        assert_eq!(
+            tool_output(&seen[4][2]),
+            [("toolu_1", session::CLEARED, true)]
+        );
+        assert_eq!(tool_output(&seen[4][4]), [("toolu_2", "T2", false)]);
+        assert_eq!(tool_output(&seen[3][2])[0].1, "unknown tool `missing`");
+        // The sixth call measured whether that was enough; before the
+        // seventh, the two results added since are past the last three.
+        assert_eq!(seen[5][4], seen[4][4]);
+        assert_eq!(
+            tool_output(&seen[6][4]),
+            [("toolu_2", session::CLEARED, false)]
+        );
+        assert_eq!(
+            tool_output(&seen[6][6]),
+            [("toolu_3", session::CLEARED, false)]
+        );
+        for (i, id) in [(8, "toolu_4"), (10, "toolu_5"), (12, "toolu_6")] {
+            let output = tool_output(&seen[6][i]);
+            assert_eq!(output[0].0, id);
+            assert_ne!(output[0].1, session::CLEARED);
+        }
+
+        let entries = entries_of(&journal);
+        let clears: Vec<&Entry> = entries
+            .iter()
+            .filter(|entry| matches!(entry, Entry::ClearToolResults { .. }))
+            .collect();
+        assert_eq!(
+            clears,
+            [
+                &Entry::ClearToolResults { upto: 4 },
+                &Entry::ClearToolResults { upto: 8 }
+            ]
+        );
+        assert_valid(agent.messages());
+        assert_eq!(replay(entries), agent.transcript);
     }
 }

@@ -21,11 +21,18 @@ use serde::{Deserialize, Serialize};
 use crate::message::{ContentBlock, Message, Role, Usage};
 
 /// The journal format this version writes and the newest it can read.
-/// Raise it when old binaries could misread new journals.
-pub const FORMAT: u32 = 1;
+/// Raise it when old binaries could misread new journals. Format 2 added
+/// `clear_tool_results` and `compact`; format 1 journals still load.
+pub const FORMAT: u32 = 2;
 
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
+
+/// What a tool result says once its output was cleared to save context.
+pub const CLEARED: &str = "[tool output cleared to save context]";
+
+/// Tool result messages whose output is never cleared: the most recent ones.
+pub const KEEP_TOOL_RESULTS: usize = 3;
 
 /// The first line of every journal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,6 +65,11 @@ pub enum Entry {
     },
     /// Token usage of one model call.
     Usage(Usage),
+    /// The output of every tool result in the messages before index `upto`
+    /// was replaced with [`CLEARED`].
+    ClearToolResults {
+        upto: usize,
+    },
 }
 
 /// An entry as a journal line stores it: stamped with when it was written.
@@ -110,7 +122,38 @@ impl Transcript {
                 self.usage.add(usage);
                 self.context_tokens = usage.context_tokens();
             }
+            Entry::ClearToolResults { upto } => {
+                for message in self.messages.iter_mut().take(upto) {
+                    for block in &mut message.content {
+                        if let ContentBlock::ToolResult { content, .. } = block {
+                            *content = CLEARED.to_string();
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// The entry that clears the output of every tool result except those
+    /// in the last [`KEEP_TOOL_RESULTS`] messages that carry tool results,
+    /// or `None` when there is nothing left to clear. The blocks stay, with
+    /// their `tool_use_id` and `is_error`, so every tool call keeps its
+    /// result.
+    pub fn clear_entry(&self) -> Option<Entry> {
+        let with_results: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| has_tool_result(message))
+            .map(|(i, _)| i)
+            .collect();
+        let upto = *with_results.iter().rev().nth(KEEP_TOOL_RESULTS - 1)?;
+        let uncleared = self.messages[..upto].iter().any(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::ToolResult { content, .. } if content != CLEARED),
+            )
+        });
+        uncleared.then_some(Entry::ClearToolResults { upto })
     }
 
     /// The entry that adds user input: it joins a trailing user message (left
@@ -149,6 +192,13 @@ impl Transcript {
             content: results,
         })
     }
+}
+
+fn has_tool_result(message: &Message) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
 /// Appends entries to a journal file, one JSON line per entry, each written
@@ -758,8 +808,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         let user = line(&Entry::Message(Message::user_text("hi")));
-        let compact = r#"{"type":"compact","summary":"so far","keep_from":0}"#;
-        write_lines(&path, &[line(&meta()), user, compact.into()], "");
+        let future = r#"{"type":"from_the_future","x":1}"#;
+        write_lines(&path, &[line(&meta()), user, future.into()], "");
         let before = fs::read(&path).unwrap();
 
         let err = Session::load(&path).unwrap_err();
@@ -771,7 +821,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 1);
+        assert_eq!(value["format"], 2);
         // Journals written before the field existed are format 1.
         let old =
             r#"{"type":"meta","id":"a","created_at":1,"cwd":"/w","model":"m","version":"0.1.0"}"#;
@@ -787,15 +837,102 @@ mod tests {
         let path = dir.path().join("s.jsonl");
         let mut newer = serde_json::to_value(meta()).unwrap();
         newer["format"] = json!(FORMAT + 1);
-        let compact = r#"{"type":"compact","summary":"so far","keep_from":0}"#;
-        write_lines(&path, &[newer.to_string(), compact.into()], "");
+        let future = r#"{"type":"from_the_future","x":1}"#;
+        write_lines(&path, &[newer.to_string(), future.into()], "");
         let before = fs::read(&path).unwrap();
 
         let err = Session::load(&path).unwrap_err().to_string();
         assert!(err.contains("written by a newer Junees"), "{err}");
-        assert!(err.contains("session format 2"), "{err}");
+        assert!(err.contains("session format 3"), "{err}");
         assert!(Session::resume(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn loads_a_format_1_session() {
+        // As L1 wrote them: format 1, no cache counts, no `ts`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let lines = [
+            r#"{"type":"meta","id":"a","format":1,"created_at":1,"cwd":"/w","model":"m","version":"0.1.0"}"#,
+            r#"{"type":"message","role":"user","content":[{"type":"text","text":"hi"}]}"#,
+            r#"{"type":"usage","input_tokens":30,"output_tokens":4}"#,
+            r#"{"type":"message","role":"assistant","content":[{"type":"text","text":"yo"}]}"#,
+        ]
+        .map(String::from);
+        write_lines(&path, &lines, "");
+        let (session, mut writer) = Session::resume(&path).unwrap();
+        assert_eq!(session.meta.format, 1);
+        assert_eq!(session.transcript.messages.len(), 2);
+        assert_eq!(session.transcript.context_tokens, 34);
+        // New entries are appended to it as they are.
+        writer.record(&Entry::ClearToolResults { upto: 0 }).unwrap();
+        drop(writer);
+        assert_eq!(Session::load(&path).unwrap().transcript, session.transcript);
+    }
+
+    fn tool_results(id: &str, output: &str, is_error: bool) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: output.into(),
+                is_error,
+            }],
+        }
+    }
+
+    /// `n` rounds of a tool call and its result after one user input.
+    fn tool_rounds(n: usize) -> Transcript {
+        let mut transcript = Transcript::default();
+        transcript.apply(Entry::Message(Message::user_text("go")));
+        for i in 0..n {
+            let id = format!("toolu_{i}");
+            transcript.apply(Entry::Message(tool_call(&id)));
+            let output = format!("output {i}");
+            transcript.apply(Entry::Message(tool_results(&id, &output, i == 0)));
+        }
+        transcript
+    }
+
+    #[test]
+    fn clearing_keeps_the_last_three_tool_results() {
+        assert_eq!(tool_rounds(3).clear_entry(), None);
+        let mut transcript = tool_rounds(5);
+        let before = transcript.clone();
+        let entry = transcript.clear_entry().unwrap();
+        // Results sit at 2, 4, 6, 8, 10; the last three start at 6.
+        assert_eq!(entry, Entry::ClearToolResults { upto: 6 });
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap(),
+            json!({"type": "clear_tool_results", "upto": 6})
+        );
+        transcript.apply(entry);
+
+        assert_eq!(transcript.messages.len(), before.messages.len());
+        assert_eq!(
+            transcript.messages[2],
+            tool_results("toolu_0", CLEARED, true)
+        );
+        assert_eq!(
+            transcript.messages[4],
+            tool_results("toolu_1", CLEARED, false)
+        );
+        assert_eq!(transcript.messages[6..], before.messages[6..]);
+        // Everything but tool output is untouched.
+        for (now, then) in transcript.messages.iter().zip(&before.messages).take(6) {
+            if !has_tool_result(then) {
+                assert_eq!(now, then);
+            }
+        }
+        // Already cleared: nothing to do until another result comes in.
+        assert_eq!(transcript.clear_entry(), None);
+        transcript.apply(Entry::Message(tool_call("toolu_5")));
+        transcript.apply(Entry::Message(tool_results("toolu_5", "more", false)));
+        assert_eq!(
+            transcript.clear_entry(),
+            Some(Entry::ClearToolResults { upto: 8 })
+        );
     }
 
     #[test]
