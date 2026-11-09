@@ -40,6 +40,16 @@ pub const KEYS: &[(&str, &str)] = &[
     ("notify_each_session", "JUNEES_NOTIFY_EACH_SESSION"),
     ("claude_bin", "JUNEES_CLAUDE_BIN"),
     ("claude_model", "JUNEES_CLAUDE_MODEL"),
+    ("web_search", "JUNEES_WEB_SEARCH"),
+    ("web_search_max_uses", "JUNEES_WEB_SEARCH_MAX_USES"),
+    (
+        "web_search_allowed_domains",
+        "JUNEES_WEB_SEARCH_ALLOWED_DOMAINS",
+    ),
+    (
+        "web_search_blocked_domains",
+        "JUNEES_WEB_SEARCH_BLOCKED_DOMAINS",
+    ),
 ];
 
 const HEADER: &str = "\
@@ -582,6 +592,27 @@ mod tests {
             Some(std::time::Duration::from_secs(7200))
         );
         assert_eq!(settings.env("ANTHROPIC_API_KEY"), None);
+    }
+
+    #[test]
+    fn the_file_can_turn_on_web_search() {
+        let file = ConfigFile::parse(
+            "api_key = \"k\"\n\
+             web_search = true\n\
+             web_search_max_uses = 3\n\
+             web_search_blocked_domains = \"spam.example, ads.example\"\n",
+        )
+        .unwrap();
+        let settings = Settings::new(
+            env(&[("JUNEES_WEB_SEARCH_MAX_USES", "2"), ("HOME", "/home/u")]),
+            file,
+            None,
+            true,
+        );
+        let config = Config::from_lookup(|key| settings.get(key)).unwrap();
+        let search = config.web_search.unwrap();
+        assert_eq!(search.max_uses, 2);
+        assert_eq!(search.blocked_domains, ["spam.example", "ads.example"]);
     }
 
     #[test]
