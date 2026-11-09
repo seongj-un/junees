@@ -26,13 +26,28 @@ const DRAIN_GRACE: Duration = Duration::from_millis(200);
 /// started still hold the output pipes.
 pub struct Bash {
     default_timeout: Duration,
+    hidden_env: Vec<String>,
 }
 
 impl Default for Bash {
     fn default() -> Self {
         Self {
             default_timeout: Duration::from_secs(120),
+            hidden_env: Vec::new(),
         }
+    }
+}
+
+impl Bash {
+    /// Removes these environment variables from the commands' environment,
+    /// typically API keys the model must not be able to read.
+    pub fn hide_env<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.hidden_env.extend(names.into_iter().map(Into::into));
+        self
     }
 }
 
@@ -82,6 +97,9 @@ impl Tool for Bash {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
+        for name in &self.hidden_env {
+            cmd.env_remove(name);
+        }
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(err) => return ToolOutput::error(format!("failed to start bash: {err}")),
@@ -323,6 +341,16 @@ mod tests {
         assert!(output.content.chars().count() < MAX_OUTPUT_CHARS + 200);
         assert!(output.content.contains("omitted"));
         assert!(output.content.ends_with("[exit code 0]"));
+    }
+
+    #[tokio::test]
+    async fn hidden_env_vars_are_removed() {
+        let output = Bash::default()
+            .hide_env(["HOME"])
+            .run(json!({"command": "printenv HOME"}))
+            .await;
+        assert!(output.is_error, "{}", output.content);
+        assert_eq!(output.content, "[exit code 1]");
     }
 
     #[tokio::test]

@@ -13,6 +13,9 @@ use serde_json::Value;
 
 use crate::provider::ToolSpec;
 
+/// Credentials Junees reads that the model's shell commands must not see.
+pub const SECRET_ENV_VARS: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+
 /// What a tool hands back to the model. Failures are reported as output with
 /// `is_error` set rather than as Rust errors, so the model can react to them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,10 +59,10 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// bash, read_file and write_file.
+    /// bash, read_file and write_file. bash never sees [`SECRET_ENV_VARS`].
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
-        registry.register(Bash::default());
+        registry.register(Bash::default().hide_env(SECRET_ENV_VARS.iter().copied()));
         registry.register(ReadFile);
         registry.register(WriteFile);
         registry
