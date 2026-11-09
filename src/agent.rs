@@ -4,6 +4,7 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
 
+use crate::context;
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{CompletionRequest, Provider};
 use crate::session::{Entry, Journal, Transcript};
@@ -41,6 +42,11 @@ pub enum Event<'a> {
     ToolResult {
         name: &'a str,
         output: &'a ToolOutput,
+    },
+    /// The earlier part of the conversation was replaced by a summary.
+    Compacted {
+        before_messages: usize,
+        after_messages: usize,
     },
 }
 
@@ -124,7 +130,7 @@ impl Agent {
         let specs = self.tools.specs();
 
         for _ in 0..self.options.max_turns {
-            self.manage_context(&mut on_event);
+            self.manage_context(&mut on_event).await;
             let response = self
                 .provider
                 .complete(CompletionRequest {
@@ -228,8 +234,10 @@ impl Agent {
     }
 
     /// Keeps the conversation under the compaction threshold: once the
-    /// context size reaches it, old tool output is cleared first.
-    fn manage_context(&mut self, on_event: &mut impl FnMut(Event<'_>)) {
+    /// context size reaches it, old tool output is cleared first. If there
+    /// is none to clear, or the next call still measures over the threshold,
+    /// the conversation is compacted.
+    async fn manage_context(&mut self, on_event: &mut impl FnMut(Event<'_>)) {
         if self.transcript.context_tokens < self.options.compact_limit() {
             self.cleared = false;
             return;
@@ -239,6 +247,72 @@ impl Agent {
             return;
         }
         self.cleared = false;
+        // A single turn cannot be compacted; clearing is all there is then.
+        self.summarize(on_event).await;
+    }
+
+    /// Replaces the earlier part of the conversation with a summary written
+    /// by the model, keeping the latest user inputs and what followed them.
+    /// Returns whether it did; if there is nothing to compact yet or the
+    /// summary fails, it says so in a warning and changes nothing.
+    pub async fn compact(&mut self, mut on_event: impl FnMut(Event<'_>)) -> bool {
+        if self.transcript.compact_point().is_none() {
+            on_event(Event::Warning(
+                "nothing to compact yet: the conversation has no earlier input to summarize",
+            ));
+            return false;
+        }
+        self.summarize(&mut on_event).await
+    }
+
+    /// Compacts at [`Transcript::compact_point`], if there is one.
+    async fn summarize(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
+        let Some(keep_from) = self.transcript.compact_point() else {
+            return false;
+        };
+        let request = [context::summary_request(
+            &self.transcript.messages[..keep_from],
+        )];
+        let result = self
+            .provider
+            .complete(CompletionRequest {
+                system: context::SUMMARY_SYSTEM,
+                messages: &request,
+                tools: &[],
+                max_tokens: context::SUMMARY_MAX_TOKENS,
+            })
+            .await;
+        let response = match result {
+            Ok(response) => response,
+            Err(err) => {
+                on_event(Event::Warning(&format!(
+                    "could not compact the conversation ({err}); it stays as it is"
+                )));
+                return false;
+            }
+        };
+        self.record(Entry::SummaryUsage(response.usage), on_event);
+        let summary = Message {
+            role: Role::Assistant,
+            content: response.content,
+        }
+        .text();
+        if summary.trim().is_empty() {
+            on_event(Event::Warning(
+                "could not compact the conversation (the summary came back empty); \
+                 it stays as it is",
+            ));
+            return false;
+        }
+
+        let before_messages = self.transcript.messages.len();
+        self.record(Entry::Compact { summary, keep_from }, on_event);
+        self.cleared = false;
+        on_event(Event::Compacted {
+            before_messages,
+            after_messages: self.transcript.messages.len(),
+        });
+        true
     }
 
     /// Clears the output of all but the latest tool results. Returns
@@ -292,13 +366,15 @@ mod tests {
     struct Scripted {
         responses: Arc<Mutex<VecDeque<Reply>>>,
         seen: Arc<Mutex<Vec<Vec<Message>>>>,
+        /// System prompt, tool count and max_tokens of each request.
+        settings: Arc<Mutex<Vec<(String, usize, u32)>>>,
     }
 
     impl Scripted {
         fn new(responses: Vec<Reply>) -> Self {
             Self {
                 responses: Arc::new(Mutex::new(responses.into())),
-                seen: Arc::default(),
+                ..Self::default()
             }
         }
     }
@@ -310,6 +386,11 @@ mod tests {
             request: CompletionRequest<'_>,
         ) -> Result<CompletionResponse, ProviderError> {
             self.seen.lock().unwrap().push(request.messages.to_vec());
+            self.settings.lock().unwrap().push((
+                request.system.to_string(),
+                request.tools.len(),
+                request.max_tokens,
+            ));
             self.responses
                 .lock()
                 .unwrap()
@@ -905,6 +986,8 @@ mod tests {
         agent.run("go", |_| {}).await.unwrap();
 
         let seen = seen.lock().unwrap();
+        // One turn has nothing to compact, so no summary was asked for.
+        assert_eq!(seen.len(), 7);
         // Before the fifth call: results at 2, 4, 6, 8; the first is cleared,
         // keeping its id and error flag.
         assert_eq!(
@@ -944,5 +1027,184 @@ mod tests {
         );
         assert_valid(agent.messages());
         assert_eq!(replay(entries), agent.transcript);
+    }
+
+    fn summary_text(message: &Message) -> Option<String> {
+        match message.content.first() {
+            Some(ContentBlock::Text { text }) => text
+                .strip_prefix(session::SUMMARY_HEADER)
+                .map(str::to_string),
+            _ => None,
+        }
+    }
+
+    /// Four inputs: a turn with four tool calls, then three plain ones, the
+    /// later two over the threshold.
+    fn long_conversation(summary: Reply) -> Vec<Reply> {
+        let mut script = tool_rounds(4, 100);
+        script.push(sized(text("one"), 100));
+        script.push(sized(text("two"), 900));
+        script.push(sized(text("three"), 900));
+        script.push(summary);
+        script.push(sized(text("four"), 300));
+        script
+    }
+
+    #[tokio::test]
+    async fn compacts_when_clearing_was_not_enough() {
+        let summary = Ok(CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: "SUMMARY".into(),
+            }],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 50,
+                output_tokens: 7,
+                ..Default::default()
+            },
+        });
+        let provider = Scripted::new(long_conversation(summary));
+        let (seen, settings) = (provider.seen.clone(), provider.settings.clone());
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        let mut compacted = Vec::new();
+        for input in ["first", "second", "third", "fourth"] {
+            agent
+                .run(input, |event| {
+                    if let Event::Compacted {
+                        before_messages,
+                        after_messages,
+                    } = event
+                    {
+                        compacted.push((before_messages, after_messages));
+                    }
+                })
+                .await
+                .unwrap();
+        }
+
+        // "second" went over; before "third" old tool output was cleared;
+        // "third" still measured over, so "fourth" compacts first.
+        let seen = seen.lock().unwrap();
+        let settings = settings.lock().unwrap();
+        assert_eq!(seen.len(), 9);
+        assert_eq!(tool_output(&seen[6][2])[0].1, session::CLEARED);
+        let (system, tools, max_tokens) = &settings[7];
+        assert_eq!(system, context::SUMMARY_SYSTEM);
+        assert_eq!((*tools, *max_tokens), (0, 4096));
+        assert_eq!(settings[8].1, 1);
+        // The summary call saw the history before the second-last input
+        // ("third", at 12) as text in one message.
+        assert_eq!(seen[7].len(), 1);
+        let asked = seen[7][0].text();
+        for part in [
+            "[user]\nfirst",
+            "[tool call toolu_4: upper]",
+            "[user]\nsecond",
+            "two",
+        ] {
+            assert!(asked.contains(part), "{part} missing from {asked}");
+        }
+        assert!(!asked.contains("third"), "{asked}");
+
+        // The last call started from the summary, glued to "third".
+        let sent = &seen[8];
+        assert_eq!(sent.len(), 3);
+        assert_eq!(summary_text(&sent[0]).as_deref(), Some("SUMMARY"));
+        assert_eq!(
+            sent[0].content[1],
+            ContentBlock::Text {
+                text: "third".into()
+            }
+        );
+        assert_eq!(sent[1].text(), "three");
+        assert_eq!(sent[2], Message::user_text("fourth"));
+        assert_valid(sent);
+        assert_valid(agent.messages());
+        assert_eq!(compacted, [(15, 3)]);
+
+        // The summary call counts toward usage, not toward the context size.
+        assert_eq!(
+            agent.usage().input_tokens,
+            4 * 99 + 99 + 899 + 899 + 50 + 299
+        );
+        assert_eq!(agent.context_tokens(), 300);
+        let entries = entries_of(&journal);
+        assert!(entries.contains(&Entry::Compact {
+            summary: "SUMMARY".into(),
+            keep_from: 12
+        }));
+        assert_eq!(replay(entries), agent.transcript);
+    }
+
+    #[tokio::test]
+    async fn a_failed_summary_leaves_the_history_alone() {
+        let failure = Err(ProviderError::Transport("network down".into()));
+        let provider = Scripted::new(long_conversation(failure));
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        for input in ["first", "second", "third"] {
+            agent.run(input, |_| {}).await.unwrap();
+        }
+        let before = agent.transcript.clone();
+        let entries_before = entries_of(&journal).len();
+
+        let mut warnings = Vec::new();
+        let answer = agent
+            .run("fourth", |event| {
+                if let Event::Warning(w) = event {
+                    warnings.push(w.to_string());
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "four");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("could not compact"), "{warnings:?}");
+        assert!(warnings[0].contains("network down"), "{warnings:?}");
+
+        // The model got the history as it was, plus the new input.
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[8][..14], before.messages[..]);
+        assert_eq!(agent.messages()[..14], before.messages[..]);
+        let new_entries = &entries_of(&journal)[entries_before..];
+        assert!(
+            new_entries
+                .iter()
+                .all(|entry| matches!(entry, Entry::Message(_) | Entry::Usage(_))),
+            "{new_entries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_on_request() {
+        let provider = Scripted::new(vec![text("a"), text("b"), text("so far: a, b")]);
+        let mut agent = agent(provider, 5);
+        let mut warnings = Vec::new();
+        agent.run("one", |_| {}).await.unwrap();
+        // One input is not enough to compact.
+        assert!(
+            !agent
+                .compact(|event| {
+                    if let Event::Warning(w) = event {
+                        warnings.push(w.to_string())
+                    }
+                })
+                .await
+        );
+        assert!(warnings[0].starts_with("nothing to compact yet"));
+        assert_eq!(agent.messages().len(), 2);
+
+        agent.run("two", |_| {}).await.unwrap();
+        assert!(agent.compact(|_| {}).await);
+        let history = agent.messages();
+        assert_eq!(history.len(), 2);
+        assert_eq!(summary_text(&history[0]).as_deref(), Some("so far: a, b"));
+        assert_eq!(
+            history[0].content[1],
+            ContentBlock::Text { text: "two".into() }
+        );
+        assert_eq!(history[1].text(), "b");
     }
 }

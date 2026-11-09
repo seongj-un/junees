@@ -213,6 +213,9 @@ impl Repl<'_> {
                         usage.output_tokens
                     );
                 }
+                "/compact" => {
+                    self.agent.compact(print_event).await;
+                }
                 "/context" => {
                     let options = self.agent.options();
                     println!(
@@ -286,6 +289,12 @@ fn print_event(event: Event<'_>) {
                 cli::preview(&input.to_string(), PREVIEW_CHARS)
             );
         }
+        Event::Compacted {
+            before_messages,
+            after_messages,
+        } => eprintln!(
+            "  (compacted the conversation: {before_messages} messages -> {after_messages})"
+        ),
         Event::ToolResult { name, output } => {
             let status = if output.is_error { "error" } else { "ok" };
             eprintln!(

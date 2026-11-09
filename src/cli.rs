@@ -39,6 +39,7 @@ pub const REPL_HELP: &str = "\
 /reset     start a new session
 /usage     show token usage of this session
 /context   show the context size and its limit
+/compact   replace the earlier conversation with a summary
 /exit      quit (also /quit or Ctrl-D)";
 
 #[derive(Debug, PartialEq, Eq)]
