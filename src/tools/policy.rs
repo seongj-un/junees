@@ -309,7 +309,8 @@ pub struct Caution {
 
 const DELETE: &str = "delete files";
 const GIT_PUSH: &str = "git push";
-const GIT_RESET: &str = "git reset --hard";
+/// `git reset --hard` and the commands that throw work away like it.
+const GIT_DISCARD: &str = "discard git work";
 const GIT_CLEAN: &str = "git clean";
 const PACKAGES: &str = "install packages";
 const DOWNLOAD: &str = "download files";
@@ -327,8 +328,9 @@ impl CommandPolicy {
     }
 
     /// Why a person should look at `command` before it runs, if at all:
-    /// deleting files, `git push`, `git reset --hard`, `git clean`,
-    /// installing packages, downloading files, changing permissions, and
+    /// deleting files, `git push`, throwing git work away (`git reset
+    /// --hard`, `git checkout -- .`, `git restore`, `git stash drop`,
+    /// `git branch -D`), `git clean`, installing packages, downloading files, changing permissions, and
     /// writing outside `workspace`. With [`CommandPolicy::allow_dangerous`],
     /// whatever the built-in rules would refuse is a caution too.
     ///
@@ -685,9 +687,49 @@ fn git_caution(args: &[String]) -> Option<(&'static str, &'static str)> {
     match subcommand? {
         "push" => Some((GIT_PUSH, "`git push` publishes commits")),
         "reset" if rest.iter().any(|arg| arg.as_str() == "--hard") => Some((
-            GIT_RESET,
+            GIT_DISCARD,
             "`git reset --hard` throws away uncommitted changes",
         )),
+        "checkout"
+            if rest
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--" | "." | "-f" | "--force")) =>
+        {
+            Some((
+                GIT_DISCARD,
+                "`git checkout` of files or with --force throws away uncommitted changes",
+            ))
+        }
+        "restore" => {
+            let short = |flag: char| {
+                rest.iter()
+                    .any(|arg| !arg.starts_with("--") && arg.starts_with('-') && arg.contains(flag))
+            };
+            let staged = rest.iter().any(|arg| arg.as_str() == "--staged") || short('S');
+            let worktree = rest.iter().any(|arg| arg.as_str() == "--worktree") || short('W');
+            (!staged || worktree)
+                .then_some((GIT_DISCARD, "`git restore` throws away uncommitted changes"))
+        }
+        "stash" if matches!(rest.first().map(|arg| arg.as_str()), Some("drop" | "clear")) => {
+            Some((
+                GIT_DISCARD,
+                "`git stash drop`/`clear` deletes stashed changes",
+            ))
+        }
+        "branch"
+            if rest.iter().any(|arg| arg.as_str() == "-D")
+                || (rest
+                    .iter()
+                    .any(|arg| matches!(arg.as_str(), "-d" | "--delete"))
+                    && rest
+                        .iter()
+                        .any(|arg| matches!(arg.as_str(), "-f" | "--force"))) =>
+        {
+            Some((
+                GIT_DISCARD,
+                "`git branch -D` deletes a branch even with commits found nowhere else",
+            ))
+        }
         "clean"
             if !rest.iter().any(|arg| {
                 arg.as_str() == "--dry-run"
@@ -2217,7 +2259,17 @@ mod tests {
             ("find . -name '*.o' -exec rm {} \\;", &[DELETE]),
             ("git push origin main", &[GIT_PUSH]),
             ("git -C repo push --force-with-lease", &[GIT_PUSH]),
-            ("git reset --hard HEAD~1", &[GIT_RESET]),
+            ("git reset --hard HEAD~1", &[GIT_DISCARD]),
+            ("git checkout -- .", &[GIT_DISCARD]),
+            ("git checkout .", &[GIT_DISCARD]),
+            ("git checkout -f main", &[GIT_DISCARD]),
+            ("git restore .", &[GIT_DISCARD]),
+            ("git restore --staged --worktree a.rs", &[GIT_DISCARD]),
+            ("git restore -SW a.rs", &[GIT_DISCARD]),
+            ("git stash drop", &[GIT_DISCARD]),
+            ("git stash clear", &[GIT_DISCARD]),
+            ("git branch -D main", &[GIT_DISCARD]),
+            ("git branch --delete --force old", &[GIT_DISCARD]),
             ("git clean -fdx", &[GIT_CLEAN]),
             ("pip install requests", &[PACKAGES]),
             ("python3 -m pip install requests", &[PACKAGES]),
@@ -2286,6 +2338,12 @@ mod tests {
             "git clean -n",
             "git clean --dry-run -d",
             "git reset HEAD file",
+            "git checkout -b feature",
+            "git checkout main",
+            "git restore --staged a.rs",
+            "git stash",
+            "git stash pop",
+            "git branch -d merged",
             "echo 'rm -rf x'",
             "grep -rn rm src",
             "curl https://example.com",
