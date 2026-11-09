@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{CompletionRequest, Provider};
+use crate::session::{Entry, Journal, Transcript};
 use crate::tools::{ToolOutput, ToolRegistry};
 
 #[derive(Debug, Clone)]
@@ -36,32 +37,52 @@ pub struct Agent {
     provider: Box<dyn Provider>,
     tools: ToolRegistry,
     options: AgentOptions,
-    messages: Vec<Message>,
-    usage: Usage,
+    transcript: Transcript,
+    /// Where history changes are recorded. `None` records nothing.
+    journal: Option<Box<dyn Journal>>,
 }
 
 impl Agent {
     pub fn new(provider: Box<dyn Provider>, tools: ToolRegistry, options: AgentOptions) -> Self {
+        Self::restore(provider, tools, options, Transcript::default())
+    }
+
+    /// An agent that continues an earlier conversation.
+    pub fn restore(
+        provider: Box<dyn Provider>,
+        tools: ToolRegistry,
+        options: AgentOptions,
+        transcript: Transcript,
+    ) -> Self {
         Self {
             provider,
             tools,
             options,
-            messages: Vec::new(),
-            usage: Usage::default(),
+            transcript,
+            journal: None,
         }
     }
 
+    /// Records every later history change to `journal`.
+    pub fn with_journal(mut self, journal: Box<dyn Journal>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
     pub fn messages(&self) -> &[Message] {
-        &self.messages
+        &self.transcript.messages
     }
 
+    /// Tokens used by this session.
     pub fn usage(&self) -> Usage {
-        self.usage
+        self.transcript.usage
     }
 
-    /// Forgets the conversation. Token usage keeps counting.
-    pub fn reset(&mut self) {
-        self.messages.clear();
+    /// Starts a new session: forgets the conversation and its token usage,
+    /// and records from now on to `journal` (or nowhere).
+    pub fn reset(&mut self, journal: Option<Box<dyn Journal>>) {
+        self.transcript = Transcript::default();
+        self.journal = journal;
     }
 
     /// Handles one user input and returns the model's final text.
@@ -73,7 +94,8 @@ impl Agent {
         input: &str,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
-        self.push_user_text(input);
+        let entry = self.transcript.user_text_entry(input);
+        self.record(entry, &mut on_event);
         let specs = self.tools.specs();
 
         for _ in 0..self.options.max_turns {
@@ -81,12 +103,12 @@ impl Agent {
                 .provider
                 .complete(CompletionRequest {
                     system: &self.options.system,
-                    messages: &self.messages,
+                    messages: &self.transcript.messages,
                     tools: &specs,
                     max_tokens: self.options.max_tokens,
                 })
                 .await?;
-            self.usage.add(response.usage);
+            self.record(Entry::Usage(response.usage), &mut on_event);
 
             let mut tool_calls = Vec::new();
             for block in &response.content {
@@ -106,7 +128,7 @@ impl Agent {
             let text = reply.text();
             // The API rejects empty assistant turns in the history.
             if !reply.content.is_empty() {
-                self.messages.push(reply);
+                self.record(Entry::Message(reply), &mut on_event);
             }
 
             // A response cut off by the token limit or a refusal may end in a
@@ -141,10 +163,11 @@ impl Agent {
                         is_error: true,
                     })
                     .collect();
-                self.messages.push(Message {
+                let results = Message {
                     role: Role::User,
                     content: results,
-                });
+                };
+                self.record(Entry::Message(results), &mut on_event);
                 continue;
             }
 
@@ -165,10 +188,11 @@ impl Agent {
                     is_error: output.is_error,
                 });
             }
-            self.messages.push(Message {
+            let results = Message {
                 role: Role::User,
                 content: results,
-            });
+            };
+            self.record(Entry::Message(results), &mut on_event);
         }
 
         bail!(
@@ -177,17 +201,21 @@ impl Agent {
         )
     }
 
-    fn push_user_text(&mut self, text: &str) {
-        let block = ContentBlock::Text {
-            text: text.to_string(),
-        };
-        match self.messages.last_mut() {
-            Some(last) if last.role == Role::User => last.content.push(block),
-            _ => self.messages.push(Message {
-                role: Role::User,
-                content: vec![block],
-            }),
+    /// Applies a history change and records it in the journal. If the
+    /// journal cannot be written, the turn goes on without it: one warning,
+    /// and nothing more is recorded, so the file stays a clean prefix of the
+    /// conversation instead of one with holes.
+    fn record(&mut self, entry: Entry, on_event: &mut impl FnMut(Event<'_>)) {
+        if let Some(journal) = &mut self.journal
+            && let Err(err) = journal.record(&entry)
+        {
+            self.journal = None;
+            on_event(Event::Warning(&format!(
+                "could not write the session journal ({err}); \
+                 the rest of this session will not be saved"
+            )));
         }
+        self.transcript.apply(entry);
     }
 }
 
@@ -202,6 +230,7 @@ mod tests {
 
     use super::*;
     use crate::provider::{CompletionResponse, ProviderError};
+    use crate::session::{Session, SessionWriter};
 
     type Reply = std::result::Result<CompletionResponse, ProviderError>;
     use crate::tools::Tool;
@@ -423,8 +452,9 @@ mod tests {
         let provider = Scripted::new(vec![text("a")]);
         let mut agent = agent(provider, 5);
         agent.run("hi", |_| {}).await.unwrap();
-        agent.reset();
+        agent.reset(None);
         assert!(agent.messages().is_empty());
+        assert_eq!(agent.usage(), Usage::default());
     }
 
     /// Counts how often it runs.
@@ -560,5 +590,147 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, [("a", "X"), ("b", "Y")]);
+    }
+
+    /// Keeps recorded entries in memory.
+    #[derive(Clone, Default)]
+    struct Memory(Arc<Mutex<Vec<Entry>>>);
+
+    impl Journal for Memory {
+        fn record(&mut self, entry: &Entry) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(entry.clone());
+            Ok(())
+        }
+    }
+
+    /// Fails every write and counts the attempts.
+    struct Broken(Arc<AtomicUsize>);
+
+    impl Journal for Broken {
+        fn record(&mut self, _entry: &Entry) -> std::io::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("disk full"))
+        }
+    }
+
+    fn replay(entries: impl IntoIterator<Item = Entry>) -> Transcript {
+        let mut transcript = Transcript::default();
+        for entry in entries {
+            transcript.apply(entry);
+        }
+        transcript
+    }
+
+    /// A failed turn (so the next input joins its user message), a tool
+    /// call, a cut-off tool call and a final answer.
+    fn eventful_script() -> Vec<Reply> {
+        vec![
+            Err(ProviderError::Transport("network down".into())),
+            tool_use("toolu_1", "upper", json!({"text": "abc"})),
+            with_stop(
+                tool_use("toolu_2", "upper", json!({"text": "de"})),
+                StopReason::MaxTokens,
+            ),
+            text("done"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn journal_replays_to_the_same_history() {
+        let journal = Memory::default();
+        let mut agent =
+            agent(Scripted::new(eventful_script()), 5).with_journal(Box::new(journal.clone()));
+        assert!(agent.run("first", |_| {}).await.is_err());
+        agent.run("second", |_| {}).await.unwrap();
+
+        let entries = journal.0.lock().unwrap().clone();
+        assert!(matches!(entries[0], Entry::Message(_)));
+        assert_eq!(
+            entries[1],
+            Entry::AppendText {
+                text: "second".into()
+            }
+        );
+        assert_eq!(agent.messages().len(), 6);
+        let replayed = replay(entries);
+        assert_eq!(replayed.messages, agent.messages());
+        assert_eq!(replayed.usage, agent.usage());
+    }
+
+    #[tokio::test]
+    async fn a_session_file_restores_the_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let (meta, writer) =
+            SessionWriter::create(home.path(), std::path::Path::new("/work"), "m").unwrap();
+        let mut agent = agent(Scripted::new(eventful_script()), 5).with_journal(Box::new(writer));
+        assert!(agent.run("first", |_| {}).await.is_err());
+        agent.run("second", |_| {}).await.unwrap();
+
+        let path = crate::session::sessions_dir(home.path()).join(format!("{}.jsonl", meta.id));
+        // Close the first writer (and its lock), as an exiting process would.
+        let (messages, usage) = (agent.messages().to_vec(), agent.usage());
+        agent.reset(None);
+        let (session, writer) = Session::resume(&path).unwrap();
+        assert_eq!(session.transcript.messages, messages);
+        assert_eq!(session.transcript.usage, usage);
+
+        let provider = Scripted::new(vec![text("again")]);
+        let seen = provider.seen.clone();
+        let mut tools = ToolRegistry::new();
+        tools.register(Upper);
+        let mut restored = Agent::restore(
+            Box::new(provider),
+            tools,
+            agent.options.clone(),
+            session.transcript,
+        )
+        .with_journal(Box::new(writer));
+        restored.run("third", |_| {}).await.unwrap();
+        assert_eq!(seen.lock().unwrap()[0].len(), 7);
+        assert_eq!(restored.usage().input_tokens, usage.input_tokens + 10);
+
+        let reloaded = Session::load(&path).unwrap();
+        assert_eq!(reloaded.transcript.messages, restored.messages());
+        assert_eq!(reloaded.transcript.usage, restored.usage());
+    }
+
+    #[tokio::test]
+    async fn journal_failures_warn_once_and_the_turn_goes_on() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let provider = Scripted::new(vec![
+            tool_use("toolu_1", "upper", json!({"text": "abc"})),
+            text("done"),
+        ]);
+        let mut agent = agent(provider, 5).with_journal(Box::new(Broken(attempts.clone())));
+        let mut warnings = Vec::new();
+        let answer = agent
+            .run("go", |event| {
+                if let Event::Warning(w) = event {
+                    warnings.push(w.to_string());
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "done");
+        assert_eq!(agent.messages().len(), 4);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("disk full"));
+    }
+
+    #[tokio::test]
+    async fn reset_switches_to_the_new_journal() {
+        let old = Memory::default();
+        let new = Memory::default();
+        let provider = Scripted::new(vec![text("a"), text("b")]);
+        let mut agent = agent(provider, 5).with_journal(Box::new(old.clone()));
+        agent.run("one", |_| {}).await.unwrap();
+        agent.reset(Some(Box::new(new.clone())));
+        agent.run("two", |_| {}).await.unwrap();
+
+        assert_eq!(old.0.lock().unwrap().len(), 3);
+        let entries = new.0.lock().unwrap().clone();
+        assert_eq!(entries[0], Entry::Message(Message::user_text("two")));
+        assert_eq!(replay(entries).messages, agent.messages());
     }
 }

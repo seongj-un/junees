@@ -1,18 +1,21 @@
 use std::io::Write;
+use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use junees::agent::{Agent, AgentOptions, Event};
-use junees::cli::{self, Command};
+use junees::cli::{self, Command, SessionMode};
 use junees::config::Config;
 use junees::prompt;
 use junees::provider::ProviderError;
 use junees::provider::anthropic::AnthropicProvider;
+use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::tools::ToolRegistry;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PREVIEW_CHARS: usize = 120;
+const SESSIONS_LISTED: usize = 10;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -26,8 +29,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<()> {
-    let command = cli::parse_args(std::env::args().skip(1))?;
-    match command {
+    let args = match cli::parse_args(std::env::args().skip(1))? {
         Command::Help => {
             print!("{}", cli::HELP);
             return Ok(());
@@ -36,8 +38,8 @@ async fn run() -> Result<()> {
             println!("junees {VERSION}");
             return Ok(());
         }
-        Command::Repl | Command::Prompt(_) => {}
-    }
+        Command::Run(args) => args,
+    };
 
     let config = Config::from_env()?;
     let provider = AnthropicProvider::new(
@@ -46,7 +48,8 @@ async fn run() -> Result<()> {
         config.model.clone(),
     )?;
     let cwd = std::env::current_dir()?;
-    let mut agent = Agent::new(
+    let opened = open_session(&args.session, &config, &cwd)?;
+    let mut agent = Agent::restore(
         Box::new(provider),
         ToolRegistry::with_defaults(),
         AgentOptions {
@@ -54,47 +57,193 @@ async fn run() -> Result<()> {
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
         },
+        opened.transcript,
     );
+    if let Some(journal) = opened.journal {
+        agent = agent.with_journal(journal);
+    }
 
-    match command {
-        Command::Prompt(prompt) => {
+    match args.prompt {
+        Some(prompt) => {
+            // stdout carries only the answer.
+            eprintln!("{}", opened.status);
             agent.run(&prompt, print_event).await?;
             Ok(())
         }
-        _ => repl(&mut agent, &config.model).await,
+        None => {
+            println!(
+                "junees {VERSION} ({}). /help for commands, /exit to quit.",
+                config.model
+            );
+            println!("{}", opened.status);
+            let mut repl = Repl {
+                agent,
+                config: &config,
+                cwd: &cwd,
+                saving: args.session != SessionMode::Off,
+                session_id: opened.id,
+            };
+            repl.run().await
+        }
     }
 }
 
-async fn repl(agent: &mut Agent, model: &str) -> Result<()> {
-    println!("junees {VERSION} ({model}). /help for commands, /exit to quit.");
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    loop {
-        print!("> ");
-        std::io::stdout().flush()?;
-        let Some(line) = lines.next_line().await? else {
-            println!();
-            return Ok(());
-        };
-        match line.trim() {
-            "" => {}
-            "/exit" | "/quit" => return Ok(()),
-            "/help" => println!("{}", cli::REPL_HELP),
-            "/reset" => {
-                agent.reset();
-                println!("(conversation cleared)");
-            }
-            "/usage" => {
-                let usage = agent.usage();
-                println!(
-                    "input {} tokens, output {} tokens",
-                    usage.input_tokens, usage.output_tokens
+/// The conversation to start from and where to record it.
+struct Opened {
+    transcript: Transcript,
+    journal: Option<Box<dyn Journal>>,
+    id: Option<String>,
+    /// One line for the user about which session this is.
+    status: String,
+}
+
+fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opened> {
+    let path = match mode {
+        SessionMode::Off => {
+            return Ok(Opened {
+                transcript: Transcript::default(),
+                journal: None,
+                id: None,
+                status: "session not saved (--no-session)".into(),
+            });
+        }
+        SessionMode::New => None,
+        SessionMode::Continue => {
+            let home = config
+                .require_home()
+                .context("cannot continue a saved session")?;
+            let latest = session::find_latest(home, cwd)?;
+            if latest.is_none() {
+                eprintln!(
+                    "no earlier session in {}; starting a new one",
+                    cwd.display()
                 );
             }
-            input => {
-                if let Err(err) = agent.run(input, print_event).await {
-                    report(&err);
+            latest
+        }
+        SessionMode::Resume(prefix) => {
+            let home = config
+                .require_home()
+                .context("cannot resume a saved session")?;
+            Some(session::find_by_prefix(home, prefix)?)
+        }
+    };
+
+    let Some(path) = path else {
+        return Ok(new_session(config, cwd));
+    };
+    let (session, writer) = Session::resume(&path)?;
+    if let Some(warning) = &session.warning {
+        eprintln!("  !! {warning}");
+    }
+    // Relative paths in the history mean the folder it started in.
+    let elsewhere = if session.meta.cwd == cwd.to_string_lossy() {
+        String::new()
+    } else {
+        format!(", started in {}", session.meta.cwd)
+    };
+    Ok(Opened {
+        status: format!(
+            "resumed {} ({} messages{elsewhere})",
+            session.meta.id,
+            session.transcript.messages.len()
+        ),
+        id: Some(session.meta.id),
+        transcript: session.transcript,
+        journal: Some(Box::new(writer)),
+    })
+}
+
+/// A fresh saved session. Without a state folder, or if its file cannot be
+/// created, Junees still runs, just without saving.
+fn new_session(config: &Config, cwd: &Path) -> Opened {
+    let created = config
+        .require_home()
+        .and_then(|home| SessionWriter::create(home, cwd, &config.model));
+    match created {
+        Ok((meta, writer)) => Opened {
+            transcript: Transcript::default(),
+            journal: Some(Box::new(writer)),
+            status: format!("session {}", meta.id),
+            id: Some(meta.id),
+        },
+        Err(err) => Opened {
+            transcript: Transcript::default(),
+            journal: None,
+            id: None,
+            status: format!("session not saved: {err:#}"),
+        },
+    }
+}
+
+struct Repl<'a> {
+    agent: Agent,
+    config: &'a Config,
+    cwd: &'a Path,
+    /// False with --no-session, so /reset starts another unsaved session.
+    saving: bool,
+    session_id: Option<String>,
+}
+
+impl Repl<'_> {
+    async fn run(&mut self) -> Result<()> {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        loop {
+            print!("> ");
+            std::io::stdout().flush()?;
+            let Some(line) = lines.next_line().await? else {
+                println!();
+                return Ok(());
+            };
+            match line.trim() {
+                "" => {}
+                "/exit" | "/quit" => return Ok(()),
+                "/help" => println!("{}", cli::REPL_HELP),
+                "/reset" => self.reset(),
+                "/sessions" => self.list_sessions(),
+                "/usage" => {
+                    let usage = self.agent.usage();
+                    println!(
+                        "input {} tokens, output {} tokens",
+                        usage.input_tokens, usage.output_tokens
+                    );
+                }
+                input => {
+                    if let Err(err) = self.agent.run(input, print_event).await {
+                        report(&err);
+                    }
                 }
             }
+        }
+    }
+
+    fn reset(&mut self) {
+        if !self.saving {
+            self.agent.reset(None);
+            println!("(new conversation, not saved)");
+            return;
+        }
+        let opened = new_session(self.config, self.cwd);
+        self.agent.reset(opened.journal);
+        self.session_id = opened.id;
+        println!("(new conversation) {}", opened.status);
+    }
+
+    fn list_sessions(&self) {
+        let listed = self
+            .config
+            .require_home()
+            .and_then(|home| session::list_recent(home, SESSIONS_LISTED));
+        match listed {
+            Ok(list) if list.is_empty() => println!("(no saved sessions)"),
+            Ok(list) => {
+                for summary in &list {
+                    let current = self.session_id.as_deref() == Some(summary.id.as_str());
+                    println!("{}", cli::session_line(summary, current));
+                }
+                println!("continue one with: junees --resume <id>");
+            }
+            Err(err) => report(&err),
         }
     }
 }
