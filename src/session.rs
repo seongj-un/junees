@@ -618,7 +618,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Entry::Usage(Usage {
                 input_tokens: 3,
-                output_tokens: 1
+                output_tokens: 1,
+                ..Default::default()
             }))
             .unwrap(),
             json!({"type": "usage", "input_tokens": 3, "output_tokens": 1})
@@ -649,6 +650,7 @@ mod tests {
             Entry::Usage(Usage {
                 input_tokens: 5,
                 output_tokens: 2,
+                ..Default::default()
             }),
             Entry::Message(tool_call("toolu_1")),
         ];

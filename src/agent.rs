@@ -291,6 +291,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 10,
                 output_tokens: 1,
+                ..Default::default()
             },
         })
     }
@@ -311,6 +312,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 5,
                 output_tokens: 2,
+                ..Default::default()
             },
         })
     }
@@ -375,7 +377,8 @@ mod tests {
             agent.usage(),
             Usage {
                 input_tokens: 15,
-                output_tokens: 3
+                output_tokens: 3,
+                ..Default::default()
             }
         );
     }

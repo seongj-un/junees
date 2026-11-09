@@ -204,8 +204,11 @@ impl Repl<'_> {
                 "/usage" => {
                     let usage = self.agent.usage();
                     println!(
-                        "input {} tokens, output {} tokens",
-                        usage.input_tokens, usage.output_tokens
+                        "input {} tokens (cache write {}, cache read {}), output {} tokens",
+                        usage.input_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.cache_read_input_tokens,
+                        usage.output_tokens
                     );
                 }
                 input => {
