@@ -4,7 +4,7 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
 
-use crate::message::{ContentBlock, Message, Role, Usage};
+use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{CompletionRequest, Provider};
 use crate::tools::{ToolOutput, ToolRegistry};
 
@@ -20,6 +20,8 @@ pub struct AgentOptions {
 #[derive(Debug)]
 pub enum Event<'a> {
     Text(&'a str),
+    /// Something the user should know about, such as a cut-off response.
+    Warning(&'a str),
     ToolCall {
         name: &'a str,
         input: &'a Value,
@@ -106,8 +108,44 @@ impl Agent {
             if !reply.content.is_empty() {
                 self.messages.push(reply);
             }
+
+            // A response cut off by the token limit or a refusal may end in a
+            // tool call whose input is incomplete. Never run those; answer
+            // each call with an error so tool_use/tool_result stay paired.
+            let cut_off = match response.stop_reason {
+                StopReason::MaxTokens => Some(
+                    "not executed: the response hit the output token limit, so this tool \
+                     input may be cut off. Retry with smaller pieces (for example, write a \
+                     large file in several steps).",
+                ),
+                StopReason::Refusal => Some("not executed: the response was stopped by a refusal."),
+                _ => None,
+            };
+
             if tool_calls.is_empty() {
+                if response.stop_reason == StopReason::MaxTokens {
+                    on_event(Event::Warning(
+                        "the answer hit the output token limit and may be cut off",
+                    ));
+                }
                 return Ok(text);
+            }
+
+            if let Some(reason) = cut_off {
+                on_event(Event::Warning(reason));
+                let results = tool_calls
+                    .into_iter()
+                    .map(|(id, _, _)| ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content: reason.to_string(),
+                        is_error: true,
+                    })
+                    .collect();
+                self.messages.push(Message {
+                    role: Role::User,
+                    content: results,
+                });
+                continue;
             }
 
             let mut results = Vec::with_capacity(tool_calls.len());
@@ -156,13 +194,13 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use serde_json::json;
 
     use super::*;
-    use crate::message::StopReason;
     use crate::provider::CompletionResponse;
     use crate::tools::Tool;
 
@@ -366,5 +404,143 @@ mod tests {
         agent.run("hi", |_| {}).await.unwrap();
         agent.reset();
         assert!(agent.messages().is_empty());
+    }
+
+    /// Counts how often it runs.
+    struct Counter(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Tool for Counter {
+        fn name(&self) -> &'static str {
+            "count"
+        }
+        fn description(&self) -> &'static str {
+            "counts calls"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn run(&self, _input: Value) -> ToolOutput {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ToolOutput::ok("counted")
+        }
+    }
+
+    fn counting_agent(provider: Scripted) -> (Agent, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut agent = agent(provider, 5);
+        agent.tools.register(Counter(calls.clone()));
+        (agent, calls)
+    }
+
+    fn with_stop(
+        response: Result<CompletionResponse>,
+        stop: StopReason,
+    ) -> Result<CompletionResponse> {
+        response.map(|mut r| {
+            r.stop_reason = stop;
+            r
+        })
+    }
+
+    #[tokio::test]
+    async fn tool_calls_cut_off_by_max_tokens_are_not_run() {
+        let provider = Scripted::new(vec![
+            with_stop(
+                tool_use("toolu_1", "count", json!({"content": "fn main() {"})),
+                StopReason::MaxTokens,
+            ),
+            text("done"),
+        ]);
+        let (mut agent, calls) = counting_agent(provider);
+        let mut warnings = Vec::new();
+        let answer = agent
+            .run("write it", |event| {
+                if let Event::Warning(w) = event {
+                    warnings.push(w.to_string());
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(answer, "done");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(warnings.len(), 1);
+        match &agent.messages()[2].content[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "toolu_1");
+                assert!(content.starts_with("not executed"));
+                assert!(is_error);
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_calls_in_a_refusal_are_not_run() {
+        let provider = Scripted::new(vec![
+            with_stop(tool_use("toolu_1", "count", json!({})), StopReason::Refusal),
+            text("ok"),
+        ]);
+        let (mut agent, calls) = counting_agent(provider);
+        agent.run("go", |_| {}).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn warns_when_a_text_answer_is_cut_off() {
+        let provider = Scripted::new(vec![with_stop(text("half an ans"), StopReason::MaxTokens)]);
+        let mut agent = agent(provider, 5);
+        let mut warned = false;
+        let answer = agent
+            .run("explain", |event| {
+                warned |= matches!(event, Event::Warning(_))
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "half an ans");
+        assert!(warned);
+    }
+
+    #[tokio::test]
+    async fn several_tool_calls_share_one_result_message_in_order() {
+        let provider = Scripted::new(vec![
+            Ok(CompletionResponse {
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "a".into(),
+                        name: "upper".into(),
+                        input: json!({"text": "x"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "b".into(),
+                        name: "upper".into(),
+                        input: json!({"text": "y"}),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            }),
+            text("done"),
+        ]);
+        let mut agent = agent(provider, 5);
+        agent.run("go", |_| {}).await.unwrap();
+        let ids: Vec<(&str, &str)> = agent.messages()[2]
+            .content
+            .iter()
+            .map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => (tool_use_id.as_str(), content.as_str()),
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, [("a", "X"), ("b", "Y")]);
     }
 }

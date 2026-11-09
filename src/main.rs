@@ -101,6 +101,7 @@ async fn repl(agent: &mut Agent, model: &str) -> Result<()> {
 fn print_event(event: Event<'_>) {
     match event {
         Event::Text(text) => println!("{text}"),
+        Event::Warning(warning) => eprintln!("  !! {warning}"),
         Event::ToolCall { name, input } => {
             eprintln!(
                 "  -> {name} {}",
