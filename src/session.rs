@@ -271,6 +271,128 @@ pub fn sessions_dir(home: &Path) -> PathBuf {
     home.join("sessions")
 }
 
+/// What `/sessions` shows about one session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    pub id: String,
+    /// Last write, in Unix seconds.
+    pub updated: u64,
+    pub cwd: String,
+    pub messages: usize,
+    /// Text of the first user message.
+    pub first_input: String,
+}
+
+struct SessionFile {
+    path: PathBuf,
+    id: String,
+    modified: SystemTime,
+}
+
+/// Journal files under `home/sessions`, most recently written first.
+fn session_files(home: &Path) -> Result<Vec<SessionFile>> {
+    let dir = sessions_dir(home);
+    let read = match fs::read_dir(&dir) {
+        Ok(read) => read,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("cannot read {}", dir.display())),
+    };
+    let mut files = Vec::new();
+    for entry in read {
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let id = id.to_string();
+        let Ok(modified) = fs::metadata(&path).and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        files.push(SessionFile { path, id, modified });
+    }
+    files.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| b.id.cmp(&a.id)));
+    Ok(files)
+}
+
+/// The meta line of a journal, if its first line is one.
+fn read_meta(path: &Path) -> Option<Meta> {
+    use std::io::BufRead;
+    let mut first = String::new();
+    io::BufReader::new(File::open(path).ok()?)
+        .read_line(&mut first)
+        .ok()?;
+    match serde_json::from_str(&first).ok()? {
+        Entry::Meta(meta) => Some(meta),
+        _ => None,
+    }
+}
+
+/// The most recently written session started in `cwd`.
+pub fn find_latest(home: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
+    let cwd = cwd.to_string_lossy();
+    Ok(session_files(home)?
+        .into_iter()
+        .find(|file| read_meta(&file.path).is_some_and(|meta| meta.cwd == cwd))
+        .map(|file| file.path))
+}
+
+/// The session whose id is `prefix`, or the only one whose id starts with it.
+pub fn find_by_prefix(home: &Path, prefix: &str) -> Result<PathBuf> {
+    if prefix.is_empty() {
+        bail!("the session id is empty");
+    }
+    let mut matches: Vec<SessionFile> = session_files(home)?
+        .into_iter()
+        .filter(|file| file.id.starts_with(prefix))
+        .collect();
+    if let Some(exact) = matches.iter().position(|file| file.id == prefix) {
+        return Ok(matches.swap_remove(exact).path);
+    }
+    match matches.len() {
+        0 => bail!(
+            "no session id starts with `{prefix}` in {}",
+            sessions_dir(home).display()
+        ),
+        1 => Ok(matches.remove(0).path),
+        n => {
+            let mut ids: Vec<&str> = matches.iter().map(|file| file.id.as_str()).collect();
+            ids.sort_unstable();
+            bail!("`{prefix}` matches {n} sessions: {}", ids.join(", "))
+        }
+    }
+}
+
+/// Up to `limit` readable sessions, most recently written first.
+pub fn list_recent(home: &Path, limit: usize) -> Result<Vec<Summary>> {
+    Ok(session_files(home)?
+        .into_iter()
+        .filter_map(|file| {
+            let session = Session::load(&file.path).ok()?;
+            let first_input = session
+                .transcript
+                .messages
+                .iter()
+                .find(|message| message.role == Role::User)
+                .map(Message::text)
+                .unwrap_or_default();
+            Some(Summary {
+                id: session.meta.id,
+                updated: file
+                    .modified
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                cwd: session.meta.cwd,
+                messages: session.transcript.messages.len(),
+                first_input,
+            })
+        })
+        .take(limit)
+        .collect())
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -563,5 +685,98 @@ mod tests {
         assert_eq!(format_utc(1_709_251_199), "2024-02-29 23:59");
         assert_eq!(format_utc(951_868_800), "2000-03-01 00:00");
         assert_eq!(format_utc(1_794_205_024), "2026-11-09 06:17");
+    }
+
+    fn set_mtime(path: &Path, unix_secs: u64) {
+        let time = UNIX_EPOCH + std::time::Duration::from_secs(unix_secs);
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    fn new_session(home: &Path, cwd: &str, inputs: &[&str], mtime: u64) -> PathBuf {
+        let (meta, mut writer) = SessionWriter::create(home, Path::new(cwd), "m").unwrap();
+        for input in inputs {
+            writer
+                .record(&Entry::Message(Message::user_text(*input)))
+                .unwrap();
+        }
+        let path = sessions_dir(home).join(format!("{}.jsonl", meta.id));
+        set_mtime(&path, mtime);
+        path
+    }
+
+    #[test]
+    fn continue_picks_the_latest_session_of_the_folder() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        assert_eq!(find_latest(home, Path::new("/x")).unwrap(), None);
+
+        let _old = new_session(home, "/x", &["old"], 1_000);
+        let newer = new_session(home, "/x", &["newer"], 2_000);
+        let _other = new_session(home, "/y", &["other"], 3_000);
+        let junk = sessions_dir(home).join("zzzz.jsonl");
+        fs::write(&junk, "not json\n").unwrap();
+        set_mtime(&junk, 4_000);
+        fs::write(sessions_dir(home).join("notes.txt"), "").unwrap();
+
+        assert_eq!(find_latest(home, Path::new("/x")).unwrap(), Some(newer));
+        assert_eq!(find_latest(home, Path::new("/z")).unwrap(), None);
+    }
+
+    #[test]
+    fn resume_accepts_a_unique_id_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let dir = sessions_dir(home);
+        fs::create_dir_all(&dir).unwrap();
+        for id in [
+            "20261109-061704-3fa2",
+            "20261109-061704-9bcd",
+            "20261110-080000-0001",
+            "20261110-080000-00012",
+        ] {
+            fs::write(dir.join(format!("{id}.jsonl")), "").unwrap();
+        }
+        let found = |prefix: &str| {
+            find_by_prefix(home, prefix)
+                .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
+        };
+
+        assert_eq!(found("20261109-061704-3").unwrap(), "20261109-061704-3fa2");
+        // A full id wins even when a longer id starts with it.
+        assert_eq!(
+            found("20261110-080000-0001").unwrap(),
+            "20261110-080000-0001"
+        );
+        let err = found("20261109").unwrap_err().to_string();
+        assert!(err.contains("matches 2 sessions"), "{err}");
+        assert!(found("2025").is_err());
+        assert!(found("").is_err());
+    }
+
+    #[test]
+    fn lists_recent_sessions() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        assert!(list_recent(home, 10).unwrap().is_empty());
+        new_session(home, "/x", &["first question", "and more"], 1_000);
+        new_session(home, "/y", &["두 번째"], 2_000);
+        new_session(home, "/y", &[], 3_000);
+
+        let list = list_recent(home, 2).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].messages, 0);
+        assert_eq!(list[0].first_input, "");
+        assert_eq!(list[1].first_input, "두 번째");
+        assert_eq!(list[1].updated, 2_000);
+        assert_eq!(list[1].cwd, "/y");
+        let all = list_recent(home, 10).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].messages, 2);
+        assert_eq!(all[2].first_input, "first question");
     }
 }
