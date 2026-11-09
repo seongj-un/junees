@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -97,7 +97,8 @@ async fn run() -> Result<ExitCode> {
         config.base_url.clone(),
         config.model.clone(),
     )?
-    .with_thinking(config.thinking_budget);
+    .with_thinking(config.thinking_budget)
+    .with_streaming(config.stream);
     let cwd = std::env::current_dir()?;
     let opened = open_session(&args.session, &config, &cwd)?;
     let mut agent = Agent::restore(
@@ -124,7 +125,10 @@ async fn run() -> Result<ExitCode> {
             let received = cancel_on_signals(signals, cancel);
             // stdout carries only the answer.
             eprintln!("{}", opened.status);
-            match agent.run(&prompt, print_event).await {
+            let mut printer = Printer::new();
+            let result = agent.run(&prompt, |event| printer.event(event)).await;
+            printer.end_line();
+            match result {
                 Ok(_) => Ok(ExitCode::SUCCESS),
                 Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
                     let signal = received.load(Ordering::SeqCst);
@@ -257,7 +261,8 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
                 config.base_url.clone(),
                 config.model.clone(),
             )?
-            .with_thinking(config.thinking_budget),
+            .with_thinking(config.thinking_budget)
+            .with_streaming(config.stream),
         ))
     };
     let budget = match &command {
@@ -289,9 +294,13 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
     };
     let received = cancel_on_signals(Signals::install()?, env.cancel.clone());
     let interrupted = || signal_exit(received.load(Ordering::SeqCst));
+    let mut printer = Printer::new();
     let mut reporter = |report: Report<'_>| match report {
-        Report::Line(line) => println!("{line}"),
-        Report::Event(event) => print_event(event),
+        Report::Line(line) => {
+            printer.end_line();
+            println!("{line}");
+        }
+        Report::Event(event) => printer.event(event),
     };
     match command {
         TaskCommand::Init { goal, .. } => match task::init(&env, &goal, &mut reporter).await {
@@ -504,18 +513,22 @@ impl Repl<'_> {
     /// SIGTERM, which also quits.
     async fn turn(&mut self, input: &str) -> bool {
         self.cancel.reset();
-        let run = self.agent.run(input, print_event);
-        tokio::pin!(run);
+        let mut printer = Printer::new();
         let mut terminated = false;
-        let result = loop {
-            tokio::select! {
-                result = &mut run => break result,
-                signal = self.signals.next() => {
-                    terminated |= signal == libc::SIGTERM;
-                    self.cancel.cancel();
+        let result = {
+            let run = self.agent.run(input, |event| printer.event(event));
+            tokio::pin!(run);
+            loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    signal = self.signals.next() => {
+                        terminated |= signal == libc::SIGTERM;
+                        self.cancel.cancel();
+                    }
                 }
             }
         };
+        printer.end_line();
         match result {
             Ok(_) => {}
             Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
@@ -571,9 +584,81 @@ fn report(err: &anyhow::Error) {
     }
 }
 
+/// Shows the agent's progress: the model's text on stdout, everything else
+/// on stderr.
+///
+/// On a terminal the text is shown as it arrives. Otherwise (`-p` into a
+/// pipe or a file) stdout is the result, so the text of a model call is
+/// held until the call is over and the part of an attempt that broke off
+/// and was retried is dropped: stdout gets each reply once, whole.
+struct Printer {
+    /// Show text as it arrives.
+    live: bool,
+    /// Text was printed since the last line break (live).
+    in_line: bool,
+    /// The text of the model call in progress (not live).
+    pending: String,
+}
+
+impl Printer {
+    fn new() -> Self {
+        Self {
+            live: std::io::stdout().is_terminal(),
+            in_line: false,
+            pending: String::new(),
+        }
+    }
+
+    fn event(&mut self, event: Event<'_>) {
+        match event {
+            Event::TextDelta(text) if self.live => {
+                print!("{text}");
+                // Nothing to do about a closed stdout but stop showing.
+                let _ = std::io::stdout().flush();
+                self.in_line = true;
+            }
+            Event::TextDelta(text) => self.pending.push_str(text),
+            Event::TextEnd if self.live => {
+                println!();
+                self.in_line = false;
+            }
+            Event::TextEnd => self.pending.push('\n'),
+            Event::Retrying => {
+                self.pending.clear();
+                self.end_line();
+                eprintln!("  (retrying)");
+            }
+            // Reported during the call; its text is not done yet.
+            Event::Thinking => print_event(event),
+            // Anything else comes after a model call.
+            event => {
+                self.end_line();
+                print_event(event);
+            }
+        }
+    }
+
+    /// Prints what is held of the model call, or ends a line of text that
+    /// was cut off (by a cancel or an error). A reply cut off that way
+    /// still shows as far as it got.
+    fn end_line(&mut self) {
+        if std::mem::take(&mut self.in_line) {
+            println!();
+        }
+        if !self.pending.is_empty() {
+            if !self.pending.ends_with('\n') {
+                self.pending.push('\n');
+            }
+            print!("{}", std::mem::take(&mut self.pending));
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
 fn print_event(event: Event<'_>) {
     match event {
-        Event::Text(text) => println!("{text}"),
+        // Shown by the printer.
+        Event::TextDelta(_) | Event::TextEnd | Event::Retrying => {}
         Event::Thinking => eprintln!("  (thinking...)"),
         Event::Warning(warning) => eprintln!("  !! {warning}"),
         Event::ToolCall { name, input } => {

@@ -158,7 +158,7 @@ impl Collected {
         |report| match report {
             Report::Line(text) => self.lines.push(text.to_string()),
             Report::Event(Event::Warning(text)) => self.warnings.push(text.to_string()),
-            Report::Event(Event::Text(text)) => self.texts.push(text.to_string()),
+            Report::Event(Event::TextDelta(text)) => self.texts.push(text.to_string()),
             Report::Event(_) => {}
         }
     }

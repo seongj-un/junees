@@ -7,13 +7,24 @@ use async_trait::async_trait;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use super::{CompletionRequest, CompletionResponse, Provider, ProviderError, ToolSpec};
+use super::stream::{Assembler, SseParser};
+use super::{
+    CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent, StreamSender,
+    ToolSpec, report_blocks,
+};
 use crate::message::{ContentBlock, Role, StopReason, Usage};
 
 const API_VERSION: &str = "2023-06-01";
 const MAX_ATTEMPTS: u32 = 4;
-/// Requests are not streamed, so this bounds one whole model call.
+/// Bounds one whole model call that is not streamed.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a streamed call may wait for its response to start and then
+/// for each next event. A stream has no limit on its whole length: the
+/// docs advise streaming for long requests, and a long answer goes on as
+/// long as events keep coming. The API sends tool input one whole value
+/// at a time, so a large file to write can mean a long pause; at the old
+/// whole-call limit, no call that used to finish can time out here.
+pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_RETRY_AFTER_SECS: u64 = 60;
 
 pub struct AnthropicProvider {
@@ -23,12 +34,16 @@ pub struct AnthropicProvider {
     model: String,
     /// Extended thinking budget in tokens; 0 leaves thinking off.
     thinking_budget: u32,
+    /// Stream [`Provider::complete_streaming`] calls (`stream: true`).
+    stream: bool,
+    /// See [`STREAM_IDLE_TIMEOUT`].
+    idle_timeout: Duration,
 }
 
 impl AnthropicProvider {
     pub fn new(api_key: String, base_url: String, model: String) -> anyhow::Result<Self> {
+        // Timeouts are set per request: a stream has no overall one.
         let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
             .build()
             .context("failed to build HTTP client")?;
         Ok(Self {
@@ -37,7 +52,24 @@ impl AnthropicProvider {
             base_url,
             model,
             thinking_budget: 0,
+            stream: false,
+            idle_timeout: STREAM_IDLE_TIMEOUT,
         })
+    }
+
+    /// Streams the calls made with [`Provider::complete_streaming`], so
+    /// text shows as it is written; off, they are plain requests whose
+    /// response is reported at the end. Other calls are never streamed.
+    pub fn with_streaming(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// Changes how long a stream may go without an event
+    /// ([`STREAM_IDLE_TIMEOUT`] by default).
+    pub fn with_idle_timeout(mut self, idle: Duration) -> Self {
+        self.idle_timeout = idle;
+        self
     }
 
     /// Turns on extended thinking with `budget` tokens for the requests
@@ -53,38 +85,29 @@ impl AnthropicProvider {
         format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
 
+    fn post(&self, url: &str, body: &ApiRequest<'_>) -> reqwest::RequestBuilder {
+        self.client
+            .post(url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", API_VERSION)
+            .json(body)
+    }
+
     async fn send_once(
         &self,
         url: &str,
         body: &ApiRequest<'_>,
     ) -> Result<CompletionResponse, Failure> {
         let response = self
-            .client
-            .post(url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .json(body)
+            .post(url, body)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
-            .map_err(|err| Failure {
-                // is_request covers connections closed before a response.
-                retryable: err.is_timeout() || err.is_connect() || err.is_request(),
-                retry_after: None,
-                error: ProviderError::Transport(Box::new(err)),
-            })?;
+            .map_err(send_failure)?;
 
         let status = response.status();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok());
-        // A body cut off midway is a transport problem worth retrying.
-        let bytes = response.bytes().await.map_err(|err| Failure {
-            retryable: true,
-            retry_after: None,
-            error: ProviderError::Transport(Box::new(err)),
-        })?;
+        let retry_after = retry_after(&response);
+        let bytes = response.bytes().await.map_err(body_failure)?;
 
         if !status.is_success() {
             return Err(Failure {
@@ -100,6 +123,102 @@ impl AnthropicProvider {
         })?;
         Ok(parsed.into())
     }
+
+    /// One streamed attempt. Sets `reported` once it reported anything,
+    /// so a retry can say that what was shown is void.
+    async fn stream_once(
+        &self,
+        url: &str,
+        body: &ApiRequest<'_>,
+        events: &StreamSender,
+        reported: &mut bool,
+    ) -> Result<CompletionResponse, Failure> {
+        let idle = self.idle_timeout;
+        let mut response = tokio::time::timeout(idle, self.post(url, body).send())
+            .await
+            .map_err(|_| idle_failure(idle))?
+            .map_err(send_failure)?;
+
+        let status = response.status();
+        let is_stream = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim_start().starts_with("text/event-stream"));
+        if !status.is_success() || !is_stream {
+            // Errors before the stream starts come as plain responses, and
+            // a server that does not stream answers with the whole message.
+            let retry_after = retry_after(&response);
+            let mut bytes = Vec::new();
+            while let Some(chunk) = tokio::time::timeout(idle, response.chunk())
+                .await
+                .map_err(|_| idle_failure(idle))?
+                .map_err(body_failure)?
+            {
+                bytes.extend_from_slice(&chunk);
+            }
+            if !status.is_success() {
+                return Err(Failure {
+                    retryable: is_retryable(status),
+                    retry_after,
+                    error: api_error(status, &bytes),
+                });
+            }
+            let parsed: ApiResponse = serde_json::from_slice(&bytes).map_err(|err| Failure {
+                retryable: false,
+                retry_after: None,
+                error: ProviderError::Decode(err.to_string()),
+            })?;
+            let response = CompletionResponse::from(parsed);
+            report_blocks(&response.content, events);
+            return Ok(response);
+        }
+
+        let mut parser = SseParser::default();
+        let mut assembler = Assembler::default();
+        let mut report = |event: StreamEvent| {
+            *reported = true;
+            // A receiver that is gone has nothing left to show.
+            let _ = events.send(event);
+        };
+        // Waiting is bounded per event, not per chunk of bytes.
+        let mut deadline = tokio::time::Instant::now() + idle;
+        loop {
+            let chunk = tokio::time::timeout_at(deadline, response.chunk())
+                .await
+                .map_err(|_| idle_failure(idle))?
+                .map_err(body_failure)?
+                .ok_or_else(|| Failure {
+                    retryable: true,
+                    retry_after: None,
+                    error: ProviderError::Transport(
+                        "the response stream ended before message_stop".into(),
+                    ),
+                })?;
+            let parsed = parser.push(&chunk).map_err(|err| Failure {
+                retryable: false,
+                retry_after: None,
+                error: ProviderError::Decode(err),
+            })?;
+            for event in parsed {
+                deadline = tokio::time::Instant::now() + idle;
+                let done = assembler
+                    .apply(&event.data, &mut report)
+                    .map_err(|error| Failure {
+                        retryable: is_retryable_error(&error),
+                        retry_after: None,
+                        error,
+                    })?;
+                if done {
+                    return assembler.finish().map_err(|error| Failure {
+                        retryable: false,
+                        retry_after: None,
+                        error,
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// One failed attempt and whether another one may help.
@@ -107,6 +226,42 @@ struct Failure {
     error: ProviderError,
     retryable: bool,
     retry_after: Option<u64>,
+}
+
+fn send_failure(err: reqwest::Error) -> Failure {
+    Failure {
+        // is_request covers connections closed before a response.
+        retryable: err.is_timeout() || err.is_connect() || err.is_request(),
+        retry_after: None,
+        error: ProviderError::Transport(Box::new(err)),
+    }
+}
+
+/// A body cut off midway is a transport problem worth retrying.
+fn body_failure(err: reqwest::Error) -> Failure {
+    Failure {
+        retryable: true,
+        retry_after: None,
+        error: ProviderError::Transport(Box::new(err)),
+    }
+}
+
+fn idle_failure(idle: Duration) -> Failure {
+    Failure {
+        retryable: true,
+        retry_after: None,
+        error: ProviderError::Transport(
+            format!("no response from the API for {} s", idle.as_secs_f32()).into(),
+        ),
+    }
+}
+
+fn retry_after(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
 /// A request body. Prompt-cache breakpoints go on the last tool, the system
@@ -127,6 +282,12 @@ struct ApiRequest<'a> {
     tools: Vec<Cached<&'a ToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<Thinking>,
+    #[serde(skip_serializing_if = "is_false")]
+    stream: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl<'a> ApiRequest<'a> {
@@ -185,6 +346,7 @@ impl<'a> ApiRequest<'a> {
                 kind: "enabled",
                 budget_tokens: thinking_budget,
             }),
+            stream: false,
         }
     }
 }
@@ -286,6 +448,42 @@ impl Provider for AnthropicProvider {
         }
     }
 
+    /// Streams the call when streaming is on. A stream that breaks off (a
+    /// dropped connection, an `error` event such as `overloaded_error`, no
+    /// event for too long) is retried like a failed request, from the
+    /// start; if part of it was reported, [`StreamEvent::Retrying`] says
+    /// so first. Dropping the future closes the connection at once.
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest<'_>,
+        events: &StreamSender,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if !self.stream {
+            let response = self.complete(request).await?;
+            report_blocks(&response.content, events);
+            return Ok(response);
+        }
+        let mut body = ApiRequest::new(&self.model, request, self.thinking_budget);
+        body.stream = true;
+        let url = self.messages_url();
+
+        let mut attempt = 1;
+        loop {
+            let mut reported = false;
+            match self.stream_once(&url, &body, events, &mut reported).await {
+                Ok(response) => return Ok(response),
+                Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
+                    if reported {
+                        let _ = events.send(StreamEvent::Retrying);
+                    }
+                    tokio::time::sleep(backoff(attempt, failure.retry_after)).await;
+                    attempt += 1;
+                }
+                Err(failure) => return Err(failure.error),
+            }
+        }
+    }
+
     fn manual_thinking(&self) -> bool {
         self.thinking_budget > 0
     }
@@ -293,6 +491,16 @@ impl Provider for AnthropicProvider {
 
 fn is_retryable(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 || status.is_server_error()
+}
+
+/// For an `error` event in a stream, which carries the status its type has
+/// in a plain response.
+fn is_retryable_error(error: &ProviderError) -> bool {
+    match error {
+        ProviderError::Api { status, .. } => StatusCode::from_u16(*status).is_ok_and(is_retryable),
+        ProviderError::Transport(_) => true,
+        ProviderError::Decode(_) => false,
+    }
 }
 
 /// Wait before retry number `attempt` (1-based). Honors `retry-after` when the

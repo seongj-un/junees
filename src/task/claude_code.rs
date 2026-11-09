@@ -914,7 +914,9 @@ impl Stream {
                 Some("text") if main => {
                     let text = block["text"].as_str().unwrap_or_default().trim();
                     if !text.is_empty() {
-                        report(Report::Event(Event::Text(text)));
+                        // Claude Code hands over whole blocks.
+                        report(Report::Event(Event::TextDelta(text)));
+                        report(Report::Event(Event::TextEnd));
                     }
                 }
                 Some("tool_use") => {
@@ -1250,7 +1252,7 @@ mod tests {
         move |report| {
             let text = match report {
                 Report::Line(text) => format!("line {text}"),
-                Report::Event(Event::Text(text)) => format!("text {text}"),
+                Report::Event(Event::TextDelta(text)) => format!("text {text}"),
                 Report::Event(Event::Warning(text)) => format!("warn {text}"),
                 Report::Event(Event::ToolCall { name, input }) => format!("-> {name} {input}"),
                 Report::Event(Event::ToolResult { name, output }) => {
