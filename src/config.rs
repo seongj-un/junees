@@ -1,6 +1,7 @@
 //! Settings read from environment variables.
 
 use std::fmt::Display;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,11 +20,13 @@ pub struct Config {
     pub model: String,
     pub max_tokens: u32,
     pub max_turns: usize,
+    /// Where Junees keeps its state (`$JUNEES_HOME`, default `$HOME/.junees`).
+    pub home: PathBuf,
 }
 
 impl Config {
     /// Reads `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `JUNEES_MODEL`,
-    /// `JUNEES_MAX_TOKENS` and `JUNEES_MAX_TURNS`.
+    /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_HOME` and `HOME`.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -53,6 +56,11 @@ impl Config {
         if max_turns == 0 {
             bail!("JUNEES_MAX_TURNS must be greater than 0");
         }
+        let home = match get("JUNEES_HOME") {
+            Some(home) => PathBuf::from(home),
+            None => PathBuf::from(get("HOME").context("neither JUNEES_HOME nor HOME is set")?)
+                .join(".junees"),
+        };
 
         Ok(Self {
             api_key,
@@ -60,6 +68,7 @@ impl Config {
             model: get("JUNEES_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens,
             max_turns,
+            home,
         })
     }
 }
@@ -83,12 +92,21 @@ mod tests {
 
     use super::*;
 
-    fn config(pairs: &[(&str, &str)]) -> Result<Config> {
+    fn lookup(pairs: &[(&str, &str)]) -> Result<Config> {
         let map: HashMap<String, String> = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         Config::from_lookup(|key| map.get(key).cloned())
+    }
+
+    /// Like [`lookup`], with `HOME` set unless the pairs set it.
+    fn config(pairs: &[(&str, &str)]) -> Result<Config> {
+        let mut pairs = pairs.to_vec();
+        if !pairs.iter().any(|(key, _)| *key == "HOME") {
+            pairs.push(("HOME", "/home/tester"));
+        }
+        lookup(&pairs)
     }
 
     #[test]
@@ -106,6 +124,22 @@ mod tests {
         assert_eq!(config.model, DEFAULT_MODEL);
         assert_eq!(config.max_tokens, DEFAULT_MAX_TOKENS);
         assert_eq!(config.max_turns, DEFAULT_MAX_TURNS);
+        assert_eq!(config.home, PathBuf::from("/home/tester/.junees"));
+    }
+
+    #[test]
+    fn junees_home_overrides_home() {
+        let config = config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_HOME", "/data/j")]).unwrap();
+        assert_eq!(config.home, PathBuf::from("/data/j"));
+        let config = lookup(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_HOME", "/data/j")]).unwrap();
+        assert_eq!(config.home, PathBuf::from("/data/j"));
+    }
+
+    #[test]
+    fn requires_some_home() {
+        let err = lookup(&[("ANTHROPIC_API_KEY", "k")]).err().unwrap();
+        assert!(err.to_string().contains("HOME"), "{err}");
+        assert!(lookup(&[("ANTHROPIC_API_KEY", "k"), ("HOME", " ")]).is_err());
     }
 
     #[test]
