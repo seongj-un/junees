@@ -176,6 +176,16 @@ impl Notifier {
         self.send(&content).await
     }
 
+    /// Posts why the task run in `root` failed before it could record a
+    /// stop.
+    pub async fn run_failed(&self, root: &Path, err: &anyhow::Error) -> Result<(), NotifyError> {
+        if self.webhook.is_none() {
+            return Ok(());
+        }
+        let content = format!("junees: task in {} run failed: {err:#}", repo_name(root));
+        self.send(&content).await
+    }
+
     /// Posts one line about a finished session, if notifications for every
     /// session are on.
     pub async fn session_done(
@@ -519,6 +529,10 @@ mod tests {
                 1,
                 &State::default(),
             )
+            .await
+            .unwrap();
+        notifier
+            .run_failed(Path::new("/work/app"), &anyhow::anyhow!("boom"))
             .await
             .unwrap();
     }

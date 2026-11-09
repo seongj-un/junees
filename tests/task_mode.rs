@@ -506,6 +506,49 @@ async fn a_failing_webhook_leaves_the_exit_code_alone() {
 }
 
 #[tokio::test]
+async fn a_run_that_cannot_start_notifies_the_webhook() {
+    let (url, _api) = fake_api(init_replies()).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let name = root.file_name().unwrap().to_string_lossy().to_string();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+    // Left behind by something else: the run refuses to start.
+    std::fs::write(root.join("stray.txt"), "left over").unwrap();
+
+    let (hook, webhook) = fake_api(vec![(204, json!({}))]).await;
+    let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
+    let run = junees_env(
+        root,
+        home.path(),
+        &url,
+        &["task", "run"],
+        &[("JUNEES_NOTIFY_WEBHOOK", &hook)],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("error: the work tree has uncommitted changes"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains(HOOK_TOKEN) && !stderr.contains(HOOK_TOKEN));
+
+    let posts = posts_of(webhook).await;
+    assert_eq!(posts.len(), 1);
+    assert_eq!(body_of(&posts[0])["allowed_mentions"], json!({"parse": []}));
+    let content = body_of(&posts[0])["content"].as_str().unwrap().to_string();
+    assert!(
+        content.starts_with(&format!(
+            "junees: task in {name} run failed: the work tree has uncommitted changes"
+        )),
+        "{content}"
+    );
+}
+
+#[tokio::test]
 async fn status_without_a_task_says_to_run_init() {
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();

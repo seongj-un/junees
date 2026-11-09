@@ -239,7 +239,27 @@ fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
 /// features.json, adds a line to progress.md and commits whatever the
 /// session left uncommitted. Session numbers and counters continue from
 /// state.json, so a run picks up where the last one (or a crash) left off.
+///
+/// A run that fails before it can record a stop (a dirty work tree, a
+/// feature list that does not load, a state file that cannot be written)
+/// returns the error, and posts it through `env.notify` too: an unattended
+/// run that never starts needs the alert most.
 pub async fn run(
+    env: &TaskEnv<'_>,
+    max_sessions: usize,
+    report: &mut Reporter<'_>,
+) -> Result<Stop> {
+    let result = run_until_stop(env, max_sessions, report).await;
+    if let Err(err) = &result
+        && let Err(notify) = env.notify.run_failed(&env.root, err).await
+    {
+        warn(report, &notify.to_string());
+    }
+    result
+}
+
+/// [`run`] without the notification of a failure.
+async fn run_until_stop(
     env: &TaskEnv<'_>,
     max_sessions: usize,
     report: &mut Reporter<'_>,
