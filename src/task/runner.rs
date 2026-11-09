@@ -55,12 +55,15 @@ const IGNORED: &[&str] = &[
 
 /// Build-output folders `task init` adds to the repository's `.gitignore`
 /// when git does not ignore them yet: verify commands build, and the
-/// harness commits everything new that is not ignored.
+/// harness commits everything new that is not ignored. Folders that build
+/// tools make at the project root are anchored there (`/build/`), since a
+/// source folder deeper down may share the name (a Java package `build`);
+/// the others appear at any depth.
 const BUILD_OUTPUT: &[&str] = &[
-    "target/",
+    "/target/",
     "node_modules/",
-    "dist/",
-    "build/",
+    "/dist/",
+    "/build/",
     ".venv/",
     "__pycache__/",
 ];
@@ -1219,9 +1222,11 @@ fn prepare_dir(root: &Path) -> Result<bool> {
 /// is.
 fn ignore_build_output(root: &Path, report: &mut Reporter<'_>) -> Result<()> {
     let mut missing = Vec::new();
-    for folder in BUILD_OUTPUT {
+    for pattern in BUILD_OUTPUT {
+        // Checked at the root, where the anchored ones apply.
+        let folder = pattern.trim_start_matches('/');
         if !git::is_ignored(root, folder)? && !git::tracks_any(root, folder)? {
-            missing.push(*folder);
+            missing.push(*pattern);
         }
     }
     if missing.is_empty() {
@@ -1530,12 +1535,12 @@ mod tests {
         // Build output stays out of the harness's commits from the start.
         assert_eq!(
             git::show(root, "HEAD", ".gitignore").unwrap(),
-            "target/\nnode_modules/\ndist/\nbuild/\n.venv/\n__pycache__/\n"
+            "/target/\nnode_modules/\n/dist/\n/build/\n.venv/\n__pycache__/\n"
         );
         assert_eq!(
             out.lines[2],
-            "build output kept out of git (.gitignore): target/ node_modules/ \
-             dist/ build/ .venv/ __pycache__/"
+            "build output kept out of git (.gitignore): /target/ node_modules/ \
+             /dist/ /build/ .venv/ __pycache__/"
         );
         assert!(
             out.lines[0].starts_with("== init session, journal "),
@@ -1763,12 +1768,36 @@ mod tests {
         ignore_build_output(root, &mut out.reporter()).unwrap();
         assert_eq!(
             fs::read_to_string(root.join(".gitignore")).unwrap(),
-            "/target\n*.log\nnode_modules/\ndist/\n.venv/\n__pycache__/\n"
+            "/target\n*.log\nnode_modules/\n/dist/\n.venv/\n__pycache__/\n"
         );
         // Nothing left to add: the file stays as it is.
         let mut out = Collected::default();
         ignore_build_output(root, &mut out.reporter()).unwrap();
         assert!(out.lines.is_empty(), "{:?}", out.lines);
+    }
+
+    #[test]
+    fn init_ignores_root_build_output_but_not_source_folders_named_alike() {
+        let repo = repo();
+        let root = repo.path();
+        let mut out = Collected::default();
+        ignore_build_output(root, &mut out.reporter()).unwrap();
+        for path in [
+            "target/debug/app",
+            "build/out.o",
+            "dist/app.js",
+            "web/node_modules/x/index.js",
+            "py/pkg/__pycache__/m.pyc",
+        ] {
+            assert!(git::is_ignored(root, path).unwrap(), "{path}");
+        }
+        for path in [
+            "src/main/java/com/acme/build/Release.java",
+            "web/dist/keep.js",
+            "crates/target/lib.rs",
+        ] {
+            assert!(!git::is_ignored(root, path).unwrap(), "{path}");
+        }
     }
 
     #[test]
