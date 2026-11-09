@@ -28,7 +28,10 @@ pub fn init_system(root: &Path) -> String {
          {{\"id\": \"F1\", \"description\": \"...\", \"verify\": \"<shell command>\", \
          \"passes\": false}}. Ids are unique. `verify` runs with bash (and `set -o pipefail`) from the \
          repository root and must exit 0 exactly when the feature works (for example \
-         a test command). Every feature starts with \"passes\": false.\n\
+         a test command). Every feature starts with \"passes\": false. The harness \
+         runs every verify command before it accepts the list and rejects the ones \
+         that already pass, so each must fail until its feature is built (check that \
+         a test filter matches a test that exists by then).\n\
          4. Write .junees/progress.md: the goal, the plan, and what the first work \
          session needs to know.\n\
          5. If every session needs setup steps (installing dependencies, starting a \
@@ -48,7 +51,8 @@ pub fn init_input(goal: &str) -> String {
 pub fn fix_input(problem: &str) -> String {
     format!(
         "The harness rejected .junees/features.json: {problem}\n\
-         Fix the file. Every feature must keep \"passes\": false."
+         Fix the file. Every feature must keep \"passes\": false, and its verify \
+         command must fail until the feature is built."
     )
 }
 

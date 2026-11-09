@@ -132,7 +132,8 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
         })
         .await
         .context("the init session failed")?;
-    let count = match check_new_list(root) {
+    let verifier = env.verifier();
+    let count = match check_new_list(root, &verifier, report).await {
         Ok(count) => count,
         Err(err) => {
             let problem = format!("{err:#}");
@@ -146,7 +147,9 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
                 })
                 .await
                 .context("the init session failed")?;
-            check_new_list(root).context("the feature list is still invalid after one fix")?
+            check_new_list(root, &verifier, report)
+                .await
+                .context("the feature list is still invalid after one fix")?
         }
     };
     // Writes the list in the harness's own formatting.
@@ -375,10 +378,37 @@ async fn recheck_passing(
     append_progress(env.root.as_path(), &format!("run start: {text}"))
 }
 
-/// Checks the list a new task starts from and returns its length.
-fn check_new_list(root: &Path) -> Result<usize> {
+/// Checks the list a new task starts from and returns its length. Besides
+/// its form, every verify command must fail now: one that passes before
+/// any work (`true`, a test filter that matches no test, a pipe into
+/// `tail`) would pass a feature nobody built.
+async fn check_new_list(
+    root: &Path,
+    verifier: &Verifier,
+    report: &mut Reporter<'_>,
+) -> Result<usize> {
     let list = features::load(root)?;
     features::check_fresh(&list)?;
+    line(
+        report,
+        &format!(
+            "== checking that the {} verify commands fail before any work ==",
+            list.len()
+        ),
+    );
+    let mut passing = Vec::new();
+    for feature in &list {
+        if !verifier.run(&feature.verify).await.is_error {
+            passing.push(format!("{} (`{}`)", feature.id, feature.verify));
+        }
+    }
+    if !passing.is_empty() {
+        bail!(
+            "these verify commands already pass before any work: {}; a verify \
+             command must fail until its feature is built",
+            passing.join(", ")
+        );
+    }
     Ok(list.len())
 }
 
@@ -576,7 +606,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let provider = Scripted::new(vec![
             calls(&[
-                write(&features_path(root), &feature_list(&["true", "true"])),
+                write(
+                    &features_path(root),
+                    &feature_list(&["test -f a", "test -f b"]),
+                ),
                 write(&progress_path(root), "# Plan\n\nTwo features."),
             ]),
             text("planned"),
@@ -615,6 +648,10 @@ mod tests {
             out.lines
         );
         assert_eq!(
+            out.lines[1],
+            "== checking that the 2 verify commands fail before any work =="
+        );
+        assert_eq!(
             fs::read_dir(home.path().join("sessions")).unwrap().count(),
             1
         );
@@ -632,7 +669,7 @@ mod tests {
             text("planned"),
             calls(&[write(
                 &features_path(root),
-                &feature_list(&["true", "true"]),
+                &feature_list(&["test -f a", "test -f b"]),
             )]),
             text("fixed"),
         ]);
@@ -656,6 +693,45 @@ mod tests {
         assert!(fix.contains("empty verify"), "{fix}");
         assert_eq!(out.warnings.len(), 1);
         assert_eq!(subjects(root), [INIT_COMMIT]);
+    }
+
+    #[tokio::test]
+    async fn init_rejects_verify_commands_that_already_pass() {
+        let repo = repo();
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![
+            calls(&[write(
+                &features_path(root),
+                &feature_list(&["true", "test -f a", "ls | tail -1"]),
+            )]),
+            text("planned"),
+            calls(&[write(
+                &features_path(root),
+                &feature_list(&["test -f z", "test -f a", "test -f b"]),
+            )]),
+            text("fixed"),
+        ]);
+        let factory = factory(&provider);
+        let mut out = Collected::default();
+        init(
+            &env(root, home.path(), &factory),
+            "goal",
+            &mut out.reporter(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.left(), 0);
+        let seen = provider.seen.lock().unwrap();
+        let fix = seen[2].1.last().unwrap().text();
+        assert!(
+            fix.contains("these verify commands already pass before any work: F1 (`true`), F3 ("),
+            "{fix}"
+        );
+        assert!(!fix.contains("F2"), "{fix}");
+        assert_eq!(subjects(root), [INIT_COMMIT]);
+        // The verify commands ran in the repository and left nothing behind.
+        assert!(!git::is_dirty(root).unwrap());
     }
 
     #[tokio::test]
