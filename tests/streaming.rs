@@ -396,8 +396,32 @@ async fn the_binary_says_when_it_retries() {
     ])
     .await;
     let output = junees(&url, &[]).await;
-    // The cut-off line ends before the retry; the answer follows whole.
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "Hal\nHallo.\n");
+    // stdout is a pipe: the cut-off attempt is dropped, the answer comes
+    // once.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Hallo.\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("  (retrying)\n"));
+    assert_eq!(server.await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_retry_after_a_finished_text_block_prints_that_block_once() {
+    let reply = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+        "content": [{"type": "text", "text": "First."}, {"type": "text", "text": "Second."}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 3, "output_tokens": 4}
+    });
+    // The first block is complete before the stream breaks off.
+    let broken = opening("First.")
+        + &sse_event(&json!({"type": "content_block_stop", "index": 0}))
+        + &sse_event(&json!({"type": "content_block_start", "index": 1,
+                             "content_block": {"type": "text", "text": ""}}))
+        + &sse_event(&json!({"type": "content_block_delta", "index": 1,
+                             "delta": {"type": "text_delta", "text": "Sec"}}))
+        + &error_event("overloaded_error", "Overloaded");
+    let (url, server) = fake_stream_api(vec![stream(broken), stream(sse_stream(&reply, 3))]).await;
+    let output = junees(&url, &[]).await;
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "First.\nSecond.\n");
     assert!(String::from_utf8_lossy(&output.stderr).contains("  (retrying)\n"));
     assert_eq!(server.await.unwrap().len(), 2);
 }
