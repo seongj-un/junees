@@ -99,7 +99,9 @@ struct Failure {
 
 /// A request body. Prompt-cache breakpoints go on the last tool, the system
 /// prompt and the last block of the last message, so each call reads the
-/// prefix the previous one wrote. They are added here, while serializing,
+/// prefix the previous one wrote. Blocks Junees keeps raw (thinking and the
+/// like) cannot carry a breakpoint, so it goes on the last block before
+/// them. They are added here, while serializing,
 /// so the conversation types stay plain, and only when the request asks
 /// for caching: a cache write costs more than plain input.
 #[derive(Serialize)]
@@ -139,7 +141,10 @@ impl<'a> ApiRequest<'a> {
             .iter()
             .enumerate()
             .map(|(i, message)| {
-                let last_block = message.content.len().saturating_sub(1);
+                let last_block = message
+                    .content
+                    .iter()
+                    .rposition(|block| !matches!(block, ContentBlock::Other(_)));
                 ApiMessage {
                     role: message.role,
                     content: message
@@ -149,7 +154,7 @@ impl<'a> ApiRequest<'a> {
                         .map(|(j, block)| {
                             Cached::new(
                                 block,
-                                request.cache && i == last_message && j == last_block,
+                                request.cache && i == last_message && last_block == Some(j),
                             )
                         })
                         .collect(),
@@ -214,11 +219,7 @@ struct ApiResponse {
 impl From<ApiResponse> for CompletionResponse {
     fn from(response: ApiResponse) -> Self {
         Self {
-            content: response
-                .content
-                .into_iter()
-                .filter(|block| !matches!(block, ContentBlock::Unsupported))
-                .collect(),
+            content: response.content,
             stop_reason: response.stop_reason.unwrap_or(StopReason::Other),
             usage: response.usage,
         }
@@ -433,16 +434,14 @@ mod tests {
     }
 
     #[test]
-    fn response_drops_unsupported_blocks() {
+    fn response_keeps_thinking_blocks_as_they_came() {
+        let thinking = json!({"type": "thinking", "thinking": "...", "signature": "s"});
         let api: ApiResponse = serde_json::from_value(json!({
             "id": "msg_1",
             "type": "message",
             "role": "assistant",
             "model": "m",
-            "content": [
-                {"type": "thinking", "thinking": "...", "signature": "s"},
-                {"type": "text", "text": "done"}
-            ],
+            "content": [thinking, {"type": "text", "text": "done"}],
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 12, "output_tokens": 3, "cache_read_input_tokens": 0}
         }))
@@ -450,12 +449,67 @@ mod tests {
         let response = CompletionResponse::from(api);
         assert_eq!(
             response.content,
-            vec![ContentBlock::Text {
-                text: "done".into()
-            }]
+            vec![
+                ContentBlock::Other(thinking),
+                ContentBlock::Text {
+                    text: "done".into()
+                }
+            ]
         );
         assert_eq!(response.stop_reason, StopReason::EndTurn);
         assert_eq!(response.usage.input_tokens, 12);
+    }
+
+    #[test]
+    fn raw_blocks_go_back_unchanged_and_without_cache_marks() {
+        let thinking = json!({"type": "thinking", "thinking": "plan", "signature": "sig=="});
+        let redacted = json!({"type": "redacted_thinking", "data": "opaque"});
+        let messages = [
+            Message::user_text("go"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Other(thinking.clone()),
+                    ContentBlock::Other(redacted.clone()),
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "bash".into(),
+                        input: json!({}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let value = request("", &messages, &[]);
+        assert_eq!(value["messages"][1]["content"][0], thinking);
+        assert_eq!(value["messages"][1]["content"][1], redacted);
+        assert_eq!(
+            value["messages"][2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+
+        // A last message that ends in raw blocks is marked before them, and
+        // one with nothing else is not marked at all.
+        let mut ends_raw = messages[1].clone();
+        ends_raw.content.rotate_left(2);
+        let value = request("", &[ends_raw], &[]);
+        let content = &value["messages"][0]["content"];
+        assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(content[1], thinking);
+        assert_eq!(content[2], redacted);
+        let only_raw = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Other(thinking.clone())],
+        };
+        let value = request("", &[only_raw], &[]);
+        assert!(!value.to_string().contains("cache_control"), "{value}");
     }
 
     #[test]

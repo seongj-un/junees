@@ -41,7 +41,13 @@ pub fn summary_request(messages: &[Message]) -> Message {
                     let error = if *is_error { ", error" } else { "" };
                     text.push_str(&format!("[tool result {tool_use_id}{error}]\n{content}\n"));
                 }
-                ContentBlock::Unsupported => {}
+                // Thinking is the model's own working; its outcome is in
+                // the text and tool calls around it.
+                block if block.is_thinking() => {}
+                block => {
+                    let kind = block.other_type().unwrap_or("unknown");
+                    text.push_str(&format!("[{role}: {kind} block]\n"));
+                }
             }
         }
     }
@@ -84,6 +90,34 @@ mod tests {
              [user]\nlist files\n\
              [tool call toolu_1: bash] {\"command\":\"ls\"}\n\
              [tool result toolu_1, error]\nno such dir\n\
+             </conversation>"
+        );
+    }
+
+    #[test]
+    fn skips_thinking_and_labels_other_raw_blocks() {
+        let messages = [
+            Message::user_text("search it"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Other(json!({"type": "thinking", "thinking": "secret plan",
+                                               "signature": "sig"})),
+                    ContentBlock::Other(json!({"type": "redacted_thinking", "data": "opaque"})),
+                    ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_1",
+                                               "name": "web_search", "input": {}})),
+                    ContentBlock::Text {
+                        text: "found it".into(),
+                    },
+                ],
+            },
+        ];
+        assert_eq!(
+            summary_request(&messages).text(),
+            "Summarize this conversation:\n\n<conversation>\n\
+             [user]\nsearch it\n\
+             [assistant: server_tool_use block]\n\
+             [assistant]\nfound it\n\
              </conversation>"
         );
     }

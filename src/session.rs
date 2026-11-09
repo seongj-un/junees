@@ -22,8 +22,11 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 
 /// The journal format this version writes and the newest it can read.
 /// Raise it when old binaries could misread new journals. Format 2 added
-/// `clear_tool_results` and `compact`; format 1 journals still load.
-pub const FORMAT: u32 = 2;
+/// `clear_tool_results` and `compact`. Format 3 keeps the content blocks
+/// Junees does not handle itself (thinking and the like) as the API sent
+/// them, which older versions would read as placeholders the API rejects.
+/// Format 1 and 2 journals still load.
+pub const FORMAT: u32 = 3;
 
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
@@ -1019,7 +1022,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 2);
+        assert_eq!(value["format"], 3);
         // Journals written before the field existed are format 1.
         let old =
             r#"{"type":"meta","id":"a","created_at":1,"cwd":"/w","model":"m","version":"0.1.0"}"#;
@@ -1041,7 +1044,7 @@ mod tests {
 
         let err = Session::load(&path).unwrap_err().to_string();
         assert!(err.contains("written by a newer Junees"), "{err}");
-        assert!(err.contains("session format 3"), "{err}");
+        assert!(err.contains("session format 4"), "{err}");
         assert!(Session::resume(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
     }
@@ -1145,6 +1148,63 @@ mod tests {
         );
         assert_eq!(transcript.clear_entry_keeping(0), None);
         assert_eq!(Transcript::default().clear_entry_keeping(0), None);
+    }
+
+    /// A tool call after a signed thinking block and a redacted one.
+    fn thinking_call(id: &str) -> Message {
+        let mut message = tool_call(id);
+        message.content.splice(
+            0..0,
+            [
+                ContentBlock::Other(json!({"type": "thinking", "thinking": format!("why {id}"),
+                                           "signature": format!("sig-{id}==")})),
+                ContentBlock::Other(json!({"type": "redacted_thinking", "data": "opaque+/="})),
+            ],
+        );
+        message
+    }
+
+    #[test]
+    fn thinking_blocks_survive_the_journal_clearing_and_compaction() {
+        let mut messages = vec![Message::user_text("go")];
+        for i in 0..5 {
+            let id = format!("toolu_{i}");
+            messages.push(thinking_call(&id));
+            messages.push(tool_results(&id, "out", false));
+        }
+        let home = tempfile::tempdir().unwrap();
+        let (_, mut writer) = SessionWriter::create(home.path(), Path::new("/w"), "m").unwrap();
+        let mut transcript = Transcript::default();
+        for message in messages.clone() {
+            let entry = Entry::Message(message);
+            writer.record(&entry).unwrap();
+            transcript.apply(entry);
+        }
+        // The rules cut where they would without thinking blocks.
+        let plain = tool_rounds(5);
+        assert_eq!(transcript.clear_entry(), plain.clear_entry());
+        assert_eq!(transcript.compact_point(), plain.compact_point());
+
+        for entry in [
+            transcript.clear_entry().unwrap(),
+            Entry::Compact {
+                summary: "s".into(),
+                keep_from: transcript.compact_point().unwrap(),
+            },
+        ] {
+            writer.record(&entry).unwrap();
+            transcript.apply(entry);
+        }
+        drop(writer);
+        // The kept replies still carry their thinking blocks as they were.
+        assert_eq!(transcript.messages[1], messages[7]);
+        assert_eq!(transcript.messages[3], messages[9]);
+        assert_eq!(transcript.interrupted_results(), None);
+        let path = sessions_dir(home.path());
+        let path = fs::read_dir(path).unwrap().next().unwrap().unwrap().path();
+        let (session, _) = Session::resume(&path).unwrap();
+        assert_eq!(session.meta.format, FORMAT);
+        assert_eq!(session.transcript, transcript);
     }
 
     fn assistant(text: &str) -> Message {
