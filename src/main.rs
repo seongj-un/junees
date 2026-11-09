@@ -136,9 +136,15 @@ fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opene
     if let Some(warning) = &session.warning {
         eprintln!("  !! {warning}");
     }
+    // Relative paths in the history mean the folder it started in.
+    let elsewhere = if session.meta.cwd == cwd.to_string_lossy() {
+        String::new()
+    } else {
+        format!(", started in {}", session.meta.cwd)
+    };
     Ok(Opened {
         status: format!(
-            "resumed {} ({} messages)",
+            "resumed {} ({} messages{elsewhere})",
             session.meta.id,
             session.transcript.messages.len()
         ),

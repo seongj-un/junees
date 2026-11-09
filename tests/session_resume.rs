@@ -160,6 +160,34 @@ async fn resume_takes_an_id_prefix() {
 }
 
 #[tokio::test]
+async fn resuming_from_another_folder_says_where_the_session_started() {
+    let (url, server) = fake_api(vec![(200, text_reply("a")), (200, text_reply("b"))]).await;
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+
+    junees(home.path(), project.path(), &url, &["-p", "hi"]).await;
+    let id = only_session_id(home.path());
+    let second = junees(
+        home.path(),
+        other.path(),
+        &url,
+        &["--resume", &id, "-p", "hi"],
+    )
+    .await;
+    let started_in = std::fs::canonicalize(project.path()).unwrap();
+    assert!(
+        stderr(&second).contains(&format!(
+            "resumed {id} (2 messages, started in {})\n",
+            started_in.display()
+        )),
+        "{}",
+        stderr(&second)
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn no_session_saves_nothing_and_continue_starts_fresh_elsewhere() {
     let (url, server) = fake_api(vec![(200, text_reply("a")), (200, text_reply("b"))]).await;
     let home = tempfile::tempdir().unwrap();
