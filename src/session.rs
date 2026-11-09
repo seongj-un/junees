@@ -90,7 +90,8 @@ pub enum Entry {
     /// Token usage of one model call.
     Usage(Usage),
     /// The output of every tool result in the messages before index `upto`
-    /// was replaced with [`CLEARED`].
+    /// was replaced with [`CLEARED`], and every thinking block was dropped
+    /// (see [`Transcript::apply`]).
     ClearToolResults {
         upto: usize,
     },
@@ -101,7 +102,7 @@ pub enum Entry {
     /// It leads the first kept message when that is a user input; when the
     /// tail starts with a model reply (a cut inside one turn), it goes into
     /// a new user message, followed by the text of the input that started
-    /// the turn, word for word.
+    /// the turn, word for word. Every kept thinking block was dropped.
     Compact {
         summary: String,
         keep_from: usize,
@@ -166,6 +167,7 @@ impl Transcript {
                         }
                     }
                 }
+                self.drop_thinking();
             }
             Entry::SummaryUsage(usage) => self.usage.add(usage),
             Entry::Compact { summary, keep_from } => {
@@ -204,9 +206,24 @@ impl Transcript {
                         );
                     }
                 }
+                self.drop_thinking();
                 // Unknown until the next model call measures it.
                 self.context_tokens = 0;
             }
+        }
+    }
+
+    /// Drops every `thinking` and `redacted_thinking` block, after a change
+    /// to earlier messages. Claude 5.1 and later models check that nothing
+    /// before a thinking block sent back (system prompt, tools, earlier
+    /// messages) changed since the block was made, and reject it, and every
+    /// later one, if it did. Without thinking blocks there is nothing to
+    /// check; the ones made from here on see the changed history. Replies
+    /// keep their text and tool calls, so none becomes empty: a reply of
+    /// nothing but thinking is never stored.
+    fn drop_thinking(&mut self) {
+        for message in &mut self.messages {
+            message.content.retain(|block| !block.is_thinking());
         }
     }
 
@@ -1164,14 +1181,55 @@ mod tests {
         message
     }
 
-    #[test]
-    fn thinking_blocks_survive_the_journal_clearing_and_compaction() {
+    fn has_thinking(transcript: &Transcript) -> bool {
+        transcript
+            .messages
+            .iter()
+            .any(|message| message.content.iter().any(ContentBlock::is_thinking))
+    }
+
+    /// One input and `n` tool rounds whose replies all start with thinking,
+    /// as Claude 5 models (thinking on by default) send them.
+    fn thinking_rounds(n: usize) -> Vec<Message> {
         let mut messages = vec![Message::user_text("go")];
-        for i in 0..5 {
+        for i in 0..n {
             let id = format!("toolu_{i}");
             messages.push(thinking_call(&id));
             messages.push(tool_results(&id, "out", false));
         }
+        messages
+    }
+
+    #[test]
+    fn clearing_drops_every_thinking_block() {
+        let mut transcript = transcript_of(thinking_rounds(6));
+        // The rules cut where they would without thinking blocks.
+        let entry = transcript.clear_entry().unwrap();
+        assert_eq!(Some(&entry), tool_rounds(6).clear_entry().as_ref());
+        transcript.apply(entry);
+        // Thinking after a cleared result would no longer match what came
+        // before it, and dropping only that would change what came before
+        // the rest: none stays, before the cut or after it.
+        assert!(!has_thinking(&transcript), "{:#?}", transcript.messages);
+        let mut plain = tool_rounds(6);
+        let entry = plain.clear_entry().unwrap();
+        plain.apply(entry);
+        for (now, then) in transcript.messages.iter().zip(&plain.messages) {
+            assert_eq!(now.role, then.role);
+            assert_eq!(now.content.len(), then.content.len());
+        }
+        assert_eq!(transcript.messages.len(), 13);
+        assert_eq!(transcript.messages[11], tool_call("toolu_5"));
+
+        // Thinking that comes after the clear saw the cleared history and
+        // stays until the next change.
+        transcript.apply(Entry::Message(thinking_call("toolu_6")));
+        assert_eq!(transcript.messages[13], thinking_call("toolu_6"));
+    }
+
+    #[test]
+    fn compaction_drops_every_thinking_block_and_replays_the_same() {
+        let messages = thinking_rounds(5);
         let home = tempfile::tempdir().unwrap();
         let (_, mut writer) = SessionWriter::create(home.path(), Path::new("/w"), "m").unwrap();
         let mut transcript = Transcript::default();
@@ -1180,25 +1238,21 @@ mod tests {
             writer.record(&entry).unwrap();
             transcript.apply(entry);
         }
-        // The rules cut where they would without thinking blocks.
-        let plain = tool_rounds(5);
-        assert_eq!(transcript.clear_entry(), plain.clear_entry());
-        assert_eq!(transcript.compact_point(), plain.compact_point());
-
-        for entry in [
-            transcript.clear_entry().unwrap(),
-            Entry::Compact {
-                summary: "s".into(),
-                keep_from: transcript.compact_point().unwrap(),
-            },
-        ] {
-            writer.record(&entry).unwrap();
-            transcript.apply(entry);
-        }
+        let keep_from = transcript.compact_point().unwrap();
+        assert_eq!(Some(keep_from), tool_rounds(5).compact_point());
+        let entry = Entry::Compact {
+            summary: "s".into(),
+            keep_from,
+        };
+        writer.record(&entry).unwrap();
+        transcript.apply(entry);
         drop(writer);
-        // The kept replies still carry their thinking blocks as they were.
-        assert_eq!(transcript.messages[1], messages[7]);
-        assert_eq!(transcript.messages[3], messages[9]);
+
+        // The kept replies keep their tool calls, without their thinking:
+        // it was made after the messages the summary replaced.
+        assert!(!has_thinking(&transcript), "{:#?}", transcript.messages);
+        assert_eq!(transcript.messages[1], tool_call("toolu_3"));
+        assert_eq!(transcript.messages[3], tool_call("toolu_4"));
         assert_eq!(transcript.interrupted_results(), None);
         let path = sessions_dir(home.path());
         let path = fs::read_dir(path).unwrap().next().unwrap().unwrap().path();

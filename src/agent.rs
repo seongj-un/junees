@@ -1332,6 +1332,52 @@ mod tests {
         assert_eq!(replay(entries), agent.transcript);
     }
 
+    fn thinking_in(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(|block| block.is_thinking())
+            .map(|block| match block {
+                ContentBlock::Other(value) => value["signature"].to_string(),
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn thinking_is_not_sent_back_after_tool_output_was_cleared() {
+        // Every reply thinks first, as Claude 5 models do by default.
+        let mut script = resized(tool_rounds(6, 1), &[100, 100, 100, 900, 100, 100]);
+        for (i, reply) in script.iter_mut().enumerate() {
+            if let Ok(response) = reply {
+                let signature = format!("sig-{}", i + 1);
+                response.content.insert(0, thinking_block(&signature));
+            }
+        }
+        script.push(sized(text("done"), 100));
+        let provider = Scripted::new(script);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        agent.run("go", |_| {}).await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 7);
+        // Sent back unchanged while nothing before them changed.
+        assert_eq!(
+            thinking_in(&seen[3]),
+            ["\"sig-1\"", "\"sig-2\"", "\"sig-3\""]
+        );
+        // The fourth call went over the threshold, so old tool output was
+        // cleared before the fifth: none of the thinking made before that
+        // goes out again, and what came after it does.
+        assert_eq!(tool_output(&seen[4][2])[0].1, session::CLEARED);
+        assert!(thinking_in(&seen[4]).is_empty(), "{:#?}", seen[4]);
+        assert_eq!(thinking_in(&seen[6]), ["\"sig-5\"", "\"sig-6\""]);
+        assert_valid(agent.messages());
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
     fn summary_text(message: &Message) -> Option<String> {
         match message.content.first() {
             Some(ContentBlock::Text { text }) => text
