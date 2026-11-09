@@ -53,7 +53,7 @@ const IGNORED: &[&str] = &[
     "sessions/",
 ];
 
-const NO_TASK: &str = "cannot load the feature list (start a task with `junees task init`)";
+const NO_TASK: &str = "cannot load the feature list (start a task with `junees task \"<goal>\"`)";
 
 /// Why task mode does not start on a work tree with changes: its commits
 /// take everything a session leaves behind, and would take the user's
@@ -203,7 +203,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     if path.exists() {
         bail!(
             "{} already exists: this repository already has a task \
-             (continue it with `junees task run`, or delete .junees/ if an \
+             (continue it with `junees task`, or delete .junees/ if an \
              earlier `junees task init` did not finish)",
             path.display()
         );
@@ -231,7 +231,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     warn_left_out(report, &commit.left_out);
     line(
         report,
-        &format!("== init done: {count} features, committed; start with `junees task run` =="),
+        &format!("== init done: {count} features, committed =="),
     );
     Ok(())
 }

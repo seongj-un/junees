@@ -78,7 +78,12 @@ impl Config {
     /// calls no API, so `ANTHROPIC_API_KEY` is neither needed nor read
     /// (`api_key` stays empty).
     pub fn from_env_without_key() -> Result<Self> {
-        Self::read(|key| std::env::var(key).ok(), false)
+        Self::from_lookup_without_key(|key| std::env::var(key).ok())
+    }
+
+    /// [`Config::from_env_without_key`] with the variables from `lookup`.
+    pub fn from_lookup_without_key(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        Self::read(lookup, false)
     }
 
     fn read(lookup: impl Fn(&str) -> Option<String>, need_key: bool) -> Result<Self> {
