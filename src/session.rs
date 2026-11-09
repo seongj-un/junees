@@ -62,6 +62,17 @@ fn first_format() -> u32 {
     1
 }
 
+/// The `type` tags of [`Entry`]; keep in step with its variants.
+const ENTRY_TYPES: [&str; 7] = [
+    "meta",
+    "message",
+    "append_text",
+    "usage",
+    "clear_tool_results",
+    "summary_usage",
+    "compact",
+];
+
 /// One line of a journal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -503,7 +514,17 @@ impl Session {
                     ));
                     break;
                 }
-                Err(err) => bail!("{}: line {line_no} is corrupt: {err}", path.display()),
+                Err(err) => match unknown_type(line) {
+                    // A later Junees may have continued an older session
+                    // without changing its meta line.
+                    Some(kind) => bail!(
+                        "{}: line {line_no} is a `{kind}` entry, which this version \
+                         does not know: the session was probably continued by a newer \
+                         Junees; update Junees to open it",
+                        path.display()
+                    ),
+                    None => bail!("{}: line {line_no} is corrupt: {err}", path.display()),
+                },
             }
             pos = next;
         }
@@ -560,6 +581,13 @@ impl Session {
         }
         Ok((session, writer))
     }
+}
+
+/// The `type` of a JSON object line, if it is not one this version knows.
+fn unknown_type(line: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+    let kind = value.get("type")?.as_str()?;
+    (!ENTRY_TYPES.contains(&kind)).then(|| kind.to_string())
 }
 
 pub fn sessions_dir(home: &Path) -> PathBuf {
@@ -944,10 +972,42 @@ mod tests {
         write_lines(&path, &[line(&meta()), user, future.into()], "");
         let before = fs::read(&path).unwrap();
 
-        let err = Session::load(&path).unwrap_err();
-        assert!(err.to_string().contains("line 3 is corrupt"), "{err}");
+        let err = Session::load(&path).unwrap_err().to_string();
+        assert!(err.contains("line 3 is a `from_the_future` entry"), "{err}");
+        assert!(err.contains("continued by a newer Junees"), "{err}");
         assert!(Session::resume(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+
+        // A known entry type that does not parse is plain corrupt.
+        let broken = r#"{"type":"usage","input_tokens":"many"}"#;
+        write_lines(&path, &[line(&meta()), broken.into()], "");
+        let err = Session::load(&path).unwrap_err().to_string();
+        assert!(err.contains("line 2 is corrupt"), "{err}");
+    }
+
+    #[test]
+    fn every_entry_type_is_known() {
+        let samples = [
+            meta(),
+            Entry::Message(Message::user_text("hi")),
+            Entry::AppendText { text: "x".into() },
+            Entry::Usage(Usage::default()),
+            Entry::ClearToolResults { upto: 1 },
+            Entry::SummaryUsage(Usage::default()),
+            Entry::Compact {
+                summary: "s".into(),
+                keep_from: 1,
+            },
+        ];
+        let kinds: Vec<String> = samples
+            .iter()
+            .map(|entry| serde_json::to_value(entry).unwrap()["type"].to_string())
+            .collect();
+        let known: Vec<String> = ENTRY_TYPES
+            .iter()
+            .map(|kind| format!("\"{kind}\""))
+            .collect();
+        assert_eq!(kinds, known);
     }
 
     #[test]
