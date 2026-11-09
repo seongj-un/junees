@@ -54,6 +54,20 @@ async fn junees_env(
     args: &[&str],
     vars: &[(&str, &str)],
 ) -> Output {
+    junees_command(cwd, home, url, args, vars)
+        .output()
+        .await
+        .unwrap()
+}
+
+/// The command [`junees_env`] runs.
+fn junees_command(
+    cwd: &Path,
+    home: &Path,
+    url: &str,
+    args: &[&str],
+    vars: &[(&str, &str)],
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
     command
         .args(args)
@@ -69,7 +83,7 @@ async fn junees_env(
         .envs(vars.iter().copied())
         .stdin(Stdio::null());
     isolate_git(&mut command, home);
-    command.output().await.unwrap()
+    command
 }
 
 /// `junees task status` with the given arguments, without an API key: the
@@ -546,6 +560,65 @@ async fn a_run_that_cannot_start_notifies_the_webhook() {
         )),
         "{content}"
     );
+}
+
+#[tokio::test]
+async fn a_run_killed_during_the_session_notification_keeps_its_stop() {
+    let mut replies = init_replies();
+    replies.extend([
+        (
+            200,
+            tool_calls(&[
+                write_file("a.txt", "a"),
+                write_file("b.txt", "b"),
+                mark("F1"),
+                mark("F2"),
+            ]),
+        ),
+        (200, text_reply("Both done.")),
+    ]);
+    let (url, _api) = fake_api(replies).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+
+    // A webhook that takes the session's post and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook = format!(
+        "http://{}/api/webhooks/7/{HOOK_TOKEN}",
+        listener.local_addr().unwrap()
+    );
+    let mut run = junees_command(
+        root,
+        home.path(),
+        &url,
+        &["task", "run"],
+        &[
+            ("JUNEES_NOTIFY_WEBHOOK", &hook),
+            ("JUNEES_NOTIFY_EACH_SESSION", "1"),
+        ],
+    )
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let (_held, _) = tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+        .await
+        .expect("no session notification")
+        .unwrap();
+    // Killed while it waits for the webhook, as by a second Ctrl-C.
+    run.kill().await.unwrap();
+
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".junees/state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["sessions"], 1, "{state}");
+    assert_eq!(state["stop"]["reason"], "complete", "{state}");
+    assert!(state["stopped_at"].is_u64(), "{state}");
+    // The tokens of the init session and of session 1.
+    assert_eq!(state["usage"]["input_tokens"], 26, "{state}");
 }
 
 #[tokio::test]

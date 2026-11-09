@@ -322,27 +322,37 @@ async fn run_until_stop(
             };
         state.stalled = if progressed { 0 } else { state.stalled + 1 };
         line(report, &format!("== session {n} done: {summary} =="));
-        if let Err(err) = env.notify.session_done(root, n, &summary).await {
-            warn(report, &err.to_string());
-        }
-
-        if let Err(err) = result {
-            break Stop {
+        let ended = if let Err(err) = &result {
+            Some(Stop {
                 reason: StopReason::Error,
                 session: n,
                 detail: Some(format!("{err:#}")),
-            };
-        }
-        if passing == total {
-            break stop(StopReason::Complete, n);
-        }
-        if state.stalled >= STALL_LIMIT {
-            break stop(StopReason::Stalled, n);
+            })
+        } else if passing == total {
+            Some(stop(StopReason::Complete, n))
+        } else if state.stalled >= STALL_LIMIT {
+            Some(stop(StopReason::Stalled, n))
+        } else {
+            None
+        };
+        // Saved before the notification, which may take seconds: a run
+        // killed while it waits keeps the session's tokens and its stop,
+        // so the next run does not take a finished run for a crash.
+        if let Some(ended) = &ended {
+            state.record_stop(ended.clone());
         }
         state.save(root)?;
+        if let Err(err) = env.notify.session_done(root, n, &summary).await {
+            warn(report, &err.to_string());
+        }
+        if let Some(ended) = ended {
+            break ended;
+        }
     };
-    state.record_stop(stop.clone());
-    state.save(root)?;
+    if state.stop.is_none() {
+        state.record_stop(stop.clone());
+        state.save(root)?;
+    }
     let (passing, total) = {
         let ledger = ledger.lock().unwrap();
         (ledger.passing(), ledger.total())
