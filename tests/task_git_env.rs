@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use junees::task::features::Ledger;
 use junees::task::git;
-use junees::task::tools::{MarkFeaturePassing, session_tools};
+use junees::task::tools::{MarkFeaturePassing, Verifier, session_tools};
 use junees::tools::Tool;
 use serde_json::json;
 
@@ -75,7 +75,7 @@ async fn git_dir_in_the_environment_does_not_redirect_task_mode() {
 
     // Verify commands.
     let ledger = Arc::new(Mutex::new(Ledger::load(&root).unwrap()));
-    let output = MarkFeaturePassing::new(ledger.clone(), root.clone())
+    let output = MarkFeaturePassing::new(ledger.clone(), Verifier::new(root.clone()))
         .run(json!({"id": "F1"}))
         .await;
     assert!(!output.is_error, "{}", output.content);

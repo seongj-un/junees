@@ -2,7 +2,7 @@
 //! harness runs the feature's verify command itself and believes the exit
 //! code, not the model.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -29,25 +29,51 @@ pub fn session_tools() -> ToolRegistry {
     tools
 }
 
+/// The bash of task sessions; verify commands run in one like it. Every
+/// task tool is built from here, so the session bash and the verify bash
+/// always get the same settings.
 fn session_bash() -> Bash {
     Bash::default().hide_env(SECRET_ENV_VARS.iter().chain(REPO_ENV_VARS).copied())
 }
 
-pub struct MarkFeaturePassing {
-    ledger: Arc<Mutex<Ledger>>,
+/// Runs verify commands as the harness trusts them: from the repository
+/// root, with `pipefail`, and with the session bash's timeout handling,
+/// output limits and hidden variables.
+pub struct Verifier {
     root: PathBuf,
     bash: Bash,
 }
 
-impl MarkFeaturePassing {
-    /// Verify commands run in `root` like the session's bash commands: with
-    /// the bash tool's output limits and without the hidden variables.
-    pub fn new(ledger: Arc<Mutex<Ledger>>, root: PathBuf) -> Self {
+impl Verifier {
+    pub fn new(root: PathBuf) -> Self {
         Self {
-            ledger,
             root,
             bash: session_bash(),
         }
+    }
+
+    /// Runs `verify`; the output is an error unless it exited 0.
+    pub async fn run(&self, verify: &str) -> ToolOutput {
+        // A newline, not `&&`, so the cd applies to the whole command.
+        // With pipefail, `cargo test 2>&1 | tail` fails when the tests do.
+        let command = format!(
+            "cd {} || exit 1\nset -o pipefail\n{verify}",
+            shell_quote(&self.root)
+        );
+        self.bash
+            .run(json!({"command": command, "timeout_secs": VERIFY_TIMEOUT_SECS}))
+            .await
+    }
+}
+
+pub struct MarkFeaturePassing {
+    ledger: Arc<Mutex<Ledger>>,
+    verifier: Verifier,
+}
+
+impl MarkFeaturePassing {
+    pub fn new(ledger: Arc<Mutex<Ledger>>, verifier: Verifier) -> Self {
+        Self { ledger, verifier }
     }
 }
 
@@ -96,16 +122,7 @@ impl Tool for MarkFeaturePassing {
             }
         };
 
-        // A newline, not `&&`, so the cd applies to the whole command.
-        // With pipefail, `cargo test 2>&1 | tail` fails when the tests do.
-        let command = format!(
-            "cd {} || exit 1\nset -o pipefail\n{verify}",
-            shell_quote(&self.root)
-        );
-        let output = self
-            .bash
-            .run(json!({"command": command, "timeout_secs": VERIFY_TIMEOUT_SECS}))
-            .await;
+        let output = self.verifier.run(&verify).await;
         if output.is_error {
             return ToolOutput::error(format!(
                 "{id} does not pass: its verify command failed, so it stays not passing.\n\
@@ -130,7 +147,7 @@ impl Tool for MarkFeaturePassing {
 }
 
 /// Quotes a path for bash.
-fn shell_quote(path: &std::path::Path) -> String {
+fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
 }
 
@@ -157,7 +174,8 @@ mod tests {
         )
         .unwrap();
         let ledger = Arc::new(Mutex::new(Ledger::load(root.path()).unwrap()));
-        let tool = MarkFeaturePassing::new(ledger.clone(), root.path().to_path_buf());
+        let tool =
+            MarkFeaturePassing::new(ledger.clone(), Verifier::new(root.path().to_path_buf()));
         (root, ledger, tool)
     }
 

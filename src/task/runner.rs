@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 
 use super::features::{self, Ledger};
 use super::state::{State, Stop, StopReason};
-use super::tools::{MarkFeaturePassing, session_tools};
+use super::tools::{MarkFeaturePassing, Verifier, session_tools};
 use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt};
 use crate::agent::{Agent, AgentOptions, Event};
 use crate::cli::preview;
@@ -60,6 +60,17 @@ pub enum Report<'a> {
 pub type Reporter<'r> = dyn FnMut(Report<'_>) + 'r;
 
 impl TaskEnv<'_> {
+    /// The tools of a task session, without `mark_feature_passing`. Every
+    /// task session gets its tools from here and every verify command runs
+    /// through [`TaskEnv::verifier`], so tool settings belong in these two.
+    fn tools(&self) -> ToolRegistry {
+        session_tools()
+    }
+
+    fn verifier(&self) -> Verifier {
+        Verifier::new(self.root.clone())
+    }
+
     /// A new agent with a fresh context, recording to a new session journal
     /// when there is a state folder. Returns the journal's session id.
     fn agent(
@@ -110,7 +121,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     }
     prepare_dir(root)?;
 
-    let (mut agent, journal) = env.agent(prompt::init_system(root), session_tools(), report)?;
+    let (mut agent, journal) = env.agent(prompt::init_system(root), env.tools(), report)?;
     line(
         report,
         &format!("== init session{} ==", journal_note(&journal)),
@@ -289,8 +300,8 @@ async fn work_session(
         let system = prompt::work_system(root, n, ledger.features(), &progress, &git_log);
         (system, ledger.passing(), ledger.total())
     };
-    let mut tools = session_tools();
-    tools.register(MarkFeaturePassing::new(Arc::clone(ledger), root.clone()));
+    let mut tools = env.tools();
+    tools.register(MarkFeaturePassing::new(Arc::clone(ledger), env.verifier()));
     let (mut agent, journal) = match env.agent(system, tools, report) {
         Ok(created) => created,
         Err(err) => return (Err(err), Usage::default()),
