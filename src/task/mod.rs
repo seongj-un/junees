@@ -9,6 +9,7 @@
 //! feature's verify command itself.
 
 pub mod budget;
+pub mod claude_code;
 pub mod features;
 pub mod git;
 pub mod lock;
@@ -43,6 +44,12 @@ pub fn features_path(root: &Path) -> PathBuf {
 /// Where a failed `task init` leaves the list it rejected.
 pub fn rejected_features_path(root: &Path) -> PathBuf {
     dir(root).join("features.rejected.json")
+}
+
+/// Where the `claude-code` backend saves the raw output of each session.
+/// Git ignores it.
+pub fn sessions_dir(root: &Path) -> PathBuf {
+    dir(root).join("sessions")
 }
 
 pub fn progress_path(root: &Path) -> PathBuf {
