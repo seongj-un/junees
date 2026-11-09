@@ -119,6 +119,46 @@ async fn continue_sends_the_earlier_conversation() {
     assert_eq!(files.len(), 1);
 }
 
+/// The id of the only session saved under `home`.
+fn only_session_id(home: &Path) -> String {
+    let files: Vec<_> = std::fs::read_dir(home.join("sessions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    files[0].file_stem().unwrap().to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+async fn resume_takes_an_id_prefix() {
+    let (url, server) = fake_api(vec![(200, text_reply("Noted.")), (200, text_reply("42."))]).await;
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    junees(home.path(), project.path(), &url, &["-p", "remember 42"]).await;
+    let id = only_session_id(home.path());
+    let prefix = &id[..id.len() - 2];
+    let second = junees(
+        home.path(),
+        project.path(),
+        &url,
+        &["--resume", prefix, "-p", "which number?"],
+    )
+    .await;
+    assert!(
+        stderr(&second).contains(&format!("resumed {id} (2 messages)\n")),
+        "{}",
+        stderr(&second)
+    );
+
+    let requests = server.await.unwrap();
+    let messages = body_of(&requests[1])["messages"].clone();
+    assert_eq!(messages.as_array().unwrap().len(), 3);
+    assert_eq!(messages[0]["content"][0]["text"], "remember 42");
+    assert_eq!(messages[2]["content"][0]["text"], "which number?");
+    assert_eq!(only_session_id(home.path()), id);
+}
+
 #[tokio::test]
 async fn no_session_saves_nothing_and_continue_starts_fresh_elsewhere() {
     let (url, server) = fake_api(vec![(200, text_reply("a")), (200, text_reply("b"))]).await;
