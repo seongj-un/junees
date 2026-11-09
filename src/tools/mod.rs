@@ -18,6 +18,16 @@ use crate::provider::ToolSpec;
 /// Credentials Junees reads that the model's shell commands must not see.
 pub const SECRET_ENV_VARS: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 
+/// User settings for the default tools, read by [`crate::config::Config`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolSettings {
+    /// Command prefixes bash refuses on top of the built-in rules
+    /// (`JUNEES_DENY_COMMANDS`).
+    pub deny_commands: Vec<String>,
+    /// Turns the built-in command rules off (`JUNEES_ALLOW_DANGEROUS`).
+    pub allow_dangerous: bool,
+}
+
 /// What a tool hands back to the model. Failures are reported as output with
 /// `is_error` set rather than as Rust errors, so the model can react to them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,10 +71,18 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// bash, read_file and write_file. bash never sees [`SECRET_ENV_VARS`].
-    pub fn with_defaults() -> Self {
+    /// bash, read_file and write_file. bash never sees [`SECRET_ENV_VARS`]
+    /// and runs only commands its [`CommandPolicy`] allows.
+    pub fn with_defaults(settings: &ToolSettings) -> Self {
+        let policy = CommandPolicy::default()
+            .deny_prefixes(&settings.deny_commands)
+            .allow_dangerous(settings.allow_dangerous);
         let mut registry = Self::new();
-        registry.register(Bash::default().hide_env(SECRET_ENV_VARS.iter().copied()));
+        registry.register(
+            Bash::default()
+                .hide_env(SECRET_ENV_VARS.iter().copied())
+                .policy(policy),
+        );
         registry.register(ReadFile);
         registry.register(WriteFile);
         registry
@@ -184,12 +202,42 @@ mod tests {
 
     #[test]
     fn defaults_have_three_tools() {
-        let names: Vec<String> = ToolRegistry::with_defaults()
+        let names: Vec<String> = ToolRegistry::with_defaults(&ToolSettings::default())
             .specs()
             .into_iter()
             .map(|spec| spec.name)
             .collect();
         assert_eq!(names, ["bash", "read_file", "write_file"]);
+    }
+
+    #[tokio::test]
+    async fn defaults_apply_the_command_settings() {
+        let command = json!({"command": "echo deny-me && shutdown() { :; }"});
+        let output = ToolRegistry::with_defaults(&ToolSettings::default())
+            .dispatch("bash", command.clone())
+            .await;
+        assert_eq!(
+            output.content,
+            "blocked by policy: `shutdown` would stop the machine"
+        );
+
+        let settings = ToolSettings {
+            deny_commands: vec!["echo deny-me".into()],
+            allow_dangerous: true,
+        };
+        let registry = ToolRegistry::with_defaults(&settings);
+        let output = registry.dispatch("bash", command).await;
+        assert_eq!(
+            output.content,
+            "blocked by policy: matches JUNEES_DENY_COMMANDS entry `echo deny-me`"
+        );
+        let output = registry
+            .dispatch(
+                "bash",
+                json!({"command": "shutdown() { echo fake; }; shutdown"}),
+            )
+            .await;
+        assert_eq!(output, ToolOutput::ok("fake\n[exit code 0]"));
     }
 
     #[test]

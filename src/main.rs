@@ -51,7 +51,7 @@ async fn run() -> Result<()> {
     let opened = open_session(&args.session, &config, &cwd)?;
     let mut agent = Agent::restore(
         Box::new(provider),
-        ToolRegistry::with_defaults(),
+        ToolRegistry::with_defaults(&config.tools),
         AgentOptions {
             system: prompt::system_prompt(&cwd),
             max_tokens: config.max_tokens,

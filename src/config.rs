@@ -6,6 +6,8 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::tools::ToolSettings;
+
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -24,11 +26,14 @@ pub struct Config {
     /// `None` when neither is set (cron, some services and containers):
     /// Junees still runs, it just cannot save or find sessions.
     pub home: Option<PathBuf>,
+    /// Settings for the default tools: the bash command policy.
+    pub tools: ToolSettings,
 }
 
 impl Config {
     /// Reads `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `JUNEES_MODEL`,
-    /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_HOME` and `HOME`.
+    /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_HOME`, `HOME`,
+    /// `JUNEES_DENY_COMMANDS` and `JUNEES_ALLOW_DANGEROUS`.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -61,6 +66,10 @@ impl Config {
         let home = get("JUNEES_HOME")
             .map(PathBuf::from)
             .or_else(|| get("HOME").map(|home| PathBuf::from(home).join(".junees")));
+        let tools = ToolSettings {
+            deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),
+            allow_dangerous: parse_flag(get("JUNEES_ALLOW_DANGEROUS"), "JUNEES_ALLOW_DANGEROUS")?,
+        };
 
         Ok(Self {
             api_key,
@@ -69,6 +78,7 @@ impl Config {
             max_tokens,
             max_turns,
             home,
+            tools,
         })
     }
 
@@ -90,6 +100,25 @@ where
         Some(raw) => raw
             .parse()
             .map_err(|err| anyhow!("{name} must be a positive integer, got `{raw}`: {err}")),
+    }
+}
+
+/// Splits `a, b,,c` into `["a", "b", "c"]`.
+fn comma_list(value: Option<String>) -> Vec<String> {
+    value
+        .iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_flag(value: Option<String>, name: &str) -> Result<bool> {
+    match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None | Some("0" | "false" | "no" | "off") => Ok(false),
+        Some("1" | "true" | "yes" | "on") => Ok(true),
+        Some(_) => bail!("{name} must be 1 or 0, got `{}`", value.unwrap_or_default()),
     }
 }
 
@@ -132,6 +161,35 @@ mod tests {
         assert_eq!(config.max_tokens, DEFAULT_MAX_TOKENS);
         assert_eq!(config.max_turns, DEFAULT_MAX_TURNS);
         assert_eq!(config.home, Some(PathBuf::from("/home/tester/.junees")));
+        assert_eq!(config.tools, ToolSettings::default());
+    }
+
+    #[test]
+    fn reads_command_policy_settings() {
+        let tools = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_DENY_COMMANDS", " docker rm, kubectl delete ,, "),
+            ("JUNEES_ALLOW_DANGEROUS", "1"),
+        ])
+        .unwrap()
+        .tools;
+        assert_eq!(tools.deny_commands, ["docker rm", "kubectl delete"]);
+        assert!(tools.allow_dangerous);
+
+        for (raw, expected) in [("0", false), ("true", true), ("No", false), ("", false)] {
+            let parsed = config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_ALLOW_DANGEROUS", raw)]);
+            assert_eq!(parsed.unwrap().tools.allow_dangerous, expected, "{raw}");
+        }
+        let err = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_ALLOW_DANGEROUS", "maybe"),
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(
+            err.to_string(),
+            "JUNEES_ALLOW_DANGEROUS must be 1 or 0, got `maybe`"
+        );
     }
 
     #[test]
