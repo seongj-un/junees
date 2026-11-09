@@ -1,6 +1,7 @@
 //! Tools the model can call, and the registry that dispatches them.
 
 mod bash;
+mod edit_file;
 mod policy;
 mod read_file;
 mod write_file;
@@ -8,6 +9,7 @@ mod write_file;
 pub use bash::Bash;
 #[cfg(test)]
 pub(crate) use bash::testing;
+pub use edit_file::EditFile;
 pub use policy::{CommandPolicy, Verdict};
 pub use read_file::ReadFile;
 pub use write_file::WriteFile;
@@ -16,6 +18,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::provider::ToolSpec;
+
+/// read_file and edit_file refuse larger files instead of loading them into
+/// memory whole.
+const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Credentials Junees reads that the model's shell commands must not see.
 /// The notification webhook URL carries its own token.
@@ -158,6 +164,16 @@ fn opt_u64_arg(input: &Value, key: &str) -> Result<Option<u64>, ToolOutput> {
     }
 }
 
+fn opt_bool_arg(input: &Value, key: &str) -> Result<Option<bool>, ToolOutput> {
+    match input.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| ToolOutput::error(format!("`{key}` must be a boolean"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +283,10 @@ mod tests {
         assert_eq!(opt_u64_arg(&input, "n").unwrap(), Some(3));
         assert_eq!(opt_u64_arg(&input, "missing").unwrap(), None);
         assert!(opt_u64_arg(&input, "neg").is_err());
+        let input = json!({"yes": true, "null": null, "text": "true"});
+        assert_eq!(opt_bool_arg(&input, "yes").unwrap(), Some(true));
+        assert_eq!(opt_bool_arg(&input, "null").unwrap(), None);
+        assert_eq!(opt_bool_arg(&input, "missing").unwrap(), None);
+        assert!(opt_bool_arg(&input, "text").is_err());
     }
 }
