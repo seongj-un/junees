@@ -9,11 +9,11 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 
+use crate::claude_code::{ClaudeCode, NotLoggedIn};
 use crate::cli::positive;
 use crate::config::DEFAULT_MODEL;
 use crate::config_file::ConfigFile;
 use crate::task::budget::parse_duration;
-use crate::task::claude_code::{ClaudeCode, NotLoggedIn};
 use crate::tools::ToolSettings;
 
 /// The time budget of a task run the wizard offers.

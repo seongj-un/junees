@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod approval;
 pub mod cancel;
+pub mod claude_code;
 pub mod cli;
 pub mod config;
 pub mod config_file;

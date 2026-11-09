@@ -1,6 +1,6 @@
 //! The slash commands of the conversation mode.
 
-use crate::task::claude_code::Backend;
+use crate::claude_code::Backend;
 
 /// One command typed at the conversation prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
