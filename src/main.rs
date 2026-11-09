@@ -15,6 +15,7 @@ use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::task::budget::Budget;
+use junees::task::claude_code::{Backend, ClaudeCode};
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
@@ -238,7 +239,17 @@ fn signal_exit(signal: i32) -> ExitCode {
 /// folder is in. SIGINT/SIGTERM stop the session that runs; `task run`
 /// then checkpoints it, records the stop and exits with 130/143.
 async fn run_task(command: TaskCommand) -> Result<ExitCode> {
-    let config = Config::from_env()?;
+    let backend = match command.backend() {
+        Some(backend) => backend,
+        None => Backend::from_lookup(|key| std::env::var(key).ok())?,
+    };
+    let (config, claude) = match backend {
+        Backend::Api => (Config::from_env()?, None),
+        Backend::ClaudeCode => (
+            Config::from_env_without_key()?,
+            Some(ClaudeCode::from_lookup(|key| std::env::var(key).ok())),
+        ),
+    };
     let root = task::git::toplevel(&std::env::current_dir()?)?;
     // The tools resolve relative paths from the process's folder.
     std::env::set_current_dir(&root)
@@ -279,6 +290,7 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         budget,
         cancel: Cancel::new(),
         notify: Notifier::from_env()?,
+        claude,
     };
     let received = cancel_on_signals(Signals::install()?, env.cancel.clone());
     let interrupted = || signal_exit(received.load(Ordering::SeqCst));
@@ -291,7 +303,7 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         Report::Event(event) => printer.event(event),
     };
     match command {
-        TaskCommand::Init { goal } => match task::init(&env, &goal, &mut reporter).await {
+        TaskCommand::Init { goal, .. } => match task::init(&env, &goal, &mut reporter).await {
             Ok(()) => Ok(ExitCode::SUCCESS),
             Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
                 report(&err);
