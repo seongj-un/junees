@@ -113,6 +113,7 @@ async fn run_task(command: TaskCommand) -> Result<()> {
         model: config.model.clone(),
         max_tokens: config.max_tokens,
         max_turns: config.max_turns,
+        tool_settings: config.tools.clone(),
         context_window: config.context_window,
         compact_threshold: config.compact_threshold,
         provider: &provider,

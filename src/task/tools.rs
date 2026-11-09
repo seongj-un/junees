@@ -10,20 +10,21 @@ use serde_json::{Value, json};
 
 use super::features::Ledger;
 use super::git::REPO_ENV_VARS;
-use crate::tools::{Bash, ReadFile, SECRET_ENV_VARS, Tool, ToolOutput, ToolRegistry, WriteFile};
+use crate::tools::{Bash, ReadFile, Tool, ToolOutput, ToolRegistry, ToolSettings, WriteFile};
 
 /// Verify commands may run a whole test suite, so they get the longest
 /// timeout the bash tool allows.
 pub const VERIFY_TIMEOUT_SECS: u64 = 600;
 
-/// bash, read_file and write_file for task sessions. Their bash, like the
-/// default one, cannot see the API key, and it cannot see
+/// bash, read_file and write_file for task sessions, with the user's tool
+/// settings like the default tools. Their bash, like the default one,
+/// cannot see the API key or the user's hidden variables, and it cannot see
 /// [`REPO_ENV_VARS`] either: a session's git commands must act on the
 /// repository the task is in, even when Junees itself was started from a
 /// git hook or `git rebase --exec`.
-pub fn session_tools() -> ToolRegistry {
+pub fn session_tools(settings: &ToolSettings) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
-    tools.register(session_bash());
+    tools.register(session_bash(settings));
     tools.register(ReadFile);
     tools.register(WriteFile);
     tools
@@ -31,24 +32,24 @@ pub fn session_tools() -> ToolRegistry {
 
 /// The bash of task sessions; verify commands run in one like it. Every
 /// task tool is built from here, so the session bash and the verify bash
-/// always get the same settings.
-fn session_bash() -> Bash {
-    Bash::default().hide_env(SECRET_ENV_VARS.iter().chain(REPO_ENV_VARS).copied())
+/// always get the same command policy and hidden variables.
+fn session_bash(settings: &ToolSettings) -> Bash {
+    Bash::with_settings(settings).hide_env(REPO_ENV_VARS.iter().copied())
 }
 
 /// Runs verify commands as the harness trusts them: from the repository
 /// root, with `pipefail`, and with the session bash's timeout handling,
-/// output limits and hidden variables.
+/// output limits, command policy and hidden variables.
 pub struct Verifier {
     root: PathBuf,
     bash: Bash,
 }
 
 impl Verifier {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, settings: &ToolSettings) -> Self {
         Self {
             root,
-            bash: session_bash(),
+            bash: session_bash(settings),
         }
     }
 
@@ -174,8 +175,10 @@ mod tests {
         )
         .unwrap();
         let ledger = Arc::new(Mutex::new(Ledger::load(root.path()).unwrap()));
-        let tool =
-            MarkFeaturePassing::new(ledger.clone(), Verifier::new(root.path().to_path_buf()));
+        let tool = MarkFeaturePassing::new(
+            ledger.clone(),
+            Verifier::new(root.path().to_path_buf(), &ToolSettings::default()),
+        );
         (root, ledger, tool)
     }
 
@@ -240,9 +243,29 @@ mod tests {
         assert!(tool.run(json!({})).await.is_error);
     }
 
+    #[tokio::test]
+    async fn verify_commands_follow_the_users_tool_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = ToolSettings {
+            hidden_env: vec!["HOME".into()],
+            deny_commands: vec!["touch".into()],
+            allow_dangerous: false,
+        };
+        let verifier = Verifier::new(root.path().to_path_buf(), &settings);
+        let output = verifier.run("test -z \"$HOME\"").await;
+        assert!(!output.is_error, "{}", output.content);
+        let output = verifier.run("touch made.txt").await;
+        assert!(
+            output.content.starts_with("blocked by policy"),
+            "{}",
+            output.content
+        );
+        assert!(!root.path().join("made.txt").exists());
+    }
+
     #[test]
     fn session_tools_are_the_default_three() {
-        let names: Vec<String> = session_tools()
+        let names: Vec<String> = session_tools(&ToolSettings::default())
             .specs()
             .into_iter()
             .map(|spec| spec.name)

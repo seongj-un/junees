@@ -18,7 +18,7 @@ use crate::cli::preview;
 use crate::message::Usage;
 use crate::provider::Provider;
 use crate::session::SessionWriter;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ToolSettings};
 
 /// Commit message of the commit that starts a task.
 pub const INIT_COMMIT: &str = "junees: initialize task";
@@ -55,6 +55,8 @@ pub struct TaskEnv<'a> {
     pub max_tokens: u32,
     /// Model calls one session may make.
     pub max_turns: usize,
+    /// The user's settings for the session tools and verify commands.
+    pub tool_settings: ToolSettings,
     /// Context management of every session, as in a normal session.
     pub context_window: u64,
     pub compact_threshold: f64,
@@ -75,11 +77,11 @@ impl TaskEnv<'_> {
     /// task session gets its tools from here and every verify command runs
     /// through [`TaskEnv::verifier`], so tool settings belong in these two.
     fn tools(&self) -> ToolRegistry {
-        session_tools()
+        session_tools(&self.tool_settings)
     }
 
     fn verifier(&self) -> Verifier {
-        Verifier::new(self.root.clone())
+        Verifier::new(self.root.clone(), &self.tool_settings)
     }
 
     /// A new agent with a fresh context, recording to a new session journal
@@ -701,6 +703,7 @@ mod tests {
             model: "m".into(),
             max_tokens: 100,
             max_turns: 10,
+            tool_settings: ToolSettings::default(),
             context_window: 200_000,
             compact_threshold: 0.8,
             provider: factory,
@@ -1337,6 +1340,33 @@ mod tests {
             ".junees/.gitignore\n.junees/features.json\n.junees/progress.md\n"
         );
         assert_eq!(State::load(root).unwrap().stop, Some(stop));
+    }
+
+    #[tokio::test]
+    async fn session_bash_follows_the_users_deny_rules() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![
+            calls(&[bash(format!("cd '{}' && touch denied.txt", root.display()))]),
+            text("blocked"),
+        ]);
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        env.tool_settings.deny_commands = vec!["touch".into()];
+        run(&env, 1, &mut |_| {}).await.unwrap();
+
+        assert!(!root.join("denied.txt").exists());
+        let seen = provider.seen.lock().unwrap();
+        let result = seen[1].1.last().unwrap();
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &result.content[0]
+        else {
+            panic!("expected a tool result: {result:?}");
+        };
+        assert!(is_error);
+        assert!(content.starts_with("blocked by policy"), "{content}");
     }
 
     fn bash(command: String) -> (&'static str, Value) {

@@ -78,16 +78,8 @@ impl ToolRegistry {
     /// or the extra hidden variables, and runs only commands its
     /// [`CommandPolicy`] allows.
     pub fn with_defaults(settings: &ToolSettings) -> Self {
-        let policy = CommandPolicy::default()
-            .deny_prefixes(&settings.deny_commands)
-            .allow_dangerous(settings.allow_dangerous);
         let mut registry = Self::new();
-        registry.register(
-            Bash::default()
-                .hide_env(SECRET_ENV_VARS.iter().copied())
-                .hide_env(settings.hidden_env.iter().cloned())
-                .policy(policy),
-        );
+        registry.register(Bash::with_settings(settings));
         registry.register(ReadFile);
         registry.register(WriteFile);
         registry
