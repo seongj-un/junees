@@ -158,16 +158,16 @@ export ANTHROPIC_API_KEY=sk-ant-...
 `bash`의 주의 신호는 명령 정책과 같은 파서로 찾는다(`$(...)`, `sh -c`, `eval`, 셸에 파이프로 넘긴 스크립트, `timeout`/`env` 같은 래퍼, `find -exec` 안까지).
 
 - 파일 삭제: `rm`, `rmdir`, `unlink`, `shred`, `find -delete`
-- git: `git push`(모든 push), `git reset --hard`, `git clean`(`-n`/`--dry-run` 제외)
+- git: `git push`(모든 push), 작업을 버리는 명령(종류 `discard git work`: `git reset --hard`, `--`/`.`/`-f`가 붙은 `git checkout`, 작업 트리를 되돌리는 `git restore`(`--staged`만이면 제외), `git stash drop`/`clear`, `git branch -D`), `git clean`(`-n`/`--dry-run` 제외)
 - 패키지 설치/제거: `apt`/`apt-get`/`dnf`/`yum`/`brew`/`pacman`/`apk` 등의 install/remove/upgrade, `pip install`, `python -m pip install`, `npm`/`pnpm`/`yarn`/`bun`의 install/add/ci/update, `cargo install`, `go install`, `gem install`, `uv pip install`/`uv add`, 그리고 레지스트리에서 받아 바로 실행하는 `npx`/`pnpx`/`bunx`/`uvx`
 - 파일로 내려받기: `curl -o`/`-O`, `wget`(`-O -`처럼 표준 출력으로 받거나 `--spider`면 제외). 내려받은 스크립트를 셸에 바로 넘기는 것은 명령 정책이 막는다
 - 권한 변경: `chmod`, `chown`, `chgrp`, `chattr`, `setfacl`
 - 작업 폴더 밖에 쓰기: 리다이렉트(`>`, `>>`, `2>`, `&>`; `2>&1`과 `/dev/null` 같은 장치는 제외), `cp`/`ln`/`install`의 대상(`-t` 포함), `mv`/`tee`/`touch`/`mkdir`/`truncate`의 인자, `sed -i`의 파일, `dd of=`, 삭제 명령의 대상
 - `JUNEES_ALLOW_DANGEROUS=1`일 때는 기본 규칙이 막았을 명령(`sudo` 등)도 주의 신호로 묻는다
 
-작업 폴더는 junees를 실행한 폴더다. 경로는 그 폴더 기준으로 풀고 이미 있는 부분은 심볼릭 링크를 따라가서 판단한다(폴더 안의 링크가 밖을 가리키면 밖). `/tmp`와 `TMPDIR`은 안으로 친다. `~`, `$HOME`은 홈으로 풀고, 그 밖의 변수나 `` ` ``가 들어간 경로, 다른 사용자의 홈(`~user`), 대상이 없는 심볼릭 링크는 알 수 없으므로 밖으로 친다. 명령 정책이 막는 명령은 묻지 않고 그대로 막힌다.
+작업 폴더는 junees를 실행한 폴더다. 경로는 그 폴더 기준으로 풀고 이미 있는 부분은 심볼릭 링크를 따라가서 판단한다(폴더 안의 링크가 밖을 가리키면 밖). 커널처럼 링크를 먼저 따라간 뒤 `..`를 적용하므로, `out`이 밖의 `~/elsewhere/sub`를 가리키면 `out/../x`는 `~/elsewhere/x`(밖)다. 한 명령 안의 `cd`/`pushd`/`popd`는 따라간다. `cd sub && touch a`는 안, `cd ~ && echo x >> .bashrc`는 밖이다. bash처럼 `-P`가 없으면 `cd`의 `..`는 글자대로 지운다. `cd -`나 `cd "$DIR"`처럼 갈 곳을 알 수 없으면 그 뒤의 상대 경로는 모두 밖으로 친다. 파이프라인이나 `( ... )` 안의 `cd`도 뒤 명령에 이어지는 것으로 보고, `cd`가 있는 명령의 `$(...)` 안은 위치를 모르는 것으로 본다(더 묻는 쪽으로만 틀린다). `/tmp`와 `TMPDIR`은 안으로 친다. `~`, `$HOME`은 홈으로 풀고, 그 밖의 변수나 `` ` ``가 들어간 경로, 다른 사용자의 홈(`~user`), 대상이 없는 심볼릭 링크는 알 수 없으므로 밖으로 친다. 명령 정책이 막는 명령은 묻지 않고 그대로 막힌다.
 
-질문은 표준 오류에 도구 이름, 명령이나 경로, 이유를 보여 준다. `edit_file`이면 바꿀 부분(`- 원래`, `+ 새 내용`, 각 8줄까지)을, `write_file`이면 새 파일인지 덮어쓰는지와 내용 앞부분을 함께 보여 준다.
+질문은 표준 오류에 도구 이름, 명령이나 경로, 이유를 보여 준다. 모델이 쓴 글자 가운데 제어 문자(탭 제외)와 양방향 서식 문자(U+202E 등)는 `\r`, `\u{1b}`처럼 글자로 바꿔 보여 주므로, `\r`이나 ESC로 질문 줄을 지우고 다른 명령처럼 보이게 할 수 없다. `edit_file`이면 바꿀 부분(`- 원래`, `+ 새 내용`, 각 8줄까지)을, `write_file`이면 새 파일인지 덮어쓰는지와 내용 앞부분을 함께 보여 준다.
 
 ```
   ?? approve bash: rm marker
@@ -180,8 +180,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - 거절하면 도구를 실행하지 않고 `the user declined: <이유>`(이유가 없으면 `no reason given`) 오류 결과를 모델에 돌려줘서 모델이 계획을 바꾸게 한다. Ctrl-D(입력 끝)도 거절이다.
 - 질문을 기다리는 중 Ctrl-C는 그 호출을 실행하지 않고 턴을 취소한다(실행 중인 도구를 Ctrl-C로 취소할 때와 같이 그 호출과 남은 호출을 `cancelled by the user` 결과로 채운다). 질문과 프롬프트가 표준 입력을 함께 쓰므로 그 뒤에 입력한 줄은 프롬프트로 간다.
 - "항상 허용"은 junees를 끝낼 때까지 유지된다(`/reset`으로 새 세션을 시작해도 남는다).
-- 표준 입력이 터미널이 아니면(파이프) 대화 모드라도 물을 수 없으므로 시작할 때 안내를 띄우고, 승인이 필요한 호출은 실행하지 않고 `not run: this call needs the user's approval ...` 오류 결과를 돌려준다. 그런 호출까지 실행하려면 `JUNEES_APPROVAL=off`.
+- 표준 입력이나 표준 오류가 터미널이 아니면(파이프, `2>log`) 대화 모드라도 물을 수 없으므로(질문이 보이지 않는다) 시작할 때 안내를 띄우고, 승인이 필요한 호출은 실행하지 않고 `not run: this call needs the user's approval ...` 오류 결과를 돌려준다. 그런 호출까지 실행하려면 `JUNEES_APPROVAL=off`.
 - `-p`와 `task` 모드는 사람이 없으므로 묻지 않는다(명령 정책만 적용).
+- `risky`는 흔한 실수를 막는 장치이지 보안 경계가 아니다. 명령 문자열만 보고 판단하므로 `rsync`, `tar -C`, `unzip -d`, `perl -pi`, `python3 -c "open(...)"`, `crontab -r`처럼 따로 알지 못하는 명령의 쓰기는 묻지 않고, 작업 폴더 안의 `write_file`은 묻지 않으므로 스크립트를 써 두고 `bash run.sh`나 `make`로 실행하면 어떤 검사든 피할 수 있다. 그 경계가 필요하면 `JUNEES_APPROVAL=all`을 쓴다.
 
 ## 구조
 
