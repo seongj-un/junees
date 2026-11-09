@@ -64,9 +64,14 @@ pub struct Stop {
     /// The last session that ran (0 if none ever did).
     pub session: u64,
     /// The error, for [`StopReason::Error`]; which budget ran out, for
-    /// [`StopReason::Budget`].
+    /// [`StopReason::Budget`]; what Claude Code said, for
+    /// [`StopReason::Limit`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// For [`StopReason::Limit`]: when the usage limit resets, in unix
+    /// seconds, if Claude Code said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +90,9 @@ pub enum StopReason {
     /// SIGINT or SIGTERM: the running session was cancelled, wrapped up
     /// and checkpointed.
     Interrupted,
+    /// Claude Code hit the usage limit of the subscription; the next run
+    /// can go on once it resets.
+    Limit,
 }
 
 impl StopReason {
@@ -114,6 +122,22 @@ impl fmt::Display for Stop {
                 write!(f, "{}", self.detail.as_deref().unwrap_or("budget used up"))
             }
             StopReason::Interrupted => write!(f, "interrupted"),
+            StopReason::Limit => {
+                write!(
+                    f,
+                    "session {} hit the Claude Code usage limit (",
+                    self.session
+                )?;
+                match self.resets_at {
+                    Some(at) => write!(f, "resets {} UTC", crate::session::format_utc(at))?,
+                    None => write!(f, "Claude Code did not say when it resets")?,
+                }
+                write!(f, "; run `junees task` again after the reset)")?;
+                match self.detail.as_deref() {
+                    Some(detail) => write!(f, ": {detail}"),
+                    None => Ok(()),
+                }
+            }
         }
     }
 }
@@ -171,6 +195,7 @@ mod tests {
                 reason: StopReason::Error,
                 session: 4,
                 detail: Some("network down".into()),
+                resets_at: None,
             }),
             stopped_at: Some(1_794_205_024),
             goal: Some("할 일 앱".into()),
@@ -208,6 +233,7 @@ mod tests {
             reason: StopReason::Complete,
             session: 3,
             detail: None,
+            resets_at: None,
         });
         assert_eq!(state.stop.as_ref().unwrap().session, 3);
         // Some time after 2026-01-01.
@@ -218,6 +244,42 @@ mod tests {
             serde_json::from_str(r#"{"sessions": 2, "stalled": 0, "usage": {}, "stop": null}"#)
                 .unwrap();
         assert_eq!((old.goal, old.stopped_at), (None, None));
+    }
+
+    #[test]
+    fn a_usage_limit_stop_says_when_to_go_on() {
+        let stop = Stop {
+            reason: StopReason::Limit,
+            session: 2,
+            detail: Some("You've hit your session limit · resets 3:45pm".into()),
+            resets_at: Some(1_794_205_024),
+        };
+        assert_eq!(
+            stop.to_string(),
+            "session 2 hit the Claude Code usage limit (resets 2026-11-09 06:17 UTC; \
+             run `junees task` again after the reset): \
+             You've hit your session limit · resets 3:45pm"
+        );
+        assert!(!stop.reason.is_failure());
+        let raw = serde_json::to_value(&stop).unwrap();
+        assert_eq!(raw["reason"], "limit");
+        assert_eq!(raw["resets_at"], 1_794_205_024);
+        let back: Stop = serde_json::from_value(raw).unwrap();
+        assert_eq!(back, stop);
+
+        let unknown = Stop {
+            resets_at: None,
+            detail: None,
+            ..stop
+        };
+        assert_eq!(
+            unknown.to_string(),
+            "session 2 hit the Claude Code usage limit (Claude Code did not say when it \
+             resets; run `junees task` again after the reset)"
+        );
+        // Older stops have no reset time.
+        let old: Stop = serde_json::from_str(r#"{"reason": "error", "session": 1}"#).unwrap();
+        assert_eq!(old.resets_at, None);
     }
 
     #[test]

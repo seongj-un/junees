@@ -19,7 +19,7 @@ use crate::agent::Event;
 use crate::cancel::Cancel;
 use crate::notify::Notifier;
 use crate::provider::Provider;
-use crate::tools::ToolSettings;
+use crate::tools::{SettingsFile, ToolSettings};
 
 fn no_provider() -> anyhow::Result<Box<dyn Provider>> {
     panic!("the API provider was used with the claude-code backend")
@@ -32,7 +32,13 @@ fn env<'a>(root: &Path, factory: &'a ProviderFactory<'a>, bin: &Path) -> TaskEnv
         model: "unused".into(),
         max_tokens: 100,
         max_turns: 9,
-        tool_settings: ToolSettings::default(),
+        tool_settings: ToolSettings {
+            settings_file: Some(SettingsFile::new(
+                "/home/tester/.junees/config.toml",
+                Some(PathBuf::from("/home/tester")),
+            )),
+            ..ToolSettings::default()
+        },
         context_window: 200_000,
         compact_threshold: 0.8,
         provider: factory,
@@ -237,6 +243,19 @@ async fn claude_code_plans_and_builds_while_the_harness_verifies() {
     assert_eq!(after(&args, "--max-turns"), "9");
     assert_eq!(after(&args, "--permission-mode"), "acceptEdits");
     assert!(!args.iter().any(|arg| arg.contains("dangerously")));
+    // Claude Code stays off the user's settings file and its folder.
+    assert_eq!(
+        args[args.len() - 2..],
+        ["Bash(*$JUNEES_HOME*)", "Bash(*${JUNEES_HOME}*)"]
+    );
+    for rule in [
+        "Read(//home/tester/.junees/config.toml)",
+        "Read(//home/tester/.junees/**)",
+        "Edit(//home/tester/.junees/**)",
+        "Bash(*~/.junees*)",
+    ] {
+        assert!(args.iter().any(|arg| arg == rule), "{rule}: {args:?}");
+    }
 
     let mut out = Collected::default();
     let stop = run(&env(root, &factory, &fake.bin), 5, &mut out.reporter())
@@ -352,6 +371,71 @@ async fn a_claude_code_without_login_stops_the_run_with_the_hint() {
     assert!(detail.ends_with(LOGIN_HINT), "{detail}");
     // Nothing to verify after a session that never started.
     assert_eq!(verifies(&fake), checked);
+    assert_eq!(fake.runs(), 2);
+}
+
+#[tokio::test]
+async fn the_usage_limit_stops_the_run_with_the_reset_time() {
+    let fake = planned(|_| {
+        vec![format!(
+            "echo a > a.txt\n{}\nexit 1",
+            print(&[
+                json!({"type": "system", "subtype": "init", "session_id": "s"}),
+                assistant("msg_1", "working", 10),
+                json!({"type": "rate_limit_event", "session_id": "s",
+                    "rate_limit_info": {"status": "rejected", "resetsAt": 1_794_205_024}}),
+                json!({"type": "assistant", "error": "rate_limit", "parent_tool_use_id": null,
+                    "session_id": "s", "message": {"content": [{"type": "text",
+                    "text": "You've hit your session limit · resets 6:17am"}]}}),
+                json!({"type": "result", "subtype": "success", "is_error": true,
+                    "api_error_status": 429, "session_id": "s",
+                    "result": "You've hit your session limit · resets 6:17am"}),
+            ])
+        )]
+    });
+    let repo = repo();
+    let root = repo.path();
+    initialized(root, &fake).await;
+    let factory = no_provider;
+    let mut seen = Collected::default();
+    let stop = run(&env(root, &factory, &fake.bin), 5, &mut seen.reporter())
+        .await
+        .unwrap();
+    assert_eq!(stop.reason, StopReason::Limit);
+    assert!(!stop.reason.is_failure());
+    assert_eq!(stop.session, 1);
+    assert_eq!(stop.resets_at, Some(1_794_205_024));
+    assert_eq!(
+        stop.detail.as_deref(),
+        Some("You've hit your session limit · resets 6:17am")
+    );
+    assert!(
+        seen.warnings
+            .iter()
+            .any(|warning| warning.contains("requests are refused until 2026-11-09 06:17 UTC")),
+        "{:?}",
+        seen.warnings
+    );
+    // The session's work is verified and kept, and the stop is recorded
+    // for `task status` and the next run.
+    assert!(features::load(root).unwrap()[0].passes);
+    assert_eq!(subjects(root)[0], checkpoint_message(1));
+    let state = State::load(root).unwrap();
+    assert_eq!(state.stop, Some(stop));
+    let progress = fs::read_to_string(progress_path(root)).unwrap();
+    assert!(
+        progress
+            .contains("session 1: 1/2 passing, new: F1, stopped at the Claude Code usage limit"),
+        "{progress}"
+    );
+    let status = super::status::load(root).unwrap();
+    assert!(
+        status
+            .to_text()
+            .contains("last stop: session 1 hit the Claude Code usage limit (resets 2026-11-09 06:17 UTC; run `junees task` again after the reset)"),
+        "{}",
+        status.to_text()
+    );
     assert_eq!(fake.runs(), 2);
 }
 

@@ -438,6 +438,7 @@ mod tests {
                 &Stop {
                     reason: StopReason::Stalled,
                     session: 4,
+                    resets_at: None,
                     detail: None,
                 },
                 2,
@@ -471,6 +472,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_usage_limit_stop_names_the_reset() {
+        let (url, server) = server(vec![Some(204)]).await;
+        let notifier = notifier(&[(WEBHOOK_ENV, &url)]).unwrap();
+        notifier
+            .task_stopped(
+                Path::new("/work/todo-app"),
+                &Stop {
+                    reason: StopReason::Limit,
+                    session: 2,
+                    resets_at: Some(1_794_205_024),
+                    detail: Some("You've hit your session limit · resets 6:17am".into()),
+                },
+                2,
+                5,
+                &stopped_state(),
+            )
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+        let content = body(&requests[0])["content"].as_str().unwrap().to_string();
+        assert!(
+            content.starts_with(
+                "junees: task in `todo-app` stopped (limit): `session 2 hit the Claude Code \
+                 usage limit (resets 2026-11-09 06:17 UTC; run 'junees task' again after the \
+                 reset): You've hit your session limit · resets 6:17am`\n"
+            ),
+            "{content}"
+        );
+    }
+
+    #[tokio::test]
     async fn cuts_long_messages_to_the_discord_limit() {
         let (url, server) = server(vec![Some(200), Some(200)]).await;
         let notifier = notifier(&[(WEBHOOK_ENV, &url)]).unwrap();
@@ -481,6 +513,7 @@ mod tests {
                 &Stop {
                     reason: StopReason::Error,
                     session: 1,
+                    resets_at: None,
                     detail: Some(detail),
                 },
                 0,
@@ -516,6 +549,7 @@ mod tests {
                 &Stop {
                     reason: StopReason::Error,
                     session: 2,
+                    resets_at: None,
                     detail: Some("see [this](https://evil.example) `x`\n# big".into()),
                 },
                 0,
@@ -619,6 +653,7 @@ mod tests {
                 &Stop {
                     reason: StopReason::Complete,
                     session: 1,
+                    resets_at: None,
                     detail: None,
                 },
                 1,

@@ -137,8 +137,12 @@ pub struct StopStatus {
     pub reason: StopReason,
     /// The last session that ran.
     pub session: u64,
-    /// The error, for `error` stops; which budget ran out, for `budget`.
+    /// The error, for `error` stops; which budget ran out, for `budget`;
+    /// what Claude Code said, for `limit`.
     pub detail: Option<String>,
+    /// For `limit` stops: when the usage limit resets, in unix seconds, if
+    /// Claude Code said.
+    pub resets_at: Option<u64>,
     /// The stop as one sentence.
     pub message: String,
     /// When the run stopped, in unix seconds, if recorded.
@@ -177,6 +181,7 @@ pub fn load(root: &Path) -> Result<Status> {
         session: stop.session,
         message: stop.to_string(),
         detail: stop.detail,
+        resets_at: stop.resets_at,
         at: state.stopped_at,
     });
     Ok(Status {
@@ -372,6 +377,7 @@ mod tests {
         state.record_stop(Stop {
             reason: StopReason::MaxSessions,
             session: 3,
+            resets_at: None,
             detail: None,
         });
         state.stopped_at = Some(1_794_205_024);
@@ -463,6 +469,7 @@ mod tests {
                 "reason": "max_sessions",
                 "session": 3,
                 "detail": null,
+                "resets_at": null,
                 "message": "reached --max-sessions",
                 "at": 1_794_205_024
             })
@@ -529,6 +536,7 @@ mod tests {
         state.stop = Some(Stop {
             reason: StopReason::Error,
             session: 3,
+            resets_at: None,
             detail: Some("network down".into()),
         });
         state.save(root).unwrap();
@@ -651,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn shows_budget_and_interrupted_stops() {
+    fn shows_budget_interrupted_and_limit_stops() {
         let repo = task_repo();
         let root = repo.path();
         for (stop, line, reason) in [
@@ -659,6 +667,7 @@ mod tests {
                 Stop {
                     reason: StopReason::Budget,
                     session: 3,
+                    resets_at: None,
                     detail: Some("token budget used up: 2100 of 2000 tokens".into()),
                 },
                 "last stop: token budget used up: 2100 of 2000 tokens (session 3)\n",
@@ -668,10 +677,23 @@ mod tests {
                 Stop {
                     reason: StopReason::Interrupted,
                     session: 3,
+                    resets_at: None,
                     detail: None,
                 },
                 "last stop: interrupted (session 3)\n",
                 "interrupted",
+            ),
+            (
+                Stop {
+                    reason: StopReason::Limit,
+                    session: 3,
+                    resets_at: Some(1_794_205_024),
+                    detail: Some("You've hit your session limit · resets 6:17am".into()),
+                },
+                "last stop: session 3 hit the Claude Code usage limit (resets 2026-11-09 \
+                 06:17 UTC; run `junees task` again after the reset): You've hit your \
+                 session limit · resets 6:17am (session 3)\n",
+                "limit",
             ),
         ] {
             let mut state = State::load(root).unwrap();
@@ -683,6 +705,8 @@ mod tests {
             assert!(text.contains(line), "{text}");
             let value: Value = serde_json::from_str(&status.to_json()).unwrap();
             assert_eq!(value["stop"]["reason"], reason);
+            let resets_at = (reason == "limit").then_some(1_794_205_024);
+            assert_eq!(value["stop"]["resets_at"], json!(resets_at));
         }
     }
 

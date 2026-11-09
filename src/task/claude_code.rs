@@ -41,7 +41,7 @@ use crate::agent::{Event, Limit};
 use crate::cancel::Cancel;
 use crate::cli::preview;
 use crate::message::Usage;
-use crate::tools::{SECRET_ENV_VARS, ToolOutput, ToolSettings};
+use crate::tools::{SECRET_ENV_VARS, SettingsFile, ToolOutput, ToolSettings};
 
 /// Picks the backend of `task init` and `task run`: `api` or `claude-code`.
 pub const BACKEND_ENV: &str = "JUNEES_BACKEND";
@@ -120,6 +120,12 @@ const AUTH_ERRORS: &[&str] = &[
     "oauth_org_not_allowed",
     "account_on_hold",
 ];
+/// The error code of Claude Code's stream for a 429 against the account's
+/// quota: the usage limit of the subscription
+/// (<https://code.claude.com/docs/en/agent-sdk/typescript>,
+/// `SDKAssistantMessageError`; also an `api_retry` category,
+/// <https://code.claude.com/docs/en/headless>).
+const RATE_LIMIT_ERROR: &str = "rate_limit";
 /// Texts of Claude Code's login failures (lowercase), for output without
 /// an error code.
 const LOGIN_TEXTS: &[&str] = &[
@@ -198,6 +204,31 @@ pub enum End {
     Budget(String),
     /// The cancel flag was set; the harness stopped Claude Code.
     Interrupted,
+    /// Claude Code hit the usage limit of the subscription and could not
+    /// go on.
+    UsageLimit(UsageLimit),
+}
+
+/// What Claude Code said when it hit the usage limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageLimit {
+    /// When the limit resets, in unix seconds: the `resetsAt` of the
+    /// `rate_limit_event` that refused the session. `None` when there was
+    /// none; Claude Code's message may still name the time, in its own
+    /// words (`resets 3:45pm`).
+    pub resets_at: Option<u64>,
+    /// Claude Code's message.
+    pub message: String,
+}
+
+impl std::fmt::Display for UsageLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Claude Code hit the usage limit")?;
+        if let Some(at) = self.resets_at {
+            write!(f, " (resets {} UTC)", crate::session::format_utc(at))?;
+        }
+        write!(f, ": {}", self.message)
+    }
 }
 
 /// What a session did.
@@ -220,6 +251,7 @@ impl Outcome {
             Ok(End::TurnLimit) => "stopped at --max-turns".to_string(),
             Ok(End::Budget(_)) => "stopped by the budget".to_string(),
             Ok(End::Interrupted) => "interrupted".to_string(),
+            Ok(End::UsageLimit(_)) => "stopped at the usage limit".to_string(),
             Err(_) => "failed".to_string(),
         }];
         if let Some(turns) = self.turns {
@@ -254,7 +286,8 @@ impl std::fmt::Display for NotLoggedIn {
 impl std::error::Error for NotLoggedIn {}
 
 impl ClaudeCode {
-    /// [`BIN_ENV`] and [`MODEL_ENV`].
+    /// [`BIN_ENV`] and [`MODEL_ENV`]; the settings file from
+    /// `JUNEES_HOME`/`HOME`, relative to the current folder if relative.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         let get = |key: &str| {
             lookup(key)
@@ -402,6 +435,8 @@ impl ClaudeCode {
     /// asking, anything else that would ask is refused
     /// (`--permission-prompts none`), and [`deny_rules`] refuse the
     /// dangerous commands. `--dangerously-skip-permissions` is never used.
+    /// [`settings_rules`] keep Claude Code off Junees's settings file
+    /// (`request.settings.settings_file`) and its folder.
     /// Settings files of the repository are not loaded
     /// (`--setting-sources user`), nor are its MCP servers
     /// (`--strict-mcp-config`): a session can write them, and the next
@@ -437,7 +472,10 @@ impl ClaudeCode {
             args.push(model.clone());
         }
         // Last: the option takes every argument up to the next option.
-        let deny = deny_rules(request.settings);
+        let mut deny = deny_rules(request.settings);
+        if let Some(file) = &request.settings.settings_file {
+            deny.extend(settings_rules(file, request.root));
+        }
         if !deny.is_empty() {
             args.push("--disallowedTools".into());
             args.extend(deny);
@@ -823,6 +861,11 @@ struct Stream {
     session_id: Option<String>,
     /// What a refused login said, if the latest model call failed so.
     auth: Option<String>,
+    /// What Claude Code said, if the latest model call failed with
+    /// [`RATE_LIMIT_ERROR`].
+    rate_limited: Option<String>,
+    /// The latest `rate_limit_event`.
+    rate_limit: Option<RateLimit>,
     /// Whether a response's usage could not be read (warned once).
     bad_usage: bool,
     result: Option<Finished>,
@@ -830,10 +873,28 @@ struct Stream {
     plain: Vec<String>,
 }
 
+/// The `rate_limit_info` of a `rate_limit_event`
+/// (<https://code.claude.com/docs/en/agent-sdk/typescript>,
+/// `SDKRateLimitEvent`).
+struct RateLimit {
+    /// `status` is `rejected`: requests are refused.
+    rejected: bool,
+    /// `resetsAt`, in unix seconds (the docs give no unit; the 2.1.319
+    /// binary documents it as "unix epoch seconds", the unit of the
+    /// status line's `rate_limits.*.resets_at`).
+    resets_at: Option<u64>,
+    /// `errorCode` is `credits_required`: the included usage is used up and
+    /// only bought usage credits let the session go on.
+    credits_required: bool,
+}
+
 /// The `result` event.
 struct Finished {
     subtype: String,
     is_error: bool,
+    /// `api_error_status`: the HTTP status of the API error that ended the
+    /// session.
+    api_error_status: Option<u64>,
     text: String,
     usage: Option<Usage>,
     cost_usd: Option<f64>,
@@ -863,6 +924,7 @@ impl Stream {
             Some("user") => self.user(&event, report),
             Some("system") => self.system(&event, line, report),
             Some("result") => self.result = Some(Finished::parse(&event)),
+            Some("rate_limit_event") => self.rate_limit_event(&event, report),
             _ => {}
         }
         false
@@ -884,6 +946,18 @@ impl Stream {
             }
             _ => None,
         };
+        // A response that came through means requests are not refused.
+        if event["error"].is_null() {
+            self.rate_limit = None;
+        }
+        self.rate_limited = (event["error"] == RATE_LIMIT_ERROR).then(|| {
+            let text = content_text(&message["content"]);
+            if text.trim().is_empty() {
+                RATE_LIMIT_ERROR.to_string()
+            } else {
+                text
+            }
+        });
         let mut changed = false;
         if let Some(usage) = message.get("usage").filter(|usage| usage.is_object()) {
             match serde_json::from_value::<Usage>(usage.clone()) {
@@ -965,6 +1039,7 @@ impl Stream {
             Some("api_retry") => {
                 let error = event["error"].as_str().unwrap_or("unknown");
                 self.auth = AUTH_ERRORS.contains(&error).then(|| error.to_string());
+                self.rate_limited = (error == RATE_LIMIT_ERROR).then(|| error.to_string());
                 warn(
                     report,
                     &format!(
@@ -982,6 +1057,31 @@ impl Stream {
             ),
             _ => {}
         }
+    }
+
+    fn rate_limit_event(&mut self, event: &Value, report: &mut Reporter<'_>) {
+        let info = &event["rate_limit_info"];
+        let limit = RateLimit {
+            rejected: info["status"] == "rejected",
+            resets_at: info["resetsAt"]
+                .as_f64()
+                .filter(|at| at.is_finite() && *at > 0.0)
+                .map(|at| at as u64),
+            credits_required: info["errorCode"] == "credits_required",
+        };
+        if !limit.rejected {
+            // The limit let a request through.
+            self.rate_limited = None;
+        } else {
+            let when = limit.resets_at.map_or_else(String::new, |at| {
+                format!(" until {} UTC", crate::session::format_utc(at))
+            });
+            warn(
+                report,
+                &format!("Claude Code reports the usage limit reached; requests are refused{when}"),
+            );
+        }
+        self.rate_limit = Some(limit);
     }
 
     /// Tokens of the model responses seen so far.
@@ -1029,6 +1129,9 @@ impl Stream {
         if let Some(said) = self.login_failure(&exit.stderr) {
             return Err(NotLoggedIn(said).into());
         }
+        if let Some(limit) = self.usage_limit() {
+            return Ok(End::UsageLimit(limit));
+        }
         let stderr = if exit.stderr.is_empty() {
             String::new()
         } else {
@@ -1036,9 +1139,12 @@ impl Stream {
         };
         match &self.result {
             Some(result) => Err(anyhow!(
-                "Claude Code ended the session with `{}` ({}): {}{stderr}",
+                "Claude Code ended the session with `{}` ({}{}): {}{stderr}",
                 result.subtype,
                 exit.status,
+                result
+                    .api_error_status
+                    .map_or_else(String::new, |status| format!(", API status {status}")),
                 preview(&result.text, ERROR_CHARS)
             )),
             None => Err(anyhow!(
@@ -1046,6 +1152,52 @@ impl Stream {
                 exit.status
             )),
         }
+    }
+
+    /// The usage limit, if that is why a session that did not finish
+    /// ended: the latest `rate_limit_event` refuses requests, or a 429
+    /// (the result's status or a model call failing with
+    /// [`RATE_LIMIT_ERROR`]) comes with Claude Code's usage-limit message.
+    /// A 429 alone is not enough: the server also throttles for a moment
+    /// without any plan limit ("Server is temporarily limiting requests
+    /// (not your usage limit)"), and that is an error to look at, not a
+    /// reset to wait for.
+    fn usage_limit(&self) -> Option<UsageLimit> {
+        let refused = self.rate_limit.as_ref().filter(|limit| limit.rejected);
+        let status_429 = self
+            .result
+            .as_ref()
+            .is_some_and(|result| result.api_error_status == Some(429));
+        let says_limit = || {
+            self.result
+                .as_ref()
+                .map(|result| result.text.as_str())
+                .into_iter()
+                .chain(self.rate_limited.as_deref())
+                .any(says_usage_limit)
+        };
+        if refused.is_none() && !((self.rate_limited.is_some() || status_429) && says_limit()) {
+            return None;
+        }
+        let said = self
+            .result
+            .as_ref()
+            .map(|result| result.text.trim())
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.rate_limited.clone())
+            .unwrap_or_else(|| "requests refused by the usage limit".to_string());
+        let mut message = preview(&said, ERROR_CHARS);
+        if refused.is_some_and(|limit| limit.credits_required) {
+            message.push_str(
+                " (Claude Code says usage credits are required to go on: \
+                 `credits_required`, which does not lift by itself)",
+            );
+        }
+        Some(UsageLimit {
+            resets_at: refused.and_then(|limit| limit.resets_at),
+            message,
+        })
     }
 
     /// What Claude Code said when its login was missing or refused.
@@ -1082,12 +1234,26 @@ impl Finished {
         Self {
             subtype: event["subtype"].as_str().unwrap_or("?").to_string(),
             is_error: event["is_error"].as_bool().unwrap_or(false),
+            api_error_status: event["api_error_status"].as_u64(),
             text,
             usage: result_usage(event),
             cost_usd: event["total_cost_usd"].as_f64(),
             turns: event["num_turns"].as_u64(),
         }
     }
+}
+
+/// Whether `text` is one of Claude Code's usage-limit messages
+/// (<https://code.claude.com/docs/en/errors>, "Usage limits"): "You've hit
+/// your session limit", "... weekly limit", "... monthly spend limit",
+/// "... team's shared budget", "Usage credits required ...".
+fn says_usage_limit(text: &str) -> bool {
+    let text = text.replace('\u{2019}', "'").to_lowercase();
+    text.contains("usage credits required")
+        || text.split("you've hit your").skip(1).any(|rest| {
+            let what = rest.split(['.', '\n', '\u{b7}']).next().unwrap_or("");
+            what.contains("limit") || what.contains("budget")
+        })
 }
 
 /// The tokens a result reports: `modelUsage` counts every model the
@@ -1187,6 +1353,84 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
         rules.push(format!("Bash({prefix} *)"));
     }
     rules
+}
+
+/// Deny rules that keep Claude Code off Junees's settings file, in its
+/// permission rule syntax (<https://code.claude.com/docs/en/permissions>).
+///
+/// `Read` and `Edit` rules name the file and, unless the settings folder
+/// holds the repository or lies inside it, the whole folder (`/**`):
+/// sessions keep their state in the repository's `.junees/`, so they need
+/// nothing from `$JUNEES_HOME`. `//` starts an absolute path, and the
+/// pattern is gitignore syntax, so its special characters are escaped. A
+/// `Read` deny rule also refuses Read, Grep and Glob there and blocks Edit
+/// and Write (Claude Code 2.1.228+); the `Edit` rule covers every tool that
+/// edits files, NotebookEdit too. They also apply to the file commands
+/// Claude Code recognizes in Bash (`cat`, `sed`, `tee`, redirections), but
+/// not to commands that read files without naming them (`grep -r`).
+///
+/// `Bash` rules refuse commands that name the folder as Junees's own bash
+/// tool sees it (its path, `~/...`, `$HOME/...`, `$JUNEES_HOME`), so
+/// `grep -r api_key ~/.junees` and `cp -r ~/.junees /tmp` are refused too.
+/// Paths built at run time or reached from a folder above still get
+/// through. The path is made absolute and resolved (`..` and symbolic
+/// links) first, as Claude Code compares resolved paths. Empty for a path
+/// that is not UTF-8 (no argument can name it).
+pub fn settings_rules(file: &SettingsFile, root: &Path) -> Vec<String> {
+    let path = file.resolved_path();
+    let Some(text) = path.to_str() else {
+        return Vec::new();
+    };
+    let mut rules = vec![
+        format!("Read(/{})", gitignore_escape(text)),
+        format!("Edit(/{})", gitignore_escape(text)),
+    ];
+    let Some(folder) = path.parent().filter(|folder| folder.parent().is_some()) else {
+        return rules;
+    };
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::tools::resolve(&root).unwrap_or(root);
+    if root.starts_with(folder) || folder.starts_with(&root) {
+        return rules;
+    }
+    let Some(folder_text) = folder.to_str() else {
+        return rules;
+    };
+    rules.push(format!("Read(/{}/**)", gitignore_escape(folder_text)));
+    rules.push(format!("Edit(/{}/**)", gitignore_escape(folder_text)));
+    // A Bash rule's `*` matches any text and has no escape: skip names
+    // that would change the pattern.
+    let mut names = vec![folder_text.to_string()];
+    if let Some(rest) = file
+        .home()
+        .and_then(|home| folder.strip_prefix(home).ok())
+        .and_then(Path::to_str)
+        .filter(|rest| !rest.is_empty())
+    {
+        for home in ["~", "$HOME", "${HOME}"] {
+            names.push(format!("{home}/{rest}"));
+        }
+    }
+    names.extend(["$JUNEES_HOME".to_string(), "${JUNEES_HOME}".to_string()]);
+    for name in names {
+        if !name.contains(['*', '(', ')']) {
+            rules.push(format!("Bash(*{name}*)"));
+        }
+    }
+    rules
+}
+
+/// `text` with gitignore's pattern characters escaped, so they match only
+/// themselves.
+fn gitignore_escape(text: &str) -> String {
+    let mut pattern = String::new();
+    for c in text.chars() {
+        if matches!(c, '\\' | '*' | '?' | '[' | ']') {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern
 }
 
 #[cfg(test)]
@@ -1443,6 +1687,99 @@ mod tests {
     }
 
     #[test]
+    fn arguments_keep_claude_code_off_the_settings_folder() {
+        let file = SettingsFile::new(
+            "/home/tester/.junees/config.toml",
+            Some(PathBuf::from("/home/tester")),
+        );
+        let settings = ToolSettings {
+            settings_file: Some(file.clone()),
+            ..ToolSettings::default()
+        };
+        let claude = claude(PathBuf::from("claude"));
+        let expected = [
+            "Read(//home/tester/.junees/config.toml)",
+            "Edit(//home/tester/.junees/config.toml)",
+            "Read(//home/tester/.junees/**)",
+            "Edit(//home/tester/.junees/**)",
+            "Bash(*/home/tester/.junees*)",
+            "Bash(*~/.junees*)",
+            "Bash(*$HOME/.junees*)",
+            "Bash(*${HOME}/.junees*)",
+            "Bash(*$JUNEES_HOME*)",
+            "Bash(*${JUNEES_HOME}*)",
+        ];
+        let args = claude.arguments(&request(Path::new("/repo"), &settings, None));
+        let deny = &args[args
+            .iter()
+            .position(|arg| arg == "--disallowedTools")
+            .unwrap()
+            + 1..];
+        assert_eq!(deny[deny.len() - expected.len()..], expected);
+        assert_eq!(
+            deny[..deny.len() - expected.len()],
+            deny_rules(&ToolSettings::default())[..]
+        );
+
+        // Even with the command policy off.
+        let open = ToolSettings {
+            allow_dangerous: true,
+            ..settings.clone()
+        };
+        let args = claude.arguments(&request(Path::new("/repo"), &open, None));
+        assert_eq!(args[args.len() - expected.len() - 1], "--disallowedTools");
+        assert_eq!(args[args.len() - expected.len()..], expected);
+
+        // `..` is resolved, as Claude Code compares resolved paths.
+        let dotted = SettingsFile::new("/nonexistent-junees/a/../j/config.toml", None);
+        let rules = settings_rules(&dotted, Path::new("/repo"));
+        assert_eq!(
+            rules[..4],
+            [
+                "Read(//nonexistent-junees/j/config.toml)",
+                "Edit(//nonexistent-junees/j/config.toml)",
+                "Read(//nonexistent-junees/j/**)",
+                "Edit(//nonexistent-junees/j/**)",
+            ]
+        );
+        // A relative path starts from the current folder.
+        let relative = SettingsFile::new("state/config.toml", None);
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            settings_rules(&relative, Path::new("/repo"))[0],
+            format!("Read(/{}/state/config.toml)", cwd.display())
+        );
+
+        // A folder holding the repository, or inside it: only the file.
+        let file = SettingsFile::new("/nonexistent-junees/j/config.toml", None);
+        for root in ["/nonexistent-junees/j/repo", "/nonexistent-junees", "/"] {
+            assert_eq!(
+                settings_rules(&file, Path::new(root)),
+                [
+                    "Read(//nonexistent-junees/j/config.toml)",
+                    "Edit(//nonexistent-junees/j/config.toml)",
+                ],
+                "{root}"
+            );
+        }
+
+        // Gitignore pattern characters match only themselves; a Bash rule
+        // cannot escape `*`, so that name is left out.
+        let odd = SettingsFile::new("/srv/a [x]/*?\\/config.toml", None);
+        assert_eq!(
+            settings_rules(&odd, Path::new("/repo")),
+            [
+                "Read(//srv/a \\[x\\]/\\*\\?\\\\/config.toml)",
+                "Edit(//srv/a \\[x\\]/\\*\\?\\\\/config.toml)",
+                "Read(//srv/a \\[x\\]/\\*\\?\\\\/**)",
+                "Edit(//srv/a \\[x\\]/\\*\\?\\\\/**)",
+                "Bash(*$JUNEES_HOME*)",
+                "Bash(*${JUNEES_HOME}*)",
+            ]
+        );
+    }
+
+    #[test]
     fn deny_rules_carry_the_command_policy() {
         let rules = deny_rules(&ToolSettings::default());
         for rule in [
@@ -1633,6 +1970,184 @@ mod tests {
         assert!(
             format!("{err:#}").contains("without a result; stderr: segfault"),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn tells_the_usage_limit_from_other_failures() {
+        // As Claude Code reports a refused request: the event with the
+        // reset time, the model call's error, then the result.
+        let refused = |resets_at: Value| {
+            json!({"type": "rate_limit_event", "session_id": "s",
+                "rate_limit_info": {"status": "rejected", "resetsAt": resets_at}})
+        };
+        let call = json!({"type": "assistant", "error": "rate_limit",
+            "parent_tool_use_id": null, "message": {"content": [{"type": "text",
+            "text": "You've hit your session limit · resets 3:45pm"}]}});
+        let result = json!({"type": "result", "subtype": "success", "is_error": true,
+            "api_error_status": 429, "result": "You've hit your session limit · resets 3:45pm"});
+        let limit = |resets_at| {
+            End::UsageLimit(UsageLimit {
+                resets_at,
+                message: "You've hit your session limit · resets 3:45pm".into(),
+            })
+        };
+        assert_eq!(
+            end_of(
+                &[refused(json!(1_794_205_024)), call.clone(), result.clone()],
+                ""
+            )
+            .unwrap(),
+            limit(Some(1_794_205_024))
+        );
+        // The event, or a 429 with the limit message, is enough; only the
+        // event has the reset time.
+        assert_eq!(
+            end_of(
+                &[
+                    call.clone(),
+                    json!({"type": "result", "subtype": "error_during_execution",
+                "is_error": true})
+                ],
+                ""
+            )
+            .unwrap(),
+            limit(None)
+        );
+        assert_eq!(
+            end_of(std::slice::from_ref(&result), "").unwrap(),
+            limit(None)
+        );
+        let End::UsageLimit(alone) = end_of(&[refused(json!(1_794_205_024))], "").unwrap() else {
+            panic!("not a usage limit");
+        };
+        assert_eq!(alone.resets_at, Some(1_794_205_024));
+        assert_eq!(alone.message, "requests refused by the usage limit");
+        // A 429 without Claude Code's limit message is the server's short
+        // throttle, not the plan limit: an error showing the 429.
+        let throttled = "API Error: Server is temporarily limiting requests (not your usage limit)";
+        let err = end_of(
+            &[
+                json!({"type": "system", "subtype": "api_retry", "attempt": 10,
+                "max_retries": 10, "error": "rate_limit"}),
+                json!({"type": "assistant", "error": "rate_limit", "parent_tool_use_id": null,
+                "message": {"content": [{"type": "text", "text": throttled}]}}),
+                json!({"type": "result", "subtype": "success", "is_error": true,
+                "api_error_status": 429, "result": throttled}),
+            ],
+            "",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("API status 429"), "{err:#}");
+        assert!(
+            end_of(
+                &[
+                    json!({"type": "system", "subtype": "api_retry", "attempt": 3,
+                "max_retries": 10, "error": "rate_limit"})
+                ],
+                "",
+            )
+            .is_err()
+        );
+        assert!(says_usage_limit("You\u{2019}ve hit your weekly limit"));
+        assert!(says_usage_limit("You've hit your team's shared budget"));
+        assert!(!says_usage_limit("You've hit your stride · 429"));
+        // A reset time Junees cannot read is none.
+        let End::UsageLimit(odd) = end_of(&[refused(json!("3:45pm")), result.clone()], "").unwrap()
+        else {
+            panic!("not a usage limit");
+        };
+        assert_eq!(odd.resets_at, None);
+        // Only bought credits help.
+        let credits = json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected",
+            "errorCode": "credits_required", "canUserPurchaseCredits": true}});
+        let End::UsageLimit(credits) = end_of(&[credits, result.clone()], "").unwrap() else {
+            panic!("not a usage limit");
+        };
+        assert!(
+            credits.message.contains("`credits_required`"),
+            "{}",
+            credits.message
+        );
+
+        // A session that got past the limit, or a limit that lifted, is no
+        // usage limit; neither is an overloaded server.
+        let success =
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "ok"});
+        assert_eq!(
+            end_of(&[refused(json!(1)), call.clone(), success], "").unwrap(),
+            End::Answered
+        );
+        let answer = json!({"type": "assistant", "parent_tool_use_id": null,
+            "message": {"content": [{"type": "text", "text": "hi"}]}});
+        let failed =
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true});
+        let allowed = json!({"type": "rate_limit_event",
+            "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1_794_205_024}});
+        for later in [answer, allowed] {
+            let err = end_of(
+                &[
+                    call.clone(),
+                    refused(json!(1)),
+                    later.clone(),
+                    failed.clone(),
+                ],
+                "",
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("error_during_execution"),
+                "{later}"
+            );
+        }
+        let overloaded = json!({"type": "assistant", "error": "overloaded",
+            "parent_tool_use_id": null, "message": {"content": []}});
+        assert!(end_of(&[overloaded, failed], "").is_err());
+    }
+
+    #[test]
+    fn the_stream_warns_when_the_limit_refuses_requests() {
+        let mut stream = Stream::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut report = collector(&seen);
+        for status in ["allowed", "rejected"] {
+            let event = json!({"type": "rate_limit_event", "rate_limit_info":
+                {"status": status, "resetsAt": 1_794_205_024}});
+            stream.handle(&event.to_string(), &mut report);
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                "warn Claude Code reports the usage limit reached; requests are refused \
+                 until 2026-11-09 06:17 UTC"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_usage_limit_names_the_reset() {
+        let outcome = Outcome {
+            end: Ok(End::UsageLimit(UsageLimit {
+                resets_at: Some(1_794_205_024),
+                message: "You've hit your session limit · resets 6:17am".into(),
+            })),
+            usage: Usage::default(),
+            cost_usd: None,
+            turns: None,
+            session_id: None,
+        };
+        assert!(
+            outcome
+                .summary()
+                .starts_with("stopped at the usage limit, ")
+        );
+        let Ok(End::UsageLimit(limit)) = outcome.end else {
+            unreachable!()
+        };
+        assert_eq!(
+            limit.to_string(),
+            "Claude Code hit the usage limit (resets 2026-11-09 06:17 UTC): \
+             You've hit your session limit · resets 6:17am"
         );
     }
 

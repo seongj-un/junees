@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::budget::{self, Budget, format_duration};
-use super::claude_code::{ClaudeCode, End, NotLoggedIn, Request};
+use super::claude_code::{ClaudeCode, End, NotLoggedIn, Request, UsageLimit};
 use super::features::{self, Ledger};
 use super::lock::RunLock;
 use super::state::{Running, State, Stop, StopReason};
@@ -343,6 +343,9 @@ async fn plan_with_claude(
                 env.max_turns
             ),
             End::Budget(reason) => bail!("the init session failed: {reason}"),
+            End::UsageLimit(limit) => bail!(
+                "the init session failed: {limit}; run `junees task init` again after the reset"
+            ),
         }
         match check_new_list(root, &verifier, report).await {
             Ok(count) => {
@@ -517,6 +520,7 @@ async fn run_until_stop(
         let stop = |reason, session| Stop {
             reason,
             session,
+            resets_at: None,
             detail: None,
         };
         // Passes the recheck did not get to are unconfirmed, so they
@@ -527,6 +531,7 @@ async fn run_until_stop(
                 break Stop {
                     reason: StopReason::Budget,
                     session: state.sessions,
+                    resets_at: None,
                     detail: Some(detail.clone()),
                 };
             }
@@ -546,6 +551,7 @@ async fn run_until_stop(
             break Stop {
                 reason: StopReason::Budget,
                 session: state.sessions,
+                resets_at: None,
                 detail: Some(detail),
             };
         }
@@ -574,6 +580,7 @@ async fn run_until_stop(
                     break Stop {
                         reason: StopReason::Error,
                         session: n,
+                        resets_at: None,
                         detail: Some(detail),
                     };
                 }
@@ -593,6 +600,7 @@ async fn run_until_stop(
             Err(err) => Some(Stop {
                 reason: StopReason::Error,
                 session: n,
+                resets_at: None,
                 detail: Some(format!("{err:#}")),
             }),
             Ok(_) if passing == total => Some(stop(StopReason::Complete, n)),
@@ -600,7 +608,14 @@ async fn run_until_stop(
             Ok(Ended::Budget(detail)) => Some(Stop {
                 reason: StopReason::Budget,
                 session: n,
+                resets_at: None,
                 detail: Some(detail),
+            }),
+            Ok(Ended::UsageLimit(limit)) => Some(Stop {
+                reason: StopReason::Limit,
+                session: n,
+                resets_at: limit.resets_at,
+                detail: Some(limit.message),
             }),
             Ok(_) if state.stalled >= STALL_LIMIT => Some(stop(StopReason::Stalled, n)),
             Ok(_) => None,
@@ -870,6 +885,7 @@ fn wrap_up(
         ),
         Ok(Ended::Budget(reason)) => format!("{passes}, ended early: {reason}"),
         Ok(Ended::Interrupted) => format!("{passes}, interrupted"),
+        Ok(Ended::UsageLimit(_)) => format!("{passes}, stopped at the Claude Code usage limit"),
         Err(err) => format!("failed: {}", preview(&format!("{err:#}"), ERROR_CHARS)),
     };
     append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
@@ -898,6 +914,8 @@ enum Ended {
     Budget(String),
     /// The session was cancelled (SIGINT/SIGTERM); the run stops after it.
     Interrupted,
+    /// Claude Code hit the usage limit; the run stops after the session.
+    UsageLimit(UsageLimit),
 }
 
 /// How a session whose agent returned `err` ended: the turn limit and the
@@ -1006,6 +1024,7 @@ async fn claude_session(
         End::TurnLimit => Ended::TurnLimit,
         End::Budget(reason) => Ended::Budget(reason),
         End::Interrupted => Ended::Interrupted,
+        End::UsageLimit(limit) => Ended::UsageLimit(limit),
     });
     let verify = match &result {
         Ok(Ended::Interrupted) => false,
