@@ -145,7 +145,7 @@ fn comma_list(value: Option<String>) -> Vec<String> {
         .collect()
 }
 
-fn parse_flag(value: Option<String>, name: &str) -> Result<bool> {
+pub(crate) fn parse_flag(value: Option<String>, name: &str) -> Result<bool> {
     match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
         None | Some("0" | "false" | "no" | "off") => Ok(false),
         Some("1" | "true" | "yes" | "on") => Ok(true),
