@@ -34,6 +34,10 @@ impl AgentOptions {
 #[derive(Debug)]
 pub enum Event<'a> {
     Text(&'a str),
+    /// The model thought before going on (a `thinking` or
+    /// `redacted_thinking` block). The block is kept and sent back, but its
+    /// content is not shown.
+    Thinking,
     /// Something the user should know about, such as a cut-off response.
     Warning(&'a str),
     ToolCall {
@@ -229,6 +233,7 @@ impl Agent {
                     ContentBlock::ToolUse { id, name, input } => {
                         tool_calls.push((id.clone(), name.clone(), input.clone()));
                     }
+                    block if block.is_thinking() => on_event(Event::Thinking),
                     _ => {}
                 }
             }
@@ -238,8 +243,11 @@ impl Agent {
                 content: response.content,
             };
             let text = reply.text();
-            // The API rejects empty assistant turns in the history.
-            if !reply.content.is_empty() {
+            // The API rejects empty assistant turns in the history. A reply
+            // of nothing but thinking (cut off by the token limit before
+            // the model got to answer) has nothing worth keeping either.
+            let answered = reply.content.iter().any(|block| !block.is_thinking());
+            if answered {
                 self.record(Entry::Message(reply), &mut on_event);
             }
 
@@ -258,9 +266,13 @@ impl Agent {
 
             if tool_calls.is_empty() {
                 if response.stop_reason == StopReason::MaxTokens {
-                    on_event(Event::Warning(
-                        "the answer hit the output token limit and may be cut off",
-                    ));
+                    on_event(Event::Warning(if answered {
+                        "the answer hit the output token limit and may be cut off"
+                    } else {
+                        "the response hit the output token limit while the model was still \
+                         thinking, so there is no answer; raise JUNEES_MAX_TOKENS or lower \
+                         JUNEES_THINKING_BUDGET"
+                    }));
                 }
                 return Ok(text);
             }
@@ -899,6 +911,71 @@ mod tests {
             .unwrap();
         assert_eq!(answer, "half an ans");
         assert!(warned);
+    }
+
+    fn thinking_block(signature: &str) -> ContentBlock {
+        ContentBlock::Other(json!({"type": "thinking", "thinking": "first upper it",
+                                   "signature": signature}))
+    }
+
+    #[tokio::test]
+    async fn thinking_blocks_are_reported_kept_and_sent_back() {
+        let redacted = ContentBlock::Other(json!({"type": "redacted_thinking", "data": "x"}));
+        let mut call = tool_use("toolu_1", "upper", json!({"text": "abc"}));
+        if let Ok(response) = &mut call {
+            response
+                .content
+                .splice(0..0, [thinking_block("sig-1"), redacted]);
+        }
+        let reply = call.as_ref().unwrap().content.clone();
+        let provider = Scripted::new(vec![call, text("ABC")]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let mut events = Vec::new();
+        agent
+            .run("shout", |event| events.push(format!("{event:?}")))
+            .await
+            .unwrap();
+
+        // Reported in the order they came, ahead of the text and the call.
+        assert_eq!(events[..2], ["Thinking", "Thinking"]);
+        assert!(events[2].starts_with("Text"), "{events:?}");
+        assert!(events[3].starts_with("ToolCall"), "{events:?}");
+        assert_eq!(agent.messages()[1].content, reply);
+        assert_eq!(seen.lock().unwrap()[1][1].content, reply);
+        assert_valid(agent.messages());
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_while_thinking_is_not_stored() {
+        let provider = Scripted::new(vec![
+            Ok(CompletionResponse {
+                content: vec![thinking_block("")],
+                stop_reason: StopReason::MaxTokens,
+                usage: Usage::default(),
+            }),
+            text("ok"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let mut warnings = Vec::new();
+        let answer = agent
+            .run("think hard", |event| {
+                if let Event::Warning(w) = event {
+                    warnings.push(w.to_string());
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("still thinking"), "{warnings:?}");
+        assert_eq!(agent.messages(), [Message::user_text("think hard")]);
+
+        // The next input joins the input left without an answer.
+        agent.run("again", |_| {}).await.unwrap();
+        assert_eq!(seen.lock().unwrap()[1][0].text(), "think hard\nagain");
+        assert_valid(agent.messages());
     }
 
     #[tokio::test]

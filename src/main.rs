@@ -558,6 +558,7 @@ fn report(err: &anyhow::Error) {
 fn print_event(event: Event<'_>) {
     match event {
         Event::Text(text) => println!("{text}"),
+        Event::Thinking => eprintln!("  (thinking...)"),
         Event::Warning(warning) => eprintln!("  !! {warning}"),
         Event::ToolCall { name, input } => {
             eprintln!(
