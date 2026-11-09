@@ -4,6 +4,7 @@ mod bash;
 mod edit_file;
 mod policy;
 mod read_file;
+mod settings_file;
 mod write_file;
 
 pub use bash::Bash;
@@ -12,6 +13,7 @@ pub(crate) use bash::testing;
 pub use edit_file::EditFile;
 pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};
 pub use read_file::ReadFile;
+pub use settings_file::SettingsFile;
 pub use write_file::WriteFile;
 
 use async_trait::async_trait;
@@ -42,6 +44,9 @@ pub struct ToolSettings {
     pub deny_commands: Vec<String>,
     /// Turns the built-in command rules off (`JUNEES_ALLOW_DANGEROUS`).
     pub allow_dangerous: bool,
+    /// The user's settings file, which the file tools refuse and bash
+    /// commands may not name, even with `allow_dangerous`.
+    pub settings_file: Option<SettingsFile>,
 }
 
 /// What a tool hands back to the model. Failures are reported as output with
@@ -93,9 +98,9 @@ impl ToolRegistry {
     pub fn with_defaults(settings: &ToolSettings) -> Self {
         let mut registry = Self::new();
         registry.register(Bash::with_settings(settings));
-        registry.register(ReadFile);
-        registry.register(WriteFile);
-        registry.register(EditFile);
+        registry.register(ReadFile::with_settings(settings));
+        registry.register(WriteFile::with_settings(settings));
+        registry.register(EditFile::with_settings(settings));
         registry
     }
 

@@ -3,13 +3,30 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{MAX_FILE_BYTES, Tool, ToolOutput, opt_u64_arg, str_arg, truncate_middle};
+use std::path::Path;
+
+use super::{
+    MAX_FILE_BYTES, SettingsFile, Tool, ToolOutput, ToolSettings, opt_u64_arg, str_arg,
+    truncate_middle,
+};
 
 const DEFAULT_LIMIT: u64 = 2000;
 const MAX_OUTPUT_CHARS: usize = 50_000;
 
 /// Reads a text file and returns it with line numbers.
-pub struct ReadFile;
+#[derive(Default)]
+pub struct ReadFile {
+    settings_file: Option<SettingsFile>,
+}
+
+impl ReadFile {
+    /// Refuses the settings file of `settings`.
+    pub fn with_settings(settings: &ToolSettings) -> Self {
+        Self {
+            settings_file: settings.settings_file.clone(),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for ReadFile {
@@ -47,6 +64,11 @@ impl Tool for ReadFile {
             Ok(limit) => limit.unwrap_or(DEFAULT_LIMIT).max(1) as usize,
             Err(err) => return err,
         };
+        if let Some(file) = &self.settings_file
+            && file.is(Path::new(path))
+        {
+            return ToolOutput::error(file.refusal(path));
+        }
 
         match tokio::fs::metadata(path).await {
             Ok(meta) if !meta.is_file() => {
@@ -112,7 +134,32 @@ mod tests {
     }
 
     async fn read(input: Value) -> ToolOutput {
-        ReadFile.run(input).await
+        ReadFile::default().run(input).await
+    }
+
+    #[tokio::test]
+    async fn refuses_the_settings_file_but_reads_the_rest_of_junees_home() {
+        let (_dir, root, file) = crate::tools::settings_file::testing::home();
+        let config = root.join(".junees/config.toml");
+        std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
+        let tool = ReadFile {
+            settings_file: Some(file),
+        };
+        for path in [
+            config.clone(),
+            root.join(".junees/sessions/../config.toml"),
+            root.join("link"),
+            crate::tools::settings_file::testing::relative(&config),
+        ] {
+            let output = tool.run(json!({"path": path})).await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(output.content.contains("private Junees settings file"));
+            assert!(!output.content.contains("secret-key"));
+        }
+        let output = tool
+            .run(json!({"path": root.join(".junees/sessions/s.jsonl")}))
+            .await;
+        assert!(!output.is_error, "{}", output.content);
     }
 
     #[tokio::test]
