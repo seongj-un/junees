@@ -94,7 +94,21 @@ async fn run() -> Result<ExitCode> {
         Command::Task(TaskCommand::Status { json }) => return task_status(json),
         _ => {}
     }
-    let mut settings = Settings::from_env()?;
+    let mut settings = if command == Command::Setup {
+        // A broken file must not block the command that rewrites it.
+        let (settings, broken) = Settings::load_for_setup(|key| std::env::var(key).ok());
+        if let (Some(err), Some(path)) = (broken, settings.path()) {
+            eprintln!(
+                "{} is broken ({}). Setup starts from scratch and replaces it when \
+                 you finish; Ctrl-C keeps the old file.",
+                path.display(),
+                err.root_cause()
+            );
+        }
+        settings
+    } else {
+        Settings::from_env()?
+    };
     // Shared by the setup questions, the prompt and the approval questions.
     let input = SharedLines::stdin();
     if command == Command::Setup {

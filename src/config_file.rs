@@ -326,6 +326,23 @@ impl Settings {
         Ok(Self::new(env, file, path, exists))
     }
 
+    /// Like [`Settings::load`] for `junees setup`, which must start even
+    /// when the file is broken: a file that cannot be read counts as an
+    /// empty one that exists, and its error comes back alongside.
+    pub fn load_for_setup(
+        env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> (Self, Option<anyhow::Error>) {
+        let path = path(&env);
+        let (file, exists, broken) = match &path {
+            Some(path) if path.exists() => match ConfigFile::load(path) {
+                Ok(file) => (file, true, None),
+                Err(err) => (ConfigFile::default(), true, Some(err)),
+            },
+            _ => (ConfigFile::default(), false, None),
+        };
+        (Self::new(env, file, path, exists), broken)
+    }
+
     pub fn new(
         env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
         file: ConfigFile,

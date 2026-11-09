@@ -126,6 +126,34 @@ async fn a_bad_settings_file_names_the_line() {
 }
 
 #[tokio::test]
+async fn setup_starts_on_a_broken_settings_file() {
+    let home = tempfile::tempdir().unwrap();
+    write_settings(home.path(), "api_key = sk-ant-api03-SECRETvalue\n");
+    let (out, _, stderr) = output(junees(home.path(), home.path(), &["setup"])).await;
+    assert!(!out.status.success());
+    let path = settings_path(home.path());
+    assert!(
+        stderr.contains(&format!(
+            "{} is broken (line 1: the value needs quotes",
+            path.display()
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Setup starts from scratch"), "{stderr}");
+    // It got past the file to the setup itself.
+    assert!(
+        stderr.contains("`junees setup` asks its questions on a terminal"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("SECRET"), "{stderr}");
+    // Nothing was written.
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "api_key = sk-ant-api03-SECRETvalue\n"
+    );
+}
+
+#[tokio::test]
 async fn off_a_terminal_nothing_is_asked() {
     let home = tempfile::tempdir().unwrap();
     for args in [&[][..], &["hi"]] {
