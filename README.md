@@ -227,6 +227,7 @@ junees task run --backend claude-code --max-time 2h
 - 질문을 기다리는 중 Ctrl-C는 그 호출을 실행하지 않고 턴을 취소한다(실행 중인 도구를 Ctrl-C로 취소할 때와 같이 그 호출과 남은 호출을 `cancelled by the user` 결과로 채운다). 질문과 프롬프트가 표준 입력을 함께 쓰므로 그 뒤에 입력한 줄은 프롬프트로 간다.
 - "항상 허용"은 junees를 끝낼 때까지 유지된다(`/reset`으로 새 세션을 시작해도 남는다).
 - 표준 입력이나 표준 오류가 터미널이 아니면(파이프, `2>log`) 대화 모드라도 물을 수 없으므로(질문이 보이지 않는다) 시작할 때 안내를 띄우고, 승인이 필요한 호출은 실행하지 않고 `not run: this call needs the user's approval ...` 오류 결과를 돌려준다. 그런 호출까지 실행하려면 `JUNEES_APPROVAL=off`.
+- 질문은 모델 응답이 끝난 뒤, 도구 호출 줄(`-> bash ...`) 다음에 나온다. 스트리밍으로 찍던 텍스트 줄은 그 전에 끝나므로 질문이 텍스트 줄 중간에 붙지 않는다. stdout이 터미널이 아니면(`junees | tee log`) 그 응답의 텍스트는 도구 호출 줄 직전에 한 번에 찍힌다.
 - `-p`와 `task` 모드는 사람이 없으므로 묻지 않는다(명령 정책만 적용).
 - `risky`는 흔한 실수를 막는 장치이지 보안 경계가 아니다. 명령 문자열만 보고 판단하므로 `rsync`, `tar -C`, `unzip -d`, `perl -pi`, `python3 -c "open(...)"`, `crontab -r`처럼 따로 알지 못하는 명령의 쓰기는 묻지 않고, 작업 폴더 안의 `write_file`은 묻지 않으므로 스크립트를 써 두고 `bash run.sh`나 `make`로 실행하면 어떤 검사든 피할 수 있다. 그 경계가 필요하면 `JUNEES_APPROVAL=all`을 쓴다.
 
@@ -271,7 +272,7 @@ tests/
   task_mode.rs         실제 바이너리로 임시 git 저장소에서 task init -> task run -> task status, task run 중 SIGTERM, 가짜 웹훅으로 알림 검증
   cancel.rs            실제 바이너리로 -p 중 SIGTERM(종료 코드 143), 대화 모드 Ctrl-C(턴 취소 후 다음 입력, 두 번이면 종료) 검증
   task_git_env.rs      GIT_DIR이나 GIT_CONFIG_PARAMETERS가 있어도 task 모드가 제 저장소와 설정으로만 git을 쓰는지 검증
-  approval.rs          실제 바이너리로 파이프 입력 대화 모드의 위험 명령 거절과 안내, JUNEES_APPROVAL=off, -p에서는 묻지 않음 검증
+  approval.rs          실제 바이너리로 파이프 입력 대화 모드의 위험 명령 거절과 안내, JUNEES_APPROVAL=off, -p에서는 묻지 않음, 가상 터미널에서 스트리밍 텍스트와 승인 질문이 섞이지 않는지 검증
   task_git_secret.rs   하네스 git이 심어진 훅을 실행하지 않고 git이 실행하는 필터에도 API 키를 넘기지 않는지 검증
   streaming.rs         조각내 보내는 가짜 SSE 서버로 조립 결과가 일반 응답과 같은지, 오류 이벤트/끊김/대기 초과 재시도, 취소 시 연결 종료, 바이너리가 텍스트를 한 번만 찍는지(stdout이 파이프일 때 재시도로 끊긴 조각을 버리는지) 검증
   claude_code.rs       실제 바이너리와 가짜 claude로 API 키 없이 task init/run, claude 환경에 API 변수 없음, 로그인 실패 안내와 알림, SIGTERM 검증
