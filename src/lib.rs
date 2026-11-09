@@ -9,6 +9,7 @@ pub mod config;
 pub mod config_file;
 pub mod context;
 pub mod flock;
+pub mod memory;
 pub mod message;
 pub mod notify;
 pub mod prompt;
