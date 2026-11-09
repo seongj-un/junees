@@ -84,6 +84,28 @@ pub fn is_dirty_outside_task(root: &Path) -> Result<bool> {
     dirty(root, &["--", ".", ":(exclude).junees"])
 }
 
+/// Like [`is_dirty`], but blind to the untracked files in `skip`: new
+/// files the harness leaves out of its commits ([`untracked_left_out`]).
+pub fn is_dirty_besides(root: &Path, skip: &[LeftOut]) -> Result<bool> {
+    let status = git(
+        root,
+        &[
+            "status",
+            "--porcelain",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+        ],
+    )?;
+    Ok(status
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| match entry.strip_prefix("?? ") {
+            Some(path) => !skip.iter().any(|file| file.path == path),
+            None => true,
+        }))
+}
+
 fn dirty(root: &Path, pathspec: &[&str]) -> Result<bool> {
     let mut args = vec!["status", "--porcelain", "--untracked-files=all"];
     args.extend(pathspec);

@@ -465,9 +465,15 @@ async fn run_until_stop(
         recover(env, &mut state, &running, report)?;
     }
     features::load(root).context(NO_TASK)?;
-    if git::is_dirty(root)? {
+    // New files the harness leaves out of its commits (a lock file over
+    // 1 MiB, a `.env`) stay out of every later commit too, so they cannot
+    // sweep the user's work into one: name them, but do not stop an
+    // unattended run on them.
+    let left_out = git::untracked_left_out(root, &[])?;
+    if git::is_dirty_besides(root, &left_out)? {
         return Err(dirty_tree(root, &[]));
     }
+    warn_left_out(report, &left_out);
     env.check_claude(report).await?;
     let ledger = Ledger::load(root)?;
     let ledger = Arc::new(Mutex::new(ledger));
@@ -1742,6 +1748,7 @@ mod tests {
         let task = task_repo(&["false"]);
         let root = task.path();
         fs::write(root.join(".env"), "DB_PASSWORD=hunter2\n").unwrap();
+        fs::write(root.join("wip.txt"), "unfinished").unwrap();
         let err = run(&env(root, home.path(), &factory), 5, &mut |_| {})
             .await
             .unwrap_err();
@@ -1826,7 +1833,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_files_a_verify_leaves_stay_out_and_the_next_run_says_why() {
+    async fn large_files_a_verify_leaves_stay_out_without_stopping_the_next_run() {
         let repo = task_repo_marked(&[(
             "echo log > small.txt && head -c 2000000 /dev/zero > big.bin",
             true,
@@ -1848,7 +1855,25 @@ mod tests {
             out.warnings
         );
 
-        // The next run refuses the tree and names the file and the reason.
+        // The next run starts anyway and names the file again: it stays
+        // out of every commit, so it cannot take the user's work along.
+        let head = subjects(root).len();
+        let mut out = Collected::default();
+        run_task(root, &Scripted::new(vec![]), 0, &mut out).await;
+        assert!(
+            out.warnings
+                .first()
+                .is_some_and(|warning| warning.starts_with(
+                    "not committed: big.bin (1.9 MiB, over the 1 MiB limit for new files)"
+                )),
+            "{:?}",
+            out.warnings
+        );
+        assert_eq!(subjects(root).len(), head);
+        assert!(git::show(root, "HEAD", "big.bin").is_err());
+
+        // Other changes still stop it, and it names the file and the reason.
+        fs::write(root.join("notes.txt"), "mine").unwrap();
         let provider = Scripted::new(vec![]);
         let factory = factory(&provider);
         let home = tempfile::tempdir().unwrap();
