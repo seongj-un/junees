@@ -16,7 +16,12 @@ use serde_json::Value;
 use crate::provider::ToolSpec;
 
 /// Credentials Junees reads that the model's shell commands must not see.
-pub const SECRET_ENV_VARS: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+/// The notification webhook URL carries its own token.
+pub const SECRET_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "JUNEES_NOTIFY_WEBHOOK",
+];
 
 /// User settings for the default tools, read by [`crate::config::Config`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
