@@ -80,7 +80,7 @@ async fn repl(agent: &mut Agent, model: &str) -> Result<()> {
             "/exit" | "/quit" => return Ok(()),
             "/help" => println!("{}", cli::REPL_HELP),
             "/reset" => {
-                agent.reset();
+                agent.reset(None);
                 println!("(conversation cleared)");
             }
             "/usage" => {
