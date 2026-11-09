@@ -230,9 +230,11 @@ pub struct Session {
 }
 
 impl Session {
-    /// Reads and replays a journal. A last line that is cut off or does not
-    /// parse is dropped with a warning (the process likely died while writing
-    /// it); a broken line before that is an error.
+    /// Reads and replays a journal. A last line that lacks its newline and
+    /// does not parse is dropped with a warning: the process died while
+    /// writing it. Any other line that does not parse is an error, because
+    /// [`write_line`] writes a line and its newline at once, so a complete
+    /// line is corrupt or from a format this version does not know.
     pub fn load(path: &Path) -> Result<Self> {
         let data = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
         let mut entries = Vec::new();
@@ -242,9 +244,9 @@ impl Session {
         let mut line_no = 0;
         while pos < data.len() {
             line_no += 1;
-            let (line, next) = match data[pos..].iter().position(|&b| b == b'\n') {
-                Some(n) => (&data[pos..pos + n], pos + n + 1),
-                None => (&data[pos..], data.len()),
+            let (line, next, terminated) = match data[pos..].iter().position(|&b| b == b'\n') {
+                Some(n) => (&data[pos..pos + n], pos + n + 1, true),
+                None => (&data[pos..], data.len(), false),
             };
             if line.trim_ascii().is_empty() {
                 pos = next;
@@ -255,7 +257,7 @@ impl Session {
                     entries.push(entry);
                     valid_len = next;
                 }
-                Err(err) if data[next..].trim_ascii().is_empty() => {
+                Err(err) if !terminated => {
                     warning = Some(format!(
                         "{}: dropped an unreadable last line ({err})",
                         path.display()
@@ -644,6 +646,23 @@ mod tests {
         write_lines(&path, &[line(&meta()), "{\"type\":".into(), user], "");
         let err = Session::load(&path).unwrap_err();
         assert!(err.to_string().contains("line 2 is corrupt"), "{err}");
+    }
+
+    #[test]
+    fn a_complete_last_line_that_does_not_parse_is_kept_and_refused() {
+        // Newline included, so no crash cut it short: it may be an entry
+        // from a newer Junees, and resume must not delete it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let user = line(&Entry::Message(Message::user_text("hi")));
+        let compact = r#"{"type":"compact","summary":"so far","keep_from":0}"#;
+        write_lines(&path, &[line(&meta()), user, compact.into()], "");
+        let before = fs::read(&path).unwrap();
+
+        let err = Session::load(&path).unwrap_err();
+        assert!(err.to_string().contains("line 3 is corrupt"), "{err}");
+        assert!(Session::resume(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]
