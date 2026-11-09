@@ -743,6 +743,9 @@ fn parse(script: &str) -> Parsed {
                 i = end + 1;
             }
             '"' => i = p.double_quoted(&chars, i + 1),
+            '$' if next == Some('\'') => i = p.ansi_c_quoted(&chars, i + 2),
+            // `$"..."` is a translated string; the text is the same.
+            '$' if next == Some('"') => i += 1,
             '$' | '<' | '>' if next == Some('(') => i = p.substitution(&chars, i),
             '`' => i = p.backtick(&chars, i),
             ';' | '(' | ')' => {
@@ -888,6 +891,58 @@ impl Parser {
                     i += 1;
                 }
             }
+        }
+        i
+    }
+
+    /// Reads a `$'...'` string whose body starts at `start`, decoding its
+    /// backslash escapes; returns the index after the closing quote.
+    fn ansi_c_quoted(&mut self, chars: &[char], start: usize) -> usize {
+        self.word.get_or_insert_with(String::new);
+        let mut i = start;
+        while i < chars.len() {
+            let c = chars[i];
+            i += 1;
+            if c == '\'' {
+                return i;
+            }
+            if c != '\\' {
+                self.push(c);
+                continue;
+            }
+            let Some(&escaped) = chars.get(i) else { break };
+            i += 1;
+            let decoded = match escaped {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '\\' | '\'' | '"' | '?' => escaped,
+                'x' | '0'..='7' => {
+                    let (radix, max, from) = if escaped == 'x' {
+                        (16, 2, i)
+                    } else {
+                        (8, 3, i - 1)
+                    };
+                    let digits: String = chars[from..]
+                        .iter()
+                        .take(max)
+                        .take_while(|d| d.is_digit(radix))
+                        .collect();
+                    i = from + digits.len();
+                    match u32::from_str_radix(&digits, radix)
+                        .ok()
+                        .and_then(char::from_u32)
+                    {
+                        Some(decoded) => decoded,
+                        None => continue,
+                    }
+                }
+                _ => {
+                    self.push('\\');
+                    escaped
+                }
+            };
+            self.push(decoded);
         }
         i
     }
@@ -1426,6 +1481,24 @@ mod tests {
     }
 
     #[test]
+    fn decodes_ansi_c_quoting() {
+        for command in [
+            "$'rm' -rf ~",
+            "$'\\x72m' -rf /",
+            "$'\\162eboot'",
+            "bash -c $'ls\\nreboot'",
+            "$\"sudo\" ls",
+        ] {
+            denied(command);
+        }
+        allowed("echo $'a\\tb'");
+        allowed("printf $'%s\\n' x");
+        allowed("echo $'it\\'s' && ls");
+        let parsed = parse("echo $'a\\nb\\'c\\q' $\"d\"");
+        assert_eq!(parsed.pipelines[0][0].words, ["echo", "a\nb'c\\q", "d"]);
+    }
+
+    #[test]
     fn unterminated_input_does_not_panic() {
         for command in [
             "echo 'abc",
@@ -1433,6 +1506,9 @@ mod tests {
             "echo $(abc",
             "echo `abc",
             "echo \\",
+            "echo $'abc",
+            "echo $'\\",
+            "echo $'\\x",
             "a <<",
         ] {
             let _ = CommandPolicy::default().check(command);
