@@ -196,7 +196,7 @@ junees task --backend claude-code --max-time 2h   # 설정과 상관없이 이�
 백엔드가 `claude-code`면 대화의 한 턴이 `claude -p` 한 번이다. 시작할 때 작업과 같이 `claude --version`(2.1.259 이상)과 구독 로그인을 확인하고, `bwrap`이 없거나 토큰 숨기기를 껐으면 경고한다. 그 뒤 턴마다 지금 폴더에서 다음을 실행한다.
 
 ```
-claude -p <입력> --output-format stream-json --verbose --include-partial-messages
+claude -p --output-format stream-json --verbose --include-partial-messages
   --permission-mode default --permission-prompts none
   --tools Read,Edit,Write,Glob,Grep,Bash --allowedTools Read,Edit,Write,Glob,Grep,Bash
   --setting-sources user --strict-mcp-config --max-turns <JUNEES_MAX_TURNS>
@@ -211,7 +211,7 @@ claude -p <입력> --output-format stream-json --verbose --include-partial-messa
 - `/backend`: 대화와 `/task`의 백엔드를 함께 바꾼다. 대화를 바꾸면 새 세션으로 시작한다. api로 바꾸는데 API 키가 없거나, claude-code로 바꾸는데 `claude`가 없거나 로그인돼 있지 않으면 오류를 보여 주고 그대로 둔다.
 - 사용 한도: 턴이 구독 사용 한도로 끝나면(위와 같은 판정) `error: Claude Code hit the usage limit (resets 2026-11-09 06:17 UTC): <메시지>`와 "리셋 뒤 다음 입력이 같은 대화를 이어 간다"는 안내를 보이고 턴을 끝낸다(`-p`는 종료 코드 1). 그 턴도 기록에 남는다.
 - Ctrl-C: 작업 취소와 같이 Claude Code의 자손 프로세스(별도 세션의 Bash 명령 포함)를 끝내고 프로세스 그룹에 SIGINT, 유예 뒤 SIGKILL한다. 턴은 `(turn cancelled)`로 끝나고 `interrupted`로 기록되며, 다음 입력은 같은 Claude Code 세션을 `--resume`으로 이어 간다(Claude Code는 끊긴 턴을 그대로 두고 다음 입력으로 진행한다, [headless](https://code.claude.com/docs/en/headless)). Claude Code가 세션 id를 알리기 전에 끊기면 그 턴은 이어 갈 대화가 없어 다음 턴이 새 대화를 시작한다.
-- `-`로 시작하는 입력(`-v 옵션이 뭐야`)은 `claude`가 옵션으로 읽지 않게 앞에 공백 하나를 붙여 넘긴다.
+- 입력은 인자가 아니라 표준 입력으로 넘기고 다 쓴 뒤 닫는다. `-p`에 프롬프트 인자가 없으면 Claude Code는 표준 입력을 프롬프트로 읽는다([headless](https://code.claude.com/docs/en/headless)의 Pipe data through Claude: "Non-interactive mode reads stdin", [CLI reference](https://code.claude.com/docs/en/cli-reference)의 `--input-format` 기본값 `text`). 인자로 넘기면 리눅스에서 인자 하나가 128 KiB(`MAX_ARG_STRLEN`)를 넘을 때 `claude`를 실행하지 못하고(`Argument list too long`), `-`로 시작하는 입력(`-v 옵션이 뭐야`)은 옵션으로 읽힌다. 표준 입력은 그대로 전해진다. 쓰기는 따로 돌려서 `claude`가 큰 입력을 읽는 동안에도 출력과 Ctrl-C를 처리하고, `claude`가 끝났는데 다 쓰지 못한 입력은 버린다. 표준 입력의 한도는 10MB다(headless 문서: 넘으면 Claude Code가 오류로 끝난다). 작업 모드는 지금처럼 인자로 넘긴다.
 - `--permission-prompt-tool`로 Junees의 승인 질문을 붙이는 것은 아직 하지 않았다. 문서상 가능하다: `-p`에서 `--permission-prompt-tool mcp__<서버>__<도구>`를 주면 확인이 필요한 호출마다 Claude Code가 그 MCP 도구를 부른다([CLI reference](https://code.claude.com/docs/en/cli-reference)). 비용: Junees가 stdio MCP 서버(초기화, `tools/list`, `tools/call`)를 직접 구현해 `--mcp-config`로 넘기고(`--strict-mcp-config`와 함께 쓸 수 있다), 그 서버 프로세스가 대화 중인 Junees에 질문을 넘겨 터미널에서 묻고 답을 돌려줄 통로(유닉스 소켓 등)가 필요하다. `--permission-prompts host`로 바꿔야 하고, 이때 Claude Code는 `permission_denied` 이벤트를 내지 않으며, MCP 서버 연결을 첫 턴 전에 기다린다(`MCP_TIMEOUT`, 기본 30초). Ctrl-C로 질문을 취소하는 것과 Claude Code 쪽 대기의 관계도 맞춰야 한다. 후속 작업으로 남긴다.
 
 ### 컨텍스트 관리
