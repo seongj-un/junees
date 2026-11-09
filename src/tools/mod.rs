@@ -21,6 +21,9 @@ pub const SECRET_ENV_VARS: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKE
 /// User settings for the default tools, read by [`crate::config::Config`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolSettings {
+    /// Environment variables bash must not see on top of
+    /// [`SECRET_ENV_VARS`] (`JUNEES_HIDDEN_ENV`).
+    pub hidden_env: Vec<String>,
     /// Command prefixes bash refuses on top of the built-in rules
     /// (`JUNEES_DENY_COMMANDS`).
     pub deny_commands: Vec<String>,
@@ -72,7 +75,8 @@ impl ToolRegistry {
     }
 
     /// bash, read_file and write_file. bash never sees [`SECRET_ENV_VARS`]
-    /// and runs only commands its [`CommandPolicy`] allows.
+    /// or the extra hidden variables, and runs only commands its
+    /// [`CommandPolicy`] allows.
     pub fn with_defaults(settings: &ToolSettings) -> Self {
         let policy = CommandPolicy::default()
             .deny_prefixes(&settings.deny_commands)
@@ -81,6 +85,7 @@ impl ToolRegistry {
         registry.register(
             Bash::default()
                 .hide_env(SECRET_ENV_VARS.iter().copied())
+                .hide_env(settings.hidden_env.iter().cloned())
                 .policy(policy),
         );
         registry.register(ReadFile);
@@ -224,6 +229,7 @@ mod tests {
         let settings = ToolSettings {
             deny_commands: vec!["echo deny-me".into()],
             allow_dangerous: true,
+            ..ToolSettings::default()
         };
         let registry = ToolRegistry::with_defaults(&settings);
         let output = registry.dispatch("bash", command).await;

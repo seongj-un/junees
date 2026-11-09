@@ -26,14 +26,16 @@ pub struct Config {
     /// `None` when neither is set (cron, some services and containers):
     /// Junees still runs, it just cannot save or find sessions.
     pub home: Option<PathBuf>,
-    /// Settings for the default tools: the bash command policy.
+    /// Settings for the default tools: the bash command policy and the
+    /// variables hidden from bash.
     pub tools: ToolSettings,
 }
 
 impl Config {
     /// Reads `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `JUNEES_MODEL`,
     /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_HOME`, `HOME`,
-    /// `JUNEES_DENY_COMMANDS` and `JUNEES_ALLOW_DANGEROUS`.
+    /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS` and
+    /// `JUNEES_HIDDEN_ENV`.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -67,6 +69,7 @@ impl Config {
             .map(PathBuf::from)
             .or_else(|| get("HOME").map(|home| PathBuf::from(home).join(".junees")));
         let tools = ToolSettings {
+            hidden_env: comma_list(get("JUNEES_HIDDEN_ENV")),
             deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),
             allow_dangerous: parse_flag(get("JUNEES_ALLOW_DANGEROUS"), "JUNEES_ALLOW_DANGEROUS")?,
         };
@@ -162,6 +165,16 @@ mod tests {
         assert_eq!(config.max_turns, DEFAULT_MAX_TURNS);
         assert_eq!(config.home, Some(PathBuf::from("/home/tester/.junees")));
         assert_eq!(config.tools, ToolSettings::default());
+    }
+
+    #[test]
+    fn reads_hidden_env() {
+        let config = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_HIDDEN_ENV", "DB_PASSWORD, GITHUB_TOKEN,"),
+        ])
+        .unwrap();
+        assert_eq!(config.tools.hidden_env, ["DB_PASSWORD", "GITHUB_TOKEN"]);
     }
 
     #[test]
