@@ -5,6 +5,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::tools::SECRET_ENV_VARS;
+
 /// Variables that point git at a repository other than the one in the
 /// current folder. Git hooks and `git rebase --exec` set some of them (a
 /// worktree's rebase exports `GIT_DIR`), and task mode always means the
@@ -20,11 +22,26 @@ pub const REPO_ENV_VARS: &[&str] = &[
     "GIT_PREFIX",
 ];
 
+/// Settings put in front of every git command the harness runs. A session
+/// can write `.git/hooks` and `.git/config`, and the harness's git must not
+/// run what it put there: no hooks and no fsmonitor command. Command-line
+/// settings win over every config file.
+const SAFE_CONFIG: &[&str] = &[
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+];
+
 /// Runs git in `dir` and returns its stdout, or an error with its stderr.
+///
+/// Git can still run commands from the repository's config (clean filters
+/// on `git add`, for one), so it gets neither the repository variables nor
+/// the API key, like the session's own bash.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new("git");
-    command.args(args).current_dir(dir);
-    for name in REPO_ENV_VARS {
+    command.args(SAFE_CONFIG).args(args).current_dir(dir);
+    for name in REPO_ENV_VARS.iter().chain(SECRET_ENV_VARS) {
         command.env_remove(name);
     }
     let output = command.output().context("cannot run git")?;
@@ -59,7 +76,7 @@ pub fn is_dirty(root: &Path) -> Result<bool> {
 /// Stages everything (`git add -A`) and commits it.
 pub fn commit_all(root: &Path, message: &str) -> Result<()> {
     git(root, &["add", "-A"])?;
-    git(root, &["commit", "-q", "-m", message])?;
+    git(root, &["commit", "-q", "--no-verify", "-m", message])?;
     Ok(())
 }
 
@@ -137,5 +154,48 @@ mod tests {
 
         let err = commit_all(root, "nothing").unwrap_err();
         assert!(err.to_string().contains("git commit"), "{err}");
+    }
+
+    #[test]
+    fn runs_no_hook_or_fsmonitor_a_session_planted() {
+        let repo = repo();
+        let root = repo.path();
+        let marker = root.join("ran.txt");
+        let script = format!("#!/bin/sh\necho \"$0\" >> '{}'\n", marker.display());
+        let hooks = root.join(".git/hooks");
+        let custom = root.join("custom-hooks");
+        std::fs::create_dir_all(&custom).unwrap();
+        for dir in [&hooks, &custom] {
+            for name in ["pre-commit", "commit-msg", "post-commit", "fsmonitor"] {
+                let path = dir.join(name);
+                std::fs::write(&path, &script).unwrap();
+                let mut perms = std::fs::metadata(&path).unwrap().permissions();
+                std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+                std::fs::set_permissions(&path, perms).unwrap();
+            }
+        }
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        commit_all(root, "with default hooks").unwrap();
+        // A hooks folder and an fsmonitor named in the repository's config.
+        git(root, &["config", "core.hooksPath", "custom-hooks"]).unwrap();
+        let fsmonitor = custom.join("fsmonitor");
+        git(
+            root,
+            &["config", "core.fsmonitor", &fsmonitor.to_string_lossy()],
+        )
+        .unwrap();
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        assert!(is_dirty(root).unwrap());
+        commit_all(root, "with configured hooks").unwrap();
+        assert!(!is_dirty(root).unwrap());
+        assert!(
+            !marker.exists(),
+            "{}",
+            std::fs::read_to_string(&marker).unwrap()
+        );
+        assert_eq!(
+            subjects(root),
+            ["with configured hooks", "with default hooks"]
+        );
     }
 }
