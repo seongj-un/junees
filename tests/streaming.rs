@@ -39,6 +39,7 @@ async fn call(
         max_tokens: 2048,
         cache: true,
         thinking: false,
+        web_search: false,
     };
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let result = provider.complete_streaming(request, &sender).await;
@@ -85,6 +86,7 @@ fn text_of(events: &[StreamEvent]) -> String {
             StreamEvent::TextEnd => "|",
             StreamEvent::Thinking => "(thinking)",
             StreamEvent::Retrying => "(retrying)",
+            StreamEvent::ServerToolUse { .. } => "(server tool)",
         })
         .collect()
 }
@@ -112,8 +114,12 @@ async fn a_streamed_reply_equals_the_plain_one() {
     assert_eq!(text_of(&plain_events), text_of(&streamed_events));
     assert_eq!(
         text_of(&streamed_events),
-        "(thinking)(thinking)목록을 확인하겠습니다. Let me look.|"
+        "(thinking)(thinking)목록을 확인하겠습니다. Let me look.|(server tool)"
     );
+    assert!(streamed_events.contains(&StreamEvent::ServerToolUse {
+        name: "web_search".into(),
+        input: json!({"query": "rust sse"}),
+    }));
     let deltas = streamed_events
         .iter()
         .filter(|event| matches!(event, StreamEvent::TextDelta(_)))
@@ -139,9 +145,7 @@ async fn a_whole_json_answer_to_a_stream_request_is_read_as_is() {
     let (response, events) = call(&streaming(url)).await;
     assert_eq!(
         response.unwrap().content,
-        vec![ContentBlock::Text {
-            text: "not streamed".into()
-        }]
+        vec![ContentBlock::text("not streamed")]
     );
     assert_eq!(text_of(&events), "not streamed|");
     assert_eq!(body_of(&server.await.unwrap()[0])["stream"], true);
@@ -181,9 +185,7 @@ async fn an_error_event_mid_stream_retries_from_the_start() {
     let (response, events) = call(&streaming(url)).await;
     assert_eq!(
         response.unwrap().content,
-        vec![ContentBlock::Text {
-            text: "Hallo, Welt.".into()
-        }]
+        vec![ContentBlock::text("Hallo, Welt.")]
     );
     assert_eq!(text_of(&events), "Hal(retrying)Hallo, Welt.|");
     assert_eq!(server.await.unwrap().len(), 2);
@@ -205,12 +207,7 @@ async fn a_dropped_stream_retries_and_says_so_only_after_output() {
     ])
     .await;
     let (response, events) = call(&streaming(url)).await;
-    assert_eq!(
-        response.unwrap().content,
-        vec![ContentBlock::Text {
-            text: "done".into()
-        }]
-    );
+    assert_eq!(response.unwrap().content, vec![ContentBlock::text("done")]);
     assert_eq!(text_of(&events), "do(retrying)done|");
     assert_eq!(server.await.unwrap().len(), 4);
 }
@@ -256,9 +253,7 @@ async fn a_stalled_stream_times_out_and_is_retried() {
     let (response, events) = call(&provider).await;
     assert_eq!(
         response.unwrap().content,
-        vec![ContentBlock::Text {
-            text: "waited".into()
-        }]
+        vec![ContentBlock::text("waited")]
     );
     assert_eq!(text_of(&events), "wai(retrying)waited|");
     // 0.3 s idle and 0.5 s backoff, not the 300 s default.

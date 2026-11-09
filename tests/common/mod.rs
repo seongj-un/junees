@@ -174,7 +174,8 @@ pub fn sse_event(data: &Value) -> String {
 
 /// The event stream the API sends for `message` (a whole Messages API
 /// response), as the streaming docs describe it: text, thinking and tool
-/// input arrive in deltas of `piece` characters, other blocks whole in
+/// input arrive in deltas of `piece` characters, each citation of a text in
+/// a delta of its own, other blocks whole in
 /// their start event, input usage in message_start and the cumulative
 /// usage in message_delta. A ping comes after the first block starts.
 pub fn sse_stream(message: &Value, piece: usize) -> String {
@@ -196,7 +197,11 @@ pub fn sse_stream(message: &Value, piece: usize) -> String {
         let kind = block["type"].as_str().unwrap();
         let mut opened = block.clone();
         match kind {
-            "text" => opened["text"] = json!(""),
+            "text" => {
+                opened["text"] = json!("");
+                // Citations come in deltas of their own.
+                opened.as_object_mut().unwrap().remove("citations");
+            }
             "thinking" => {
                 opened["thinking"] = json!("");
                 opened["signature"] = json!("");
@@ -210,13 +215,19 @@ pub fn sse_stream(message: &Value, piece: usize) -> String {
             events.push(json!({"type": "ping"}));
         }
         match kind {
-            "text" => deltas(
-                &mut events,
-                index,
-                "text_delta",
-                "text",
-                block["text"].as_str().unwrap(),
-            ),
+            "text" => {
+                for citation in block["citations"].as_array().into_iter().flatten() {
+                    events.push(json!({"type": "content_block_delta", "index": index,
+                        "delta": {"type": "citations_delta", "citation": citation}}));
+                }
+                deltas(
+                    &mut events,
+                    index,
+                    "text_delta",
+                    "text",
+                    block["text"].as_str().unwrap(),
+                )
+            }
             "thinking" => {
                 let thinking = block["thinking"].as_str().unwrap();
                 deltas(&mut events, index, "thinking_delta", "thinking", thinking);

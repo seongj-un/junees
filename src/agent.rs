@@ -13,6 +13,12 @@ use crate::provider::{
 };
 use crate::session::{Entry, Journal, Transcript};
 use crate::tools::{ToolOutput, ToolRegistry};
+use crate::web_search;
+
+/// Replies in a row the API may pause (`stop_reason: "pause_turn"`, when
+/// its own tool loop, such as web search, runs long) before the loop stops
+/// asking it to go on.
+pub const MAX_PAUSES: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
@@ -54,6 +60,15 @@ pub enum Event<'a> {
         name: &'a str,
         input: &'a Value,
     },
+    /// The API ran one of its own tools (such as a web search) with this
+    /// input, while the reply arrived. Junees does not run it.
+    ServerToolUse {
+        name: &'a str,
+        input: &'a Value,
+    },
+    /// The web pages the replies to this input cited, each once, after
+    /// the final answer.
+    Sources(&'a [String]),
     ToolResult {
         name: &'a str,
         output: &'a ToolOutput,
@@ -241,6 +256,8 @@ impl Agent {
     ///
     /// If the loop fails midway, the history still ends with a user message,
     /// and the next input is appended to it, so the conversation stays valid.
+    /// The exception is a reply the API paused (`pause_turn`): it is kept,
+    /// and the next input follows it as a new user message.
     pub async fn run(
         &mut self,
         input: &str,
@@ -250,6 +267,12 @@ impl Agent {
         self.record(entry, &mut on_event);
         let specs = self.tools.specs();
         let cancel = self.cancel.clone();
+        // The URLs the replies cite, listed after the answer.
+        let mut sources = Vec::new();
+        // The text of the replies since the last tool round: a reply the
+        // API paused is continued by the next one.
+        let mut answer: Vec<String> = Vec::new();
+        let mut pauses = 0;
 
         for _ in 0..self.options.max_turns {
             self.check_limit()?;
@@ -261,6 +284,7 @@ impl Agent {
                 response = self.respond(&specs, &mut on_event) => response?,
             };
             self.record(Entry::Usage(response.usage), &mut on_event);
+            web_search::collect_sources(&response.content, &mut sources);
 
             // Its text and thinking were reported while it arrived.
             let tool_calls: Vec<_> = response
@@ -302,7 +326,22 @@ impl Agent {
             };
 
             if tool_calls.is_empty() {
-                if response.stop_reason == StopReason::MaxTokens {
+                if !text.is_empty() {
+                    answer.push(text);
+                }
+                if response.stop_reason == StopReason::PauseTurn {
+                    // The API stopped its own tool loop midway. The reply,
+                    // recorded as it came, goes back unchanged with no user
+                    // message after it, and the API goes on from there.
+                    pauses += 1;
+                    if pauses <= MAX_PAUSES {
+                        continue;
+                    }
+                    on_event(Event::Warning(&format!(
+                        "the API paused this turn {MAX_PAUSES} times in a row; stopping \
+                         here (send a message to let it go on)"
+                    )));
+                } else if response.stop_reason == StopReason::MaxTokens {
                     on_event(Event::Warning(if answered {
                         "the answer hit the output token limit and may be cut off"
                     } else {
@@ -315,8 +354,13 @@ impl Agent {
                         "the model only thought and gave no answer; ask again or rephrase",
                     ));
                 }
-                return Ok(text);
+                if !sources.is_empty() {
+                    on_event(Event::Sources(&sources));
+                }
+                return Ok(answer.join("\n"));
             }
+            pauses = 0;
+            answer.clear();
 
             if let Some(reason) = cut_off {
                 on_event(Event::Warning(reason));
@@ -442,6 +486,7 @@ impl Agent {
                 max_tokens: self.options.max_tokens,
                 cache: true,
                 thinking: true,
+                web_search: true,
             },
             &events,
         );
@@ -541,6 +586,8 @@ impl Agent {
                 // Its own small output limit leaves no room for a thinking
                 // budget, and a summary needs none.
                 thinking: false,
+                // It works from the text it is given.
+                web_search: false,
             })
             .await;
         let response = match result {
@@ -626,6 +673,7 @@ fn forward(event: StreamEvent, on_event: &mut impl FnMut(Event<'_>)) {
         StreamEvent::TextEnd => Event::TextEnd,
         StreamEvent::Thinking => Event::Thinking,
         StreamEvent::Retrying => Event::Retrying,
+        StreamEvent::ServerToolUse { name, input } => Event::ServerToolUse { name, input },
     });
 }
 
@@ -644,9 +692,9 @@ mod tests {
     type Reply = std::result::Result<CompletionResponse, ProviderError>;
     use crate::tools::Tool;
 
-    /// System prompt, tool count, max_tokens, caching and thinking of a
-    /// request.
-    type Settings = (String, usize, u32, bool, bool);
+    /// System prompt, tool count, max_tokens, caching, thinking and web
+    /// search of a request.
+    type Settings = (String, usize, u32, bool, bool, bool);
 
     /// Replays canned responses and records the history it was sent.
     #[derive(Clone, Default)]
@@ -680,6 +728,7 @@ mod tests {
                 request.max_tokens,
                 request.cache,
                 request.thinking,
+                request.web_search,
             ));
             self.responses
                 .lock()
@@ -713,7 +762,7 @@ mod tests {
 
     fn text(text: &str) -> Reply {
         Ok(CompletionResponse {
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
             stop_reason: StopReason::EndTurn,
             usage: Usage {
                 input_tokens: 10,
@@ -726,9 +775,7 @@ mod tests {
     fn tool_use(id: &str, name: &str, input: Value) -> Reply {
         Ok(CompletionResponse {
             content: vec![
-                ContentBlock::Text {
-                    text: "let me check".into(),
-                },
+                ContentBlock::text("let me check"),
                 ContentBlock::ToolUse {
                     id: id.into(),
                     name: name.into(),
@@ -758,6 +805,145 @@ mod tests {
                 compact_threshold: 0.8,
             },
         )
+    }
+
+    /// A reply that searched the web once and cites `url`.
+    fn searched(stop_reason: StopReason, text: &str, url: &str) -> Reply {
+        Ok(CompletionResponse {
+            content: vec![
+                ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_1",
+                    "name": "web_search", "input": {"query": "news"}})),
+                ContentBlock::Other(json!({"type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_1", "content": [{"type": "web_search_result",
+                    "url": url, "title": "T", "encrypted_content": "EqgfCioIARgB"}]})),
+                ContentBlock::Text {
+                    text: text.into(),
+                    citations: Some(json!([{"type": "web_search_result_location", "url": url,
+                        "title": "T", "encrypted_index": "Eo8B", "cited_text": "..."}])),
+                },
+            ],
+            stop_reason,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 1,
+                server_tool_use: crate::message::ServerToolUsage {
+                    web_search_requests: 1,
+                },
+                ..Default::default()
+            },
+        })
+    }
+
+    /// The events of a run that are not text, as short strings.
+    fn notable(log: &mut Vec<String>) -> impl FnMut(Event<'_>) + '_ {
+        |event| match event {
+            Event::Sources(urls) => log.push(format!("sources {}", urls.join(" "))),
+            Event::ToolCall { name, .. } => log.push(format!("tool {name}")),
+            Event::Warning(warning) => log.push(format!("warning {warning}")),
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paused_turn_goes_on_without_a_user_message() {
+        let provider = Scripted::new(vec![
+            searched(StopReason::PauseTurn, "Searching.", "https://b.example"),
+            searched(
+                StopReason::PauseTurn,
+                "Still searching.",
+                "https://a.example",
+            ),
+            searched(StopReason::EndTurn, "Done.", "https://b.example"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let mut log = Vec::new();
+        let answer = agent.run("news?", notable(&mut log)).await.unwrap();
+        assert_eq!(answer, "Searching.\nStill searching.\nDone.");
+        // Cited pages once each, after the answer; nothing ran here.
+        assert_eq!(log, ["sources https://b.example https://a.example"]);
+
+        let messages = agent.messages();
+        assert_eq!(messages.len(), 4);
+        let seen = seen.lock().unwrap();
+        // Each continuation sent the history as it was: the paused replies,
+        // unchanged and last.
+        assert_eq!(seen[1], messages[..2]);
+        assert_eq!(seen[2], messages[..3]);
+        assert!(messages[1..].iter().all(|m| m.role == Role::Assistant));
+        assert_eq!(messages[1], {
+            let Ok(reply) = searched(StopReason::PauseTurn, "Searching.", "https://b.example")
+            else {
+                unreachable!()
+            };
+            Message {
+                role: Role::Assistant,
+                content: reply.content,
+            }
+        });
+        assert_eq!(agent.usage().web_searches(), 3);
+    }
+
+    #[tokio::test]
+    async fn pauses_in_a_row_stop_at_the_limit() {
+        let provider = Scripted::new(
+            (0..=MAX_PAUSES)
+                .map(|_| searched(StopReason::PauseTurn, "more", "https://a.example"))
+                .collect(),
+        );
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 50);
+        let mut log = Vec::new();
+        agent.run("go", notable(&mut log)).await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), MAX_PAUSES + 1);
+        assert_eq!(
+            log,
+            [
+                format!(
+                    "warning the API paused this turn {MAX_PAUSES} times in a row; stopping \
+                     here (send a message to let it go on)"
+                ),
+                "sources https://a.example".into(),
+            ]
+        );
+        // The next input follows the last paused reply.
+        assert_eq!(agent.messages().last().unwrap().role, Role::Assistant);
+        assert!(matches!(
+            agent.transcript.user_text_entry("go on"),
+            Entry::Message(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn server_tool_blocks_are_not_dispatched() {
+        // The docs' mixed turn: a search the API holds back until the
+        // client tool's result comes, in the same reply.
+        let mixed = Ok(CompletionResponse {
+            content: vec![
+                ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_9",
+                    "name": "web_search", "input": {"query": "rust"}})),
+                ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "upper".into(),
+                    input: json!({"text": "x"}),
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        });
+        let provider = Scripted::new(vec![
+            mixed,
+            searched(StopReason::EndTurn, "found", "https://a.example"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let mut log = Vec::new();
+        agent.run("go", notable(&mut log)).await.unwrap();
+        assert_eq!(log, ["tool upper", "sources https://a.example"]);
+        let seen = seen.lock().unwrap();
+        // One result, for the client call; the server call went back as is.
+        assert_eq!(tool_output(&seen[1][2]), [("toolu_1", "X", false)]);
+        assert_eq!(seen[1][1].content[0].other_type(), Some("server_tool_use"));
     }
 
     #[tokio::test]
@@ -1589,10 +1775,7 @@ mod tests {
         // starts the turn again, thinking first, from summary and input.
         assert_eq!(seen[6].len(), 1, "{:#?}", seen[6]);
         assert_eq!(summary_text(&seen[6][0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(
-            seen[6][0].content[1],
-            ContentBlock::Text { text: "go".into() }
-        );
+        assert_eq!(seen[6][0].content[1], ContentBlock::text("go"));
         let entries = entries_of(&journal);
         assert!(entries.contains(&Entry::Compact {
             summary: "SUMMARY".into(),
@@ -1605,7 +1788,7 @@ mod tests {
 
     fn summary_text(message: &Message) -> Option<String> {
         match message.content.first() {
-            Some(ContentBlock::Text { text }) => text
+            Some(ContentBlock::Text { text, .. }) => text
                 .strip_prefix(session::SUMMARY_HEADER)
                 .map(str::to_string),
             _ => None,
@@ -1627,9 +1810,7 @@ mod tests {
     #[tokio::test]
     async fn compacts_when_clearing_was_not_enough() {
         let summary = Ok(CompletionResponse {
-            content: vec![ContentBlock::Text {
-                text: "SUMMARY".into(),
-            }],
+            content: vec![ContentBlock::text("SUMMARY")],
             stop_reason: StopReason::EndTurn,
             usage: Usage {
                 input_tokens: 50,
@@ -1663,15 +1844,15 @@ mod tests {
         let settings = settings.lock().unwrap();
         assert_eq!(seen.len(), 9);
         assert_eq!(tool_output(&seen[6][2])[0].1, session::CLEARED);
-        let (system, tools, max_tokens, cache, thinking) = &settings[7];
+        let (system, tools, max_tokens, cache, thinking, web_search) = &settings[7];
         assert_eq!(system, context::SUMMARY_SYSTEM);
         assert_eq!(
-            (*tools, *max_tokens, *cache, *thinking),
-            (0, 4096, false, false)
+            (*tools, *max_tokens, *cache, *thinking, *web_search),
+            (0, 4096, false, false, false)
         );
         assert_eq!(
-            (settings[8].1, settings[8].3, settings[8].4),
-            (1, true, true)
+            (settings[8].1, settings[8].3, settings[8].4, settings[8].5),
+            (1, true, true, true)
         );
         // The summary call saw the history before the second-last input
         // ("third", at 12) as text in one message.
@@ -1691,12 +1872,7 @@ mod tests {
         let sent = &seen[8];
         assert_eq!(sent.len(), 3);
         assert_eq!(summary_text(&sent[0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(
-            sent[0].content[1],
-            ContentBlock::Text {
-                text: "third".into()
-            }
-        );
+        assert_eq!(sent[0].content[1], ContentBlock::text("third"));
         assert_eq!(sent[1].text(), "three");
         assert_eq!(sent[2], Message::user_text("fourth"));
         assert_valid(sent);
@@ -1850,10 +2026,7 @@ mod tests {
         let history = agent.messages();
         assert_eq!(history.len(), 2);
         assert_eq!(summary_text(&history[0]).as_deref(), Some("so far: a, b"));
-        assert_eq!(
-            history[0].content[1],
-            ContentBlock::Text { text: "two".into() }
-        );
+        assert_eq!(history[0].content[1], ContentBlock::text("two"));
         assert_eq!(history[1].text(), "b");
     }
 
@@ -1901,7 +2074,7 @@ mod tests {
         let sent = &seen[7];
         assert_eq!(sent.len(), 5);
         assert_eq!(summary_text(&sent[0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(sent[0].content[1], ContentBlock::Text { text: "go".into() });
+        assert_eq!(sent[0].content[1], ContentBlock::text("go"));
         assert_eq!(sent[1].role, Role::Assistant);
         assert_eq!(tool_output(&sent[2])[0].0, "toolu_5");
         assert_valid(sent);
@@ -1957,12 +2130,7 @@ mod tests {
         let retried = &seen[7];
         assert_eq!(retried.len(), 1);
         assert_eq!(summary_text(&retried[0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(
-            retried[0].content[1],
-            ContentBlock::Text {
-                text: "second".into()
-            }
-        );
+        assert_eq!(retried[0].content[1], ContentBlock::text("second"));
         assert!(events[0].starts_with("Compacted"), "{events:?}");
         assert!(events[1].contains("retrying once"), "{events:?}");
         assert_valid(agent.messages());
@@ -1987,10 +2155,7 @@ mod tests {
         assert_eq!(settings.lock().unwrap()[6].0, context::SUMMARY_SYSTEM);
         let retried = &seen[7];
         assert_eq!(summary_text(&retried[0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(
-            retried[0].content[1],
-            ContentBlock::Text { text: "go".into() }
-        );
+        assert_eq!(retried[0].content[1], ContentBlock::text("go"));
         assert_eq!(retried.len(), 5);
         assert_valid(retried);
         assert_valid(agent.messages());
@@ -2117,12 +2282,7 @@ mod tests {
         assert_eq!(agent.run("next", |_| {}).await.unwrap(), "fine");
         let sent = &seen.lock().unwrap()[1];
         assert_eq!(sent.len(), 3);
-        assert_eq!(
-            sent[2].content.last(),
-            Some(&ContentBlock::Text {
-                text: "next".into()
-            })
-        );
+        assert_eq!(sent[2].content.last(), Some(&ContentBlock::text("next")));
         assert_valid(sent);
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }

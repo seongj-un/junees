@@ -13,6 +13,7 @@ use super::{
     ToolSpec, report_blocks,
 };
 use crate::message::{ContentBlock, Role, StopReason, Usage};
+use crate::web_search::{self, WebSearch};
 
 const API_VERSION: &str = "2023-06-01";
 const MAX_ATTEMPTS: u32 = 4;
@@ -38,6 +39,8 @@ pub struct AnthropicProvider {
     stream: bool,
     /// See [`STREAM_IDLE_TIMEOUT`].
     idle_timeout: Duration,
+    /// The API's web search tool, offered to the requests that allow it.
+    web_search: Option<WebSearch>,
 }
 
 impl AnthropicProvider {
@@ -54,7 +57,16 @@ impl AnthropicProvider {
             thinking_budget: 0,
             stream: false,
             idle_timeout: STREAM_IDLE_TIMEOUT,
+            web_search: None,
         })
+    }
+
+    /// Offers the API's web search tool, set up as `web_search` says, in
+    /// the requests that allow it (`CompletionRequest::web_search`), with a
+    /// line in their system prompt on when to use it. `None` offers none.
+    pub fn with_web_search(mut self, web_search: Option<WebSearch>) -> Self {
+        self.web_search = web_search;
+        self
     }
 
     /// Streams the calls made with [`Provider::complete_streaming`], so
@@ -279,7 +291,7 @@ struct ApiRequest<'a> {
     system: Vec<Cached<SystemText<'a>>>,
     messages: Vec<ApiMessage<'a>>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    tools: Vec<Cached<&'a ToolSpec>>,
+    tools: Vec<Cached<ApiTool<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<Thinking>,
     #[serde(skip_serializing_if = "is_false")]
@@ -291,22 +303,38 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl<'a> ApiRequest<'a> {
-    fn new(model: &'a str, request: CompletionRequest<'a>, thinking_budget: u32) -> Self {
-        let system = if request.system.is_empty() {
-            Vec::new()
-        } else {
-            vec![Cached::new(
-                SystemText {
-                    kind: "text",
-                    text: request.system,
-                },
-                request.cache,
-            )]
-        };
-        let last_tool = request.tools.len().saturating_sub(1);
-        let tools = request
-            .tools
-            .iter()
+    fn new(
+        model: &'a str,
+        request: CompletionRequest<'a>,
+        thinking_budget: u32,
+        web_search: Option<&WebSearch>,
+    ) -> Self {
+        let web_search = web_search.filter(|_| request.web_search);
+        let mut system: Vec<&str> = Vec::new();
+        if !request.system.is_empty() {
+            system.push(request.system);
+        }
+        if web_search.is_some() {
+            system.push(web_search::SYSTEM_NOTE);
+        }
+        let last_text = system.len().saturating_sub(1);
+        let system = system
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| {
+                Cached::new(
+                    SystemText { kind: "text", text },
+                    request.cache && i == last_text,
+                )
+            })
+            .collect();
+        let mut tools: Vec<ApiTool> = request.tools.iter().map(ApiTool::Client).collect();
+        if let Some(search) = web_search {
+            tools.push(ApiTool::Server(search.definition()));
+        }
+        let last_tool = tools.len().saturating_sub(1);
+        let tools = tools
+            .into_iter()
             .enumerate()
             .map(|(i, tool)| Cached::new(tool, request.cache && i == last_tool))
             .collect();
@@ -349,6 +377,15 @@ impl<'a> ApiRequest<'a> {
             stream: false,
         }
     }
+}
+
+/// A tool in a request: one of Junees's own, or one the API runs itself,
+/// given as its definition.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ApiTool<'a> {
+    Client(&'a ToolSpec),
+    Server(serde_json::Value),
 }
 
 /// `thinking: {type: "enabled", budget_tokens}` of a request.
@@ -432,7 +469,12 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompletionRequest<'_>,
     ) -> Result<CompletionResponse, ProviderError> {
-        let body = ApiRequest::new(&self.model, request, self.thinking_budget);
+        let body = ApiRequest::new(
+            &self.model,
+            request,
+            self.thinking_budget,
+            self.web_search.as_ref(),
+        );
         let url = self.messages_url();
 
         let mut attempt = 1;
@@ -463,7 +505,12 @@ impl Provider for AnthropicProvider {
             report_blocks(&response.content, events);
             return Ok(response);
         }
-        let mut body = ApiRequest::new(&self.model, request, self.thinking_budget);
+        let mut body = ApiRequest::new(
+            &self.model,
+            request,
+            self.thinking_budget,
+            self.web_search.as_ref(),
+        );
         body.stream = true;
         let url = self.messages_url();
 
@@ -547,8 +594,10 @@ mod tests {
                 max_tokens: 10,
                 cache,
                 thinking: true,
+                web_search: true,
             },
             0,
+            None,
         );
         serde_json::to_value(&body).unwrap()
     }
@@ -564,8 +613,9 @@ mod tests {
                 max_tokens: 4096,
                 cache: false,
                 thinking,
+                web_search: true,
             };
-            serde_json::to_value(ApiRequest::new("m", request, budget)).unwrap()
+            serde_json::to_value(ApiRequest::new("m", request, budget, None)).unwrap()
         };
         assert_eq!(
             body(true, 2048)["thinking"],
@@ -582,6 +632,98 @@ mod tests {
         };
         assert!(provider(2048).manual_thinking());
         assert!(!provider(0).manual_thinking());
+    }
+
+    #[test]
+    fn web_search_is_offered_after_the_tools_with_a_system_note() {
+        let tools = [ToolSpec {
+            name: "bash".into(),
+            description: "runs".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+        let messages = [Message::user_text("news?")];
+        let search = WebSearch {
+            max_uses: 3,
+            allowed_domains: vec!["docs.rs".into()],
+            blocked_domains: vec![],
+        };
+        let body = |web_search, offered: Option<&WebSearch>, cache| {
+            let request = CompletionRequest {
+                system: "be nice",
+                messages: &messages,
+                tools: &tools,
+                max_tokens: 10,
+                cache,
+                thinking: false,
+                web_search,
+            };
+            serde_json::to_value(ApiRequest::new("m", request, 0, offered)).unwrap()
+        };
+        let ephemeral = json!({"type": "ephemeral"});
+        let value = body(true, Some(&search), true);
+        assert_eq!(
+            value["tools"],
+            json!([
+                {"name": "bash", "description": "runs", "input_schema": {"type": "object"}},
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 3,
+                 "allowed_domains": ["docs.rs"], "cache_control": ephemeral}
+            ])
+        );
+        assert_eq!(
+            value["system"],
+            json!([
+                {"type": "text", "text": "be nice"},
+                {"type": "text", "text": web_search::SYSTEM_NOTE, "cache_control": ephemeral}
+            ])
+        );
+        let uncached = body(true, Some(&search), false);
+        assert!(
+            !uncached.to_string().contains("cache_control"),
+            "{uncached}"
+        );
+        assert_eq!(uncached["tools"][1]["type"], "web_search_20250305");
+
+        // Not set up, or not allowed (summary calls): no tool, no note.
+        for value in [body(true, None, true), body(false, Some(&search), true)] {
+            assert_eq!(value["tools"].as_array().unwrap().len(), 1, "{value}");
+            assert_eq!(value["tools"][0]["cache_control"], ephemeral, "{value}");
+            assert_eq!(
+                value["system"],
+                json!([{"type": "text", "text": "be nice", "cache_control": ephemeral}])
+            );
+        }
+    }
+
+    #[test]
+    fn cited_text_and_web_search_usage_round_trip() {
+        let cited = json!({"type": "text", "text": "Rust 1.95 is out.",
+            "citations": [{"type": "web_search_result_location", "url": "https://blog.rust-lang.org/",
+                           "title": "Rust Blog", "encrypted_index": "Eo8BCioIAhgB",
+                           "cited_text": "Rust 1.95.0 is released"}]});
+        let api: ApiResponse = serde_json::from_value(json!({
+            "content": [cited, {"type": "text", "text": "plain", "citations": null}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 9, "output_tokens": 2,
+                      "server_tool_use": {"web_search_requests": 2, "web_fetch_requests": 0}}
+        }))
+        .unwrap();
+        let response = CompletionResponse::from(api);
+        assert_eq!(response.usage.web_searches(), 2);
+        assert_eq!(response.content[1], ContentBlock::text("plain"));
+        let messages = [Message {
+            role: Role::Assistant,
+            content: response.content,
+        }];
+        let value = request_with("", &messages, &[], false);
+        assert_eq!(
+            value["messages"][0]["content"],
+            json!([cited, {"type": "text", "text": "plain"}])
+        );
+        // A missing or null count object is no searches.
+        for usage in [json!({"input_tokens": 1}), json!({"server_tool_use": null})] {
+            let usage: Usage = serde_json::from_value(usage).unwrap();
+            assert_eq!(usage.web_searches(), 0);
+        }
     }
 
     #[test]
@@ -634,9 +776,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: vec![
-                    ContentBlock::Text {
-                        text: "sure".into(),
-                    },
+                    ContentBlock::text("sure"),
                     ContentBlock::ToolUse {
                         id: "toolu_1".into(),
                         name: "bash".into(),
@@ -652,9 +792,7 @@ mod tests {
                         content: "a\nb".into(),
                         is_error: false,
                     },
-                    ContentBlock::Text {
-                        text: "and then?".into(),
-                    },
+                    ContentBlock::text("and then?"),
                 ],
             },
         ];
@@ -720,12 +858,7 @@ mod tests {
         let response = CompletionResponse::from(api);
         assert_eq!(
             response.content,
-            vec![
-                ContentBlock::Other(thinking),
-                ContentBlock::Text {
-                    text: "done".into()
-                }
-            ]
+            vec![ContentBlock::Other(thinking), ContentBlock::text("done")]
         );
         assert_eq!(response.stop_reason, StopReason::EndTurn);
         assert_eq!(response.usage.input_tokens, 12);

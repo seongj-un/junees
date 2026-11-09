@@ -12,8 +12,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{CompletionResponse, ProviderError, StreamEvent};
-use crate::message::{ContentBlock, StopReason, Usage};
+use super::{CompletionResponse, ProviderError, StreamEvent, server_tool_use};
+use crate::message::{ContentBlock, ServerToolUsage, StopReason, Usage};
 
 /// One event of the stream: its `event:` name and `data:` lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,11 +109,13 @@ struct DeltaUsage {
     output_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
+    server_tool_use: Option<ServerToolUsage>,
 }
 
 impl Assembler {
-    /// Applies the data of one event, reporting text and thinking blocks
-    /// to `report` as they come. Returns whether it was `message_stop`.
+    /// Applies the data of one event, reporting text, thinking and server
+    /// tool blocks to `report` as they come. Returns whether it was
+    /// `message_stop`.
     pub fn apply(
         &mut self,
         data: &str,
@@ -190,6 +192,17 @@ impl Assembler {
                 let index = index_of(&event)?;
                 match self.blocks.get(index) {
                     Some(block) if block["type"] == "text" => report(StreamEvent::TextEnd),
+                    // Reported once its input is whole.
+                    Some(block) if block["type"] == "server_tool_use" => {
+                        let mut block = block.clone();
+                        if let Some(input) = self.inputs[index]
+                            .as_deref()
+                            .and_then(|json| serde_json::from_str::<Value>(json).ok())
+                        {
+                            block["input"] = input;
+                        }
+                        report(server_tool_use(&block));
+                    }
                     Some(_) => {}
                     None => {
                         return Err(decode(format!(
@@ -221,6 +234,9 @@ impl Assembler {
                         if let Some(count) = count {
                             *field = count;
                         }
+                    }
+                    if let Some(server) = usage.server_tool_use {
+                        total.server_tool_use = server;
                     }
                 }
             }
@@ -435,9 +451,7 @@ data: {"type":"message_stop"}
         assert_eq!(
             response.content,
             vec![
-                ContentBlock::Text {
-                    text: "Okay, let's check:".into()
-                },
+                ContentBlock::text("Okay, let's check:"),
                 ContentBlock::ToolUse {
                     id: "toolu_01T1x1fJ34qAmk2tNTrN7Up6".into(),
                     name: "get_weather".into(),
@@ -548,9 +562,65 @@ data: {"type":"message_stop"}
                 output_tokens: 70,
                 cache_read_input_tokens: 900,
                 cache_creation_input_tokens: 0,
+                server_tool_use: ServerToolUsage {
+                    web_search_requests: 1
+                },
             }
         );
-        assert_eq!(reported, [StreamEvent::Thinking, StreamEvent::Thinking]);
+        assert_eq!(
+            reported,
+            [
+                StreamEvent::Thinking,
+                StreamEvent::Thinking,
+                // Once its input was whole.
+                StreamEvent::ServerToolUse {
+                    name: "web_search".into(),
+                    input: json!({"query": "rust"}),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn citations_stay_on_their_text_and_search_counts_are_cumulative() {
+        let citation = |url: &str| {
+            json!({"type": "web_search_result_location", "url": url, "title": "T",
+                   "encrypted_index": "Eo8BCioIAhgB", "cited_text": "Rust 1.95"})
+        };
+        let mut events = vec![
+            start(json!({"input_tokens": 5, "server_tool_use": {"web_search_requests": 0}})),
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": "", "citations": null}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "citations_delta", "citation": citation("https://a")}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "Rust 1.95 is out."}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "citations_delta", "citation": citation("https://b")}}),
+            json!({"type": "content_block_stop", "index": 0}),
+        ];
+        events.extend(stop(
+            "end_turn",
+            json!({"output_tokens": 9, "server_tool_use": {"web_search_requests": 2}}),
+        ));
+        let (response, reported) = assemble(&data(&events));
+        let response = response.unwrap();
+        assert_eq!(
+            response.content,
+            [ContentBlock::Text {
+                text: "Rust 1.95 is out.".into(),
+                citations: Some(json!([citation("https://a"), citation("https://b")])),
+            }]
+        );
+        assert_eq!(response.usage.web_searches(), 2);
+        assert_eq!(response.usage.input_tokens, 5);
+        assert_eq!(
+            reported,
+            [
+                StreamEvent::TextDelta("Rust 1.95 is out.".into()),
+                StreamEvent::TextEnd
+            ]
+        );
     }
 
     #[test]

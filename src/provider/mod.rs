@@ -33,6 +33,9 @@ pub struct CompletionRequest<'a> {
     /// Let the model think before it answers, if the provider was set up
     /// with a thinking budget. Off for summary calls.
     pub thinking: bool,
+    /// Offer the API's web search tool too, if the provider was set up
+    /// with it. Off for summary calls.
+    pub web_search: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +47,7 @@ pub struct CompletionResponse {
 
 /// Progress of a model call made with [`Provider::complete_streaming`],
 /// reported while the response arrives.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     /// The next piece of a text block.
     TextDelta(String),
@@ -53,6 +56,9 @@ pub enum StreamEvent {
     /// A `thinking` or `redacted_thinking` block started. Its content is
     /// not reported.
     Thinking,
+    /// The API ran one of its own tools (a `server_tool_use` block, such as
+    /// a web search) with this input. Junees does not run it.
+    ServerToolUse { name: String, input: Value },
     /// The response broke off after part of it was reported. It is asked
     /// for again from the start, and what was reported since the last
     /// `Retrying` (or the start) is not part of the response.
@@ -72,7 +78,7 @@ pub trait Provider: Send + Sync {
     ) -> Result<CompletionResponse, ProviderError>;
 
     /// Like [`Provider::complete`], reporting the response to `events` as
-    /// it arrives: every text and thinking block of the returned response
+    /// it arrives: every text, thinking and server tool block of the returned response
     /// is reported, in order, after the last [`StreamEvent::Retrying`].
     /// Providers that cannot stream report the whole response at the end,
     /// which is what this default does.
@@ -96,19 +102,31 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Reports the text and thinking blocks of a whole response, as a stream
-/// would have. A receiver that is gone has nothing left to show.
+/// Reports the text, thinking and server tool blocks of a whole response,
+/// as a stream would have. A receiver that is gone has nothing left to
+/// show.
 pub fn report_blocks(content: &[ContentBlock], events: &StreamSender) {
     for block in content {
         match block {
-            ContentBlock::Text { text } => {
+            ContentBlock::Text { text, .. } => {
                 let _ = events.send(StreamEvent::TextDelta(text.clone()));
                 let _ = events.send(StreamEvent::TextEnd);
             }
             block if block.is_thinking() => {
                 let _ = events.send(StreamEvent::Thinking);
             }
+            ContentBlock::Other(value) if value["type"] == "server_tool_use" => {
+                let _ = events.send(server_tool_use(value));
+            }
             _ => {}
         }
+    }
+}
+
+/// The event for a whole `server_tool_use` block.
+pub(crate) fn server_tool_use(block: &Value) -> StreamEvent {
+    StreamEvent::ServerToolUse {
+        name: block["name"].as_str().unwrap_or_default().to_string(),
+        input: block["input"].clone(),
     }
 }

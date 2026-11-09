@@ -16,3 +16,4 @@ pub mod setup;
 pub mod slash;
 pub mod task;
 pub mod tools;
+pub mod web_search;
