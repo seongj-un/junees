@@ -243,7 +243,8 @@ async fn init_then_run_builds_the_features_and_commits() {
     let tracked = git(root, home.path(), &["ls-files"]).await;
     assert_eq!(
         tracked,
-        ".junees/.gitignore\n.junees/features.json\n.junees/progress.md\nhello.txt\nworld.txt\n"
+        ".gitignore\n.junees/.gitignore\n.junees/features.json\n.junees/progress.md\n\
+         hello.txt\nworld.txt\n"
     );
 
     let list: Value =

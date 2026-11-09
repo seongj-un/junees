@@ -84,37 +84,143 @@ pub fn is_dirty_outside_task(root: &Path) -> Result<bool> {
     dirty(root, &["--", ".", ":(exclude).junees"])
 }
 
+/// Like [`is_dirty`], but blind to the untracked files in `skip`: new
+/// files the harness leaves out of its commits ([`untracked_left_out`]).
+pub fn is_dirty_besides(root: &Path, skip: &[LeftOut]) -> Result<bool> {
+    let status = git(
+        root,
+        &[
+            "status",
+            "--porcelain",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+        ],
+    )?;
+    Ok(status
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| match entry.strip_prefix("?? ") {
+            Some(path) => !skip.iter().any(|file| file.path == path),
+            None => true,
+        }))
+}
+
 fn dirty(root: &Path, pathspec: &[&str]) -> Result<bool> {
     let mut args = vec!["status", "--porcelain", "--untracked-files=all"];
     args.extend(pathspec);
     Ok(!git(root, &args)?.trim().is_empty())
 }
 
+/// New files larger than this (1 MiB) stay out of harness commits: build
+/// output, downloads and data files a session or a verify command left
+/// behind, which would bloat the history for good.
+pub const MAX_NEW_FILE_BYTES: u64 = 1024 * 1024;
+
 /// What [`commit_all`] did.
 #[derive(Debug, Default, PartialEq)]
 pub struct Commit {
     /// Whether a commit was made; not when everything new was left out.
     pub made: bool,
-    /// New files left out because their names say they may hold secrets.
-    pub left_out: Vec<String>,
+    /// New files left out (see [`left_out_reason`]).
+    pub left_out: Vec<LeftOut>,
+}
+
+/// A new file the harness does not commit, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeftOut {
+    /// Relative to the root of the work tree.
+    pub path: String,
+    pub reason: Reason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reason {
+    /// Its name says it may hold a secret (see [`looks_secret`]).
+    Secret,
+    /// It is larger than [`MAX_NEW_FILE_BYTES`]; the size in bytes.
+    TooLarge(u64),
+}
+
+impl std::fmt::Display for LeftOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.reason {
+            Reason::Secret => write!(f, "{} (the name looks like a secret)", self.path),
+            Reason::TooLarge(bytes) => write!(
+                f,
+                "{} ({:.1} MiB, over the 1 MiB limit for new files)",
+                self.path,
+                bytes as f64 / (1024.0 * 1024.0)
+            ),
+        }
+    }
+}
+
+/// Why the harness would not commit the new file at `path` (relative to
+/// `root`), if it would not.
+pub fn left_out_reason(root: &Path, path: &str) -> Option<Reason> {
+    if looks_secret(path) {
+        return Some(Reason::Secret);
+    }
+    let size = std::fs::symlink_metadata(root.join(path)).ok()?.len();
+    (size > MAX_NEW_FILE_BYTES).then_some(Reason::TooLarge(size))
+}
+
+/// Splits git's `-z` output into paths and keeps the ones the harness would
+/// leave out.
+fn left_out_of(root: &Path, paths: &str) -> Vec<LeftOut> {
+    paths
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| {
+            left_out_reason(root, path).map(|reason| LeftOut {
+                path: path.to_string(),
+                reason,
+            })
+        })
+        .collect()
+}
+
+/// Untracked files (not ignored) the harness would leave out of its
+/// commits, limited to `pathspec` like [`is_dirty`]. They keep a work tree
+/// dirty after a harness commit.
+pub fn untracked_left_out(root: &Path, pathspec: &[&str]) -> Result<Vec<LeftOut>> {
+    let mut args = vec!["ls-files", "--others", "--exclude-standard", "-z"];
+    args.extend(pathspec);
+    Ok(left_out_of(root, &git(root, &args)?))
 }
 
 /// Stages everything (`git add -A`) except new files that look like
-/// secrets (see [`looks_secret`]), and commits it.
+/// secrets or are larger than [`MAX_NEW_FILE_BYTES`], and commits it.
 pub fn commit_all(root: &Path, message: &str) -> Result<Commit> {
     git(root, &["add", "-A"])?;
+    // Rename and copy detection would hide a new file filled from a
+    // tracked one (`mv .env.example .env`) from the secret check, so that
+    // check sees every new path. The size check keeps detection: a large
+    // file that was only moved is already in the history.
     let added = git(
         root,
-        &["diff", "--cached", "--name-only", "--diff-filter=A", "-z"],
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "--diff-filter=A",
+            "-z",
+        ],
     )?;
-    let left_out: Vec<String> = added
-        .split('\0')
-        .filter(|path| !path.is_empty() && looks_secret(path))
-        .map(String::from)
+    let new_content = git(
+        root,
+        &["diff", "--cached", "--name-only", "--diff-filter=AC", "-z"],
+    )?;
+    let new_content: Vec<&str> = new_content.split('\0').collect();
+    let left_out: Vec<LeftOut> = left_out_of(root, &added)
+        .into_iter()
+        .filter(|file| file.reason == Reason::Secret || new_content.contains(&file.path.as_str()))
         .collect();
     if !left_out.is_empty() {
         let mut args = vec!["--literal-pathspecs", "rm", "--cached", "-q", "--"];
-        args.extend(left_out.iter().map(String::as_str));
+        args.extend(left_out.iter().map(|file| file.path.as_str()));
         git(root, &args)?;
     }
     let staged = git(root, &["diff", "--cached", "--name-only", "-z"])?;
@@ -144,6 +250,30 @@ pub fn looks_secret(path: &str) -> bool {
         || ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
             .iter()
             .any(|key| name.starts_with(key))
+}
+
+/// Whether git ignores `path` (relative to the root; a trailing `/` for a
+/// folder), through any `.gitignore`, `.git/info/exclude` or the user's
+/// global excludes, whether or not it exists.
+pub fn is_ignored(root: &Path, path: &str) -> Result<bool> {
+    let mut command = Command::new("git");
+    command
+        .args(SAFE_CONFIG)
+        .args(["check-ignore", "-q", "--no-index", "--", path])
+        .current_dir(root);
+    for name in REPO_ENV_VARS.iter().chain(SECRET_ENV_VARS) {
+        command.env_remove(name);
+    }
+    match command.status().context("cannot run git")?.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("`git check-ignore {path}` failed"),
+    }
+}
+
+/// Whether git tracks any file under `path`.
+pub fn tracks_any(root: &Path, path: &str) -> Result<bool> {
+    Ok(!git(root, &["--literal-pathspecs", "ls-files", "-z", "--", path])?.is_empty())
 }
 
 /// `git log --oneline -<count>`, or a note when there is nothing to show.
@@ -267,10 +397,12 @@ mod tests {
         }
         let commit = commit_all(root, "first").unwrap();
         assert!(commit.made);
+        let paths: Vec<&str> = commit.left_out.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
-            commit.left_out,
+            paths,
             [".env", "conf/.env.local", "conf/server.pem", "id_ed25519"]
         );
+        assert!(commit.left_out.iter().all(|f| f.reason == Reason::Secret));
         let tracked = git(root, &["ls-files"]).unwrap();
         assert_eq!(tracked, "main.rs\n");
 
@@ -315,6 +447,100 @@ mod tests {
         git(root, &["replace", first, head.trim()]).unwrap();
         assert_eq!(show(root, first, "a.txt").unwrap(), "first");
         assert!(show(root, first, "missing.txt").is_err());
+    }
+
+    #[test]
+    fn leaves_large_new_files_out() {
+        let repo = repo();
+        let root = repo.path();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/app.bin"), vec![0u8; 2_000_000]).unwrap();
+        let limit = MAX_NEW_FILE_BYTES as usize;
+        std::fs::write(root.join("at-limit.bin"), vec![0u8; limit]).unwrap();
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        let commit = commit_all(root, "first").unwrap();
+        assert!(commit.made);
+        assert_eq!(
+            commit.left_out,
+            [LeftOut {
+                path: "target/app.bin".into(),
+                reason: Reason::TooLarge(2_000_000)
+            }]
+        );
+        assert_eq!(
+            commit.left_out[0].to_string(),
+            "target/app.bin (1.9 MiB, over the 1 MiB limit for new files)"
+        );
+        assert_eq!(git(root, &["ls-files"]).unwrap(), "at-limit.bin\nmain.rs\n");
+        assert_eq!(untracked_left_out(root, &[]).unwrap(), commit.left_out);
+
+        // A tracked file may grow past the limit.
+        std::fs::write(root.join("main.rs"), vec![b'a'; 2_000_000]).unwrap();
+        let commit = commit_all(root, "second").unwrap();
+        assert!(commit.made);
+        assert_eq!(commit.left_out.len(), 1);
+        assert_eq!(subjects(root), ["second", "first"]);
+
+        // A large file that was only moved is already in the history.
+        std::fs::rename(root.join("main.rs"), root.join("moved.rs")).unwrap();
+        let commit = commit_all(root, "third").unwrap();
+        assert!(commit.made);
+        assert_eq!(commit.left_out.len(), 1);
+        assert_eq!(
+            git(root, &["ls-files"]).unwrap(),
+            "at-limit.bin\nmoved.rs\n"
+        );
+
+        // A large new copy is new content, even where the user's config
+        // makes git detect copies.
+        git(root, &["config", "diff.renames", "copies"]).unwrap();
+        let mut text = vec![b'a'; 2_000_000];
+        text.push(b'\n');
+        std::fs::write(root.join("moved.rs"), &text).unwrap();
+        text.push(b'b');
+        std::fs::write(root.join("copy.rs"), &text).unwrap();
+        let commit = commit_all(root, "fourth").unwrap();
+        let paths: Vec<&str> = commit.left_out.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["copy.rs", "target/app.bin"]);
+    }
+
+    #[test]
+    fn leaves_a_secret_out_that_git_sees_as_a_rename() {
+        let repo = repo();
+        let root = repo.path();
+        let example = "DB_HOST=localhost\nDB_PORT=5432\nDB_NAME=app\nDB_USER=app\n";
+        std::fs::write(root.join(".env.example"), example).unwrap();
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        git(root, &["add", "-A"]).unwrap();
+        git(root, &["commit", "-q", "-m", "first"]).unwrap();
+        // Filled from the example: git pairs the two as a rename.
+        std::fs::rename(root.join(".env.example"), root.join(".env")).unwrap();
+        std::fs::write(root.join(".env"), format!("{example}DB_PASSWORD=x\n")).unwrap();
+        let commit = commit_all(root, "second").unwrap();
+        assert!(commit.made);
+        assert_eq!(
+            commit.left_out,
+            [LeftOut {
+                path: ".env".into(),
+                reason: Reason::Secret
+            }]
+        );
+        assert_eq!(git(root, &["ls-files"]).unwrap(), "main.rs\n");
+        assert!(root.join(".env").exists());
+    }
+
+    #[test]
+    fn tells_ignored_and_tracked_folders() {
+        let repo = repo();
+        let root = repo.path();
+        std::fs::write(root.join(".gitignore"), "/target\n").unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("build/gen.sh"), "true").unwrap();
+        commit_all(root, "first").unwrap();
+        assert!(is_ignored(root, "target/").unwrap());
+        assert!(!is_ignored(root, "dist/").unwrap());
+        assert!(tracks_any(root, "build/").unwrap());
+        assert!(!tracks_any(root, "dist/").unwrap());
     }
 
     #[test]
