@@ -90,11 +90,60 @@ fn dirty(root: &Path, pathspec: &[&str]) -> Result<bool> {
     Ok(!git(root, &args)?.trim().is_empty())
 }
 
-/// Stages everything (`git add -A`) and commits it.
-pub fn commit_all(root: &Path, message: &str) -> Result<()> {
+/// What [`commit_all`] did.
+#[derive(Debug, Default, PartialEq)]
+pub struct Commit {
+    /// Whether a commit was made; not when everything new was left out.
+    pub made: bool,
+    /// New files left out because their names say they may hold secrets.
+    pub left_out: Vec<String>,
+}
+
+/// Stages everything (`git add -A`) except new files that look like
+/// secrets (see [`looks_secret`]), and commits it.
+pub fn commit_all(root: &Path, message: &str) -> Result<Commit> {
     git(root, &["add", "-A"])?;
+    let added = git(
+        root,
+        &["diff", "--cached", "--name-only", "--diff-filter=A", "-z"],
+    )?;
+    let left_out: Vec<String> = added
+        .split('\0')
+        .filter(|path| !path.is_empty() && looks_secret(path))
+        .map(String::from)
+        .collect();
+    if !left_out.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "rm", "--cached", "-q", "--"];
+        args.extend(left_out.iter().map(String::as_str));
+        git(root, &args)?;
+    }
+    let staged = git(root, &["diff", "--cached", "--name-only", "-z"])?;
+    if staged.is_empty() {
+        return Ok(Commit {
+            made: false,
+            left_out,
+        });
+    }
     git(root, &["commit", "-q", "--no-verify", "-m", message])?;
-    Ok(())
+    Ok(Commit {
+        made: true,
+        left_out,
+    })
+}
+
+/// Whether a file's name says it may hold a secret: `.env` files, keys and
+/// certificates, ssh keys, `.netrc`. The harness does not commit new ones
+/// on its own; a session or the user can still commit them on purpose.
+pub fn looks_secret(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.starts_with(".env")
+        || name == ".netrc"
+        || [".pem", ".key", ".p12", ".pfx"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
+        || ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"]
+            .iter()
+            .any(|key| name.starts_with(key))
 }
 
 /// `git log --oneline -<count>`, or a note when there is nothing to show.
@@ -177,8 +226,73 @@ mod tests {
         assert!(is_dirty_outside_task(root).unwrap());
         commit_all(root, "second").unwrap();
 
-        let err = commit_all(root, "nothing").unwrap_err();
-        assert!(err.to_string().contains("git commit"), "{err}");
+        assert_eq!(commit_all(root, "nothing").unwrap(), Commit::default());
+        assert_eq!(subjects(root), ["second", "first"]);
+    }
+
+    #[test]
+    fn leaves_new_files_that_look_like_secrets_out() {
+        let repo = repo();
+        let root = repo.path();
+        std::fs::create_dir_all(root.join("conf")).unwrap();
+        for name in [
+            ".env",
+            "conf/.env.local",
+            "conf/server.pem",
+            "id_ed25519",
+            "main.rs",
+        ] {
+            std::fs::write(root.join(name), "x").unwrap();
+        }
+        let commit = commit_all(root, "first").unwrap();
+        assert!(commit.made);
+        assert_eq!(
+            commit.left_out,
+            [".env", "conf/.env.local", "conf/server.pem", "id_ed25519"]
+        );
+        let tracked = git(root, &["ls-files"]).unwrap();
+        assert_eq!(tracked, "main.rs\n");
+
+        // Only those left: no commit, and they stay where they are.
+        let commit = commit_all(root, "second").unwrap();
+        assert!(!commit.made);
+        assert_eq!(commit.left_out.len(), 4);
+        assert_eq!(subjects(root), ["first"]);
+        assert!(root.join(".env").exists());
+
+        // A file the user already tracks is theirs to commit.
+        git(root, &["add", "-f", ".env"]).unwrap();
+        git(root, &["commit", "-q", "-m", "track env"]).unwrap();
+        std::fs::write(root.join(".env"), "y").unwrap();
+        let commit = commit_all(root, "third").unwrap();
+        assert!(commit.made);
+        assert_eq!(commit.left_out.len(), 3);
+    }
+
+    #[test]
+    fn secret_names() {
+        for name in [
+            ".env",
+            ".env.production",
+            "a/b/.envrc",
+            "tls.key",
+            "ca.pem",
+            "id_rsa",
+            "id_rsa.pub",
+            ".netrc",
+        ] {
+            assert!(looks_secret(name), "{name}");
+        }
+        for name in [
+            "env.rs",
+            "src/environment.md",
+            "id_card.rs",
+            "keys.rs",
+            "pem.txt",
+            "README.md",
+        ] {
+            assert!(!looks_secret(name), "{name}");
+        }
     }
 
     #[test]

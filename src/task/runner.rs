@@ -144,7 +144,8 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
         root,
         &format!("init: {count} features planned, {}", tokens(usage)),
     )?;
-    git::commit_all(root, INIT_COMMIT).context("cannot commit the new task")?;
+    let commit = git::commit_all(root, INIT_COMMIT).context("cannot commit the new task")?;
+    warn_left_out(report, &commit.left_out);
     line(
         report,
         &format!("== init done: {count} features, committed; start with `junees task run` =="),
@@ -303,11 +304,14 @@ pub async fn run(
         };
         append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
         if git::is_dirty(root)? {
-            git::commit_all(root, &checkpoint_message(n))?;
-            line(
-                report,
-                &format!("checkpoint commit: {}", checkpoint_message(n)),
-            );
+            let commit = git::commit_all(root, &checkpoint_message(n))?;
+            warn_left_out(report, &commit.left_out);
+            if commit.made {
+                line(
+                    report,
+                    &format!("checkpoint commit: {}", checkpoint_message(n)),
+                );
+            }
         }
         state.stalled = if newly.is_empty() {
             state.stalled + 1
@@ -498,6 +502,19 @@ fn journal_note(journal: &Option<String>) -> String {
     match journal {
         Some(id) => format!(", journal {id}"),
         None => ", not saved".to_string(),
+    }
+}
+
+fn warn_left_out(report: &mut Reporter<'_>, left_out: &[String]) {
+    if !left_out.is_empty() {
+        warn(
+            report,
+            &format!(
+                "not committed, because the names look like secrets: {} \
+                 (commit them yourself if they belong in git)",
+                left_out.join(", ")
+            ),
+        );
     }
 }
 
@@ -1100,6 +1117,47 @@ mod tests {
         assert!(
             out.lines
                 .contains(&format!("checkpoint commit: {}", checkpoint_message(1)))
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoints_leave_files_that_look_like_secrets_out() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![
+            calls(&[
+                write(&root.join(".env"), "DB_PASSWORD=hunter2\n"),
+                write(&root.join("app.rs"), "fn main() {}"),
+            ]),
+            text("done for now"),
+            text("nothing to add"),
+        ]);
+        let mut out = Collected::default();
+        run_task(root, &provider, 2, &mut out).await;
+
+        assert_eq!(
+            subjects(root),
+            [
+                checkpoint_message(2),
+                checkpoint_message(1),
+                INIT_COMMIT.to_string()
+            ]
+        );
+        let mut ls_files = std::process::Command::new("git");
+        ls_files
+            .args(["ls-files", ".env", "app.rs"])
+            .current_dir(root);
+        for name in git::REPO_ENV_VARS {
+            ls_files.env_remove(name);
+        }
+        let tracked = ls_files.output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&tracked.stdout), "app.rs\n");
+        assert!(root.join(".env").exists());
+        assert_eq!(out.warnings.len(), 2, "{:?}", out.warnings);
+        assert!(
+            out.warnings[0].contains("look like secrets: .env "),
+            "{:?}",
+            out.warnings
         );
     }
 
