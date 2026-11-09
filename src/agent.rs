@@ -319,6 +319,15 @@ impl Agent {
             }
         };
         self.record(Entry::SummaryUsage(response.usage), on_event);
+        // The summary ends with the work that remains; a cut-off one would
+        // lose exactly that, and the messages it replaces are gone for good.
+        if response.stop_reason == StopReason::MaxTokens {
+            on_event(Event::Warning(
+                "could not compact the conversation (the summary hit the output token \
+                 limit and would be cut off); it stays as it is",
+            ));
+            return false;
+        }
         let summary = Message {
             role: Role::Assistant,
             content: response.content,
@@ -1212,6 +1221,48 @@ mod tests {
                 .all(|entry| matches!(entry, Entry::Message(_) | Entry::Usage(_))),
             "{new_entries:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_summary_cut_off_by_the_token_limit_is_not_used() {
+        let cut_off = with_stop(text("Goals: ... Remaining wo"), StopReason::MaxTokens);
+        let provider = Scripted::new(long_conversation(cut_off));
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        for input in ["first", "second", "third"] {
+            agent.run(input, |_| {}).await.unwrap();
+        }
+        let before = agent.transcript.clone();
+        let entries_before = entries_of(&journal).len();
+
+        let mut warnings = Vec::new();
+        let answer = agent
+            .run("fourth", |event| {
+                if let Event::Warning(w) = event {
+                    warnings.push(w.to_string());
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "four");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("output token limit"), "{warnings:?}");
+        assert_eq!(agent.messages()[..14], before.messages[..]);
+        // The call still counts toward usage.
+        let new_entries = &entries_of(&journal)[entries_before..];
+        assert!(
+            new_entries
+                .iter()
+                .all(|entry| !matches!(entry, Entry::Compact { .. })),
+            "{new_entries:?}"
+        );
+        assert!(
+            new_entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::SummaryUsage(_))),
+            "{new_entries:?}"
+        );
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }
 
     #[tokio::test]
