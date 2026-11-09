@@ -11,6 +11,7 @@ pub use bash::Bash;
 #[cfg(test)]
 pub(crate) use bash::testing;
 pub use edit_file::EditFile;
+pub(crate) use policy::resolve;
 pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};
 pub use read_file::ReadFile;
 pub use settings_file::SettingsFile;

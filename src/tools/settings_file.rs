@@ -49,6 +49,18 @@ impl SettingsFile {
         }
     }
 
+    /// The file as an absolute path (relative ones start from the current
+    /// folder), `.`, `..` and symbolic links resolved like the kernel does.
+    pub fn resolved_path(&self) -> PathBuf {
+        let path = std::path::absolute(&self.path).unwrap_or_else(|_| self.path.clone());
+        resolve(&path).unwrap_or(path)
+    }
+
+    /// What `~` and `$HOME` mean in bash commands.
+    pub fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
     /// Whether the file tools must refuse `path` (relative paths start from
     /// the current folder): it is the settings file once `.`, `..` and
     /// symbolic links are resolved, a dangling link to where it would be,

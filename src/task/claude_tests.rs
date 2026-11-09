@@ -19,7 +19,7 @@ use crate::agent::Event;
 use crate::cancel::Cancel;
 use crate::notify::Notifier;
 use crate::provider::Provider;
-use crate::tools::ToolSettings;
+use crate::tools::{SettingsFile, ToolSettings};
 
 fn no_provider() -> anyhow::Result<Box<dyn Provider>> {
     panic!("the API provider was used with the claude-code backend")
@@ -32,7 +32,13 @@ fn env<'a>(root: &Path, factory: &'a ProviderFactory<'a>, bin: &Path) -> TaskEnv
         model: "unused".into(),
         max_tokens: 100,
         max_turns: 9,
-        tool_settings: ToolSettings::default(),
+        tool_settings: ToolSettings {
+            settings_file: Some(SettingsFile::new(
+                "/home/tester/.junees/config.toml",
+                Some(PathBuf::from("/home/tester")),
+            )),
+            ..ToolSettings::default()
+        },
         context_window: 200_000,
         compact_threshold: 0.8,
         provider: factory,
@@ -44,7 +50,6 @@ fn env<'a>(root: &Path, factory: &'a ProviderFactory<'a>, bin: &Path) -> TaskEnv
             model: None,
             grace: Duration::from_millis(300),
             scrub: true,
-            settings_file: Some(PathBuf::from("/home/tester/.junees/config.toml")),
         }),
     }
 }
@@ -238,14 +243,19 @@ async fn claude_code_plans_and_builds_while_the_harness_verifies() {
     assert_eq!(after(&args, "--max-turns"), "9");
     assert_eq!(after(&args, "--permission-mode"), "acceptEdits");
     assert!(!args.iter().any(|arg| arg.contains("dangerously")));
-    // The file tools stay off the settings file.
+    // Claude Code stays off the user's settings file and its folder.
     assert_eq!(
         args[args.len() - 2..],
-        [
-            "Read(//home/tester/.junees/config.toml)",
-            "Edit(//home/tester/.junees/config.toml)"
-        ]
+        ["Bash(*$JUNEES_HOME*)", "Bash(*${JUNEES_HOME}*)"]
     );
+    for rule in [
+        "Read(//home/tester/.junees/config.toml)",
+        "Read(//home/tester/.junees/**)",
+        "Edit(//home/tester/.junees/**)",
+        "Bash(*~/.junees*)",
+    ] {
+        assert!(args.iter().any(|arg| arg == rule), "{rule}: {args:?}");
+    }
 
     let mut out = Collected::default();
     let stop = run(&env(root, &factory, &fake.bin), 5, &mut out.reporter())

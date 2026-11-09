@@ -41,7 +41,7 @@ use crate::agent::{Event, Limit};
 use crate::cancel::Cancel;
 use crate::cli::preview;
 use crate::message::Usage;
-use crate::tools::{SECRET_ENV_VARS, ToolOutput, ToolSettings};
+use crate::tools::{SECRET_ENV_VARS, SettingsFile, ToolOutput, ToolSettings};
 
 /// Picks the backend of `task init` and `task run`: `api` or `claude-code`.
 pub const BACKEND_ENV: &str = "JUNEES_BACKEND";
@@ -175,10 +175,6 @@ pub struct ClaudeCode {
     /// Whether sessions run with [`SCRUB_ENV`]` = 1`: false only when the
     /// user set it to an off value, which then reaches `claude` unchanged.
     pub scrub: bool,
-    /// Junees's settings file ([`crate::config_file::path`], made absolute),
-    /// which Claude Code's file tools must not touch: it holds the API key,
-    /// and writing it could turn the command rules off for the next run.
-    pub settings_file: Option<PathBuf>,
 }
 
 /// One session for [`ClaudeCode::run`].
@@ -303,8 +299,6 @@ impl ClaudeCode {
             model: get(MODEL_ENV),
             grace: DEFAULT_GRACE,
             scrub: !get(SCRUB_ENV).is_some_and(|value| is_off(&value)),
-            settings_file: crate::config_file::path(&lookup)
-                .and_then(|path| std::path::absolute(path).ok()),
         }
     }
 
@@ -441,8 +435,8 @@ impl ClaudeCode {
     /// asking, anything else that would ask is refused
     /// (`--permission-prompts none`), and [`deny_rules`] refuse the
     /// dangerous commands. `--dangerously-skip-permissions` is never used.
-    /// [`settings_file_rules`] keep the file tools off Junees's settings
-    /// file.
+    /// [`settings_rules`] keep Claude Code off Junees's settings file
+    /// (`request.settings.settings_file`) and its folder.
     /// Settings files of the repository are not loaded
     /// (`--setting-sources user`), nor are its MCP servers
     /// (`--strict-mcp-config`): a session can write them, and the next
@@ -479,8 +473,8 @@ impl ClaudeCode {
         }
         // Last: the option takes every argument up to the next option.
         let mut deny = deny_rules(request.settings);
-        if let Some(path) = &self.settings_file {
-            deny.extend(settings_file_rules(path));
+        if let Some(file) = &request.settings.settings_file {
+            deny.extend(settings_rules(file, request.root));
         }
         if !deny.is_empty() {
             args.push("--disallowedTools".into());
@@ -1361,29 +1355,82 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
     rules
 }
 
-/// Deny rules that keep Claude Code's file tools off `path`, in its
-/// permission rule syntax (<https://code.claude.com/docs/en/permissions>,
-/// "Read and Edit"): `//` starts an absolute path, and the pattern is
-/// gitignore syntax, so its special characters are escaped. A `Read` deny
-/// rule also refuses Read, Grep and Glob there and blocks Edit and Write
-/// (Claude Code 2.1.228+); the `Edit` rule covers every tool that edits
-/// files, NotebookEdit too. Both match the file through a symbolic link
-/// and its real location, and apply to the file commands Claude Code
-/// recognizes in Bash (`cat`, `sed`, `tee`, redirections), but not to a
-/// script that opens the file itself. Empty for a path that is not UTF-8
-/// (no argument can name it).
-pub fn settings_file_rules(path: &Path) -> Vec<String> {
-    let Some(text) = path.to_str().filter(|_| path.is_absolute()) else {
+/// Deny rules that keep Claude Code off Junees's settings file, in its
+/// permission rule syntax (<https://code.claude.com/docs/en/permissions>).
+///
+/// `Read` and `Edit` rules name the file and, unless the settings folder
+/// holds the repository or lies inside it, the whole folder (`/**`):
+/// sessions keep their state in the repository's `.junees/`, so they need
+/// nothing from `$JUNEES_HOME`. `//` starts an absolute path, and the
+/// pattern is gitignore syntax, so its special characters are escaped. A
+/// `Read` deny rule also refuses Read, Grep and Glob there and blocks Edit
+/// and Write (Claude Code 2.1.228+); the `Edit` rule covers every tool that
+/// edits files, NotebookEdit too. They also apply to the file commands
+/// Claude Code recognizes in Bash (`cat`, `sed`, `tee`, redirections), but
+/// not to commands that read files without naming them (`grep -r`).
+///
+/// `Bash` rules refuse commands that name the folder as Junees's own bash
+/// tool sees it (its path, `~/...`, `$HOME/...`, `$JUNEES_HOME`), so
+/// `grep -r api_key ~/.junees` and `cp -r ~/.junees /tmp` are refused too.
+/// Paths built at run time or reached from a folder above still get
+/// through. The path is made absolute and resolved (`..` and symbolic
+/// links) first, as Claude Code compares resolved paths. Empty for a path
+/// that is not UTF-8 (no argument can name it).
+pub fn settings_rules(file: &SettingsFile, root: &Path) -> Vec<String> {
+    let path = file.resolved_path();
+    let Some(text) = path.to_str() else {
         return Vec::new();
     };
-    let mut pattern = String::from("/");
+    let mut rules = vec![
+        format!("Read(/{})", gitignore_escape(text)),
+        format!("Edit(/{})", gitignore_escape(text)),
+    ];
+    let Some(folder) = path.parent().filter(|folder| folder.parent().is_some()) else {
+        return rules;
+    };
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::tools::resolve(&root).unwrap_or(root);
+    if root.starts_with(folder) || folder.starts_with(&root) {
+        return rules;
+    }
+    let Some(folder_text) = folder.to_str() else {
+        return rules;
+    };
+    rules.push(format!("Read(/{}/**)", gitignore_escape(folder_text)));
+    rules.push(format!("Edit(/{}/**)", gitignore_escape(folder_text)));
+    // A Bash rule's `*` matches any text and has no escape: skip names
+    // that would change the pattern.
+    let mut names = vec![folder_text.to_string()];
+    if let Some(rest) = file
+        .home()
+        .and_then(|home| folder.strip_prefix(home).ok())
+        .and_then(Path::to_str)
+        .filter(|rest| !rest.is_empty())
+    {
+        for home in ["~", "$HOME", "${HOME}"] {
+            names.push(format!("{home}/{rest}"));
+        }
+    }
+    names.extend(["$JUNEES_HOME".to_string(), "${JUNEES_HOME}".to_string()]);
+    for name in names {
+        if !name.contains(['*', '(', ')']) {
+            rules.push(format!("Bash(*{name}*)"));
+        }
+    }
+    rules
+}
+
+/// `text` with gitignore's pattern characters escaped, so they match only
+/// themselves.
+fn gitignore_escape(text: &str) -> String {
+    let mut pattern = String::new();
     for c in text.chars() {
         if matches!(c, '\\' | '*' | '?' | '[' | ']') {
             pattern.push('\\');
         }
         pattern.push(c);
     }
-    vec![format!("Read({pattern})"), format!("Edit({pattern})")]
+    pattern
 }
 
 #[cfg(test)]
@@ -1468,7 +1515,6 @@ mod tests {
             model: None,
             grace: Duration::from_millis(300),
             scrub: true,
-            settings_file: None,
         }
     }
 
@@ -1526,24 +1572,7 @@ mod tests {
                 model: None,
                 grace: DEFAULT_GRACE,
                 scrub: true,
-                settings_file: None,
             }
-        );
-        let home = |key: &str| match key {
-            "HOME" => Some("/home/tester".into()),
-            _ => None,
-        };
-        assert_eq!(
-            ClaudeCode::from_lookup(home).settings_file,
-            Some(PathBuf::from("/home/tester/.junees/config.toml"))
-        );
-        let claude = ClaudeCode::from_lookup(|key| match key {
-            "JUNEES_HOME" => Some(" state ".into()),
-            _ => home(key),
-        });
-        assert_eq!(
-            claude.settings_file,
-            Some(std::env::current_dir().unwrap().join("state/config.toml"))
         );
         let claude = ClaudeCode::from_lookup(|key| match key {
             BIN_ENV => Some(" /opt/claude ".into()),
@@ -1658,49 +1687,96 @@ mod tests {
     }
 
     #[test]
-    fn arguments_keep_the_file_tools_off_the_settings_file() {
-        let settings = ToolSettings::default();
-        let mut claude = claude(PathBuf::from("claude"));
-        claude.settings_file = Some(PathBuf::from("/home/tester/.junees/config.toml"));
+    fn arguments_keep_claude_code_off_the_settings_folder() {
+        let file = SettingsFile::new(
+            "/home/tester/.junees/config.toml",
+            Some(PathBuf::from("/home/tester")),
+        );
+        let settings = ToolSettings {
+            settings_file: Some(file.clone()),
+            ..ToolSettings::default()
+        };
+        let claude = claude(PathBuf::from("claude"));
+        let expected = [
+            "Read(//home/tester/.junees/config.toml)",
+            "Edit(//home/tester/.junees/config.toml)",
+            "Read(//home/tester/.junees/**)",
+            "Edit(//home/tester/.junees/**)",
+            "Bash(*/home/tester/.junees*)",
+            "Bash(*~/.junees*)",
+            "Bash(*$HOME/.junees*)",
+            "Bash(*${HOME}/.junees*)",
+            "Bash(*$JUNEES_HOME*)",
+            "Bash(*${JUNEES_HOME}*)",
+        ];
         let args = claude.arguments(&request(Path::new("/repo"), &settings, None));
         let deny = &args[args
             .iter()
             .position(|arg| arg == "--disallowedTools")
             .unwrap()
             + 1..];
+        assert_eq!(deny[deny.len() - expected.len()..], expected);
         assert_eq!(
-            deny[deny.len() - 2..],
-            [
-                "Read(//home/tester/.junees/config.toml)",
-                "Edit(//home/tester/.junees/config.toml)"
-            ]
+            deny[..deny.len() - expected.len()],
+            deny_rules(&ToolSettings::default())[..]
         );
-        assert_eq!(deny[..deny.len() - 2], deny_rules(&settings)[..]);
 
         // Even with the command policy off.
         let open = ToolSettings {
             allow_dangerous: true,
-            ..ToolSettings::default()
+            ..settings.clone()
         };
         let args = claude.arguments(&request(Path::new("/repo"), &open, None));
+        assert_eq!(args[args.len() - expected.len() - 1], "--disallowedTools");
+        assert_eq!(args[args.len() - expected.len()..], expected);
+
+        // `..` is resolved, as Claude Code compares resolved paths.
+        let dotted = SettingsFile::new("/nonexistent-junees/a/../j/config.toml", None);
+        let rules = settings_rules(&dotted, Path::new("/repo"));
         assert_eq!(
-            args[args.len() - 3..],
+            rules[..4],
             [
-                "--disallowedTools",
-                "Read(//home/tester/.junees/config.toml)",
-                "Edit(//home/tester/.junees/config.toml)"
+                "Read(//nonexistent-junees/j/config.toml)",
+                "Edit(//nonexistent-junees/j/config.toml)",
+                "Read(//nonexistent-junees/j/**)",
+                "Edit(//nonexistent-junees/j/**)",
             ]
+        );
+        // A relative path starts from the current folder.
+        let relative = SettingsFile::new("state/config.toml", None);
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            settings_rules(&relative, Path::new("/repo"))[0],
+            format!("Read(/{}/state/config.toml)", cwd.display())
         );
 
-        // Gitignore pattern characters match only themselves.
+        // A folder holding the repository, or inside it: only the file.
+        let file = SettingsFile::new("/nonexistent-junees/j/config.toml", None);
+        for root in ["/nonexistent-junees/j/repo", "/nonexistent-junees", "/"] {
+            assert_eq!(
+                settings_rules(&file, Path::new(root)),
+                [
+                    "Read(//nonexistent-junees/j/config.toml)",
+                    "Edit(//nonexistent-junees/j/config.toml)",
+                ],
+                "{root}"
+            );
+        }
+
+        // Gitignore pattern characters match only themselves; a Bash rule
+        // cannot escape `*`, so that name is left out.
+        let odd = SettingsFile::new("/srv/a [x]/*?\\/config.toml", None);
         assert_eq!(
-            settings_file_rules(Path::new("/srv/a [x]/*?\\/config.toml")),
+            settings_rules(&odd, Path::new("/repo")),
             [
                 "Read(//srv/a \\[x\\]/\\*\\?\\\\/config.toml)",
-                "Edit(//srv/a \\[x\\]/\\*\\?\\\\/config.toml)"
+                "Edit(//srv/a \\[x\\]/\\*\\?\\\\/config.toml)",
+                "Read(//srv/a \\[x\\]/\\*\\?\\\\/**)",
+                "Edit(//srv/a \\[x\\]/\\*\\?\\\\/**)",
+                "Bash(*$JUNEES_HOME*)",
+                "Bash(*${JUNEES_HOME}*)",
             ]
         );
-        assert!(settings_file_rules(Path::new("relative/config.toml")).is_empty());
     }
 
     #[test]

@@ -990,7 +990,7 @@ impl Workspace {
 /// Like the kernel, it follows a link before applying a `..` after it:
 /// with `out -> /elsewhere/sub`, `out/../x` is `/elsewhere/x`. Only the
 /// part that does not exist yet is taken as written.
-pub(super) fn resolve(path: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve(path: &Path) -> Option<PathBuf> {
     let mut resolved = PathBuf::new();
     // How many of the last components of `resolved` do not exist.
     let mut missing: usize = 0;
