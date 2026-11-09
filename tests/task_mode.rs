@@ -681,6 +681,42 @@ async fn status_sees_a_run_that_is_going() {
 }
 
 #[tokio::test]
+async fn a_budget_stop_is_posted() {
+    let (url, _api) = fake_api(init_replies()).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let name = root.file_name().unwrap().to_string_lossy().to_string();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+
+    let (hook, webhook) = fake_api(vec![(204, json!({}))]).await;
+    let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
+    // The init session alone used more than 10 tokens.
+    let run = junees_env(
+        root,
+        home.path(),
+        &url,
+        &["task", "run", "--max-tokens", "10"],
+        &[("JUNEES_NOTIFY_WEBHOOK", &hook)],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stdout}\n{stderr}");
+    let posts = posts_of(webhook).await;
+    assert_eq!(posts.len(), 1);
+    let content = body_of(&posts[0])["content"].as_str().unwrap().to_string();
+    assert!(
+        content.starts_with(&format!(
+            "junees: task in `{name}` stopped (budget): `token budget used up"
+        )),
+        "{content}"
+    );
+    assert!(content.contains("\nfeatures: 0/2 passing\n"), "{content}");
+}
+
+#[tokio::test]
 async fn status_without_a_task_says_to_run_init() {
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
@@ -765,6 +801,8 @@ async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
     let root = repo.path();
     git(root, home.path(), &["init", "-q"]).await;
     junees(root, home.path(), &url, &["task", "init", "make done.txt"]).await;
+    let (hook, webhook) = fake_api(vec![(204, json!({}))]).await;
+    let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
 
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
     command
@@ -773,6 +811,9 @@ async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", &url)
         .env("JUNEES_HOME", home.path().join("junees"))
+        // After the signal only the stop is posted, not the session line.
+        .env("JUNEES_NOTIFY_WEBHOOK", &hook)
+        .env("JUNEES_NOTIFY_EACH_SESSION", "1")
         .env_remove("JUNEES_TASK_MAX_TOKENS")
         .env_remove("JUNEES_TASK_MAX_TIME")
         .stdin(Stdio::null())
@@ -810,6 +851,20 @@ async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
             .unwrap();
     assert_eq!(state["stop"]["reason"], "interrupted");
     assert_eq!(state["stop"]["session"], 1);
+    assert!(state["stopped_at"].is_u64(), "{state}");
+    assert!(state.get("running").is_none(), "{state}");
+    let posts = posts_of(webhook).await;
+    assert_eq!(posts.len(), 1);
+    let content = body_of(&posts[0])["content"].as_str().unwrap().to_string();
+    let name = root.file_name().unwrap().to_string_lossy();
+    assert!(
+        content.starts_with(&format!(
+            "junees: task in `{name}` stopped (interrupted): `interrupted`\nfeatures: 0/1 passing\n"
+        )),
+        "{content}"
+    );
+    // A second post would have found the fake webhook gone.
+    assert!(!stderr.contains("notification to"), "{stderr}");
     let log = git(root, home.path(), &["log", "--format=%s"]).await;
     assert_eq!(
         log,
