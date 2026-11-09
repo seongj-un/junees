@@ -45,6 +45,7 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 예산: 작업 전체 토큰 상한, 시간 상한, 세션 수 상한
 - Ctrl-C/SIGTERM: 현재 도구가 끝나면 멈추고 짝 없는 tool_use를 채움(#2)
 - 무인 모드 명령 정책: 위험 명령 차단 목록, 작업 폴더 밖 쓰기 경고
+  - L4a: `bash` 명령 정책(`src/tools/policy.rs`). 실행 전에 루트/홈/상위 폴더 재귀 삭제, 디스크 파괴, 시스템 종료, fork bomb, `curl | sh`, 강제 push, `sudo`를 막고 `blocked by policy: <이유>` 오류 결과를 돌려준다. `JUNEES_DENY_COMMANDS`로 접두사 추가, `JUNEES_ALLOW_DANGEROUS=1`로 기본 규칙 끔. 숨길 환경 변수 `JUNEES_HIDDEN_ENV`(#4). 작업 폴더 밖 쓰기 경고와 대화형 승인은 아직
 - 실행 로그 파일, 크래시 후 `task run`이 기록에서 이어서 시작
 
 ### L5. 상태 보기와 알림

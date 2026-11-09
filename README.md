@@ -42,8 +42,33 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `JUNEES_MAX_TOKENS` | `8192` | 모델 호출 1회의 최대 출력 토큰 |
 | `JUNEES_MAX_TURNS` | `50` | 입력 하나당 최대 모델 호출 횟수 |
 | `JUNEES_HOME` | `~/.junees` | 세션 기록 등 상태를 두는 폴더 |
+| `JUNEES_DENY_COMMANDS` | (없음) | `bash`에서 추가로 막을 명령 접두사, 쉼표 구분 (예: `docker rm,kubectl delete`) |
+| `JUNEES_ALLOW_DANGEROUS` | `0` | `1`이면 기본 명령 차단 규칙을 끈다 (사용자 책임) |
+| `JUNEES_HIDDEN_ENV` | (없음) | `bash`에서 추가로 숨길 환경 변수 이름, 쉼표 구분 (예: `DB_PASSWORD,GITHUB_TOKEN`) |
 
-기본 도구는 `bash`, `read_file`, `write_file` 세 가지다. `bash`는 아직 승인 절차 없이 바로 실행되니(2단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다.
+기본 도구는 `bash`, `read_file`, `write_file` 세 가지다. `bash`는 승인 절차 없이 바로 실행되니(로드맵 3단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다.
+
+### 명령 정책
+
+`bash`는 명령을 실행하기 전에 정책으로 검사하고, 걸리면 아무것도 실행하지 않은 채 `blocked by policy: <이유>` 오류 결과를 모델에 돌려준다. 사람이 지켜보지 않는 장기 실행에서 치명적인 명령을 막는 1차 안전장치이고 샌드박스는 아니다.
+
+기본으로 막는 것:
+
+- 루트, 최상위 시스템 폴더(`/usr`, `/etc`, `/home` 등), 홈, 상위 폴더의 재귀 삭제: `rm -r`/`-rf`/`--recursive` 대상이 `/`, `/*`, `~`, `~/`, `$HOME`, `${HOME}`, 홈의 절대 경로나 그 위, `..`, `../..`처럼 현재 폴더 위로 올라가는 경로. `rm -rf ./build`, `rm -rf target`, `rm -rf ../other/target`은 허용
+- 파일시스템/디스크 파괴: `mkfs*`, `wipefs`, `dd ... of=/dev/...`, `> /dev/sda` 같은 장치로의 리다이렉트 (`/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/*`, `/dev/tcp/*` 등은 허용)
+- 시스템 종료: `shutdown`, `reboot`, `halt`, `poweroff`, `systemctl reboot|poweroff|halt|kexec`
+- fork bomb (`:(){ :|:& };:`과 같은 모양)
+- 내려받은 스크립트 바로 실행: `curl`/`wget ... | sh`(bash, zsh 등 셸 포함), `bash <(curl ...)`, `sh -c "$(curl ...)"`
+- 강제 push: `git push --force`, `-f`, `+refspec` (`--force-with-lease`는 허용)
+- `sudo`, `doas`
+
+검사 방식:
+
+- 명령을 셸처럼 대략 나눠서 `;`, `&&`, `||`, `|`, `&`, 줄바꿈, 괄호로 이어진 각 부분, `$(...)`과 백틱 안, `sh -c '...'`, `eval` 인자까지 검사한다. 앞에 붙은 `FOO=1`, `env`, `nohup`, `timeout 5`, `nice`, `command`, `then`/`do` 같은 키워드는 건너뛰고 실제 실행되는 프로그램을 본다. 프로그램 이름은 경로를 뗀 이름으로 비교한다(`/sbin/reboot`도 차단).
+- 따옴표 안 문자열, 주석, here-document 본문은 명령으로 보지 않는다. `echo "rm -rf /"`, `grep shutdown log.txt`, `git commit -m "git push --force"`는 허용된다.
+- 실행 중에 만들어지는 단어(`rm -rf $(echo /)`, 변수에 담긴 경로)는 알 수 없으므로 막지 못한다. `$(...)`, `sh -c`, `eval`이 합쳐서 8단계보다 깊게 중첩되면 검사하지 않고 막는다.
+- `JUNEES_DENY_COMMANDS`의 접두사는 단어 단위로 비교한다. `docker rm`은 `docker rm -f web`을 막지만 `docker rmi`는 막지 않는다. 이 규칙은 `JUNEES_ALLOW_DANGEROUS=1`이어도 적용된다.
+- `JUNEES_ALLOW_DANGEROUS`는 `1`/`true`/`yes`/`on` 또는 `0`/`false`/`no`/`off`만 받고, 다른 값이면 시작할 때 오류로 멈춘다.
 
 ## 구조
 
@@ -54,14 +79,16 @@ src/
   session.rs         세션 기록(JSONL) 쓰기, 재생, 이어 가기, 세션 찾기/목록
   message.rs         대화 메시지 타입 (Messages API 형식)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트
-  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file
-  config.rs          환경 변수 설정
+  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file, bash 명령 정책(policy.rs)
+  config.rs          환경 변수 설정 (도구 설정 ToolSettings 포함)
   prompt.rs          시스템 프롬프트
   cli.rs             인자 파싱, 출력 보조 함수
 tests/
   common/              테스트용 가짜 Anthropic API 서버
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행 검증
+  secret_env.rs        기본 bash에서 API 키가 보이지 않는지 검증
+  hidden_env.rs        JUNEES_HIDDEN_ENV로 지정한 변수가 bash에서 보이지 않는지 검증
 ```
 
 ## 로드맵
