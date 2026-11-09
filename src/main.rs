@@ -14,6 +14,7 @@ use junees::claude_code::{BACKEND_ENV, Backend, ClaudeCode, MODEL_ENV, UsageLimi
 use junees::cli::{self, Command, SessionMode, TaskCommand, TaskRun};
 use junees::config::Config;
 use junees::config_file::Settings;
+use junees::memory::Memory;
 use junees::notify::Notifier;
 use junees::prompt;
 use junees::provider::anthropic::AnthropicProvider;
@@ -562,6 +563,10 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         ),
     };
     let root = task::git::toplevel(&std::env::current_dir()?)?;
+    let memory = config
+        .home
+        .as_deref()
+        .map(|home| Memory::new(home, &root, config.memory));
     // The tools resolve relative paths from the process's folder.
     std::env::set_current_dir(&root)
         .with_context(|| format!("cannot change to {}", root.display()))?;
@@ -588,6 +593,7 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         cancel,
         notify: Notifier::from_lookup(lookup)?,
         claude,
+        memory,
     };
     let mut printer = Printer::new();
     let mut reporter = |report: Report<'_>| match report {
