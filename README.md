@@ -18,6 +18,8 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ./target/release/junees task run --max-sessions 5             # 기능 하나씩 작업 세션 반복
 ./target/release/junees task run --max-tokens 2000000 --max-time 2h   # 토큰/시간 예산 안에서만
 ./target/release/junees task status            # 작업 상태 보기 (--json이면 JSON)
+./target/release/junees task init --backend claude-code "할 일 관리 웹 앱을 만들어"   # Claude 구독으로 (아래)
+JUNEES_BACKEND=claude-code ./target/release/junees task run --max-time 2h
 ```
 
 대화 모드 명령: `/sessions` 최근 세션 10개(id, 마지막 기록 시각, 첫 입력), `/reset` 새 세션 시작, `/usage` 현재 세션의 토큰 사용량(캐시 쓰기/읽기 포함), `/context` 현재 컨텍스트 크기와 한도, `/compact` 앞부분을 요약으로 압축, `/exit` 종료.
@@ -80,6 +82,33 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - 예산을 켠 수동 모드는 예외다. 이 방식을 받는 모델(Claude 4.6 이하)은 앞부분 검사를 하지 않는 대신, 진행 중인 턴이 thinking 블록으로 시작해야 하고 thinking은 턴의 첫 응답에만 나온다. 그래서 비우기와 압축이 thinking 블록을 지우지 않고(기록 항목에 `keep_thinking: true`), 입력이 하나뿐인 턴 안에서 압축할 때는 꼬리를 남기지 않고 마지막 도구 결과까지 턴 전체를 요약해 `user(요약 + 원래 입력)` 하나로 만든다. 모델은 그 턴을 thinking부터 다시 시작한다. 사용자 입력 앞에서 자르는 경우는 같다.
 - 응답이 사고 중에 출력 한도(`max_tokens`)에 걸려 thinking 블록만 남으면 그 응답은 기록하지 않고, `JUNEES_MAX_TOKENS`를 올리거나 `JUNEES_THINKING_BUDGET`을 낮추라는 경고를 띄운다(기록은 입력으로 끝나 다음 입력이 거기에 붙는다). 한도에 걸리지 않았는데 thinking만 온 응답도 기록하지 않고, 모델이 생각만 하고 답하지 않았다는 경고를 띄운다.
 - `type: "enabled"` 방식은 Claude 4.6 모델(기본 `claude-sonnet-4-6`)에서는 동작하지만 폐기 예정이고, 4.7 이후 모델은 400으로 거절한다. 그런 모델에서는 켜지 않는다. 켜면 오류 메시지 끝에 `JUNEES_THINKING_BUDGET`을 0으로 하라는 안내가 붙는다(adaptive thinking은 아직 지원하지 않음. Claude 5 모델은 설정 없이도 adaptive로 생각한다).
+
+### 구독 모드 (claude-code 백엔드)
+
+`task init`과 `task run`의 세션을 Junees 자신의 에이전트 대신 공식 Claude Code CLI(`claude`)가 실행하게 할 수 있다. Claude Pro/Max 구독으로 Junees를 쓰는 방법이다. `--backend claude-code`나 `JUNEES_BACKEND=claude-code`로 고르고(기본은 `api`), 이때는 `ANTHROPIC_API_KEY`가 필요 없고 읽지도 않는다.
+
+로그인은 직접 한다. Junees는 로그인을 대신하거나 확인하지 않는다.
+
+```sh
+claude            # 처음 한 번: Claude Code를 열고
+/login            # 그 안에서 구독 계정으로 로그인한 뒤 /exit
+# 브라우저 없는 서버라면: claude setup-token 으로 토큰을 만들어
+# export CLAUDE_CODE_OAUTH_TOKEN=... 을 자기 셸에 둔다 (Junees는 claude에게 물려줄 뿐 읽지 않는다)
+junees task init --backend claude-code "목표"
+junees task run --backend claude-code --max-time 2h
+```
+
+왜 이 방식만 지원하나: Anthropic 약관([Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance))은 구독(OAuth) 자격 증명을 다른 도구가 직접 쓰거나 대신 저장, 중계하는 것을 금지하고, 사용자가 **수정하지 않은 Claude Code**에 자기 구독으로 로그인해 쓰는 것은 허용한다. 그래서 Junees는 `claude` 프로그램을 자식 프로세스로 실행하기만 한다. `~/.claude`의 자격 증명이나 `CLAUDE_CODE_OAUTH_TOKEN`을 읽거나 저장하거나 복사하지 않고, Junees의 API 클라이언트가 Claude Code인 척하지도 않는다(헤더, 시스템 프롬프트). 환경에 `CLAUDE_CODE_OAUTH_TOKEN`이 있으면 다른 변수처럼 `claude`에 상속될 뿐이다.
+
+- 시작할 때 `claude --version`이 실행되고 2.1.259 이상인지 확인한다(`--permission-prompts`가 이 버전부터). 로그인 여부는 첫 세션 결과로 판단한다. Claude Code가 "Not logged in", "Failed to authenticate" 같은 결과를 내거나 `authentication_failed` 오류를 보내면 "Claude Code is not signed in ... run `claude` and then /login (or create a token with `claude setup-token`)" 안내와 함께 `error`로 정지하고, 웹훅이 있으면 알린다.
+- 세션 하나는 저장소 루트에서 `claude -p <입력> --output-format stream-json --verbose --append-system-prompt <하네스 규칙과 작업 상태> --permission-mode acceptEdits --permission-prompts none --tools Read,Edit,Write,Glob,Grep,Bash --allowedTools Read,Edit,Write,Glob,Grep,Bash --setting-sources user --strict-mcp-config --max-turns <JUNEES_MAX_TURNS> [--model <JUNEES_CLAUDE_MODEL>] --disallowedTools <규칙...>`이다. 무인 실행이라 확인을 기다리면 안 되므로, 편집과 위 도구는 묻지 않고 허용하고, 그 밖에 확인이 필요한 것은 거절된다(`--permission-prompts none`). `--dangerously-skip-permissions`는 쓰지 않는다. 저장소의 `.claude/settings*.json`과 `.mcp.json`은 읽지 않는다(세션이 써 둔 훅이나 MCP 서버가 다음 세션에서 규칙 밖으로 실행되지 않도록). 사용자 설정(`~/.claude/settings.json`)은 그대로 적용된다. `--bare`는 OAuth 로그인을 읽지 않으므로 쓰지 않는다.
+- 명령 정책: L4a 정책의 핵심을 Claude Code 권한 규칙으로 옮긴 `--disallowedTools` 목록을 넘긴다. `sudo`/`su`/`doas`/`pkexec`/`runuser`, `shutdown`/`reboot`/`halt`/`poweroff`/`systemctl poweroff` 등, `mkfs*`, `wipefs`, `dd ... of=/dev/...`, `rm -rf`(와 `-fr`, `-r`, `-R` 등) 뒤에 `/`, `~`, `$HOME`, `..`, 강제 push(`--force`, `-f`, `+refspec`. `--force-with-lease`는 허용), 표준 입력에서 스크립트를 읽는 셸(`curl ... | sh`). `JUNEES_DENY_COMMANDS`의 접두사는 `Bash(<접두사> *)`로 더하고, `JUNEES_ALLOW_DANGEROUS=1`이면 기본 규칙은 빠진다. 한계: Claude Code 규칙은 쓰인 그대로의 단어만 맞춘다. `/usr/bin/sudo`, `git -C . push --force`, `bash -c '...'`, 실행 중에 만든 명령, fork bomb, 루트 바로 아래 글롭(`/*`. 규칙의 `*`는 무엇이든 맞으므로 `/tmp/x`까지 막게 되어 넣지 않음)은 막지 못한다. Junees의 bash 정책보다 약하다.
+- 환경: `claude`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`(있으면 Claude Code가 구독 대신 API 과금으로 간다), 웹훅 URL, `JUNEES_HIDDEN_ENV`, 저장소 지정 git 변수를 넘기지 않는다. Claude Code의 Bash 도구도 같은 환경을 받는다.
+- 기능 통과: Claude Code에는 `mark_feature_passing`이 없다. 세션 프롬프트는 "기능 하나를 끝내고 verify 명령을 직접 실행해 확인하라, 통과 기록은 하네스가 한다"고 알려 주고, 세션이 끝나면 하네스가 아직 통과하지 않은 기능의 verify를 모두(목록 순서로) 실행해서 exit 0인 것을 기록한다(`verified by the harness: F1`). 세션이 취소됐거나 로그인 실패면 건너뛰고, 시간 예산이 다 되면 남은 verify는 다음 실행으로 미룬다. 기능 목록 되돌리기, 체크포인트 커밋, 정지 조건, 재검증, 크래시 복구, 실행 로그, 알림은 api 백엔드와 같다. init이 거절된 목록을 고치는 것은 같은 세션이 아니라 목표와 문제를 받은 새 init 세션이 한다.
+- 토큰과 예산: stream-json의 응답별 usage(같은 응답 id는 한 번만)를 세션 중에 세어 예산을 확인하고(응답마다, 그리고 시간 때문에 1초마다), 넘으면 Claude Code의 프로세스 그룹에 SIGINT를 보내 턴을 끝내게 한 뒤 10초 안에 끝나지 않으면 SIGKILL한다. 세션이 끝나면 `result` 이벤트의 `modelUsage`(모든 모델 합계, 없으면 `usage`)가 더 크면 그것을 누적에 더한다. Claude Code가 추정한 비용(`total_cost_usd`)과 턴 수, Claude Code 세션 id는 `run.log`에 `session N claude-code: ...` 한 줄로 남는다(구독은 이 금액으로 과금되지 않는다). 구독의 사용 한도는 Junees가 알 수 없다.
+- 취소: SIGINT/SIGTERM이면 Claude Code의 프로세스 그룹에 SIGINT, 유예 뒤 SIGKILL을 보내고(그 그룹의 명령까지 끝남) 세션을 마무리한 뒤 `interrupted`로 정지한다. 세션이 스스로 끝나면 그 세션이 띄운 백그라운드 프로세스는 bash 도구처럼 그대로 둔다.
+- 출력: 세션 중에 stream-json 이벤트를 다른 백엔드와 같은 형식(텍스트, `-> Read {...}`, `<- Read ok: ...`)으로 보여 준다. 원본은 `.junees/sessions/init.jsonl`, `init-fix.jsonl`, `session-N.jsonl`에 저장한다(0600, git 제외). Junees의 세션 기록(`$JUNEES_HOME/sessions/`)은 남지 않고, Claude Code가 자기 대화를 따로 저장하므로 `claude --resume <id>`로 열어 볼 수 있다.
+- 설정: `JUNEES_CLAUDE_BIN`(기본 `PATH`의 `claude`), `JUNEES_CLAUDE_MODEL`(`--model`로 전달, 없으면 Claude Code의 기본), `JUNEES_MAX_TURNS`(`--max-turns`). `JUNEES_MODEL`, `JUNEES_MAX_TOKENS`, 컨텍스트 관리 설정은 이 백엔드에서 쓰지 않는다(압축은 Claude Code가 한다).
 
 ### 컨텍스트 관리
 
@@ -156,7 +185,9 @@ src/
   session.rs         세션 기록(JSONL) 쓰기, 재생, 이어 가기, 세션 찾기/목록, 비우기/압축 지점 계산
   context.rs         압축 요약 요청(시스템 프롬프트, 앞부분을 텍스트로 옮기기)
   task/              장기 작업 모드
-    runner.rs          task init/run 세션 루프, 체크포인트 커밋, 정지 조건, 크래시 복구, 실행 로그
+    runner.rs          task init/run 세션 루프, 체크포인트 커밋, 정지 조건, 크래시 복구, 실행 로그, Claude Code 세션 뒤 하네스 verify
+    claude_code.rs     claude-code 백엔드: claude 실행 인자와 권한 규칙, 환경 정리, stream-json 읽기, 예산/취소, 로그인 실패 판단
+    claude_tests.rs    가짜 claude로 claude-code 백엔드의 init/run 검증(단위 테스트)
     budget.rs          토큰/시간 예산, 기간 파싱(90s, 30m, 2h)
     lock.rs            동시 실행 방지(저장소 루트 flock)
     features.rs        features.json 검증, 하네스의 권위 있는 사본(Ledger)
@@ -184,6 +215,7 @@ tests/
   cancel.rs            실제 바이너리로 -p 중 SIGTERM(종료 코드 143), 대화 모드 Ctrl-C(턴 취소 후 다음 입력, 두 번이면 종료) 검증
   task_git_env.rs      GIT_DIR이나 GIT_CONFIG_PARAMETERS가 있어도 task 모드가 제 저장소와 설정으로만 git을 쓰는지 검증
   task_git_secret.rs   하네스 git이 심어진 훅을 실행하지 않고 git이 실행하는 필터에도 API 키를 넘기지 않는지 검증
+  claude_code.rs       실제 바이너리와 가짜 claude로 API 키 없이 task init/run, claude 환경에 API 변수 없음, 로그인 실패 안내와 알림, SIGTERM 검증
 ```
 
 ## 로드맵

@@ -68,6 +68,13 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 알림: `JUNEES_NOTIFY_WEBHOOK`(디스코드 웹훅 URL)이 있으면 `task run`이 정지를 기록한 뒤 한 번 POST(저장소 이름, 정지 이유 키와 문장, 통과 수/전체, 세션 수, 토큰). 정지 이유는 `state.json`의 값을 그대로 쓰므로 L4b의 `budget`/`interrupted`도 따로 손대지 않고 알림에 나온다. `JUNEES_NOTIFY_EACH_SESSION=1`이면 세션마다 한 줄. `allowed_mentions: {"parse": []}`, 2000자 제한, 타임아웃 10초, 리다이렉트 안 따라감. 실패는 경고만 하고 종료 코드는 그대로. URL은 출력하지 않고 호스트만 보여 주며, 세션의 bash와 하네스 git에도 넘기지 않는다. 정지를 기록하기 전에 실패한 run(더러운 작업 트리 등)도 `run failed: <오류>` 한 번을 보낸다. 세션 알림은 상태(그 세션의 토큰, 마지막 세션이면 정지 기록)를 저장한 뒤에 보낸다. 웹훅은 https만 받고(평문 http는 루프백만), 바뀌는 텍스트는 인라인 코드로 감싸 마크다운이 적용되지 않게 한다
 - 보안: junees는 시작할 때 `prctl(PR_SET_DUMPABLE, 0)`으로 dump 불가 프로세스가 되어, bash가 `/proc/$PPID/environ`(또는 더 위 조상)에서 숨긴 API 키와 웹훅 URL을 읽지 못한다(PR #1부터 있던 우회로)
 
+### 구독 백엔드 (Claude Code CLI)
+- `task init`/`task run`에 `--backend claude-code`(또는 `JUNEES_BACKEND`). 세션을 공식 `claude` CLI가 실행하고, 사용자가 자기 구독으로 직접 로그인한다(`claude` 실행 후 `/login`, 또는 `claude setup-token`). Junees는 Claude 자격 증명을 읽거나 저장하거나 보내지 않고 `claude`를 실행만 한다(약관상 허용되는 길). `ANTHROPIC_API_KEY`는 필요 없고, `claude`의 환경에서 API 변수(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`)를 지운다
+- 세션: `claude -p ... --output-format stream-json --verbose --append-system-prompt <규칙과 상태> --permission-mode acceptEdits --permission-prompts none --tools/--allowedTools Read,Edit,Write,Glob,Grep,Bash --setting-sources user --strict-mcp-config --max-turns N --disallowedTools <L4a 핵심 규칙>`. `--dangerously-skip-permissions`는 쓰지 않는다. 시작 전에 `claude --version`(2.1.259 이상) 확인, 로그인 실패 출력이면 안내와 함께 `error` 정지와 알림
+- `mark_feature_passing`이 없으므로 세션 뒤 하네스가 통과하지 않은 기능의 verify를 직접 실행해 기록한다(취소, 로그인 실패면 건너뜀, 시간 예산을 verify마다 확인). 나머지 하네스 규칙(목록 되돌리기, 체크포인트, 정지 조건, 재검증, 크래시 복구, run.log, 알림)은 그대로
+- stream-json의 응답별 usage로 세션 중 예산을 확인하고(넘으면 SIGINT, 유예 뒤 SIGKILL), 끝나면 `result`의 `modelUsage`/`usage`를 누적. 취소도 같은 방식으로 프로세스 그룹을 끝내고 `interrupted`. 원본 출력은 `.junees/sessions/<이름>.jsonl`(git 제외), 비용 추정과 Claude Code 세션 id는 run.log
+- 한계: Claude Code 권한 규칙은 쓰인 단어만 맞추므로 Junees bash 정책보다 약하다(`/usr/bin/sudo`, `git -C . push --force`, `bash -c`, fork bomb 등). 구독 사용 한도는 알 수 없다. 실제 `claude`로는 테스트하지 않았다(가짜 실행 파일로 검증)
+
 ## 상태
 
 - [x] 1단계 에이전트 루프 (PR #1)
