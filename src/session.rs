@@ -10,7 +10,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -718,17 +717,14 @@ impl Journal for SessionWriter {
     }
 }
 
-/// Takes an exclusive `flock` on a journal without waiting. The kernel drops
-/// it when the file is closed or the process dies, so a lock that is held
-/// means the session's writer is still running.
+/// Takes an exclusive `flock` on a journal without blocking. The kernel
+/// drops it when the file is closed or the process dies, so a lock that is
+/// held means the session's writer is still running. A lock that looks
+/// taken is tried again for a moment, because a child another thread forks
+/// shares a just-released lock until it execs ([`crate::flock`]).
 fn lock(file: &File, path: &Path) -> io::Result<()> {
-    // SAFETY: `file` owns the descriptor and outlives the call.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+    if crate::flock::try_exclusive(file)? {
         return Ok(());
-    }
-    let err = io::Error::last_os_error();
-    if err.kind() != io::ErrorKind::WouldBlock {
-        return Err(err);
     }
     let id = path.file_stem().unwrap_or_default().to_string_lossy();
     Err(io::Error::new(
