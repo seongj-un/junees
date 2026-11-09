@@ -98,6 +98,17 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 마법사: 구독을 고르면 대화도 구독으로 된다고 안내하고 API 키를 묻지 않는다
 - 한계: 실제 `claude`로는 테스트하지 않았다(가짜 실행 파일로 검증). Claude Code가 세션 id를 알리기 전에 끊긴 첫 턴은 이어 갈 수 없다
 
+### 스킬 (로드맵 4단계 B)
+- 저장: `$JUNEES_HOME/skills/<이름>/SKILL.md`(앞머리 `name`, `description` + 본문)와 선택적 `references/`, `templates/`, `scripts/`, `assets/` 파일. 이름 `[a-z0-9-]{1,64}`, 앞머리 `name`은 폴더 이름과 같아야 한다. YAML은 직접 읽는다(최상위 한 줄 `name`/`description`만, 따옴표 허용, 블록 스칼라 거절. 다른 키와 들여쓴 줄은 무시). 새 의존성 없음
+- `src/skills/`: `Index`(목록과 건너뛴 폴더의 이유), `Store`(파일 작업), `secrets`(비밀 판정), `tools`(`skill_view`, `skill_manage`). 공유 파일은 연결만 바꿨다: `main.rs`(도구 등록, 시스템 프롬프트, `/new`, `/skills`, `/skill`), `task/runner.rs`(`TaskEnv::agent`와 Claude Code 세션의 시스템 프롬프트), `claude_code/chat.rs`(`--append-system-prompt`), `agent.rs`(`set_system`), `slash.rs`, `cli.rs`, `config.rs`/`config_file.rs`(`JUNEES_TASK_SKILL_MANAGE`)
+- 시스템 프롬프트: `# Skills` 절에 지침(작업 전에 맞는 스킬을 `skill_view`로 읽고 따를 것, 여러 단계를 해냈거나 사용자가 정정하면 `skill_manage`로 남기거나 고칠 것, 비밀과 일회성 내용은 넣지 말 것)과 `- 이름: 설명` 목록. 목록은 4000자 상한(`INDEX_MAX_CHARS`)까지 줄 단위로 넣고 넘는 스킬은 개수만 적는다. 세션 시작 때 한 번 읽어 고정한다: 대화는 에이전트를 만들 때와 `/new`(`Agent::set_system`, Claude Code는 `Chat::set_system`), 작업은 세션마다. 바뀐 내용은 도구 결과가 "다음 세션부터 목록에 나온다"고 알려 준다
+- `skill_manage`: `create`/`patch`는 결과 `SKILL.md` 전체를 검사(크기, 앞머리, 이름 일치, 비밀)하고, 목록을 상한 넘게 늘리면 거절(줄어드는 변경은 언제나 허용, 거절 메시지에 가장 긴 설명 셋). 설명이 60자를 넘으면 저장하고 짧게 하라는 안내만. `patch`는 겹치는 일치까지 세어 정확히 한 번이어야 한다. `write_file`은 네 하위 폴더 아래만, `delete`는 확인 없이 `.trash/<이름>-<unix 초>[-n]`으로 rename. 파일 작업은 `spawn_blocking` 안에서 `std::fs`로 끝까지 한다(취소돼도 임시 파일이 남지 않음)
+- 경로: `file_path`는 상대 경로만(`.`/`..`/빈 조각/절대 경로 거절). 읽기는 정규화한 경로가 스킬 폴더 안이어야 하고, 쓰기와 지우기는 스킬 폴더 아래 심볼릭 링크를 지나거나 링크 자체에 쓰는 것을 거절한다(스킬 폴더 자체나 `skills/`가 링크인 것은 사용자의 선택으로 허용)
+- 비밀 판정: 알려진 접두사(`sk-ant-`, `ghp_`/`gho_`/`ghs_`/`ghu_`/`github_pat_`, `glpat-`, `xox[bpars]-`, `AKIA`) 뒤 12자 이상, `-----BEGIN ... PRIVATE KEY-----`, 숫자와 글자가 섞인 48자 이상 hex(40자 git SHA는 통과), 대소문자와 숫자가 섞이고 `/` 없는 조각이 32자 이상인 64자 이상 base64. 메모리(4단계 A)도 같은 규칙이 필요하므로 merge 때 한 모듈로 합칠 수 있다
+- 작업 모드: 목록과 `skill_view`는 늘, `skill_manage`는 `JUNEES_TASK_SKILL_MANAGE=1`(`task_skill_manage`)일 때만 등록한다(없을 때 부르면 `unknown tool`). 지침도 "이 세션에서 스킬은 읽기 전용"으로 바뀐다
+- claude-code 백엔드: 대화와 작업 세션 모두 목록만 `--append-system-prompt`로(스킬이 없으면 인자 없음). `settings_rules`가 `$JUNEES_HOME` 전체의 Read/Edit를 거절하므로 Claude Code는 스킬 파일을 읽을 수 없고, 목록에 그렇다고 적는다. 상한 4000자라 인자 하나의 128 KiB 한도와 멀다
+- 남은 것: 여러 Junees 프로세스가 같은 스킬을 동시에 고치면 마지막 쓰기가 이긴다(잠금 없음). 하위 폴더(카테고리)나 Hermes 스킬 형식의 메타데이터는 읽지 않는다
+
 ## 상태
 
 - [x] 1단계 에이전트 루프 (PR #1)

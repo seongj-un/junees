@@ -22,6 +22,7 @@ junees setup                        # 설정 다시
 - `/new`: 새 대화(예전 이름 `/reset`도 됨).
 - `/model [이름]`: 지금 모델을 보여 주거나, 이 실행 동안만 다른 모델로 바꾼다(claude-code 백엔드에서는 Claude Code에 `--model`로 넘긴다).
 - `/backend [api|claude-code]`: 대화와 `/task`를 무엇으로 돌릴지 보여 주거나, 이 실행 동안만 둘 다 바꾼다. 대화를 바꾸면 새 세션으로 시작한다(아래 구독 모드).
+- `/skills`: 스킬 목록(`$JUNEES_HOME/skills`, 아래 스킬), `/skill <이름>`: 스킬 본문과 파일 목록.
 - `/compact`, `/context`(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), `/usage`, `/help`, `/exit`.
 
 명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
@@ -156,6 +157,36 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - 컨텍스트: 검색한 호출의 사용량은 컨텍스트 크기로 쓰지 않는다. 그 호출의 캐시 읽기에는 API의 검색 반복 단계마다 읽은 양이 모두 들어 있어 실제보다 훨씬 커서, 압축이 너무 일찍 일어난다(context editing 문서의 서버 도구 주의). 대신 그 응답(검색 결과 포함)은 아래 추정치로 크기에 더해지므로, 매 호출이 검색하는 세션도 제때 압축된다. 검색하지 않은 다음 호출이 다시 잰다. 도구 결과 비우기는 검색 결과 블록을 건드리지 않는다. `encrypted_content`는 바꾸면 400이고, Junees가 대신 넣을 수 있는 유효한 자리표시가 없으며, 블록 짝을 지우면 뒤 텍스트의 인용이 가리킬 곳이 사라진다. 검색 결과는 압축 때 요약으로 정리된다(요약 텍스트에는 검색어와 앞 5개 결과의 제목/URL만 넣는다). 검색을 클라이언트 도구와 같은 응답에서 부르면 검색은 그 도구 결과를 보낸 다음 요청에서 실행되어 결과 블록이 다음 응답에 오는데, 턴 안 압축은 이 둘 사이를 자르지 않는다(검색 호출 없이 결과만 남지 않도록).
 - 조직에서 웹 검색이 꺼져 있다는 400이 오면 오류 끝에 `JUNEES_WEB_SEARCH=off`로 하거나 관리자에게 켜 달라는 안내가 붙는다.
 
+### 스킬
+
+스킬은 반복되는 작업의 절차를 적어 둔 문서다. 모델이 작업 전에 맞는 스킬을 읽고 따르며, 여러 단계의 작업을 해냈거나 사용자가 방법을 바로잡으면 스킬로 남기거나 고친다.
+
+```
+~/.junees/skills/
+  deploy-app/
+    SKILL.md            # 앞머리(name, description) + 본문
+    references/api.md   # 선택: references/, templates/, scripts/, assets/
+  .trash/               # 지운 스킬
+```
+
+```markdown
+---
+name: deploy-app
+description: Use when deploying the app. Build, test, tag.
+---
+
+1. cargo test -q
+2. ...
+```
+
+- 이름은 `a-z`, `0-9`, `-`로 1~64자이고 폴더 이름과 앞머리의 `name`이 같아야 한다. `description`은 한 줄(60자 이하 권장, 200자까지)이고, 앞머리 뒤에 본문이 있어야 한다.
+- 시스템 프롬프트에는 스킬 이름과 설명 목록만 들어간다(4000자까지. 넘는 스킬은 개수만 적는다). 목록은 세션을 시작할 때 한 번 읽어 고정하므로(프롬프트 캐싱), 세션 중에 바꾼 스킬은 `/new`나 다음 실행부터 목록에 나온다(`skill_view`로는 바로 읽힌다).
+- 도구: `skill_view {name, file_path?}`는 `SKILL.md`(뒤에 파일 목록) 또는 스킬 안의 파일을 읽는다. `skill_manage {action, name, ...}`의 동작은 `create`(`content`: `SKILL.md` 전체), `patch`(`old_string`이 정확히 한 번 나와야 하고, `file_path`를 주면 그 파일), `write_file`/`remove_file`(`file_path`는 `references/`, `templates/`, `scripts/`, `assets/` 아래), `delete`(묻지 않고 `skills/.trash/<이름>-<시각>`으로 옮긴다).
+- 막는 것: 스킬 밖 경로(`..`, 절대 경로, 스킬 안의 심볼릭 링크를 거치는 쓰기와 밖을 가리키는 읽기), 100000바이트가 넘는 파일, API 키처럼 보이는 내용(`sk-ant-`, `ghp_`, `xox?-`, `AKIA`, 개인 키 PEM, 긴 hex/base64 토큰. 어느 줄인지만 알려 주고 값은 되풀이하지 않는다), 목록을 4000자 넘게 늘리는 추가나 설명 변경(긴 설명을 알려 주며 줄이거나 지우라고 안내). 쓰기는 임시 파일 + rename, 파일 0600, 폴더 0700.
+- 작업 모드: 세션마다 목록을 넣고 `skill_view`는 쓸 수 있지만, `skill_manage`는 `JUNEES_TASK_SKILL_MANAGE=1`일 때만 준다(무인 실행이 사용자의 절차를 바꾸지 않도록).
+- claude-code 백엔드: 같은 목록을 `--append-system-prompt`로 넣는 데까지만 한다. Claude Code에는 두 도구가 없고 `$JUNEES_HOME` 폴더는 거절 규칙으로 읽을 수 없으므로, 목록에 "파일은 이 세션에서 읽을 수 없다"는 안내를 붙인다. 스킬이 없으면 아무것도 넣지 않는다.
+- `JUNEES_HOME`도 `HOME`도 없으면 스킬 도구와 목록이 없다.
+
 ### 구독 모드 (claude-code 백엔드)
 
 대화(`junees`, `junees "질문"`, `-p`, `-c`)와 `task init`, `task run`(그리고 둘을 합친 `junees task "목표"`, 대화의 `/task`)을 Junees 자신의 에이전트 대신 공식 Claude Code CLI(`claude`)가 실행하게 할 수 있다. Claude Pro/Max 구독으로 Junees를 쓰는 방법이다. 설정 마법사에서 `1) Claude subscription`을 고르면 설정 파일에 `backend = "claude-code"`가 들어간다. 환경 변수는 `JUNEES_BACKEND=claude-code`, 대화 안에서는 `/backend claude-code`, 작업 한 번만이면 `--backend claude-code`(기본은 `api`). 이때는 `ANTHROPIC_API_KEY`가 필요 없고 읽지도 않는다. 대화는 아래 "구독으로 대화하기", 나머지 항목은 작업 세션 기준이고 대화에도 그대로 적용된다(로그인 확인, 환경 정리, 토큰 숨기기, 명령 정책, 사용 한도, 취소).
@@ -247,6 +278,7 @@ claude -p --output-format stream-json --verbose --include-partial-messages
 | `JUNEES_NOTIFY_EACH_SESSION` | `0` | `1`이면 작업 세션마다 한 줄 알림도 보낸다 |
 | `JUNEES_TASK_MAX_TOKENS` | (없음) | `task run --max-tokens`의 기본값 (작업 전체 누적 토큰) |
 | `JUNEES_TASK_MAX_TIME` | (없음) | `task run --max-time`의 기본값 (이번 실행 시간, 예: `2h`, `1h30m`) |
+| `JUNEES_TASK_SKILL_MANAGE` | `0` | `1`이면 작업 세션도 `skill_manage`로 스킬을 바꿀 수 있다 (기본은 읽기만, 아래 스킬) |
 | `JUNEES_STREAM` | `1` | `0`이면 스트리밍을 끄고 응답을 한 번에 받아 찍는다 |
 | `JUNEES_WEB_SEARCH` | `0` | `on`/`1`이면 API의 웹 검색 도구를 켠다 (별도 과금, 위 "웹 검색") |
 | `JUNEES_WEB_SEARCH_MAX_USES` | `5` | 한 턴의 웹 검색 횟수 상한 (`max_uses`) |
@@ -365,6 +397,11 @@ src/
   config_file.rs     설정 파일 config.toml (단순 TOML 읽기/쓰기, 0600), Settings: 실행 중 변경 -> 환경 변수 -> 파일 순서로 찾기
   setup.rs           설정 마법사 (Prompter 트레이트, Claude Code 확인 ClaudeProbe, 키 입력 때 터미널 echo 끄기 EchoOff)
   slash.rs           대화 안 슬래시 명령 파싱, /sessions 번호 고르기
+  skills/            스킬 ($JUNEES_HOME/skills/<이름>/SKILL.md)
+    mod.rs             이름과 앞머리 검사, 목록(Index)과 상한, 모드별 시스템 프롬프트 절
+    store.rs           읽기/만들기/패치/파일 쓰기와 지우기/휴지통, 경로 탈출과 심볼릭 링크 거절, 크기 제한, 원자적 쓰기(0600/0700)
+    tools.rs           skill_view, skill_manage 도구와 등록
+    secrets.rs         비밀처럼 보이는 내용 찾기 (알려진 키 접두사, 개인 키, 긴 hex/base64 토큰)
   prompt.rs          시스템 프롬프트
   cli.rs             인자 파싱(위치 인자 질문, task/status/setup 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
 tests/
@@ -384,6 +421,7 @@ tests/
   web_search.rs        가짜 API 서버(JSON, SSE)로 웹 검색 도구 정의, pause_turn 이어 가기(멈춘 응답을 그대로, 뒤에 user 메시지 없이), pause 상한 뒤 검색을 끄고 이어 갈 때 결과 없는 검색 호출 제거, 검색 블록과 citations 재전송, 클라이언트 도구 미실행, 바이너리의 출처 목록과 조직 비활성 안내 검증
   claude_code.rs       실제 바이너리와 가짜 claude로 API 키 없이 task init/run, claude 환경에 API 변수 없음, 로그인 실패 안내와 알림, SIGTERM 검증
   claude_chat.rs       실제 바이너리와 가짜 claude로 구독 대화: 두 번째 턴이 같은 세션을 --resume, 스트리밍과 도구/거절 표시, /usage와 /compact, /context 안내, 거절 규칙 인자, claude 환경에 API 변수 없음, -p와 -c, Ctrl-C 후 다음 턴, 사용 한도 안내 검증
+  skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
 
