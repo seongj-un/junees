@@ -278,6 +278,10 @@ impl Transcript {
     /// results, so every earlier tool call has its result. It keeps the
     /// last two such rounds when it can, else the last one.
     ///
+    /// A server tool called next to client tools (web search in the same
+    /// reply as bash) runs on the request after their results, so its
+    /// result block arrives in the next reply: no cut falls between the two.
+    ///
     /// With `manual_thinking` the API wants the turn in progress to start
     /// with a thinking block, and only the turn's first reply has one, so a
     /// cut inside the turn keeps none of it: where the cut above would go,
@@ -309,7 +313,9 @@ impl Transcript {
         }
         let rounds: Vec<usize> = (2..self.messages.len())
             .filter(|&i| {
-                self.messages[i].role == Role::Assistant && only_tool_results(&self.messages[i - 1])
+                self.messages[i].role == Role::Assistant
+                    && only_tool_results(&self.messages[i - 1])
+                    && !orphans_server_tool_result(&self.messages[i..])
             })
             .collect();
         if manual_thinking {
@@ -400,6 +406,31 @@ fn has_tool_result(message: &Message) -> bool {
         .content
         .iter()
         .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}
+
+/// Whether `kept` holds a server tool result (`web_search_tool_result` and
+/// the like) whose `server_tool_use` call is not in `kept` too.
+fn orphans_server_tool_result(kept: &[Message]) -> bool {
+    let blocks = || kept.iter().flat_map(|message| &message.content);
+    let calls: Vec<&str> = blocks()
+        .filter_map(|block| match block {
+            ContentBlock::Other(value) if value["type"] == "server_tool_use" => {
+                value["id"].as_str()
+            }
+            _ => None,
+        })
+        .collect();
+    blocks().any(|block| match block {
+        ContentBlock::Other(value) => {
+            value["type"]
+                .as_str()
+                .is_some_and(|kind| kind.ends_with("_tool_result"))
+                && value["tool_use_id"]
+                    .as_str()
+                    .is_some_and(|id| !calls.contains(&id))
+        }
+        _ => false,
+    })
 }
 
 /// A user message that answers tool calls and says nothing else.
@@ -1506,6 +1537,52 @@ mod tests {
             tool_results("toolu_3", "out", false),
         ]);
         assert_eq!(transcript.compact_point(false), Some(5));
+    }
+
+    #[test]
+    fn a_cut_never_keeps_a_search_result_without_its_call() {
+        // Web search called next to bash: the search runs on the request
+        // after the bash result, so its result comes in the next reply.
+        let mut transcript = tool_rounds(4);
+        let mut mixed = tool_call("toolu_4");
+        mixed.content.insert(
+            1,
+            ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_1",
+                "name": "web_search", "input": {"query": "q"}})),
+        );
+        let mut answered = tool_call("toolu_5");
+        answered.content.insert(
+            0,
+            ContentBlock::Other(json!({"type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_1", "content": []})),
+        );
+        for message in [
+            mixed,
+            tool_results("toolu_4", "out", false),
+            answered,
+            tool_results("toolu_5", "out", false),
+            tool_call("toolu_6"),
+            tool_results("toolu_6", "out", false),
+        ] {
+            transcript.apply(Entry::Message(message));
+        }
+        // Rounds start at 3, 5, 7, 9, 11, 13; 11 holds the result of the
+        // call in 9, so the cut goes back to 9.
+        let keep_from = transcript.compact_point(false).unwrap();
+        assert_eq!(keep_from, 9);
+        transcript.apply(Entry::Compact {
+            summary: "s".into(),
+            keep_from,
+            keep_thinking: false,
+        });
+        assert!(!orphans_server_tool_result(&transcript.messages));
+        let kinds: Vec<_> = transcript
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(ContentBlock::other_type)
+            .collect();
+        assert_eq!(kinds, ["server_tool_use", "web_search_tool_result"]);
     }
 
     #[test]
