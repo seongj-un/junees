@@ -98,10 +98,16 @@ impl Chat {
     /// a person is at the prompt, but `-p` has nobody to ask, so whatever
     /// would ask is refused (`--permission-prompts none`) and shown. Text
     /// streams as it is written (`--include-partial-messages`).
-    pub fn arguments(&self, input: &str) -> Vec<String> {
+    ///
+    /// The input is not among them: [`Chat::turn`] writes it to stdin,
+    /// which `claude -p` reads as the prompt when no prompt argument is
+    /// given (<https://code.claude.com/docs/en/headless>, "Pipe data
+    /// through Claude": "Non-interactive mode reads stdin"; `--input-format`
+    /// is `text` by default). An argument is limited to 128 KiB on Linux,
+    /// and one starting with `-` would be read as an option.
+    pub fn arguments(&self) -> Vec<String> {
         let mut args: Vec<String> = [
             "-p",
-            &prompt_argument(input),
             "--output-format",
             "stream-json",
             "--verbose",
@@ -151,11 +157,12 @@ impl Chat {
     pub async fn turn(&mut self, input: &str, mut on_event: impl FnMut(Event<'_>)) -> Result<()> {
         let spawn = Spawn {
             root: &self.cwd,
-            args: self.arguments(input),
+            args: self.arguments(),
             settings: &self.settings,
             log: None,
             partial: true,
             resumed: self.claude_session().is_some(),
+            stdin: Some(input),
         };
         let outcome = self
             .claude
@@ -202,17 +209,6 @@ impl Chat {
             )));
         }
         self.transcript.apply(entry);
-    }
-}
-
-/// The input as the prompt argument of `claude -p`. A prompt starting with
-/// `-` would be read as an option (`-v` prints the version), so it gets a
-/// leading space.
-fn prompt_argument(input: &str) -> String {
-    if input.starts_with('-') {
-        format!(" {input}")
-    } else {
-        input.to_string()
     }
 }
 
@@ -276,11 +272,12 @@ mod tests {
     }
 
     /// A fake `claude` that plays `turns` in order, one per run, and saves
-    /// each run's arguments as `args-<n>` in its folder.
+    /// each run's arguments as `args-<n>` and its stdin (the prompt) as
+    /// `stdin-<n>` in its folder.
     fn fake(dir: &Path, turns: &[String]) -> PathBuf {
         let mut body = String::from(
             "n=$(( $(cat count 2>/dev/null || echo 0) + 1 ))\necho $n > count\n\
-             printf '%s\\0' \"$@\" > args-$n\ncase $n in\n",
+             printf '%s\\0' \"$@\" > args-$n\ncat > stdin-$n\ncase $n in\n",
         );
         for (i, turn) in turns.iter().enumerate() {
             body.push_str(&format!("{})\n{turn}\n;;\n", i + 1));
@@ -300,6 +297,10 @@ mod tests {
             .filter(|arg| !arg.is_empty())
             .map(|arg| String::from_utf8_lossy(arg).into_owned())
             .collect()
+    }
+
+    fn stdin_of(dir: &Path, n: usize) -> String {
+        std::fs::read_to_string(dir.join(format!("stdin-{n}"))).unwrap()
     }
 
     fn chat(bin: PathBuf, dir: &Path, cancel: Cancel) -> Chat {
@@ -342,12 +343,11 @@ mod tests {
             7,
             Cancel::new(),
         );
-        let args = chat.arguments("hello");
+        let args = chat.arguments();
         assert_eq!(
-            args[..20],
+            args[..19],
             [
                 "-p",
-                "hello",
                 "--output-format",
                 "stream-json",
                 "--verbose",
@@ -370,7 +370,7 @@ mod tests {
         );
         let mut deny = deny_rules(&settings);
         deny.extend(settings_rules(&file, Path::new("/work")));
-        assert_eq!(args[20..], deny[..]);
+        assert_eq!(args[19..], deny[..]);
         assert!(args.contains(&"Read(//home/tester/.junees/config.toml)".to_string()));
         for skip in [
             "--dangerously-skip-permissions",
@@ -385,10 +385,9 @@ mod tests {
         // A later turn continues the conversation, with the model asked for.
         chat.transcript.claude_session = Some("c-1".into());
         chat.set_model(Some("opus".into()));
-        let args = chat.arguments("-v please");
-        assert_eq!(args[1], " -v please");
+        let args = chat.arguments();
         assert_eq!(
-            args[19..24],
+            args[18..23],
             ["--resume", "c-1", "--model", "opus", "--disallowedTools"]
         );
     }
@@ -418,11 +417,13 @@ mod tests {
         );
         let first = args_of(dir.path(), 1);
         assert!(!first.contains(&"--resume".to_string()), "{first:?}");
-        assert_eq!(first[1], "hi");
+        // The input goes to stdin, not among the arguments.
+        assert_eq!(stdin_of(dir.path(), 1), "hi");
+        assert!(!first.contains(&"hi".to_string()), "{first:?}");
         let second = args_of(dir.path(), 2);
         let at = second.iter().position(|arg| arg == "--resume").unwrap();
         assert_eq!(second[at + 1], "c-1");
-        assert_eq!(second[1], "still there?");
+        assert_eq!(stdin_of(dir.path(), 2), "still there?");
 
         let turns = turns(&journal);
         assert_eq!(turns.len(), 2);
@@ -435,6 +436,30 @@ mod tests {
         assert_eq!(tokens(turns[0].usage), 2000);
         assert_eq!(tokens(turns[1].usage), 13);
         assert_eq!(tokens(chat.usage()), 2013);
+        assert_eq!(chat.turns(), 2);
+    }
+
+    #[tokio::test]
+    async fn large_and_dash_inputs_reach_claude_intact_on_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake(
+            dir.path(),
+            &[
+                print(&answer("c-8", "Read it.")),
+                print(&answer("c-8", "A flag.")),
+            ],
+        );
+        let mut chat = chat(bin, dir.path(), Cancel::new());
+        // Over the 128 KiB a single argument may hold on Linux.
+        let large = "\u{d55c}\u{ae00} line of text\n".repeat(12_000);
+        assert!(large.len() > 200 * 1024);
+        chat.turn(&large, |_| {}).await.unwrap();
+        assert_eq!(stdin_of(dir.path(), 1), large);
+        // Not read as an option: no prompt argument at all.
+        chat.turn("-v is a flag", |_| {}).await.unwrap();
+        assert_eq!(stdin_of(dir.path(), 2), "-v is a flag");
+        let args = args_of(dir.path(), 2);
+        assert_eq!(args, chat.arguments());
         assert_eq!(chat.turns(), 2);
     }
 
@@ -542,6 +567,38 @@ mod tests {
         assert_eq!(turns[0].claude_session.as_deref(), Some("c-3"));
         assert_eq!(turns[0].text, "");
         assert_eq!(turns[1].text, "Back.");
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_a_turn_whose_claude_never_reads_its_input() {
+        let dir = tempfile::tempdir().unwrap();
+        // A pipe holds 64 KiB: the rest of the input waits for a read
+        // that never comes, while the output is read and the turn stops.
+        let bin = fake_claude(
+            dir.path(),
+            &format!(
+                "{}\necho started > started\nsleep 30",
+                print(&lines(&[
+                    json!({"type": "system", "subtype": "init", "session_id": "c-9"})
+                ]))
+            ),
+        );
+        let cancel = Cancel::new();
+        let mut chat = chat(bin, dir.path(), cancel.clone());
+        let input = "x".repeat(1024 * 1024);
+        let started = dir.path().join("started");
+        let stop = async {
+            wait_for(&started).await;
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(chat.turn(&input, |_| {}), stop)
+        })
+        .await
+        .expect("the turn did not stop");
+        let err = result.unwrap_err();
+        assert!(err.downcast_ref::<Cancelled>().is_some(), "{err:#}");
+        assert_eq!(chat.claude_session(), Some("c-9"));
     }
 
     #[tokio::test]

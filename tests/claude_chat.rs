@@ -13,7 +13,8 @@ use tokio::io::AsyncWriteExt;
 
 /// A fake `claude` playing `turns` in order (after answering `--version`,
 /// and `auth status` as signed in with the subscription), saving each
-/// run's arguments as `args-<n>` and environment as `env-<n>` in `dir`.
+/// run's arguments as `args-<n>`, environment as `env-<n>` and stdin (the
+/// prompt) as `stdin-<n>` in `dir`.
 fn fake_claude(dir: &Path, turns: &[String]) -> PathBuf {
     let mut body = format!(
         "#!/bin/bash\n\
@@ -25,6 +26,7 @@ fn fake_claude(dir: &Path, turns: &[String]) -> PathBuf {
          echo $n > \"$F/count\"\n\
          printf '%s\\0' \"$@\" > \"$F/args-$n\"\n\
          env -0 > \"$F/env-$n\"\n\
+         cat > \"$F/stdin-$n\"\n\
          case $n in\n",
         dir.display()
     );
@@ -62,6 +64,10 @@ fn split(bytes: &[u8]) -> Vec<String> {
 
 fn args_of(dir: &Path, n: usize) -> Vec<String> {
     split(&std::fs::read(dir.join(format!("args-{n}"))).unwrap())
+}
+
+fn stdin_of(dir: &Path, n: usize) -> String {
+    std::fs::read_to_string(dir.join(format!("stdin-{n}"))).unwrap()
 }
 
 fn env_of(dir: &Path, n: usize) -> Vec<(String, String)> {
@@ -241,7 +247,9 @@ async fn a_conversation_continues_one_claude_code_session() {
     );
 
     let first = args_of(fake.path(), 1);
-    assert_eq!(first[..2], ["-p", "hello"]);
+    assert_eq!(first[0], "-p");
+    assert_eq!(stdin_of(fake.path(), 1), "hello");
+    assert!(!first.contains(&"hello".to_string()), "{first:?}");
     assert_eq!(after(&first, "--permission-mode"), Some("default"));
     assert_eq!(after(&first, "--permission-prompts"), Some("none"));
     assert!(first.contains(&"--include-partial-messages".to_string()));
@@ -259,8 +267,9 @@ async fn a_conversation_continues_one_claude_code_session() {
         "{first:?}"
     );
     let second = args_of(fake.path(), 2);
-    // A prompt that looks like an option is not read as one.
-    assert_eq!(second[1], " -v is a flag");
+    // A prompt that looks like an option reaches claude on stdin as it is.
+    assert_eq!(stdin_of(fake.path(), 2), "-v is a flag");
+    assert!(!second.contains(&"-v is a flag".to_string()), "{second:?}");
     assert_eq!(after(&second, "--resume"), Some("s-1"));
 
     for n in [1, 2] {
@@ -299,6 +308,27 @@ async fn a_conversation_continues_one_claude_code_session() {
     assert_eq!(lines[1]["text"], "Hello there.");
     assert_eq!(lines[2]["input"], "-v is a flag");
     assert_eq!(lines.len(), 3);
+}
+
+#[tokio::test]
+async fn an_input_over_the_argument_limit_reaches_claude() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let bin = fake_claude(fake.path(), &[print(&answer("s-2", "Got it all."))]);
+    // One line of 200 KiB with Hangul: over the 128 KiB a single argument
+    // may hold on Linux (MAX_ARG_STRLEN).
+    let mut large = "\u{d55c}\u{ae00} text ".repeat(200 * 1024 / 11);
+    large.truncate(large.trim_end().len());
+    assert!(large.len() > 200 * 1024 - 16, "{}", large.len());
+    let (out, stdout, stderr) = converse(
+        junees(work.path(), home.path(), &bin, &[]),
+        &format!("{large}\n/exit\n"),
+    )
+    .await;
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("Got it all.\n"), "{stdout}\n{stderr}");
+    assert_eq!(stdin_of(fake.path(), 1), large);
 }
 
 #[tokio::test]

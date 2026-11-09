@@ -103,6 +103,7 @@ impl ClaudeCode {
             log: request.log,
             partial: false,
             resumed: false,
+            stdin: None,
         };
         self.session(&spawn, cancel, limit, &mut |event| {
             report(Report::Event(event))

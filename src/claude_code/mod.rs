@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::Instant;
 
@@ -202,6 +202,9 @@ pub struct Spawn<'a> {
     pub partial: bool,
     /// `args` hold `--resume`: the session continues an earlier one.
     pub resumed: bool,
+    /// The prompt, written to `claude`'s stdin (then closed) instead of
+    /// given as an argument; `None` leaves stdin empty (`/dev/null`).
+    pub stdin: Option<&'a str>,
 }
 
 /// How a session that did not fail ended.
@@ -497,10 +500,20 @@ impl ClaudeCode {
         if self.scrub {
             command.env(SCRUB_ENV, "1");
         }
+        if spawn.stdin.is_some() {
+            command.stdin(Stdio::piped());
+        }
         let mut child = command
             .spawn()
             .with_context(|| format!("cannot run `{}`", self.bin.display()))?;
         let mut group = Group(child.id().and_then(|id| i32::try_from(id).ok()));
+        // Written by a task of its own and then closed: a prompt larger
+        // than the pipe holds waits for claude to read it, while this
+        // function must go on reading claude's output and the cancel flag.
+        let feed = spawn.stdin.zip(child.stdin.take()).map(|(text, mut pipe)| {
+            let text = text.as_bytes().to_vec();
+            tokio::spawn(async move { pipe.write_all(&text).await })
+        });
         let stdout = child.stdout.take().context("no stdout from claude")?;
         let stderr = child.stderr.take().context("no stderr from claude")?;
         let mut stderr = tokio::spawn(read_tail(stderr));
@@ -559,6 +572,17 @@ impl ClaudeCode {
                 kill_at = Some(group.interrupt(self.grace));
             }
         };
+        // Claude Code has ended. A write still waiting (a process it left
+        // holds the pipe open without reading) is given up; one cut short
+        // because claude stopped reading (a broken pipe) needs no word.
+        if let Some(feed) = feed {
+            feed.abort();
+            if let Ok(Err(err)) = feed.await
+                && err.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                warn(report, &format!("cannot write the input to claude: {err}"));
+            }
+        }
         if stdout_open {
             let drain = async {
                 while let Ok(Some(line)) = lines.next_segment().await {
