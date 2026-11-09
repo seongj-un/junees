@@ -324,6 +324,35 @@ impl Memory {
         })
     }
 
+    /// What `/memory` shows: each store's file, size and entries.
+    pub fn overview(&self) -> String {
+        let snapshot = self.snapshot();
+        let mut out = String::new();
+        for store in &snapshot.stores {
+            let path = self.path(store.target);
+            out.push_str(&format!("{} ({}): ", store.target.name(), path.display()));
+            if let Some(error) = &store.error {
+                out.push_str(&format!("cannot read: {error}\n"));
+                continue;
+            }
+            out.push_str(&format!(
+                "{} entries, {}/{} characters\n",
+                store.entries,
+                store.chars(),
+                store.limit
+            ));
+            for line in store.text.lines() {
+                out.push_str(&format!("  {line}\n"));
+            }
+        }
+        out.push_str(&format!(
+            "project = {}. A session sees memory as it was when it started; /new starts \
+             one with the memory as it is now.\n",
+            self.project_root.display()
+        ));
+        out
+    }
+
     /// Empties a store; returns how many entries it had.
     pub fn clear(&self, target: Target) -> Result<usize> {
         let path = self.path(target);

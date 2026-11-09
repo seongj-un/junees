@@ -282,6 +282,37 @@ fn a_folder_in_a_git_repository_uses_the_repository_root() {
 }
 
 #[test]
+fn the_overview_lists_every_store() {
+    let home = Path::new("/nonexistent-junees-home");
+    let memory = memory(home);
+    let empty = memory.overview();
+    assert!(
+        empty.starts_with(
+            "user (/nonexistent-junees-home/memory/user.md): 0 entries, 0/1500 characters\n\
+         notes (/nonexistent-junees-home/memory/notes.md): 0 entries, 0/2500 characters\n\
+         project (/nonexistent-junees-home/projects/"
+        ),
+        "{empty}"
+    );
+    assert!(empty.ends_with(
+        "project = /work/project. A session sees memory as it was when it started; /new \
+         starts one with the memory as it is now.\n"
+    ));
+
+    let home = tempfile::tempdir().unwrap();
+    let memory = self::memory(home.path());
+    add(&memory, Target::Notes, "one").unwrap();
+    add(&memory, Target::Notes, "two\nlines").unwrap();
+    let overview = memory.overview();
+    assert!(
+        overview.contains(
+            "/memory/notes.md): 2 entries, 15/2500 characters\n  one\n  §\n  two\n  lines\n"
+        ),
+        "{overview}"
+    );
+}
+
+#[test]
 fn clear_empties_one_store() {
     let home = tempfile::tempdir().unwrap();
     let memory = memory(home.path());

@@ -14,7 +14,7 @@ use junees::claude_code::{BACKEND_ENV, Backend, ClaudeCode, MODEL_ENV, UsageLimi
 use junees::cli::{self, Command, SessionMode, TaskCommand, TaskRun};
 use junees::config::Config;
 use junees::config_file::Settings;
-use junees::memory::Memory;
+use junees::memory::{Memory, MemoryTool, Mode, Target};
 use junees::notify::Notifier;
 use junees::prompt;
 use junees::provider::anthropic::AnthropicProvider;
@@ -32,6 +32,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PREVIEW_CHARS: usize = 120;
 const SESSIONS_LISTED: usize = 10;
+const NO_MEMORY: &str = "memory is off: neither JUNEES_HOME nor HOME is set";
 
 fn main() -> ExitCode {
     protect_environment();
@@ -314,11 +315,16 @@ fn api_agent(
     cancel: &Cancel,
     input: Option<&SharedLines>,
 ) -> Result<Agent> {
+    let memory = conversation_memory(config, cwd);
+    let mut tools = ToolRegistry::with_defaults(&config.tools);
+    if let Some(memory) = &memory {
+        tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
+    }
     let mut agent = Agent::new(
         make_provider(config)?,
-        ToolRegistry::with_defaults(&config.tools),
+        tools,
         AgentOptions {
-            system: prompt::system_prompt(cwd),
+            system: api_system(cwd, memory.as_ref()),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
             context_window: config.context_window,
@@ -330,6 +336,31 @@ fn api_agent(
         agent = agent.with_gate(Box::new(gate));
     }
     Ok(agent)
+}
+
+/// The persistent memory of a conversation in `cwd`, if there is a state
+/// folder to keep it in.
+fn conversation_memory(config: &Config, cwd: &Path) -> Option<Memory> {
+    let home = config.home.as_deref()?;
+    Some(Memory::for_folder(home, cwd, config.memory))
+}
+
+/// The system prompt of Junees's own agent: the memory is read now and
+/// stays as it is for the session, so the prompt cache holds.
+fn api_system(cwd: &Path, memory: Option<&Memory>) -> String {
+    let mut system = prompt::system_prompt(cwd);
+    if let Some(memory) = memory {
+        system.push_str(&memory.snapshot().section(Mode::Conversation));
+    }
+    system
+}
+
+/// What the conversation adds to Claude Code's system prompt: the memory,
+/// to read only (the memory tool is Junees's own).
+fn claude_system(memory: Option<&Memory>) -> String {
+    memory.map_or_else(String::new, |memory| {
+        memory.snapshot().section(Mode::ReadOnly)
+    })
 }
 
 /// Claude Code for the conversation, once `claude --version` and its
@@ -351,13 +382,14 @@ async fn claude_chat(
         "(Claude Code runs commands without Junees approval questions; \
          only the command policy deny rules apply)"
     );
-    let chat = Chat::new(
+    let mut chat = Chat::new(
         claude,
         cwd.to_path_buf(),
         config.tools.clone(),
         config.max_turns,
         cancel.clone(),
     );
+    chat.set_system(claude_system(conversation_memory(config, cwd).as_ref()));
     Ok((chat, version))
 }
 
@@ -430,6 +462,7 @@ async fn conversation(
             println!("junees {VERSION} ({banner}). /help for commands, /exit to quit.");
             println!("{}", opened.status);
             let mut repl = Repl {
+                memory: conversation_memory(&config, &cwd),
                 engine,
                 config,
                 settings,
@@ -768,6 +801,9 @@ struct Repl {
     cancel: Cancel,
     signals: Signals,
     input: SharedLines,
+    /// What `/memory` shows and `/new` reads again; `None` without a state
+    /// folder.
+    memory: Option<Memory>,
 }
 
 impl Repl {
@@ -889,6 +925,11 @@ impl Repl {
                      used"
                 ),
             },
+            Slash::Memory => match &self.memory {
+                Some(memory) => print!("{}", memory.overview()),
+                None => eprintln!("{NO_MEMORY}"),
+            },
+            Slash::MemoryClear(target) => return self.clear_memory(target).await,
             Slash::Bad(message) => eprintln!("{message}"),
             Slash::Exit => {}
         }
@@ -1080,7 +1121,62 @@ impl Repl {
         Ok(())
     }
 
+    /// `/memory clear <target>`: empties one memory once the user says
+    /// yes. Returns whether SIGTERM came while it asked.
+    async fn clear_memory(&mut self, target: Target) -> bool {
+        let Some(memory) = &self.memory else {
+            eprintln!("{NO_MEMORY}");
+            return false;
+        };
+        let name = target.name();
+        let count = match memory.entries(target) {
+            Ok(entries) => entries.len(),
+            Err(err) => {
+                report(&err);
+                return false;
+            }
+        };
+        if count == 0 {
+            println!("({name} memory is already empty)");
+            return false;
+        }
+        print!("clear {name} memory ({count} entries)? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let answer = tokio::select! {
+            line = self.input.next_line() => line.ok().flatten(),
+            signal = self.signals.next() => {
+                println!();
+                return signal == libc::SIGTERM;
+            }
+        };
+        let yes = answer.is_some_and(|answer| {
+            matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        });
+        if !yes {
+            println!("({name} memory kept)");
+            return false;
+        }
+        match memory.clear(target) {
+            Ok(count) => println!(
+                "cleared {name} memory ({count} entries); this session still shows what it \
+                 started with, /new starts one without it"
+            ),
+            Err(err) => report(&err),
+        }
+        false
+    }
+
+    /// Gives the conversation the memory as it is now, for a new session.
+    fn reread_memory(&mut self) {
+        let memory = self.memory.as_ref();
+        match &mut self.engine {
+            Engine::Api(agent) => agent.set_system(api_system(&self.cwd, memory)),
+            Engine::Claude(chat) => chat.set_system(claude_system(memory)),
+        }
+    }
+
     fn reset(&mut self) {
+        self.reread_memory();
         if !self.saving {
             self.engine.reset(None);
             println!("(new conversation, not saved)");
