@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::approval::ApprovalMode;
+use crate::memory::Limits;
 use crate::task::budget::parse_duration;
 use crate::tools::{SettingsFile, ToolSettings};
 use crate::web_search::WebSearch;
@@ -60,6 +61,8 @@ pub struct Config {
     /// The API's web search tool, when it is turned on (`JUNEES_WEB_SEARCH`
     /// and its settings; see [`WebSearch::read`]).
     pub web_search: Option<WebSearch>,
+    /// Character limits of the memory stores (`JUNEES_MEMORY_*_CHARS`).
+    pub memory: Limits,
 }
 
 impl Config {
@@ -68,8 +71,8 @@ impl Config {
     /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_THINKING_BUDGET`, `JUNEES_HOME`, `HOME`,
     /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
     /// `JUNEES_HIDDEN_ENV`, `JUNEES_APPROVAL`, `JUNEES_TASK_MAX_TOKENS`,
-    /// `JUNEES_TASK_MAX_TIME`, `JUNEES_STREAM` and the `JUNEES_WEB_SEARCH*`
-    /// settings.
+    /// `JUNEES_TASK_MAX_TIME`, `JUNEES_STREAM`, the `JUNEES_WEB_SEARCH*`
+    /// settings and the `JUNEES_MEMORY_*_CHARS` limits.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -183,6 +186,7 @@ impl Config {
             raw => parse_flag(raw, "JUNEES_STREAM")?,
         };
         let web_search = WebSearch::read(get)?;
+        let memory = Limits::read(get)?;
 
         Ok(Self {
             api_key,
@@ -200,6 +204,7 @@ impl Config {
             task_max_time,
             stream,
             web_search,
+            memory,
         })
     }
 
@@ -324,6 +329,28 @@ mod tests {
         assert_eq!(config.task_max_time, None);
         assert!(config.stream);
         assert_eq!(config.web_search, None);
+        assert_eq!(config.memory, Limits::default());
+    }
+
+    #[test]
+    fn reads_the_memory_limits() {
+        let parsed = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_MEMORY_USER_CHARS", " 300 "),
+        ])
+        .unwrap();
+        assert_eq!(parsed.memory.user, 300);
+        assert_eq!(parsed.memory.notes, crate::memory::DEFAULT_NOTES_CHARS);
+        let err = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_MEMORY_PROJECT_CHARS", "9000"),
+        ])
+        .err()
+        .unwrap();
+        assert!(
+            err.to_string()
+                .starts_with("JUNEES_MEMORY_PROJECT_CHARS must be")
+        );
     }
 
     #[test]
