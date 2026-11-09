@@ -37,12 +37,12 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 
 ### L3. 장기 작업 모드
 - 작업 파일은 대상 저장소의 `.junees/`에 둔다. `features.json`(기능 목록: `id`, `description`, `verify` 셸 명령, `passes`), `progress.md`(사람이 읽는 진행 기록, 세션과 하네스가 함께 덧붙임), `state.json`(하네스 상태, `.junees/.gitignore`로 git에서 제외)
-- `junees task init "<목표>"`: git 저장소가 아니면 오류(자동 `git init` 없음), 이미 `features.json`이 있으면 오류. 초기화 세션(목표를 검증 가능한 기능 5~50개로 쪼개고 verify 명령을 정하고 `progress.md`를 쓰라, 필요하면 `init.sh`, 아직 구현하지 말라)이 끝나면 하네스가 목록을 검증(JSON 배열, 비어 있지 않음, id 유일, verify 존재, 전부 `passes: false`, 문제를 모두 나열)하고, 틀리면 오류 내용을 같은 세션에 보내 한 번 더 고치게 한다. 통과하면 하네스 서식으로 다시 쓰고 `git add -A && git commit -m "junees: initialize task"`
-- `junees task run [--max-sessions N]`(기본 20): 세션마다 새 `Agent`(새 컨텍스트, L1 세션 기록). system 프롬프트에 규칙, 기능 목록과 통과 여부, `progress.md` 마지막 4000자, `git log --oneline -20`. 첫 입력은 "안 끝난 기능 하나를 골라 구현, 검증, 커밋하고 progress.md를 갱신하라"
-- 하네스가 강제하는 규칙: `passes`는 전용 도구 `mark_feature_passing {id}`로만 바뀐다. 하네스가 verify 명령을 저장소 루트에서 bash 도구와 같은 방식(출력 제한, API 키 변수 제거, 타임아웃 600초)으로 실행하고 exit 0일 때만 저장, 실패하면 출력과 함께 오류 결과. 하네스는 기능 목록의 권위 있는 사본을 들고 있다가 세션이 끝나면 파일을 그 사본으로 되돌려 쓴다(내용이 바뀌었으면 경고와 progress 한 줄, 서식만 다르면 조용히)
-- 세션이 끝나면 progress에 하네스 한 줄(세션 번호, 통과 수/전체, 새로 통과한 기능, 토큰)을 붙이고, 작업 트리가 더러우면 `junees: checkpoint after session N`으로 커밋
-- 정지 조건: 모든 기능 통과, 세션 수 상한, 연속 3세션 새 통과 없음(stalled), 세션 오류(오류를 progress에 남기고 체크포인트 후 정지). 이유를 출력하고 `state.json`에 기록, stalled와 오류는 종료 코드 1
-- `state.json`: 실행한 세션 수, 연속 무진전 세션 수, 누적 usage, 마지막 정지 이유. 다음 `task run`은 세션 번호를 이어 간다. 이전 실행이 스스로 멈췄으면 무진전 횟수를 초기화, 정지 기록 없이 끝났으면(크래시) 이어서 센다
+- `junees task init "<목표>"`: git 저장소가 아니면 오류(자동 `git init` 없음), 이미 `features.json`이 있거나 작업 트리가 더러우면(`.junees/` 제외) 오류. 초기화 세션(목표를 검증 가능한 기능 5~50개로 쪼개고 verify 명령을 정하고 `progress.md`를 쓰라, 필요하면 `init.sh`, 아직 구현하지 말라)이 끝나면 하네스가 목록을 검증(JSON 배열, 비어 있지 않음, id 유일, verify 존재, 전부 `passes: false`, verify를 한 번씩 실행해 이미 통과하는 것 거절, 문제를 모두 나열)하고, 틀리면 오류 내용을 같은 세션에 보내 한 번 더 고치게 한다. 그래도 틀리거나 세션이 실패하면 목록을 `features.rejected.json`으로 옮겨 init을 다시 할 수 있게 한다. 통과하면 하네스 서식으로 다시 쓰고 `junees: initialize task`로 커밋
+- `junees task run [--max-sessions N]`(기본 20): 작업 트리가 더러우면 거절. 시작할 때 파일에서 `passes: true`인 기능의 verify를 다시 실행해 실패하는 것은 통과에서 뺀다(경고와 progress 한 줄). 세션마다 새 `Agent`(새 컨텍스트, L1 세션 기록). system 프롬프트에 규칙, 기능 목록과 통과 여부, `progress.md` 마지막 4000자, `git log --oneline -20`. 첫 입력은 "안 끝난 기능 하나를 골라 구현, 검증, 커밋하고 progress.md를 갱신하라"
+- 하네스가 강제하는 규칙: `passes`는 전용 도구 `mark_feature_passing {id}`로만 바뀐다. 하네스가 verify 명령을 저장소 루트에서 bash 도구와 같은 방식(출력 제한, API 키 변수 제거, 타임아웃 600초)으로 `set -o pipefail`을 붙여 실행하고 exit 0일 때만 저장, 실패하면 출력과 함께 오류 결과. 하네스는 기능 목록의 권위 있는 사본을 들고 있다가 세션이 끝나면 파일을 그 사본으로 되돌려 쓴다(내용이 바뀌었으면 경고와 progress 한 줄, 서식만 다르면 조용히)
+- 세션이 끝나면 progress에 하네스 한 줄(세션 번호, 통과 수/전체, 새로 통과한 기능, 토큰)을 붙이고, 작업 트리가 더러우면 `junees: checkpoint after session N`으로 커밋. 하네스의 커밋은 훅과 fsmonitor 없이(`core.hooksPath=/dev/null`, `--no-verify`), API 키 변수 없이 실행하고, 비밀 파일처럼 보이는 새 파일(`.env*`, `*.pem`, `*.key`, ssh 키 등)은 빼고 경고. 커밋 전에 `.junees/`와 `.gitignore`를 다시 만든다
+- 정지 조건: 모든 기능 통과, 세션 수 상한, 연속 3세션 새 통과 없음(stalled), 세션 오류(오류를 progress에 남기고 체크포인트 후 정지), 세션 뒤 하네스 작업 실패. 턴 한도(`JUNEES_MAX_TURNS`)를 넘긴 세션은 오류가 아니라 세션 종료로 보고 다음 세션으로 넘어간다(stalled 규칙이 처리). 이유를 출력하고 `state.json`에 기록, stalled와 오류는 종료 코드 1
+- `state.json`: 실행한 세션 수, 연속 무진전 세션 수, 누적 usage, 마지막 정지 이유. 다음 `task run`은 세션 번호를 이어 간다. 이전 실행이 스스로 멈췄으면(`--max-sessions` 포함) 무진전 횟수를 초기화, 정지 기록 없이 끝났으면(크래시) 이어서 센다. 그래서 `--max-sessions 1`을 반복하면 stalled로는 멈추지 않는다(의도한 동작)
 - 예산(토큰/시간), 시그널 처리, 무인 명령 정책은 L4, `task status`와 알림은 L5
 
 ### L4. 무인 실행 안정성

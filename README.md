@@ -40,15 +40,15 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 컨텍스트 창 하나에 담기지 않는 큰 목표를, 매번 새 컨텍스트로 시작하는 세션 여러 개가 기능 하나씩 끝내며 이어 간다. 완료 판정은 모델이 아니라 하네스가 검증 명령의 종료 코드로 한다.
 
-- `task init "<목표>"`: git 저장소 안에서만 동작한다(자동으로 `git init`하지 않음). 이미 `.junees/features.json`이 있으면 오류. 초기화 세션이 목표를 검증 가능한 기능 목록으로 쪼개 `.junees/features.json`과 `.junees/progress.md`를 쓰고(필요하면 `.junees/init.sh`), 하네스가 목록을 검사한다. 틀리면 오류 내용을 같은 세션에 보내 한 번 고치게 하고, 그래도 틀리면 커밋하지 않고 오류로 끝난다. 통과하면 `git add -A` 후 `junees: initialize task`로 커밋한다.
+- `task init "<목표>"`: git 저장소 안에서만 동작한다(자동으로 `git init`하지 않음). 이미 `.junees/features.json`이 있거나, 작업 트리에 커밋하지 않은 변경이나 추적하지 않는 파일이 있으면(`.junees/`는 제외) 오류. 초기화 세션이 목표를 검증 가능한 기능 목록으로 쪼개 `.junees/features.json`과 `.junees/progress.md`를 쓰고(필요하면 `.junees/init.sh`), 하네스가 목록을 검사한다. 이때 verify 명령을 하나씩 실행해서 아직 아무것도 만들지 않았는데 이미 통과하는 것(`true`, 테스트가 하나도 걸리지 않는 필터 등)도 거절한다. 틀리면 오류 내용을 같은 세션에 보내 한 번 고치게 하고, 그래도 틀리면(또는 세션이 실패하면) 커밋하지 않고 오류로 끝나며, 거절된 목록은 `.junees/features.rejected.json`(git 제외)으로 옮겨서 `task init`을 다시 할 수 있게 한다. 통과하면 커밋한다(커밋 방식은 아래 체크포인트와 같음).
 - `features.json`은 `[{"id": "F1", "description": "...", "verify": "<셸 명령>", "passes": false}]` 형식이다. 비어 있지 않은 배열, 유일한 id, 비어 있지 않은 verify가 조건이고 새 작업은 전부 `passes: false`여야 한다. 다른 필드(steps 등)는 그대로 둔다.
-- `task run [--max-sessions N]`(기본 20): 세션마다 새 에이전트(새 컨텍스트, 세션 기록은 `$JUNEES_HOME/sessions/`에 따로 남음)가 기능 목록과 통과 여부, `progress.md` 끝부분(4000자), `git log --oneline -20`을 system 프롬프트로 받고, 안 끝난 기능 하나를 구현, 검증, 커밋하고 `progress.md`를 갱신한다.
-- 기능 통과는 `mark_feature_passing {id}` 도구로만 바뀐다. 하네스가 그 기능의 verify 명령을 저장소 루트에서 bash 도구와 같은 방식(출력 제한, API 키 변수 제거, 타임아웃 600초)으로 실행하고 종료 코드 0일 때만 `passes: true`로 저장한다. 실패하면 출력과 함께 오류 결과를 돌려준다.
+- `task run [--max-sessions N]`(기본 20): 작업 트리가 깨끗해야 시작한다(아니면 커밋하거나 `git stash -u` 하라는 오류). 시작할 때 `features.json`에서 `passes: true`인 기능의 verify를 모두 다시 실행해서, 실패하는 것은 통과로 치지 않는다(경고와 `progress.md` 한 줄). 실패한 init이나 하네스가 되돌리기 전에 죽은 세션이 남긴 목록, 나중 변경으로 깨진 기능을 걸러 내기 위해서다. 세션마다 새 에이전트(새 컨텍스트, 세션 기록은 `$JUNEES_HOME/sessions/`에 따로 남음)가 기능 목록과 통과 여부, `progress.md` 끝부분(4000자), `git log --oneline -20`을 system 프롬프트로 받고, 안 끝난 기능 하나를 구현, 검증, 커밋하고 `progress.md`를 갱신한다.
+- 기능 통과는 `mark_feature_passing {id}` 도구로만 바뀐다. 하네스가 그 기능의 verify 명령을 저장소 루트에서 bash 도구와 같은 방식(출력 제한, API 키 변수 제거, 타임아웃 600초)으로, `set -o pipefail`을 앞에 붙여 실행하고(`cargo test 2>&1 | tail`도 테스트가 실패하면 실패) 종료 코드 0일 때만 `passes: true`로 저장한다. 실패하면 출력과 함께 오류 결과를 돌려준다.
 - 하네스는 기능 목록의 권위 있는 사본을 들고 있다. 세션이 `features.json`을 직접 고치면(지우거나 `passes`를 바꾸는 것 포함) 세션이 끝날 때 사본으로 되돌려 쓰고 경고와 `progress.md` 한 줄을 남긴다. 서식만 다른 것은 편집으로 치지 않는다.
-- 세션이 끝나면 하네스가 `progress.md`에 `- [junees] session N: 통과 수/전체, 새로 통과한 기능, 토큰` 한 줄을 붙이고, 작업 트리가 더러우면 `junees: checkpoint after session N`으로 커밋한다(하네스 줄이 붙으므로 사실상 세션마다 하나).
-- 정지: 모든 기능 통과, `--max-sessions`만큼 실행, 연속 3세션 동안 새로 통과한 기능 없음(stalled), 세션 하나가 오류로 끝남(오류를 `progress.md`에 남기고 체크포인트 커밋 후 정지). 정지 이유를 `task stopped: ...`로 출력하고 `state.json`에 기록한다. stalled와 오류는 종료 코드 1.
-- `.junees/state.json`(실행한 세션 수, 연속 무진전 세션 수, 누적 토큰, 정지 이유)은 `.junees/.gitignore`로 git에서 뺀다. 다음 `task run`은 세션 번호와 토큰을 여기서 이어 간다. 이전 실행이 스스로 멈췄으면 무진전 횟수를 0부터 다시 세고, 정지 이유 없이 끝났으면(크래시) 이어서 센다.
-- 하위 폴더에서 실행해도 저장소 루트로 옮겨서 작업한다. 하네스의 git 명령과 세션의 `bash`(verify 포함)에서는 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` 같은 저장소 지정 변수를 지운다. git 훅이나 worktree의 `git rebase -x`처럼 이 변수가 설정된 곳에서 실행해도 다른 저장소에 커밋하지 않게 하기 위해서다. 세션당 모델 호출 상한은 `JUNEES_MAX_TURNS`이고, 넘으면 그 세션은 오류로 끝난다.
+- 세션이 끝나면 하네스가 `progress.md`에 `- [junees] session N: 통과 수/전체, 새로 통과한 기능, 토큰` 한 줄을 붙이고, 작업 트리가 더러우면 `junees: checkpoint after session N`으로 커밋한다(하네스 줄이 붙으므로 사실상 세션마다 하나). 하네스의 커밋은 `git add -A`에서 이름이 비밀 파일 같은 새 파일(`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa`/`id_ed25519` 등 ssh 키, `.netrc`)을 빼고 경고한다. 이미 추적 중인 파일은 그대로 커밋한다. 세션이 `.junees/`나 `.junees/.gitignore`를 지워도 커밋 전에 다시 만든다.
+- 정지: 모든 기능 통과, `--max-sessions`만큼 실행, 연속 3세션 동안 새로 통과한 기능 없음(stalled), 세션 하나가 오류로 끝남(공급자 오류 등. 오류를 `progress.md`에 남기고 체크포인트 커밋 후 정지), 세션 뒤 하네스 작업(되돌리기, progress 기록, 커밋)이 실패함. 정지 이유를 `task stopped: ...`로 출력하고 `state.json`에 기록한다. stalled와 오류는 종료 코드 1.
+- `.junees/state.json`(실행한 세션 수, 연속 무진전 세션 수, 누적 토큰, 정지 이유)은 `.junees/.gitignore`로 git에서 뺀다. 다음 `task run`은 세션 번호와 토큰을 여기서 이어 간다. 이전 실행이 스스로 멈췄으면(`--max-sessions` 포함) 무진전 횟수를 0부터 다시 세고, 정지 이유 없이 끝났으면(크래시) 이어서 센다. 그래서 `--max-sessions 1`로 여러 번 나눠 실행하면 stalled로는 멈추지 않는다.
+- 하위 폴더에서 실행해도 저장소 루트로 옮겨서 작업한다. 하네스의 git 명령과 세션의 `bash`(verify 포함)에서는 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` 같은 저장소 지정 변수와 상위 git이 넘기는 설정(`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`)을 지운다. git 훅이나 worktree의 `git rebase -x`처럼 이 변수가 설정된 곳에서 실행해도 다른 저장소에 커밋하지 않게 하기 위해서다. 하네스의 git은 세션이 심었을 수 있는 훅과 fsmonitor를 실행하지 않고(`-c core.hooksPath=/dev/null -c core.fsmonitor=false`, 커밋은 `--no-verify`), API 키 변수도 받지 않는다. 세션당 모델 호출 상한은 `JUNEES_MAX_TURNS`이고, 넘으면 그 세션만 끝난다. 작업은 체크포인트로 남고 다음 세션으로 넘어가며, 진전이 없으면 stalled 규칙이 멈춘다.
 - `bash`에 아직 승인 절차나 명령 정책이 없으므로(L4 예정) 믿을 수 있는 저장소에서만 쓴다.
 
 | 환경 변수 | 기본값 | 설명 |
@@ -87,7 +87,8 @@ tests/
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행 검증
   task_mode.rs         실제 바이너리로 임시 git 저장소에서 task init -> task run 검증
-  task_git_env.rs      GIT_DIR이 다른 저장소를 가리켜도 task 모드가 제 저장소에서만 git을 쓰는지 검증
+  task_git_env.rs      GIT_DIR이나 GIT_CONFIG_PARAMETERS가 있어도 task 모드가 제 저장소와 설정으로만 git을 쓰는지 검증
+  task_git_secret.rs   하네스 git이 심어진 훅을 실행하지 않고 git이 실행하는 필터에도 API 키를 넘기지 않는지 검증
 ```
 
 ## 로드맵
