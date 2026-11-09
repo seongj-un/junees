@@ -64,7 +64,7 @@ pub const REPL_HELP: &str = "\
 /compact   replace the earlier conversation with a summary
 /exit      quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
-approval question it declines the call and cancels the turn.";
+approval question it skips the call and cancels the turn.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
