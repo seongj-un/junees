@@ -236,10 +236,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for Upper {
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "upper"
         }
-        fn description(&self) -> &'static str {
+        fn description(&self) -> &str {
             "uppercases text"
         }
         fn input_schema(&self) -> Value {
@@ -411,10 +411,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for Counter {
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "count"
         }
-        fn description(&self) -> &'static str {
+        fn description(&self) -> &str {
             "counts calls"
         }
         fn input_schema(&self) -> Value {

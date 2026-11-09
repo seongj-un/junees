@@ -10,11 +10,11 @@ pub struct WriteFile;
 
 #[async_trait]
 impl Tool for WriteFile {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "write_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Write content to a file, replacing it if it exists. \
          Parent directories are created automatically."
     }

@@ -53,11 +53,11 @@ impl Bash {
 
 #[async_trait]
 impl Tool for Bash {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "bash"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Run a shell command with `bash -c` in the current working directory. \
          Returns stdout, stderr and the exit code. Stdin is closed, so interactive \
          commands will not work. To leave a process running in the background, \

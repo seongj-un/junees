@@ -42,8 +42,8 @@ impl ToolOutput {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     /// JSON Schema of the tool input.
     fn input_schema(&self) -> Value;
     async fn run(&self, input: Value) -> ToolOutput;
@@ -143,10 +143,10 @@ mod tests {
 
     #[async_trait]
     impl Tool for Echo {
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "echo"
         }
-        fn description(&self) -> &'static str {
+        fn description(&self) -> &str {
             "echoes"
         }
         fn input_schema(&self) -> Value {

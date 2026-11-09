@@ -15,11 +15,11 @@ pub struct ReadFile;
 
 #[async_trait]
 impl Tool for ReadFile {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "read_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Read a text file. Lines come back numbered as `LINE<TAB>CONTENT`. \
          Use offset and limit to page through long files."
     }
