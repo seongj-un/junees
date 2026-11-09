@@ -1,6 +1,7 @@
 //! Runs task sessions: the init session that plans a task, and the work
 //! sessions that build it one feature at a time.
 
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -242,6 +243,7 @@ pub async fn run(
     let ledger = Ledger::load(root)?;
     let ledger = Arc::new(Mutex::new(ledger));
     prepare_dir(root)?;
+    recheck_passing(env, &ledger, report).await?;
     let mut state = State::load(root)?;
     // A run that stopped on its own does not hold its stall streak against
     // the next one; after a crash (no stop recorded) the streak carries on.
@@ -249,7 +251,6 @@ pub async fn run(
         state.stalled = 0;
     }
     state.save(root)?;
-    recheck_passing(env, &ledger, report).await?;
 
     let mut ran = 0;
     let stop = loop {
@@ -273,59 +274,22 @@ pub async fn run(
         let (result, usage) = work_session(env, n, &ledger, report).await;
         state.usage.add(usage);
 
-        let (edited, newly, passing, total) = {
-            let mut ledger = ledger.lock().unwrap();
-            let edited = ledger.restore()?;
-            let newly: Vec<&str> = ledger
-                .features()
-                .iter()
-                .filter(|feature| feature.passes && !before.contains(&feature.id))
-                .map(|feature| feature.id.as_str())
-                .collect();
-            (edited, newly.join(", "), ledger.passing(), ledger.total())
-        };
-        if edited {
-            warn(
-                report,
-                "the session edited .junees/features.json; the harness restored its own copy",
-            );
-            append_progress(
-                root,
-                &format!(
-                    "session {n}: .junees/features.json was edited directly; \
-                     the harness restored its own copy"
-                ),
-            )?;
-        }
-        let passes = if newly.is_empty() {
-            format!("{passing}/{total} passing, nothing new")
-        } else {
-            format!("{passing}/{total} passing, new: {newly}")
-        };
-        let summary = match &result {
-            Ok(Ended::Answered) => passes,
-            Ok(Ended::TurnLimit) => format!(
-                "{passes}, ended at the turn limit ({} model calls)",
-                env.max_turns
-            ),
-            Err(err) => format!("failed: {}", preview(&format!("{err:#}"), ERROR_CHARS)),
-        };
-        append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
-        if git::is_dirty(root)? {
-            let commit = git::commit_all(root, &checkpoint_message(n))?;
-            warn_left_out(report, &commit.left_out);
-            if commit.made {
-                line(
-                    report,
-                    &format!("checkpoint commit: {}", checkpoint_message(n)),
-                );
-            }
-        }
-        state.stalled = if newly.is_empty() {
-            state.stalled + 1
-        } else {
-            0
-        };
+        let (summary, progressed, passing, total) =
+            match wrap_up(env, n, &ledger, &before, &result, usage, report) {
+                Ok(wrapped) => wrapped,
+                // The session's work may be uncommitted, but the stop is
+                // recorded, so the next run does not take this for a crash.
+                Err(err) => {
+                    let detail = format!("could not wrap up session {n}: {err:#}");
+                    warn(report, &detail);
+                    break Stop {
+                        reason: StopReason::Error,
+                        session: n,
+                        detail: Some(detail),
+                    };
+                }
+            };
+        state.stalled = if progressed { 0 } else { state.stalled + 1 };
         line(report, &format!("== session {n} done: {summary} =="));
 
         if let Err(err) = result {
@@ -346,6 +310,71 @@ pub async fn run(
     state.stop = Some(stop.clone());
     state.save(root)?;
     Ok(stop)
+}
+
+/// The harness's part after a work session: puts its copy of the feature
+/// list back, adds the session's line to progress.md and commits what the
+/// session left behind. Returns the summary line, whether a feature newly
+/// passes, and the passing and total counts.
+fn wrap_up(
+    env: &TaskEnv<'_>,
+    n: u64,
+    ledger: &Arc<Mutex<Ledger>>,
+    before: &HashSet<String>,
+    result: &Result<Ended>,
+    usage: Usage,
+    report: &mut Reporter<'_>,
+) -> Result<(String, bool, usize, usize)> {
+    let root = &env.root;
+    let (edited, newly, passing, total) = {
+        let mut ledger = ledger.lock().unwrap();
+        let edited = ledger.restore()?;
+        let newly: Vec<&str> = ledger
+            .features()
+            .iter()
+            .filter(|feature| feature.passes && !before.contains(&feature.id))
+            .map(|feature| feature.id.as_str())
+            .collect();
+        (edited, newly.join(", "), ledger.passing(), ledger.total())
+    };
+    if edited {
+        warn(
+            report,
+            "the session edited .junees/features.json; the harness restored its own copy",
+        );
+        append_progress(
+            root,
+            &format!(
+                "session {n}: .junees/features.json was edited directly; \
+                 the harness restored its own copy"
+            ),
+        )?;
+    }
+    let passes = if newly.is_empty() {
+        format!("{passing}/{total} passing, nothing new")
+    } else {
+        format!("{passing}/{total} passing, new: {newly}")
+    };
+    let summary = match &result {
+        Ok(Ended::Answered) => passes,
+        Ok(Ended::TurnLimit) => format!(
+            "{passes}, ended at the turn limit ({} model calls)",
+            env.max_turns
+        ),
+        Err(err) => format!("failed: {}", preview(&format!("{err:#}"), ERROR_CHARS)),
+    };
+    append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
+    if git::is_dirty(root)? {
+        let commit = git::commit_all(root, &checkpoint_message(n))?;
+        warn_left_out(report, &commit.left_out);
+        if commit.made {
+            line(
+                report,
+                &format!("checkpoint commit: {}", checkpoint_message(n)),
+            );
+        }
+    }
+    Ok((summary, !newly.is_empty(), passing, total))
 }
 
 /// How a work session that did not fail ended.
@@ -1265,6 +1294,38 @@ mod tests {
         // The work is kept.
         assert_eq!(subjects(root)[1], checkpoint_message(1));
         assert!(root.join("step9.txt").exists());
+    }
+
+    fn bash(command: String) -> (&'static str, Value) {
+        ("bash", json!({ "command": command }))
+    }
+
+    #[tokio::test]
+    async fn a_failed_checkpoint_commit_stops_the_run_and_is_recorded() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        // The session leaves the repository unable to commit.
+        let provider = Scripted::new(vec![
+            calls(&[bash(format!(
+                "cd '{}' && git config commit.gpgsign true && git config gpg.program false \
+                 && echo wip > wip.txt",
+                root.display()
+            ))]),
+            text("done"),
+        ]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 3, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::Error);
+        assert_eq!(stop.session, 1);
+        let detail = stop.detail.as_deref().unwrap();
+        assert!(
+            detail.starts_with("could not wrap up session 1: "),
+            "{detail}"
+        );
+        assert!(detail.contains("git commit"), "{detail}");
+        assert_eq!(State::load(root).unwrap().stop, Some(stop));
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
     }
 
     #[tokio::test]
