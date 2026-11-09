@@ -9,12 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 
-use super::budget::{self, Budget};
+use super::budget::{self, Budget, format_duration};
 use super::features::{self, Ledger};
 use super::lock::RunLock;
 use super::state::{Running, State, Stop, StopReason};
 use super::tools::{MarkFeaturePassing, Verifier, session_tools};
-use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt, rejected_features_path};
+use super::{
+    STALL_LIMIT, append_run_log, dir, features_path, git, progress_path, prompt,
+    rejected_features_path, run_log_path,
+};
 use crate::agent::{Agent, AgentOptions, Cancelled, Event, Limit, LimitReached, TurnLimit};
 use crate::cancel::Cancel;
 use crate::cli::preview;
@@ -28,6 +31,14 @@ pub const INIT_COMMIT: &str = "junees: initialize task";
 
 /// Commit message of the commit that keeps what a crashed run left behind.
 pub const RECOVER_COMMIT: &str = "junees: recover after crash";
+
+/// Commit message of the commit that brings the `.junees/.gitignore` of an
+/// older task up to date before a run.
+pub const IGNORE_COMMIT: &str = "junees: keep the run log out of git";
+
+/// What `.junees/.gitignore` keeps out of git: harness files that change
+/// on every run.
+const IGNORED: &[&str] = &["state.json", ".*.tmp", "*.rejected.json", "run.log"];
 
 const NO_TASK: &str = "cannot load the feature list (start a task with `junees task init`)";
 
@@ -290,7 +301,11 @@ pub async fn run(
     }
     let ledger = Ledger::load(root)?;
     let ledger = Arc::new(Mutex::new(ledger));
-    prepare_dir(root)?;
+    // A task from an older Junees learns to ignore the run log here, in its
+    // own commit, so the tree stays clean even if no session runs.
+    if prepare_dir(root)? && git::is_dirty(root)? {
+        git::commit_all(root, IGNORE_COMMIT)?;
+    }
     let rechecked = recheck_passing(env, &ledger, report).await?;
     // A run that stopped on its own does not hold its stall streak against
     // the next one; after a crash (no stop recorded) the streak carries on.
@@ -302,6 +317,19 @@ pub async fn run(
         started: unix_now(),
     });
     save_state(root, &mut state, &ledger)?;
+    let (passing, total) = {
+        let ledger = ledger.lock().unwrap();
+        (ledger.passing(), ledger.total())
+    };
+    log(
+        root,
+        report,
+        &format!(
+            "run start (pid {}): {passing}/{total} passing, {}, max sessions {max_sessions}",
+            std::process::id(),
+            spent(env, &state, started)
+        ),
+    );
 
     let mut ran = 0;
     let stop = loop {
@@ -331,6 +359,7 @@ pub async fn run(
         state.sessions += 1;
         let n = state.sessions;
         save_state(root, &mut state, &ledger)?;
+        log(root, report, &format!("session {n} start"));
         let before = ledger.lock().unwrap().passing_ids();
 
         let limit = env.budget.session_limit(used, started);
@@ -354,6 +383,14 @@ pub async fn run(
             };
         state.stalled = if progressed { 0 } else { state.stalled + 1 };
         line(report, &format!("== session {n} done: {summary} =="));
+        log(
+            root,
+            report,
+            &format!(
+                "session {n} end: {summary}; {}",
+                spent(env, &state, started)
+            ),
+        );
 
         let ended = match result {
             Ok(ended) => ended,
@@ -386,7 +423,43 @@ pub async fn run(
     state.stop = Some(stop.clone());
     state.running = None;
     save_state(root, &mut state, &ledger)?;
+    let reason = serde_json::to_value(stop.reason).unwrap_or_default();
+    log(
+        root,
+        report,
+        &format!(
+            "run stop ({}): {stop}; {}",
+            reason.as_str().unwrap_or("?"),
+            spent(env, &state, started)
+        ),
+    );
     Ok(stop)
+}
+
+/// The task's tokens and this run's time, with their budgets.
+fn spent(env: &TaskEnv<'_>, state: &State, started: std::time::Instant) -> String {
+    let tokens = budget::tokens(state.usage);
+    let time = format_duration(env.budget.now().saturating_duration_since(started));
+    let tokens = match env.budget.max_tokens {
+        Some(max) => format!("{tokens} of {max}"),
+        None => tokens.to_string(),
+    };
+    let time = match env.budget.max_time {
+        Some(max) => format!("{time} of {}", format_duration(max)),
+        None => time,
+    };
+    format!("task tokens {tokens}, run time {time}")
+}
+
+/// Adds a line to `.junees/run.log`. The log is for people watching; a
+/// failure to write it is a warning, not a reason to stop.
+fn log(root: &Path, report: &mut Reporter<'_>, text: &str) {
+    if let Err(err) = append_run_log(root, unix_now(), text) {
+        warn(
+            report,
+            &format!("could not write {}: {err}", run_log_path(root).display()),
+        );
+    }
 }
 
 /// Saves state.json with the harness's current copy of the feature list.
@@ -439,7 +512,18 @@ fn recover(
             line(report, &format!("recovery commit: {RECOVER_COMMIT}"));
         }
     }
-    state.save(root)
+    state.save(root)?;
+    log(
+        root,
+        report,
+        &format!(
+            "recovered after a crash of the run started {} UTC (pid {}) during session {}",
+            format_utc(running.started),
+            running.pid,
+            state.sessions
+        ),
+    );
+    Ok(())
 }
 
 fn unix_now() -> u64 {
@@ -687,16 +771,38 @@ async fn check_new_list(
     Ok(list.len())
 }
 
-/// Creates `.junees/` and keeps the harness state out of git.
-fn prepare_dir(root: &Path) -> Result<()> {
+/// Creates `.junees/` and keeps the harness state out of git: adds what
+/// [`IGNORED`] lists to `.junees/.gitignore` if it is not there (a session
+/// deleted the file, or an older Junees wrote it). Returns whether the
+/// file changed.
+fn prepare_dir(root: &Path) -> Result<bool> {
     let dir = dir(root);
     fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let ignore = dir.join(".gitignore");
-    if !ignore.exists() {
-        fs::write(&ignore, "state.json\n.*.tmp\n*.rejected.json\n")
-            .with_context(|| format!("cannot write {}", ignore.display()))?;
+    let mut text = match fs::read_to_string(&ignore) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("cannot read {}", ignore.display()));
+        }
+    };
+    let missing: Vec<&str> = IGNORED
+        .iter()
+        .copied()
+        .filter(|pattern| !text.lines().any(|line| line.trim() == *pattern))
+        .collect();
+    if missing.is_empty() {
+        return Ok(false);
     }
-    Ok(())
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for pattern in missing {
+        text.push_str(pattern);
+        text.push('\n');
+    }
+    fs::write(&ignore, text).with_context(|| format!("cannot write {}", ignore.display()))?;
+    Ok(true)
 }
 
 /// Adds one harness line to progress.md.
@@ -1846,6 +1952,71 @@ mod tests {
         let state = State::load(root).unwrap();
         assert_eq!(state.running, None);
         assert_eq!(state.stop, Some(stop));
+    }
+
+    #[tokio::test]
+    async fn the_run_log_has_a_line_per_event_and_stays_out_of_git() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        // A task from before the run log: its .gitignore does not know it.
+        fs::write(
+            dir(root).join(".gitignore"),
+            "state.json\n.*.tmp\n*.rejected.json\n",
+        )
+        .unwrap();
+        git::commit_all(root, "older task").unwrap();
+        let provider = Scripted::new(vec![text("hm"), text("again")]);
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        env.budget.max_tokens = Some(1000);
+        env.budget.clock = budget::testing::fake_clock(provider.clock.clone());
+        let stop = run(&env, 1, &mut |_| {}).await.unwrap();
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+
+        assert_eq!(
+            subjects(root)[..3],
+            [
+                checkpoint_message(1),
+                IGNORE_COMMIT.to_string(),
+                "older task".to_string()
+            ]
+        );
+        assert!(!git::is_dirty(root).unwrap());
+        let log = fs::read_to_string(run_log_path(root)).unwrap();
+        let lines: Vec<&str> = log
+            .lines()
+            .map(|line| {
+                let (stamp, text) = line.split_once(' ').unwrap();
+                assert_eq!(stamp.len(), 20, "{line}");
+                assert!(stamp.ends_with('Z') && &stamp[10..11] == "T", "{line}");
+                text
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                format!(
+                    "run start (pid {}): 0/1 passing, task tokens 0 of 1000, run time 0s, \
+                     max sessions 1",
+                    std::process::id()
+                )
+                .as_str(),
+                "session 1 start",
+                "session 1 end: 0/1 passing, nothing new; task tokens 11 of 1000, run time 0s",
+                "run stop (max_sessions): reached --max-sessions; task tokens 11 of 1000, \
+                 run time 0s",
+            ]
+        );
+
+        // The next run adds to it.
+        run(&env, 1, &mut |_| {}).await.unwrap();
+        let log = fs::read_to_string(run_log_path(root)).unwrap();
+        assert_eq!(log.lines().count(), 8, "{log}");
+        assert!(
+            log.ends_with(" run stop (max_sessions): reached --max-sessions; task tokens 22 of 1000, run time 0s\n"),
+            "{log}"
+        );
     }
 
     #[tokio::test]

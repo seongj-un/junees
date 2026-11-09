@@ -746,6 +746,12 @@ pub fn format_utc(unix_secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ` (RFC 3339 in UTC).
+pub fn format_utc_seconds(unix_secs: u64) -> String {
+    let ((y, mo, d), (h, mi, s)) = utc_parts(unix_secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
 type Ymd = (i64, u32, u32);
 type Hms = (u32, u32, u32);
 
@@ -1503,6 +1509,7 @@ mod tests {
         assert_eq!(format_utc(1_709_251_199), "2024-02-29 23:59");
         assert_eq!(format_utc(951_868_800), "2000-03-01 00:00");
         assert_eq!(format_utc(1_794_205_024), "2026-11-09 06:17");
+        assert_eq!(format_utc_seconds(1_794_205_024), "2026-11-09T06:17:04Z");
     }
 
     fn set_mtime(path: &Path, unix_secs: u64) {
