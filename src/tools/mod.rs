@@ -87,7 +87,7 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// bash, read_file and write_file. bash never sees [`SECRET_ENV_VARS`]
+    /// bash, read_file, write_file and edit_file. bash never sees [`SECRET_ENV_VARS`]
     /// or the extra hidden variables, and runs only commands its
     /// [`CommandPolicy`] allows.
     pub fn with_defaults(settings: &ToolSettings) -> Self {
@@ -95,6 +95,7 @@ impl ToolRegistry {
         registry.register(Bash::with_settings(settings));
         registry.register(ReadFile);
         registry.register(WriteFile);
+        registry.register(EditFile);
         registry
     }
 
@@ -221,13 +222,13 @@ mod tests {
     }
 
     #[test]
-    fn defaults_have_three_tools() {
+    fn defaults_have_four_tools() {
         let names: Vec<String> = ToolRegistry::with_defaults(&ToolSettings::default())
             .specs()
             .into_iter()
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(names, ["bash", "read_file", "write_file"]);
+        assert_eq!(names, ["bash", "read_file", "write_file", "edit_file"]);
     }
 
     #[tokio::test]

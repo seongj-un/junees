@@ -313,7 +313,13 @@ async fn init_then_run_builds_the_features_and_commits() {
         .collect();
     assert_eq!(
         tools,
-        ["bash", "read_file", "write_file", "mark_feature_passing"]
+        [
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "mark_feature_passing"
+        ]
     );
     let results = tool_results(&requests[4]);
     assert_eq!(results.len(), 2);
