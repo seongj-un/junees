@@ -448,7 +448,24 @@ fn write_and_rename(
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&temp)?;
+        .open(&temp)
+        .map_err(|err| {
+            // The file itself may well be writable: name the directory.
+            let dir = path.parent().unwrap_or(Path::new("/"));
+            let hint = if err.kind() == std::io::ErrorKind::PermissionDenied {
+                " (edit_file replaces the file through a temporary file in its \
+                 directory; write_file can rewrite the file in place)"
+            } else {
+                ""
+            };
+            std::io::Error::new(
+                err.kind(),
+                format!(
+                    "cannot create a temporary file in {}: {err}{hint}",
+                    dir.display()
+                ),
+            )
+        })?;
     // Created by this call, so it is ours to remove on any error below.
     let mut guard = RemoveOnDrop {
         path: &temp,
@@ -963,6 +980,34 @@ mod tests {
             .await;
         assert!(output.content.contains(": replaced 2 occurrences\n"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "bb\n");
+    }
+
+    #[tokio::test]
+    async fn a_read_only_directory_is_named_in_the_error() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes anywhere
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let path = locked.join("file.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let output = run(&path, "old", "new").await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(output.is_error);
+        let real_dir = locked.canonicalize().unwrap();
+        assert!(
+            output.content.contains(&format!(
+                "cannot create a temporary file in {}",
+                real_dir.display()
+            )),
+            "{}",
+            output.content
+        );
+        assert!(output.content.contains("write_file"), "{}", output.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
     }
 
     #[test]
