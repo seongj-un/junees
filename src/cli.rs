@@ -27,7 +27,8 @@ Environment:
   JUNEES_MODEL        model id (default claude-sonnet-4-6)
   JUNEES_MAX_TOKENS   max output tokens per model call (default 8192)
   JUNEES_MAX_TURNS    max model calls per prompt (default 50)
-  JUNEES_HOME         where Junees keeps sessions (default ~/.junees)
+  JUNEES_HOME         where Junees keeps sessions (default ~/.junees;
+                      with neither it nor HOME set, sessions are not saved)
 ";
 
 pub const REPL_HELP: &str = "\
