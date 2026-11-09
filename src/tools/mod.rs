@@ -1,8 +1,12 @@
 //! Tools the model can call, and the registry that dispatches them.
 
 mod bash;
+mod read_file;
+mod write_file;
 
 pub use bash::Bash;
+pub use read_file::ReadFile;
+pub use write_file::WriteFile;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -52,10 +56,12 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// The built-in tools.
+    /// bash, read_file and write_file.
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
         registry.register(Bash::default());
+        registry.register(ReadFile);
+        registry.register(WriteFile);
         registry
     }
 
@@ -172,13 +178,13 @@ mod tests {
     }
 
     #[test]
-    fn defaults_include_bash() {
+    fn defaults_have_three_tools() {
         let names: Vec<String> = ToolRegistry::with_defaults()
             .specs()
             .into_iter()
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(names, ["bash"]);
+        assert_eq!(names, ["bash", "read_file", "write_file"]);
     }
 
     #[test]
