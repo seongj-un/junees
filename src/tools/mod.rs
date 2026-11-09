@@ -6,6 +6,8 @@ mod read_file;
 mod write_file;
 
 pub use bash::Bash;
+#[cfg(test)]
+pub(crate) use bash::testing;
 pub use policy::{CommandPolicy, Verdict};
 pub use read_file::ReadFile;
 pub use write_file::WriteFile;
