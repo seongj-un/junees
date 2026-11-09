@@ -1,22 +1,26 @@
 use std::io::{IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use junees::agent::{Agent, AgentOptions, Cancelled, Event};
 use junees::approval::{self, SharedLines};
 use junees::cancel::Cancel;
-use junees::cli::{self, Command, SessionMode, TaskCommand};
+use junees::cli::{self, Command, SessionMode, TaskCommand, TaskRun};
 use junees::config::Config;
+use junees::config_file::Settings;
 use junees::notify::Notifier;
 use junees::prompt;
 use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
+use junees::setup::{self, EchoOff, Prompter};
+use junees::slash::{self, Slash};
 use junees::task::budget::Budget;
-use junees::task::claude_code::{Backend, ClaudeCode};
+use junees::task::claude_code::{BACKEND_ENV, Backend, ClaudeCode};
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
@@ -76,7 +80,8 @@ fn protect_environment() {
 fn protect_environment() {}
 
 async fn run() -> Result<ExitCode> {
-    let args = match cli::parse_args(std::env::args().skip(1))? {
+    let command = cli::parse_args(std::env::args().skip(1))?;
+    match command {
         Command::Help => {
             print!("{}", cli::HELP);
             return Ok(ExitCode::SUCCESS);
@@ -85,24 +90,172 @@ async fn run() -> Result<ExitCode> {
             println!("junees {VERSION}");
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Run(args) => args,
         // Needs no API key, and writes nothing.
         Command::Task(TaskCommand::Status { json }) => return task_status(json),
-        Command::Task(command) => return run_task(command).await,
-    };
+        _ => {}
+    }
+    let mut settings = Settings::from_env()?;
+    // Shared by the setup questions, the prompt and the approval questions.
+    let input = SharedLines::stdin();
+    if command == Command::Setup {
+        if !on_terminal() {
+            bail!(
+                "`junees setup` asks its questions on a terminal; run it in one, or write \
+                 the settings file yourself (see README)"
+            );
+        }
+        setup(&mut settings, &input).await?;
+        eprintln!(
+            "Ready. Try:\n  junees                          talk with the agent\n  \
+             junees \"what is in this folder?\"  ask once\n  \
+             junees task \"<goal>\"            a long task, in a git repository"
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if wants_first_setup(&command, &settings) {
+        setup(&mut settings, &input).await?;
+    }
+    match command {
+        Command::Run(args) => conversation(args, settings, input).await,
+        Command::Task(command) => run_task(command, &settings).await,
+        Command::Setup | Command::Help | Command::Version => unreachable!("handled above"),
+    }
+}
 
-    let config = Config::from_env()?;
-    let provider = AnthropicProvider::new(
-        config.api_key.clone(),
-        config.base_url.clone(),
-        config.model.clone(),
-    )?
-    .with_thinking(config.thinking_budget)
-    .with_streaming(config.stream);
+/// Whether questions can be asked: both stdin and stderr are terminals.
+fn on_terminal() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// The first run asks the setup questions: no settings file, no
+/// `ANTHROPIC_API_KEY`, a terminal to ask on, and a command that needs a
+/// key (a task on the claude-code backend does not).
+fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
+    if settings.file_exists()
+        || settings.path().is_none()
+        || settings.env("ANTHROPIC_API_KEY").is_some()
+    {
+        return false;
+    }
+    if let Command::Task(task) = command {
+        let backend = match task.backend() {
+            Some(backend) => Ok(backend),
+            None => Backend::from_lookup(|key| settings.get(key)),
+        };
+        if matches!(backend, Ok(Backend::ClaudeCode)) {
+            return false;
+        }
+    }
+    on_terminal()
+}
+
+/// Asks the setup questions and saves the answers.
+async fn setup(settings: &mut Settings, input: &SharedLines) -> Result<()> {
+    let path = settings
+        .path()
+        .context("neither JUNEES_HOME nor HOME is set, so there is nowhere to keep the settings")?
+        .to_path_buf();
+    let claude = ClaudeCode::from_lookup(|key| settings.get(key));
+    let mut terminal = TerminalPrompter {
+        input,
+        signals: Signals::install()?,
+    };
+    let file = setup::wizard(&mut terminal, &claude, settings.file().clone(), &path).await?;
+    file.save(&path)?;
+    let has_key = file.get("api_key").is_some();
+    settings.replace_file(file);
+    eprintln!("Saved {}.", path.display());
+    for (key, name) in [("api_key", "ANTHROPIC_API_KEY"), ("backend", BACKEND_ENV)] {
+        if settings.env(name).is_some() && (key != "api_key" || has_key) {
+            eprintln!("Note: {name} in your environment wins over `{key}` in the file.");
+        }
+    }
+    Ok(())
+}
+
+/// The setup questions on the terminal: questions on stderr, answers from
+/// the lines the conversation reads later. Ctrl-C cancels the setup.
+struct TerminalPrompter<'a> {
+    input: &'a SharedLines,
+    signals: Signals,
+}
+
+impl TerminalPrompter<'_> {
+    async fn read(&mut self) -> Result<Option<String>> {
+        tokio::select! {
+            line = self.input.next_line() => Ok(line?),
+            _ = self.signals.next() => {
+                eprintln!();
+                bail!("setup cancelled; nothing was saved")
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Prompter for TerminalPrompter<'_> {
+    fn say(&mut self, text: &str) {
+        eprintln!("{text}");
+    }
+
+    async fn line(&mut self, question: &str) -> Result<Option<String>> {
+        eprint!("{question}");
+        let _ = std::io::stderr().flush();
+        self.read().await
+    }
+
+    async fn secret(&mut self, question: &str) -> Result<Option<String>> {
+        let quiet = EchoOff::new(libc::STDIN_FILENO).context("cannot turn off the echo")?;
+        eprint!("{question}");
+        let _ = std::io::stderr().flush();
+        let answer = self.read().await;
+        drop(quiet);
+        // The Enter that ended the answer did not show either.
+        eprintln!();
+        answer
+    }
+}
+
+/// The settings of the conversation mode, which always needs an API key.
+fn conversation_config(settings: &Settings) -> Result<Config> {
+    Config::from_lookup(|key| settings.get(key)).map_err(|err| {
+        let subscription = Backend::from_lookup(|key| settings.get(key))
+            .is_ok_and(|backend| backend == Backend::ClaudeCode);
+        if settings.get("ANTHROPIC_API_KEY").is_none() && subscription {
+            anyhow::anyhow!(
+                "the conversation needs an Anthropic API key: the Claude subscription \
+                 (claude-code backend) runs only tasks for now (`junees task \"<goal>\"`). \
+                 Add a key with `junees setup`, or set ANTHROPIC_API_KEY"
+            )
+        } else {
+            err
+        }
+    })
+}
+
+fn make_provider(config: &Config) -> Result<Box<dyn Provider>> {
+    Ok(Box::new(
+        AnthropicProvider::new(
+            config.api_key.clone(),
+            config.base_url.clone(),
+            config.model.clone(),
+        )?
+        .with_thinking(config.thinking_budget)
+        .with_streaming(config.stream),
+    ))
+}
+
+/// `junees`, `junees "<question>"` and their options.
+async fn conversation(
+    args: cli::RunArgs,
+    settings: Settings,
+    input: SharedLines,
+) -> Result<ExitCode> {
+    let config = conversation_config(&settings)?;
     let cwd = std::env::current_dir()?;
     let opened = open_session(&args.session, &config, &cwd)?;
     let mut agent = Agent::restore(
-        Box::new(provider),
+        make_provider(&config)?,
         ToolRegistry::with_defaults(&config.tools),
         AgentOptions {
             system: prompt::system_prompt(&cwd),
@@ -139,8 +292,6 @@ async fn run() -> Result<ExitCode> {
             }
         }
         None => {
-            // Shared by the prompt and the approval questions.
-            let input = SharedLines::stdin();
             if let Some(gate) = approval::for_conversation(&config, &cwd, &input) {
                 agent = agent.with_gate(Box::new(gate));
             }
@@ -151,8 +302,9 @@ async fn run() -> Result<ExitCode> {
             println!("{}", opened.status);
             let mut repl = Repl {
                 agent,
-                config: &config,
-                cwd: &cwd,
+                config,
+                settings,
+                cwd,
                 saving: args.session != SessionMode::Off,
                 session_id: opened.id,
                 cancel,
@@ -164,7 +316,7 @@ async fn run() -> Result<ExitCode> {
     }
 }
 
-/// `junees task status`, for the git repository the current folder is in.
+/// `junees status`, for the git repository the current folder is in.
 fn task_status(json: bool) -> Result<ExitCode> {
     let root = task::git::toplevel(&std::env::current_dir()?)?;
     let status = task::status::load(&root)?;
@@ -241,44 +393,55 @@ fn signal_exit(signal: i32) -> ExitCode {
     ExitCode::from(u8::try_from(128 + signal).unwrap_or(1))
 }
 
-/// `junees task init|run`, in the root of the git repository the current
-/// folder is in. SIGINT/SIGTERM stop the session that runs; `task run`
-/// then checkpoints it, records the stop and exits with 130/143.
-async fn run_task(command: TaskCommand) -> Result<ExitCode> {
+/// `junees task ...` from the command line. SIGINT/SIGTERM stop the
+/// session that runs; `task run` then checkpoints it, records the stop and
+/// exits with 130/143.
+async fn run_task(command: TaskCommand, settings: &Settings) -> Result<ExitCode> {
+    let cancel = Cancel::new();
+    let received = cancel_on_signals(Signals::install()?, cancel.clone());
+    match task_work(&command, settings, cancel).await? {
+        TaskEnd::Done => {
+            if matches!(command, TaskCommand::Init { .. }) {
+                println!("work on it with `junees task`");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        TaskEnd::Interrupted => Ok(signal_exit(received.load(Ordering::SeqCst))),
+    }
+}
+
+/// How a task command that did not fail ended.
+enum TaskEnd {
+    Done,
+    /// Stopped by `cancel`.
+    Interrupted,
+}
+
+/// `task init`, `task run`, or both (`junees task "<goal>"`), in the root
+/// of the git repository the current folder is in (the process moves
+/// there). `cancel` stops the session that runs.
+async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -> Result<TaskEnd> {
+    let lookup = |key: &str| settings.get(key);
     let backend = match command.backend() {
         Some(backend) => backend,
-        None => Backend::from_lookup(|key| std::env::var(key).ok())?,
+        None => Backend::from_lookup(lookup)?,
     };
     let (config, claude) = match backend {
-        Backend::Api => (Config::from_env()?, None),
+        Backend::Api => (Config::from_lookup(lookup)?, None),
         Backend::ClaudeCode => (
-            Config::from_env_without_key()?,
-            Some(ClaudeCode::from_lookup(|key| std::env::var(key).ok())),
+            Config::from_lookup_without_key(lookup)?,
+            Some(ClaudeCode::from_lookup(lookup)),
         ),
     };
     let root = task::git::toplevel(&std::env::current_dir()?)?;
     // The tools resolve relative paths from the process's folder.
     std::env::set_current_dir(&root)
         .with_context(|| format!("cannot change to {}", root.display()))?;
-    let provider = || -> Result<Box<dyn Provider>> {
-        Ok(Box::new(
-            AnthropicProvider::new(
-                config.api_key.clone(),
-                config.base_url.clone(),
-                config.model.clone(),
-            )?
-            .with_thinking(config.thinking_budget)
-            .with_streaming(config.stream),
-        ))
-    };
-    let budget = match &command {
-        TaskCommand::Run {
-            max_tokens,
-            max_time,
-            ..
-        } => Budget {
-            max_tokens: max_tokens.or(config.task_max_tokens),
-            max_time: max_time.or(config.task_max_time),
+    let provider = || make_provider(&config);
+    let budget = match command {
+        TaskCommand::Run(run) | TaskCommand::Start { run, .. } => Budget {
+            max_tokens: run.max_tokens.or(config.task_max_tokens),
+            max_time: run.max_time.or(config.task_max_time),
             ..Budget::default()
         },
         TaskCommand::Init { .. } | TaskCommand::Status { .. } => Budget::default(),
@@ -294,12 +457,10 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         compact_threshold: config.compact_threshold,
         provider: &provider,
         budget,
-        cancel: Cancel::new(),
-        notify: Notifier::from_env()?,
+        cancel,
+        notify: Notifier::from_lookup(lookup)?,
         claude,
     };
-    let received = cancel_on_signals(Signals::install()?, env.cancel.clone());
-    let interrupted = || signal_exit(received.load(Ordering::SeqCst));
     let mut printer = Printer::new();
     let mut reporter = |report: Report<'_>| match report {
         Report::Line(line) => {
@@ -308,28 +469,37 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         }
         Report::Event(event) => printer.event(event),
     };
-    match command {
-        TaskCommand::Init { goal, .. } => match task::init(&env, &goal, &mut reporter).await {
-            Ok(()) => Ok(ExitCode::SUCCESS),
+    let (goal, run) = match command {
+        TaskCommand::Init { goal, .. } => (Some(goal), None),
+        TaskCommand::Run(run) => (None, Some(run)),
+        TaskCommand::Start { goal, run } => (Some(goal), Some(run)),
+        TaskCommand::Status { json } => {
+            task_status(*json)?;
+            return Ok(TaskEnd::Done);
+        }
+    };
+    if let Some(goal) = goal {
+        match task::init(&env, goal, &mut reporter).await {
+            Ok(()) => {}
             Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
                 report(&err);
-                Ok(interrupted())
+                return Ok(TaskEnd::Interrupted);
             }
-            Err(err) => Err(err),
-        },
-        TaskCommand::Run { max_sessions, .. } => {
-            let stop = task::run(&env, max_sessions, &mut reporter).await?;
-            if stop.reason.is_failure() {
-                bail!("task stopped: {stop}");
-            }
-            println!("task stopped: {stop}");
-            if stop.reason == StopReason::Interrupted {
-                return Ok(interrupted());
-            }
-            Ok(ExitCode::SUCCESS)
+            Err(err) => return Err(err),
         }
-        TaskCommand::Status { json } => task_status(json),
     }
+    let Some(TaskRun { max_sessions, .. }) = run else {
+        return Ok(TaskEnd::Done);
+    };
+    let stop = task::run(&env, *max_sessions, &mut reporter).await?;
+    if stop.reason.is_failure() {
+        bail!("task stopped: {stop}");
+    }
+    println!("task stopped: {stop}");
+    if stop.reason == StopReason::Interrupted {
+        return Ok(TaskEnd::Interrupted);
+    }
+    Ok(TaskEnd::Done)
 }
 
 /// The conversation to start from and where to record it.
@@ -376,7 +546,12 @@ fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opene
     let Some(path) = path else {
         return Ok(new_session(config, cwd));
     };
-    let (session, writer) = Session::resume(&path)?;
+    resume_session(&path, cwd)
+}
+
+/// The saved session at `path`, locked for this process.
+fn resume_session(path: &Path, cwd: &Path) -> Result<Opened> {
+    let (session, writer) = Session::resume(path)?;
     if let Some(warning) = &session.warning {
         eprintln!("  !! {warning}");
     }
@@ -420,11 +595,14 @@ fn new_session(config: &Config, cwd: &Path) -> Opened {
     }
 }
 
-struct Repl<'a> {
+struct Repl {
     agent: Agent,
-    config: &'a Config,
-    cwd: &'a Path,
-    /// False with --no-session, so /reset starts another unsaved session.
+    config: Config,
+    /// Where `/task` gets its settings; `/model` and `/backend` change
+    /// them for this process only.
+    settings: Settings,
+    cwd: PathBuf,
+    /// False with --no-session, so /new starts another unsaved session.
     saving: bool,
     session_id: Option<String>,
     /// Set to cancel the turn that is running.
@@ -433,7 +611,7 @@ struct Repl<'a> {
     input: SharedLines,
 }
 
-impl Repl<'_> {
+impl Repl {
     /// Reads and handles input until /exit, Ctrl-D or two Ctrl-C in a row
     /// at the prompt. Ctrl-C during a turn cancels just that turn; SIGTERM
     /// cancels it and quits.
@@ -462,57 +640,69 @@ impl Repl<'_> {
                 println!();
                 return Ok(ExitCode::SUCCESS);
             };
-            let terminated = match line.trim() {
-                "" => false,
-                "/exit" | "/quit" => return Ok(ExitCode::SUCCESS),
-                "/help" => {
-                    println!("{}", cli::REPL_HELP);
-                    false
-                }
-                "/reset" => {
-                    self.reset();
-                    false
-                }
-                "/sessions" => {
-                    self.list_sessions();
-                    false
-                }
-                "/usage" => {
-                    let usage = self.agent.usage();
-                    println!(
-                        "input {} tokens (cache write {}, cache read {}), output {} tokens",
-                        usage.input_tokens,
-                        usage.cache_creation_input_tokens,
-                        usage.cache_read_input_tokens,
-                        usage.output_tokens
-                    );
-                    false
-                }
-                // Nothing is recorded until the summary is back, so the
-                // compaction can simply be dropped.
-                "/compact" => tokio::select! {
-                    _ = self.agent.compact(print_event) => false,
-                    signal = self.signals.next() => {
-                        eprintln!("(compaction cancelled)");
-                        signal == libc::SIGTERM
-                    }
-                },
-                "/context" => {
-                    let options = self.agent.options();
-                    println!(
-                        "context {} / {} tokens; old tool output is cleared from {} tokens",
-                        self.agent.context_tokens(),
-                        options.context_window,
-                        options.compact_limit()
-                    );
-                    false
-                }
-                input => self.turn(input).await,
+            let input = line.trim();
+            if input.is_empty() {
+                continue;
+            }
+            let terminated = match slash::parse(input) {
+                None => self.turn(input).await,
+                Some(Slash::Exit) => return Ok(ExitCode::SUCCESS),
+                Some(command) => self.command(command).await,
             };
             if terminated {
                 return Ok(signal_exit(libc::SIGTERM));
             }
         }
+    }
+
+    /// Runs a slash command; returns whether SIGTERM came meanwhile.
+    async fn command(&mut self, command: Slash) -> bool {
+        match command {
+            Slash::Help => println!("{}", cli::REPL_HELP),
+            Slash::New => self.reset(),
+            Slash::Sessions => return self.sessions().await,
+            Slash::Status => {
+                if let Err(err) = task_status(false) {
+                    report(&err);
+                }
+            }
+            Slash::Task(goal) => return self.task(goal).await,
+            Slash::Model(model) => self.model(model),
+            Slash::Backend(backend) => self.backend(backend),
+            Slash::Usage => {
+                let usage = self.agent.usage();
+                println!(
+                    "input {} tokens (cache write {}, cache read {}), output {} tokens",
+                    usage.input_tokens,
+                    usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                    usage.output_tokens
+                );
+            }
+            // Nothing is recorded until the summary is back, so the
+            // compaction can simply be dropped.
+            Slash::Compact => {
+                return tokio::select! {
+                    _ = self.agent.compact(print_event) => false,
+                    signal = self.signals.next() => {
+                        eprintln!("(compaction cancelled)");
+                        signal == libc::SIGTERM
+                    }
+                };
+            }
+            Slash::Context => {
+                let options = self.agent.options();
+                println!(
+                    "context {} / {} tokens; old tool output is cleared from {} tokens",
+                    self.agent.context_tokens(),
+                    options.context_window,
+                    options.compact_limit()
+                );
+            }
+            Slash::Bad(message) => eprintln!("{message}"),
+            Slash::Exit => {}
+        }
+        false
     }
 
     /// Runs one input. A signal cancels the turn; returns whether it was
@@ -545,34 +735,169 @@ impl Repl<'_> {
         terminated
     }
 
+    /// `/task [<goal>]`: like `junees task ["<goal>"]` in this folder, on
+    /// the backend `/backend` picked. A signal stops the task the way it
+    /// stops `junees task`; returns whether it was SIGTERM.
+    async fn task(&mut self, goal: Option<String>) -> bool {
+        let command = match goal {
+            Some(goal) => TaskCommand::Start {
+                goal,
+                run: TaskRun::default(),
+            },
+            None => TaskCommand::Run(TaskRun::default()),
+        };
+        self.cancel.reset();
+        let mut terminated = false;
+        let result = {
+            let work = task_work(&command, &self.settings, self.cancel.clone());
+            tokio::pin!(work);
+            loop {
+                tokio::select! {
+                    result = &mut work => break result,
+                    signal = self.signals.next() => {
+                        terminated |= signal == libc::SIGTERM;
+                        eprintln!(
+                            "  !! {}: stopping the task (it checkpoints the session first)",
+                            signal_name(signal)
+                        );
+                        self.cancel.cancel();
+                    }
+                }
+            }
+        };
+        // The task moved to the repository root.
+        if let Err(err) = std::env::set_current_dir(&self.cwd) {
+            eprintln!("  !! cannot go back to {}: {err}", self.cwd.display());
+        }
+        match result {
+            Ok(TaskEnd::Done) => {}
+            Ok(TaskEnd::Interrupted) => eprintln!("(task interrupted)"),
+            Err(err) => report(&err),
+        }
+        self.cancel.reset();
+        terminated
+    }
+
+    /// `/model [<name>]`: shows the model, or uses another for the rest of
+    /// this process (the conversation and `/task` on the api backend).
+    fn model(&mut self, model: Option<String>) {
+        let Some(model) = model else {
+            println!("model: {}", self.config.model);
+            return;
+        };
+        let mut config = self.config.clone();
+        config.model = model.clone();
+        match make_provider(&config) {
+            Ok(provider) => {
+                self.agent.set_provider(provider);
+                self.config = config;
+                self.settings.set_override("JUNEES_MODEL", model.as_str());
+                println!("model: {model} (this session; `junees setup` changes the default)");
+            }
+            Err(err) => report(&err),
+        }
+    }
+
+    /// `/backend [api|claude-code]`: shows what runs `/task`, or switches
+    /// it for the rest of this process. The conversation always uses the
+    /// API.
+    fn backend(&mut self, backend: Option<Backend>) {
+        if let Some(backend) = backend {
+            self.settings
+                .set_override(BACKEND_ENV, slash::backend_name(backend));
+        }
+        match Backend::from_lookup(|key| self.settings.get(key)) {
+            Ok(current) if backend.is_some() => println!(
+                "/task now runs on {} (this session; `junees setup` changes the default)",
+                slash::backend_name(current)
+            ),
+            Ok(current) => println!(
+                "/task runs on {}; the conversation always uses the API",
+                slash::backend_name(current)
+            ),
+            Err(err) => report(&err),
+        }
+    }
+
     fn reset(&mut self) {
         if !self.saving {
             self.agent.reset(None);
             println!("(new conversation, not saved)");
             return;
         }
-        let opened = new_session(self.config, self.cwd);
+        let opened = new_session(&self.config, &self.cwd);
         self.agent.reset(opened.journal);
         self.session_id = opened.id;
         println!("(new conversation) {}", opened.status);
     }
 
-    fn list_sessions(&self) {
+    /// `/sessions`: lists recent sessions and continues the one picked by
+    /// number. Returns whether SIGTERM came while it asked.
+    async fn sessions(&mut self) -> bool {
         let listed = self
             .config
             .require_home()
             .and_then(|home| session::list_recent(home, SESSIONS_LISTED));
-        match listed {
-            Ok(list) if list.is_empty() => println!("(no saved sessions)"),
-            Ok(list) => {
-                for summary in &list {
-                    let current = self.session_id.as_deref() == Some(summary.id.as_str());
-                    println!("{}", cli::session_line(summary, current));
+        let list = match listed {
+            Ok(list) if list.is_empty() => {
+                println!("(no saved sessions)");
+                return false;
+            }
+            Ok(list) => list,
+            Err(err) => {
+                report(&err);
+                return false;
+            }
+        };
+        for (n, summary) in list.iter().enumerate() {
+            let current = self.session_id.as_deref() == Some(summary.id.as_str());
+            println!("{:>3} {}", n + 1, cli::session_line(summary, current));
+        }
+        let index = loop {
+            print!("number to continue (Enter to stay here) > ");
+            let _ = std::io::stdout().flush();
+            let answer = tokio::select! {
+                line = self.input.next_line() => line.ok().flatten(),
+                signal = self.signals.next() => {
+                    println!();
+                    return signal == libc::SIGTERM;
                 }
-                println!("continue one with: junees --resume <id>");
+            };
+            let Some(answer) = answer else {
+                println!();
+                return false;
+            };
+            match slash::pick(&answer, list.len()) {
+                Ok(index) => break index,
+                Err(message) => println!("{message}"),
+            }
+        };
+        let Some(index) = index else {
+            return false;
+        };
+        let summary = &list[index];
+        if self.session_id.as_deref() == Some(summary.id.as_str()) {
+            println!("(already in this session)");
+            return false;
+        }
+        if !self.saving {
+            println!("(this conversation is not saved: --no-session)");
+            return false;
+        }
+        let opened = self
+            .config
+            .require_home()
+            .and_then(|home| session::find_by_prefix(home, &summary.id))
+            .and_then(|path| resume_session(&path, &self.cwd));
+        match opened {
+            Ok(opened) => {
+                self.agent.resume(opened.transcript, opened.journal);
+                self.session_id = opened.id;
+                println!("{}", opened.status);
             }
             Err(err) => report(&err),
         }
+        false
     }
 }
 
@@ -582,10 +907,10 @@ fn report(err: &anyhow::Error) {
         if provider_error.is_context_overflow() {
             eprintln!(
                 "hint: the conversation no longer fits the model's context window, \
-                 even after clearing old tool output and compacting. /reset starts a new one."
+                 even after clearing old tool output and compacting. /new starts a new one."
             );
         } else if provider_error.is_auth() {
-            eprintln!("hint: check ANTHROPIC_API_KEY.");
+            eprintln!("hint: check the API key (`junees setup`, or ANTHROPIC_API_KEY).");
         }
     }
 }

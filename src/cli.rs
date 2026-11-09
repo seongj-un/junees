@@ -13,13 +13,28 @@ pub const HELP: &str = "\
 junees - an AI agent in your terminal
 
 Usage:
-  junees [OPTIONS]              start an interactive session
-  junees [OPTIONS] -p <PROMPT>  run one prompt and exit
+  junees                  talk with the agent (the first run sets it up)
+  junees \"<question>\"     ask once and exit
+  junees -c               continue the last conversation in this folder
+  junees task \"<goal>\"    plan a long task in this git repository and work on it
+  junees task             keep working on the task
+  junees status           show where the task stands
+  junees setup            change the settings
+
+In the conversation, /help lists the commands (/task, /status, /sessions,
+/new, /model, /backend, ...). Settings are in $JUNEES_HOME/config.toml
+(default ~/.junees/config.toml); environment variables win over it.
+A one-word question that is also a command (`status`) needs -p.
+
+Advanced:
+  junees [OPTIONS] [-p] <PROMPT>  run one prompt and exit
   junees task init [--backend <B>] \"<GOAL>\"
-                                plan a long-running task in this git repository
-  junees task run [--backend <B>] [--max-sessions <N>] [--max-tokens <N>] [--max-time <DURATION>]
+                                only plan a long-running task
+  junees task [run] [--backend <B>] [--max-sessions <N>] [--max-tokens <N>] [--max-time <DURATION>]
                                 work on the task, one feature per session
-  junees task status [--json]   show where the task stands (read-only)
+  junees task \"<GOAL>\" [the run options]
+                                plan it, then work on it (task init + task run)
+  junees [task] status [--json] show where the task stands (read-only)
 
 Options:
   -p, --prompt <PROMPT>  run a single prompt non-interactively
@@ -44,45 +59,77 @@ signed in with your own Claude subscription. Junees only starts `claude`;
 sign in yourself first (run `claude`, then /login). It needs no
 ANTHROPIC_API_KEY, and removes the API variables from claude's environment.
 
-Environment:
-  ANTHROPIC_API_KEY   required, except for task init/run with the claude-code backend
-  ANTHROPIC_BASE_URL  API base URL (default https://api.anthropic.com)
-  JUNEES_MODEL        model id (default claude-sonnet-4-6)
-  JUNEES_MAX_TOKENS   max output tokens per model call (default 8192)
-  JUNEES_MAX_TURNS    max model calls per prompt (default 50)
-  JUNEES_CONTEXT_WINDOW     model context window in tokens (default 200000)
-  JUNEES_COMPACT_THRESHOLD  share of the window at which old tool output is
-                            cleared and the conversation compacted (default 0.8)
-  JUNEES_HOME         where Junees keeps sessions (default ~/.junees;
+Environment (each also a key of config.toml, named in brackets):
+  ANTHROPIC_API_KEY   [api_key] needed, except for tasks on the claude-code backend
+  ANTHROPIC_BASE_URL  [base_url] API base URL (default https://api.anthropic.com)
+  JUNEES_MODEL        [model] model id (default claude-sonnet-4-6)
+  JUNEES_MAX_TOKENS   [max_tokens] max output tokens per model call (default 8192)
+  JUNEES_MAX_TURNS    [max_turns] max model calls per prompt (default 50)
+  JUNEES_CONTEXT_WINDOW     [context_window] model context window in tokens (default 200000)
+  JUNEES_COMPACT_THRESHOLD  [compact_threshold] share of the window at which old tool
+                            output is cleared and the conversation compacted (default 0.8)
+  JUNEES_HOME         where Junees keeps settings and sessions (default ~/.junees;
                       with neither it nor HOME set, sessions are not saved)
-  JUNEES_APPROVAL     which tool calls the conversation mode asks about first:
-                      off, risky (default: risky commands, writes outside
+  JUNEES_APPROVAL     [approval] which tool calls the conversation mode asks about
+                      first: off, risky (default: risky commands, writes outside
                       the folder) or all (every bash/write_file/edit_file)
-  JUNEES_NOTIFY_WEBHOOK       Discord webhook URL `task run` posts to when it stops
-  JUNEES_NOTIFY_EACH_SESSION  1 to also post a line after every task session
-  JUNEES_TASK_MAX_TOKENS  default --max-tokens of task run
-  JUNEES_TASK_MAX_TIME    default --max-time of task run
-  JUNEES_BACKEND       default --backend of task init/run (api or claude-code)
-  JUNEES_CLAUDE_BIN    the claude program of the claude-code backend (default: claude)
-  JUNEES_CLAUDE_MODEL  model passed to claude with --model (default: Claude Code's own)
+  JUNEES_NOTIFY_WEBHOOK       [notify_webhook] Discord webhook URL `task run` posts to
+  JUNEES_NOTIFY_EACH_SESSION  [notify_each_session] 1 to also post after every session
+  JUNEES_TASK_MAX_TOKENS  [task_max_tokens] default --max-tokens of task run
+  JUNEES_TASK_MAX_TIME    [task_max_time] default --max-time of task run
+  JUNEES_BACKEND       [backend] default --backend of tasks (api or claude-code)
+  JUNEES_CLAUDE_BIN    [claude_bin] the claude program of the claude-code backend
+  JUNEES_CLAUDE_MODEL  [claude_model] model passed to claude with --model
+  (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
+  JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see README)
 ";
 
 pub const REPL_HELP: &str = "\
-/sessions  list recent sessions
-/reset     start a new session
-/usage     show token usage of this session
-/context   show the context size and its limit
-/compact   replace the earlier conversation with a summary
-/exit      quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
+/task <goal>       plan a long task in this git repository and work on it
+/task              keep working on the task
+/status            show where the task stands
+/sessions          list recent sessions and pick one to continue
+/new               start a new conversation (also /reset)
+/model [<name>]    show the model, or switch to another for this session
+/backend [api|claude-code]
+                   show what runs /task, or switch it for this session
+/compact           replace the earlier conversation with a summary
+/context           show the context size and its limit
+/usage             show token usage of this session
+/exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
-approval question it skips the call and cancels the turn.";
+approval question it skips the call and cancels the turn. During /task it
+stops the task like Ctrl-C in `junees task`.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Run(RunArgs),
     Task(TaskCommand),
+    /// `junees setup`: ask the setup questions again.
+    Setup,
     Help,
     Version,
+}
+
+/// How long a `task run` goes on, and on what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRun {
+    pub max_sessions: usize,
+    /// Unset parts of the budget come from the settings.
+    pub max_tokens: Option<u64>,
+    pub max_time: Option<Duration>,
+    pub backend: Option<Backend>,
+}
+
+impl Default for TaskRun {
+    fn default() -> Self {
+        Self {
+            max_sessions: DEFAULT_MAX_SESSIONS,
+            max_tokens: None,
+            max_time: None,
+            backend: None,
+        }
+    }
 }
 
 /// `junees task ...`.
@@ -93,20 +140,17 @@ pub enum TaskCommand {
         goal: String,
         backend: Option<Backend>,
     },
-    /// Work on the task for at most this many sessions, within the budget
-    /// (unset parts come from the environment).
-    Run {
-        max_sessions: usize,
-        max_tokens: Option<u64>,
-        max_time: Option<Duration>,
-        backend: Option<Backend>,
-    },
+    /// Work on the task.
+    Run(TaskRun),
+    /// Plan a new task for this goal, then work on it.
+    Start { goal: String, run: TaskRun },
     /// Show where the task stands, as text or JSON.
     Status { json: bool },
 }
 
-const TASK_USAGE: &str = "usage: junees task init [--backend api|claude-code] \"<goal>\" | \
-                          junees task run [--backend api|claude-code] [--max-sessions N] \
+const TASK_USAGE: &str = "usage: junees task \"<goal>\" | junees task | junees status; \
+                          advanced: junees task init [--backend api|claude-code] \"<goal>\" | \
+                          junees task [run] [--backend api|claude-code] [--max-sessions N] \
                           [--max-tokens N] [--max-time 2h] | \
                           junees task status [--json]";
 
@@ -114,7 +158,8 @@ impl TaskCommand {
     /// The backend asked for on the command line, if any.
     pub fn backend(&self) -> Option<Backend> {
         match self {
-            Self::Init { backend, .. } | Self::Run { backend, .. } => *backend,
+            Self::Init { backend, .. } => *backend,
+            Self::Run(run) | Self::Start { run, .. } => run.backend,
             Self::Status { .. } => None,
         }
     }
@@ -146,11 +191,29 @@ pub enum SessionMode {
     Off,
 }
 
+/// Parses the arguments after the program name. A first argument that is
+/// no command (`task`, `status`, `setup`) and no option is the prompt, as
+/// with `-p`.
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
     let mut args = args.into_iter().peekable();
-    if args.peek().is_some_and(|arg| arg == "task") {
-        args.next();
-        return parse_task(args);
+    match args.peek().map(String::as_str) {
+        Some("task") => {
+            args.next();
+            return parse_task(args);
+        }
+        Some("status") => {
+            args.next();
+            return parse_status(args);
+        }
+        Some("setup") => {
+            args.next();
+            return match args.next().as_deref() {
+                None => Ok(Command::Setup),
+                Some("-h" | "--help") => Ok(Command::Help),
+                Some(other) => bail!("setup takes no arguments (got `{other}`)"),
+            };
+        }
+        _ => {}
     }
     let mut run = RunArgs::default();
     let mut set_session = |mode: SessionMode| {
@@ -161,30 +224,59 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Ok(())
     };
     let mut prompt = None;
+    let mut set_prompt = |text: String| {
+        if prompt.is_some() {
+            bail!("give one prompt; quote it if it has spaces (\"{text}\" is extra)");
+        }
+        prompt = Some(text);
+        Ok(())
+    };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
-            "-p" | "--prompt" => {
-                prompt = Some(args.next().context("-p/--prompt needs a value")?);
-            }
+            "-p" | "--prompt" => set_prompt(args.next().context("-p/--prompt needs a value")?)?,
             "-c" | "--continue" => set_session(SessionMode::Continue)?,
             "--resume" => {
                 let id = args.next().context("--resume needs a session id")?;
                 set_session(SessionMode::Resume(id))?;
             }
             "--no-session" => set_session(SessionMode::Off)?,
-            other => bail!("unknown argument `{other}` (see --help)"),
+            // Everything after it is the prompt, even if it starts with -.
+            "--" => {
+                for text in args.by_ref() {
+                    set_prompt(text)?;
+                }
+            }
+            other if other.starts_with('-') && other != "-" => {
+                bail!(
+                    "unknown argument `{other}` (see --help; a prompt that starts with - goes after --)"
+                )
+            }
+            _ => set_prompt(arg)?,
         }
     }
     run.prompt = prompt;
     Ok(Command::Run(run))
 }
 
-fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
-    let command = match args.next().as_deref() {
+fn parse_status(args: impl Iterator<Item = String>) -> Result<Command> {
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--json" => json = true,
+            other => bail!("unknown argument `{other}` for status ({TASK_USAGE})"),
+        }
+    }
+    Ok(Command::Task(TaskCommand::Status { json }))
+}
+
+fn parse_task(mut args: std::iter::Peekable<impl Iterator<Item = String>>) -> Result<Command> {
+    let command = match args.peek().map(String::as_str) {
         Some("-h" | "--help") => return Ok(Command::Help),
         Some("init") => {
+            args.next();
             let mut goal = None;
             let mut backend = None;
             while let Some(arg) = args.next() {
@@ -204,63 +296,70 @@ fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
             }
         }
         Some("run") => {
-            let mut max_sessions = DEFAULT_MAX_SESSIONS;
-            let mut max_tokens = None;
-            let mut max_time = None;
-            let mut backend = None;
-            while let Some(arg) = args.next() {
-                match arg.as_str() {
-                    "-h" | "--help" => return Ok(Command::Help),
-                    "--backend" => backend = Some(parse_backend(args.next())?),
-                    "--max-sessions" => {
-                        let value = args.next().context("--max-sessions needs a number")?;
-                        max_sessions =
-                            value
-                                .parse()
-                                .ok()
-                                .filter(|&n: &usize| n > 0)
-                                .with_context(|| {
-                                    format!(
-                                        "--max-sessions must be a positive integer, got `{value}`"
-                                    )
-                                })?;
-                    }
-                    "--max-tokens" => {
-                        let value = args.next().context("--max-tokens needs a number")?;
-                        max_tokens = Some(positive(&value).with_context(|| {
-                            format!("--max-tokens must be a positive integer, got `{value}`")
-                        })?);
-                    }
-                    "--max-time" => {
-                        let value = args
-                            .next()
-                            .context("--max-time needs a duration such as 2h")?;
-                        max_time = Some(parse_duration(&value).context("--max-time")?);
-                    }
-                    other => bail!("unknown argument `{other}` for task run ({TASK_USAGE})"),
-                }
-            }
-            TaskCommand::Run {
-                max_sessions,
-                max_tokens,
-                max_time,
-                backend,
+            args.next();
+            match parse_task_run(args, false)? {
+                Some((run, _)) => TaskCommand::Run(run),
+                None => return Ok(Command::Help),
             }
         }
         Some("status") => {
-            let mut json = false;
-            for arg in args {
-                match arg.as_str() {
-                    "-h" | "--help" => return Ok(Command::Help),
-                    "--json" => json = true,
-                    other => bail!("unknown argument `{other}` for task status ({TASK_USAGE})"),
-                }
-            }
-            TaskCommand::Status { json }
+            args.next();
+            return parse_status(args);
         }
-        _ => bail!(TASK_USAGE),
+        // `junees task` keeps working, `junees task "<goal>"` starts.
+        _ => match parse_task_run(args, true)? {
+            Some((run, None)) => TaskCommand::Run(run),
+            Some((run, Some(goal))) => TaskCommand::Start { goal, run },
+            None => return Ok(Command::Help),
+        },
     };
     Ok(Command::Task(command))
+}
+
+/// The options of `task run`, and the goal when `with_goal`; `None` for
+/// `--help`.
+fn parse_task_run(
+    mut args: impl Iterator<Item = String>,
+    with_goal: bool,
+) -> Result<Option<(TaskRun, Option<String>)>> {
+    let mut run = TaskRun::default();
+    let mut goal: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(None),
+            "--backend" => run.backend = Some(parse_backend(args.next())?),
+            "--max-sessions" => {
+                let value = args.next().context("--max-sessions needs a number")?;
+                run.max_sessions =
+                    value
+                        .parse()
+                        .ok()
+                        .filter(|&n: &usize| n > 0)
+                        .with_context(|| {
+                            format!("--max-sessions must be a positive integer, got `{value}`")
+                        })?;
+            }
+            "--max-tokens" => {
+                let value = args.next().context("--max-tokens needs a number")?;
+                run.max_tokens = Some(positive(&value).with_context(|| {
+                    format!("--max-tokens must be a positive integer, got `{value}`")
+                })?);
+            }
+            "--max-time" => {
+                let value = args
+                    .next()
+                    .context("--max-time needs a duration such as 2h")?;
+                run.max_time = Some(parse_duration(&value).context("--max-time")?);
+            }
+            other if !with_goal || other.starts_with('-') => {
+                bail!("unknown argument `{other}` for task run ({TASK_USAGE})")
+            }
+            _ if goal.is_some() => bail!("give the task one goal; quote it (\"{arg}\" is extra)"),
+            _ if arg.trim().is_empty() => bail!("the goal is empty ({TASK_USAGE})"),
+            _ => goal = Some(arg),
+        }
+    }
+    Ok(Some((run, goal)))
 }
 
 /// A whole number above 0.
@@ -323,6 +422,47 @@ mod tests {
         );
         assert_eq!(parse(&["--help"]).unwrap(), Command::Help);
         assert_eq!(parse(&["-V"]).unwrap(), Command::Version);
+        assert_eq!(parse(&["setup"]).unwrap(), Command::Setup);
+        assert!(parse(&["setup", "now"]).is_err());
+    }
+
+    #[test]
+    fn a_first_word_that_is_no_command_is_the_prompt() {
+        assert_eq!(
+            parse(&["이 폴더에 뭐가 있어?"]).unwrap(),
+            run(Some("이 폴더에 뭐가 있어?"), SessionMode::New)
+        );
+        assert_eq!(
+            parse(&["-c", "계속"]).unwrap(),
+            run(Some("계속"), SessionMode::Continue)
+        );
+        assert_eq!(
+            parse(&["explain", "--no-session"]).unwrap(),
+            run(Some("explain"), SessionMode::Off)
+        );
+        assert_eq!(
+            parse(&["--", "-5 is negative?"]).unwrap(),
+            run(Some("-5 is negative?"), SessionMode::New)
+        );
+        assert_eq!(parse(&["-"]).unwrap(), run(Some("-"), SessionMode::New));
+        // A command word is only a prompt through -p (or after another word).
+        assert_eq!(
+            parse(&["-p", "status"]).unwrap(),
+            run(Some("status"), SessionMode::New)
+        );
+        assert_eq!(
+            parse(&["-c", "setup"]).unwrap(),
+            run(Some("setup"), SessionMode::Continue)
+        );
+        for bad in [&["one", "two"][..], &["-p", "a", "b"], &["a", "-p", "b"]] {
+            let err = parse(bad).unwrap_err();
+            assert!(
+                err.to_string().starts_with("give one prompt"),
+                "{bad:?}: {err}"
+            );
+        }
+        let err = parse(&["-x"]).unwrap_err();
+        assert!(err.to_string().contains("goes after --"), "{err}");
     }
 
     #[test]
@@ -390,6 +530,11 @@ mod tests {
             panic!("not a task command");
         };
         assert_eq!(run.backend(), Some(Backend::Api));
+        let Command::Task(start) = parse(&["task", "--backend", "claude-code", "goal"]).unwrap()
+        else {
+            panic!("not a task command");
+        };
+        assert_eq!(start.backend(), Some(Backend::ClaudeCode));
         let Command::Task(init) =
             parse(&["task", "init", "goal", "--backend", "claude-code"]).unwrap()
         else {
@@ -415,21 +560,14 @@ mod tests {
         );
         assert_eq!(
             parse(&["task", "run"]).unwrap(),
-            Command::Task(TaskCommand::Run {
-                max_sessions: DEFAULT_MAX_SESSIONS,
-                max_tokens: None,
-                max_time: None,
-                backend: None,
-            })
+            Command::Task(TaskCommand::Run(TaskRun::default()))
         );
         assert_eq!(
             parse(&["task", "run", "--max-sessions", "3"]).unwrap(),
-            Command::Task(TaskCommand::Run {
+            Command::Task(TaskCommand::Run(TaskRun {
                 max_sessions: 3,
-                max_tokens: None,
-                max_time: None,
-                backend: None,
-            })
+                ..TaskRun::default()
+            }))
         );
         assert_eq!(
             parse(&[
@@ -441,12 +579,11 @@ mod tests {
                 "2000000"
             ])
             .unwrap(),
-            Command::Task(TaskCommand::Run {
-                max_sessions: DEFAULT_MAX_SESSIONS,
+            Command::Task(TaskCommand::Run(TaskRun {
                 max_tokens: Some(2_000_000),
                 max_time: Some(Duration::from_secs(5400)),
-                backend: None,
-            })
+                ..TaskRun::default()
+            }))
         );
         assert_eq!(
             parse(&["task", "status"]).unwrap(),
@@ -457,6 +594,8 @@ mod tests {
             Command::Task(TaskCommand::Status { json: true })
         );
         assert_eq!(parse(&["task", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse(&["task", "run", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse(&["task", "goal", "-h"]).unwrap(), Command::Help);
         // Only a leading `task` is the subcommand.
         assert_eq!(
             parse(&["-p", "task"]).unwrap(),
@@ -465,10 +604,56 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_short_task_commands() {
+        // `junees task` keeps working on the task.
+        assert_eq!(
+            parse(&["task"]).unwrap(),
+            Command::Task(TaskCommand::Run(TaskRun::default()))
+        );
+        assert_eq!(
+            parse(&["task", "--max-time", "2h"]).unwrap(),
+            Command::Task(TaskCommand::Run(TaskRun {
+                max_time: Some(Duration::from_secs(7200)),
+                ..TaskRun::default()
+            }))
+        );
+        // `junees task "<goal>"` plans it and works on it.
+        assert_eq!(
+            parse(&["task", "할 일 앱을 만들어"]).unwrap(),
+            Command::Task(TaskCommand::Start {
+                goal: "할 일 앱을 만들어".into(),
+                run: TaskRun::default(),
+            })
+        );
+        assert_eq!(
+            parse(&["task", "--max-sessions", "4", "go", "--max-tokens", "9"]).unwrap(),
+            Command::Task(TaskCommand::Start {
+                goal: "go".into(),
+                run: TaskRun {
+                    max_sessions: 4,
+                    max_tokens: Some(9),
+                    ..TaskRun::default()
+                },
+            })
+        );
+        // `junees status` is `junees task status`.
+        assert_eq!(
+            parse(&["status"]).unwrap(),
+            Command::Task(TaskCommand::Status { json: false })
+        );
+        assert_eq!(
+            parse(&["status", "--json"]).unwrap(),
+            Command::Task(TaskCommand::Status { json: true })
+        );
+        assert!(parse(&["status", "now"]).is_err());
+    }
+
+    #[test]
     fn rejects_bad_task_args() {
         for bad in [
-            &["task"][..],
-            &["task", "go"],
+            &["task", "a", "b"][..],
+            &["task", " "],
+            &["task", "--max-wat", "goal"],
             &["task", "init"],
             &["task", "init", " "],
             &["task", "init", "a", "b"],
