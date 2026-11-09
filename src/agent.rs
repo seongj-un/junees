@@ -247,6 +247,7 @@ impl Agent {
             // of nothing but thinking (cut off by the token limit before
             // the model got to answer) has nothing worth keeping either.
             let answered = reply.content.iter().any(|block| !block.is_thinking());
+            let only_thought = !answered && !reply.content.is_empty();
             if answered {
                 self.record(Entry::Message(reply), &mut on_event);
             }
@@ -273,6 +274,10 @@ impl Agent {
                          thinking, so there is no answer; raise JUNEES_MAX_TOKENS or lower \
                          JUNEES_THINKING_BUDGET"
                     }));
+                } else if only_thought {
+                    on_event(Event::Warning(
+                        "the model only thought and gave no answer; ask again or rephrase",
+                    ));
                 }
                 return Ok(text);
             }
@@ -1001,6 +1006,43 @@ mod tests {
         agent.run("again", |_| {}).await.unwrap();
         assert_eq!(seen.lock().unwrap()[1][0].text(), "think hard\nagain");
         assert_valid(agent.messages());
+    }
+
+    #[tokio::test]
+    async fn a_reply_of_only_thinking_warns_that_there_is_no_answer() {
+        let provider = Scripted::new(vec![
+            Ok(CompletionResponse {
+                content: vec![thinking_block("sig")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+            Ok(CompletionResponse {
+                content: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+        ]);
+        let mut agent = agent(provider, 5);
+        let mut warnings = Vec::new();
+        let answer = agent
+            .run("hm", |event| {
+                if let Event::Warning(w) = event {
+                    warnings.push(w.to_string());
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("only thought"), "{warnings:?}");
+        assert_eq!(agent.messages(), [Message::user_text("hm")]);
+        // An empty reply is no thinking: nothing to say about it.
+        agent
+            .run("again", |event| {
+                assert!(!matches!(event, Event::Warning(_)), "{event:?}")
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
