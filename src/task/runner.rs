@@ -12,7 +12,7 @@ use super::features::{self, Ledger};
 use super::state::{State, Stop, StopReason};
 use super::tools::{MarkFeaturePassing, Verifier, session_tools};
 use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt, rejected_features_path};
-use crate::agent::{Agent, AgentOptions, Event};
+use crate::agent::{Agent, AgentOptions, Event, TurnLimit};
 use crate::cli::preview;
 use crate::message::Usage;
 use crate::provider::Provider;
@@ -297,9 +297,17 @@ pub async fn run(
                 ),
             )?;
         }
+        let passes = if newly.is_empty() {
+            format!("{passing}/{total} passing, nothing new")
+        } else {
+            format!("{passing}/{total} passing, new: {newly}")
+        };
         let summary = match &result {
-            Ok(()) if newly.is_empty() => format!("{passing}/{total} passing, nothing new"),
-            Ok(()) => format!("{passing}/{total} passing, new: {newly}"),
+            Ok(Ended::Answered) => passes,
+            Ok(Ended::TurnLimit) => format!(
+                "{passes}, ended at the turn limit ({} model calls)",
+                env.max_turns
+            ),
             Err(err) => format!("failed: {}", preview(&format!("{err:#}"), ERROR_CHARS)),
         };
         append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
@@ -340,6 +348,16 @@ pub async fn run(
     Ok(stop)
 }
 
+/// How a work session that did not fail ended.
+enum Ended {
+    /// The model gave its final answer.
+    Answered,
+    /// The model was still working when the session used up its model
+    /// calls. Its work is kept like any other session's, and a session that
+    /// keeps doing this counts towards the stall limit.
+    TurnLimit,
+}
+
 /// One work session: a fresh agent told where the task stands, with the
 /// default tools and `mark_feature_passing`. Returns how it ended and the
 /// tokens it used.
@@ -348,7 +366,7 @@ async fn work_session(
     n: u64,
     ledger: &Arc<Mutex<Ledger>>,
     report: &mut Reporter<'_>,
-) -> (Result<()>, Usage) {
+) -> (Result<Ended>, Usage) {
     let root = &env.root;
     let progress = fs::read_to_string(progress_path(root)).unwrap_or_default();
     let git_log = git::recent_log(root, GIT_LOG_LINES);
@@ -370,10 +388,14 @@ async fn work_session(
             journal_note(&journal)
         ),
     );
-    let result = agent
+    let result = match agent
         .run(prompt::WORK_INPUT, |event| report(Report::Event(event)))
         .await
-        .map(|_| ());
+    {
+        Ok(_) => Ok(Ended::Answered),
+        Err(err) if err.downcast_ref::<TurnLimit>().is_some() => Ok(Ended::TurnLimit),
+        Err(err) => Err(err),
+    };
     (result, agent.usage())
 }
 
@@ -1213,6 +1235,36 @@ mod tests {
         // The work in progress is kept in a checkpoint.
         assert_eq!(subjects(root)[0], checkpoint_message(1));
         assert_eq!(State::load(root).unwrap().stop, Some(stop));
+    }
+
+    #[tokio::test]
+    async fn a_session_at_the_turn_limit_ends_and_the_run_goes_on() {
+        let repo = task_repo(&["false", "false"]);
+        let root = repo.path();
+        // max_turns is 10 in these tests: ten replies that keep working.
+        let mut replies: Vec<Reply> = (0..10)
+            .map(|i| calls(&[write(&root.join(format!("step{i}.txt")), "x")]))
+            .collect();
+        replies.push(text("picking up from step 9"));
+        let provider = Scripted::new(replies);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 2, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(stop.session, 2);
+        assert_eq!(provider.left(), 0);
+        assert_eq!(State::load(root).unwrap().stalled, 2);
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains(
+                "- [junees] session 1: 0/2 passing, nothing new, \
+                 ended at the turn limit (10 model calls), "
+            ),
+            "{progress}"
+        );
+        // The work is kept.
+        assert_eq!(subjects(root)[1], checkpoint_message(1));
+        assert!(root.join("step9.txt").exists());
     }
 
     #[tokio::test]
