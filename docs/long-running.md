@@ -69,11 +69,12 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 보안: junees는 시작할 때 `prctl(PR_SET_DUMPABLE, 0)`으로 dump 불가 프로세스가 되어, bash가 `/proc/$PPID/environ`(또는 더 위 조상)에서 숨긴 API 키와 웹훅 URL을 읽지 못한다(PR #1부터 있던 우회로)
 
 ### 구독 백엔드 (Claude Code CLI)
-- `task init`/`task run`에 `--backend claude-code`(또는 `JUNEES_BACKEND`). 세션을 공식 `claude` CLI가 실행하고, 사용자가 자기 구독으로 직접 로그인한다(`claude` 실행 후 `/login`, 또는 `claude setup-token`). Junees는 Claude 자격 증명을 읽거나 저장하거나 보내지 않고 `claude`를 실행만 한다(약관상 허용되는 길). `ANTHROPIC_API_KEY`는 필요 없고, `claude`의 환경에서 API 변수(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`)를 지운다
-- 세션: `claude -p ... --output-format stream-json --verbose --append-system-prompt <규칙과 상태> --permission-mode acceptEdits --permission-prompts none --tools/--allowedTools Read,Edit,Write,Glob,Grep,Bash --setting-sources user --strict-mcp-config --max-turns N --disallowedTools <L4a 핵심 규칙>`. `--dangerously-skip-permissions`는 쓰지 않는다. 시작 전에 `claude --version`(2.1.259 이상) 확인, 로그인 실패 출력이면 안내와 함께 `error` 정지와 알림
+- `task init`/`task run`에 `--backend claude-code`(또는 `JUNEES_BACKEND`). 세션을 공식 `claude` CLI가 실행하고, 사용자가 자기 구독으로 직접 로그인한다(`claude` 실행 후 `/login`, 또는 `claude setup-token`). Junees는 Claude 자격 증명을 읽거나 저장하거나 보내지 않고 `claude`를 실행만 한다(약관상 허용되는 길). `ANTHROPIC_API_KEY`는 필요 없고, `claude`의 환경에서 인증 우선순위상 구독보다 앞서는 변수(API 키와 토큰, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_*` 클라우드 제공자와 그 키, `ANTHROPIC_PROFILE`과 federation 변수)를 지운다. 설정 파일의 `apiKeyHelper`/`env`는 시작할 때와 세션마다 `claude auth status --json`의 `authMethod`가 `claude.ai`/`oauth_token`인지 확인해 막는다
+- 토큰 보호: 세션마다 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`을 켜서 Claude Code가 Bash 명령의 환경에서 `CLAUDE_CODE_OAUTH_TOKEN` 등 자격 증명을 지우게 한다(Linux에서는 bubblewrap 필요, 없으면 시작 경고). 사용자가 끄면 그대로 넘기고 시작 경고
+- 세션: `claude -p ... --output-format stream-json --verbose --append-system-prompt <규칙과 상태> --permission-mode acceptEdits --permission-prompts none --tools/--allowedTools Read,Edit,Write,Glob,Grep,Bash --setting-sources user --strict-mcp-config --max-turns N --disallowedTools <L4a 핵심 규칙>`. `--dangerously-skip-permissions`는 쓰지 않는다. 시작 전에 `claude --version`(2.1.259 이상) 확인, 로그인 실패(마지막 모델 호출의 인증 오류나 `auth status`)면 안내와 함께 `error` 정지와 알림
 - `mark_feature_passing`이 없으므로 세션 뒤 하네스가 통과하지 않은 기능의 verify를 직접 실행해 기록한다(취소, 로그인 실패면 건너뜀, 시간 예산을 verify마다 확인). 나머지 하네스 규칙(목록 되돌리기, 체크포인트, 정지 조건, 재검증, 크래시 복구, run.log, 알림)은 그대로
-- stream-json의 응답별 usage로 세션 중 예산을 확인하고(넘으면 SIGINT, 유예 뒤 SIGKILL), 끝나면 `result`의 `modelUsage`/`usage`를 누적. 취소도 같은 방식으로 프로세스 그룹을 끝내고 `interrupted`. 원본 출력은 `.junees/sessions/<이름>.jsonl`(git 제외), 비용 추정과 Claude Code 세션 id는 run.log
-- 한계: Claude Code 권한 규칙은 쓰인 단어만 맞추므로 Junees bash 정책보다 약하다(`/usr/bin/sudo`, `git -C . push --force`, `bash -c`, fork bomb 등). 구독 사용 한도는 알 수 없다. 실제 `claude`로는 테스트하지 않았다(가짜 실행 파일로 검증)
+- stream-json의 응답별 usage로 세션 중 예산을 확인하고(넘으면 SIGINT, 유예 뒤 SIGKILL), 끝나면 `result`의 `modelUsage`/`usage`를 누적. 취소도 같은 방식이고 `interrupted`. 정지할 때는 SIGINT 전에, 그리고 SIGKILL 전에 한 번 더 `claude`의 자손 프로세스(별도 세션으로 뜬 Bash 명령 포함)를 SIGSTOP으로 멈춘 뒤 SIGKILL한다. 원본 출력은 `.junees/sessions/<이름>.jsonl`(git 제외), 비용 추정과 Claude Code 세션 id는 run.log
+- 한계: Claude Code 권한 규칙은 쓰인 단어만 맞추므로 Junees bash 정책보다 약하다(`/usr/bin/sudo`, `git -C . push --force`, `bash -c`, fork bomb 등). 구독 사용 한도는 알 수 없다(한도에 걸리면 `error` 정지, 별도 정지 이유는 다음 PR). 정지 전에 `claude`가 스스로 죽으면 그 명령은 남는다. 실제 `claude`로는 테스트하지 않았다(가짜 실행 파일로 검증)
 
 ## 상태
 

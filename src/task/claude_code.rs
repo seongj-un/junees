@@ -7,9 +7,12 @@
 //! copies, stores or sends Claude credentials (`~/.claude`,
 //! `CLAUDE_CODE_OAUTH_TOKEN`), and its own API client does not pretend to be
 //! Claude Code. A `CLAUDE_CODE_OAUTH_TOKEN` in the user's environment
-//! reaches `claude` the way every other variable does; the API credentials
-//! in [`API_ENV_VARS`] do not, because Claude Code would bill them instead
-//! of the subscription.
+//! reaches `claude` the way every other variable does, and Claude Code is
+//! told to keep it from the commands it runs ([`SCRUB_ENV`]); the
+//! variables in [`API_ENV_VARS`] do not reach it, because Claude Code
+//! would bill them instead of the subscription, and
+//! [`ClaudeCode::check_auth`] refuses any other sign-in before each
+//! session.
 //!
 //! A session is one `claude -p` run with `--output-format stream-json` (see
 //! [`ClaudeCode::arguments`]). Its events are shown like an agent's (text,
