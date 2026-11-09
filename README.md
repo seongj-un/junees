@@ -39,9 +39,10 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - `--resume`으로 다른 폴더에서 시작한 세션을 열면 `resumed <id> (N messages, started in <폴더>)`로 알려 준다. 기록 속 상대 경로는 그 폴더 기준이다.
 - 세션 파일은 그 세션을 쓰는 Junees가 `flock`으로 잠근다. 아직 실행 중인 세션을 다른 터미널에서 `-c`나 `--resume`으로 열면 "session <id> is in use by another Junees" 오류로 끝나고 파일은 건드리지 않는다. 프로세스가 죽으면 잠금은 커널이 풀어 준다.
 - 이어 갈 때 마지막 줄이 줄바꿈 없이 끝나고 읽히지 않으면(쓰는 도중 죽은 흔적) 그 줄만 버린다. 줄바꿈까지 있는 줄이 읽히지 않으면 위치와 상관없이 오류로 멈추고 파일을 고치지 않는다. 도구 실행 중에 끊겨서 결과가 없는 도구 호출은 `interrupted` 오류 결과로 채우고 그것도 기록한다.
-- 첫 줄(`meta`)에 기록 형식 버전 `format`(현재 2)이 있고, 각 줄에 기록 시각 `ts`(unix 초)가 붙는다. 이 버전보다 새 형식의 세션은 "written by a newer Junees" 오류로 열지 않는다. 형식 1(L1) 세션도 그대로 읽고 이어 쓴다.
+- 첫 줄(`meta`)에 기록 형식 버전 `format`(현재 3)이 있고, 각 줄에 기록 시각 `ts`(unix 초)가 붙는다. 이 버전보다 새 형식의 세션은 "written by a newer Junees" 오류로 열지 않는다. 형식 1(L1) 세션도 그대로 읽고 이어 쓴다.
 - 이어 쓸 때 첫 줄은 바꾸지 않으므로(덧붙이기만 함), 형식 1 세션을 이 버전으로 이어 쓴 뒤 L1 바이너리로 열면 "newer Junees"가 아니라 `line N is corrupt` 오류가 난다(파일은 그대로). 이 버전부터는 모르는 종류의 항목을 만나면 "continued by a newer Junees" 오류로 원인을 알려 준다.
-- 항목 종류: `meta`, `message`, `append_text`, `usage`, 그리고 형식 2에서 추가된 `clear_tool_results`, `compact`, `summary_usage`(아래 컨텍스트 관리). 기록을 바꾸는 일도 항목으로 덧붙이기만 하고 파일을 새로 쓰지 않으므로, 재생 결과가 실행 중 기록과 같다.
+- 항목 종류: `meta`, `message`, `append_text`, `usage`, 그리고 형식 2에서 추가된 `clear_tool_results`, `compact`, `summary_usage`(아래 컨텍스트 관리).
+- 형식 3: 메시지 안의 thinking, redacted_thinking, 서버 도구 블록처럼 Junees가 직접 다루지 않는 블록을 API가 보낸 JSON 그대로 저장한다(아래 확장 사고). 이전 버전은 이런 블록을 API가 거절하는 자리표시로 읽기 때문에 형식을 올렸고, 이전 바이너리는 형식 3 세션을 "newer Junees" 오류로 열지 않는다. 형식 1, 2 세션도 그대로 읽는다. 이런 세션을 이 버전으로 이어 쓰면 첫 새 줄 앞에 `{"type":"format","format":3}` 항목을 한 번 덧붙인다. 이전 바이너리는 이 모르는 항목에서 "continued by a newer Junees" 오류로 멈추므로, thinking 블록을 자리표시로 잘못 읽어 400을 받는 일이 없다. 기록을 바꾸는 일도 항목으로 덧붙이기만 하고 파일을 새로 쓰지 않으므로, 재생 결과가 실행 중 기록과 같다.
 - 세션 파일에는 도구 출력이 그대로 들어가므로 파일은 `0600`, 새로 만드는 `$JUNEES_HOME`과 `sessions` 폴더는 `0700`으로 만든다.
 - `JUNEES_HOME`과 `HOME`이 둘 다 없으면(cron, 일부 서비스와 컨테이너) 기록 없이 실행하고 "session not saved" 한 줄로 알린다. 이때 `-c`와 `--resume`만 오류다.
 - 토큰 사용량도 기록되고, 이어 가면 그 세션의 누적값부터 다시 센다.
@@ -69,14 +70,25 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - 알림: `JUNEES_NOTIFY_WEBHOOK`에 디스코드 웹훅 URL을 넣으면 `task run`이 정지 이유를 기록한 뒤 웹훅에 한 번 POST한다. 내용은 저장소 이름, 정지 이유(키와 문장), 통과 수/전체, 세션 수, 누적 토큰. `JUNEES_NOTIFY_EACH_SESSION=1`이면 세션이 끝날 때마다 `session N done: ...` 한 줄도 보낸다 세션 알림도 그 세션의 토큰과 (마지막 세션이면) 정지 기록을 `state.json`에 저장한 뒤에 보내므로, 알림을 기다리는 동안 프로세스가 죽어도 기록은 남는다. 예산 소진(`budget`)과 시그널(`interrupted`) 정지도 같은 형식으로 알린다. 시그널을 받은 뒤에는 세션 한 줄 알림은 건너뛰고 정지 알림만 보낸다(두 번째 시그널은 알림을 기다리지 않고 바로 끝낸다). 본문은 `{"content": "...", "allowed_mentions": {"parse": []}}`(멘션 알림 없음)이고, 저장소 이름, 정지 문장, 세션 요약, 오류처럼 바뀌는 부분은 인라인 코드(`` ` ``)로 감싸 마크다운 링크나 서식이 적용되지 않게 한다(백틱은 `'`로, 줄바꿈은 공백으로 바꾸고 한 부분은 1500자까지). `content`는 2000자에서 자른다(UTF-16 단위로 세어 이모지도 안전). 요청 하나의 제한 시간은 10초, 리다이렉트는 따라가지 않는다. 실패(연결 실패, 시간 초과, 2xx가 아닌 응답)는 `!! notification to <호스트> failed: ...` 경고만 띄우고 종료 코드는 바꾸지 않는다. URL에는 웹훅 토큰이 들어 있어서 경고와 오류에는 호스트만 나오고, 세션의 `bash`와 하네스 git에도 이 변수를 넘기지 않는다. 정지를 기록하기 전에 실패하면(작업 트리가 더러움, 기능 목록을 읽지 못함, 상태 파일을 쓰지 못함 등) `task in <저장소> run failed: <오류>` 한 줄을 대신 보낸다. 설정 오류(API 키 없음 등)처럼 `task run`이 작업을 열기도 전에 끝나는 경우는 알림이 없다.
 - 세션의 `bash`와 verify 명령에는 대화 모드와 같은 명령 정책과 숨김 변수 설정(`JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`, `JUNEES_HIDDEN_ENV`)이 걸리고, 세션의 컨텍스트 관리도 같은 설정(`JUNEES_CONTEXT_WINDOW`, `JUNEES_COMPACT_THRESHOLD`)을 쓴다. 정책에 막힌 verify 명령은 실패로 친다.
 
+### 확장 사고
+
+`JUNEES_THINKING_BUDGET`을 1024 이상으로 주면 모델 호출마다 `thinking: {"type": "enabled", "budget_tokens": N}`을 보낸다(`task` 세션 포함, 압축 요약 호출 제외). 사고 토큰도 출력 한도에 들어가므로 예산은 `JUNEES_MAX_TOKENS`보다 작아야 한다.
+
+- 응답의 `thinking`, `redacted_thinking` 블록은 내용 대신 `(thinking...)` 한 줄로만 알린다.
+- 이 블록들(그리고 서버 도구 블록 같은, Junees가 직접 다루지 않는 모든 블록)은 받은 JSON 그대로 기록과 세션 파일에 남고, 다음 요청에 그대로 다시 보낸다. 도구 호출 턴의 thinking 블록은 `signature`까지 고치지 않고 돌려보내야 API가 받아 준다.
+- 도구 결과 비우기와 압축은 기록 전체의 `thinking`, `redacted_thinking` 블록을 지운다(텍스트와 도구 호출은 남긴다). Claude 5.1 이후 모델은 돌려받은 thinking 블록 앞(시스템 프롬프트, 도구, 앞선 메시지)이 그 블록을 만들 때와 같은지 확인하고, 달라졌으면 그 블록과 뒤의 모든 thinking 블록을 거절한다(400). 비우기와 압축은 앞부분을 고치므로, 남길 수 있는 thinking 블록이 없다. 그 뒤에 나온 thinking 블록은 다음 변경 때까지 그대로 보낸다. Claude 5 모델은 `JUNEES_THINKING_BUDGET=0`이어도 기본으로 생각하므로 이 규칙이 늘 적용된다.
+- 예산을 켠 수동 모드는 예외다. 이 방식을 받는 모델(Claude 4.6 이하)은 앞부분 검사를 하지 않는 대신, 진행 중인 턴이 thinking 블록으로 시작해야 하고 thinking은 턴의 첫 응답에만 나온다. 그래서 비우기와 압축이 thinking 블록을 지우지 않고(기록 항목에 `keep_thinking: true`), 입력이 하나뿐인 턴 안에서 압축할 때는 꼬리를 남기지 않고 마지막 도구 결과까지 턴 전체를 요약해 `user(요약 + 원래 입력)` 하나로 만든다. 모델은 그 턴을 thinking부터 다시 시작한다. 사용자 입력 앞에서 자르는 경우는 같다.
+- 응답이 사고 중에 출력 한도(`max_tokens`)에 걸려 thinking 블록만 남으면 그 응답은 기록하지 않고, `JUNEES_MAX_TOKENS`를 올리거나 `JUNEES_THINKING_BUDGET`을 낮추라는 경고를 띄운다(기록은 입력으로 끝나 다음 입력이 거기에 붙는다). 한도에 걸리지 않았는데 thinking만 온 응답도 기록하지 않고, 모델이 생각만 하고 답하지 않았다는 경고를 띄운다.
+- `type: "enabled"` 방식은 Claude 4.6 모델(기본 `claude-sonnet-4-6`)에서는 동작하지만 폐기 예정이고, 4.7 이후 모델은 400으로 거절한다. 그런 모델에서는 켜지 않는다. 켜면 오류 메시지 끝에 `JUNEES_THINKING_BUDGET`을 0으로 하라는 안내가 붙는다(adaptive thinking은 아직 지원하지 않음. Claude 5 모델은 설정 없이도 adaptive로 생각한다).
+
 ### 컨텍스트 관리
 
 긴 작업에서도 대화가 모델의 컨텍스트 창을 넘지 않게 하고, 반복되는 앞부분은 캐시한다.
 
-- 프롬프트 캐싱: 매 요청에서 도구 목록의 마지막 도구, 시스템 프롬프트, 마지막 메시지의 마지막 블록에 `cache_control: ephemeral`을 붙인다. 한 번만 보내는 요약 호출에는 붙이지 않는다(캐시 쓰기는 일반 입력보다 비싸다). 응답의 캐시 쓰기/읽기 토큰은 `/usage`에 따로 나온다.
+- 프롬프트 캐싱: 매 요청에서 도구 목록의 마지막 도구, 시스템 프롬프트, 마지막 메시지의 마지막 일반 블록(텍스트, 도구 호출, 도구 결과)에 `cache_control: ephemeral`을 붙인다. thinking 블록에는 붙일 수 없어서, 그런 블록은 건너뛰고 그 앞의 일반 블록에 붙인다. 한 번만 보내는 요약 호출에는 붙이지 않는다(캐시 쓰기는 일반 입력보다 비싸다). 응답의 캐시 쓰기/읽기 토큰은 `/usage`에 따로 나온다.
 - 컨텍스트 크기: 마지막 응답의 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`. 세션 기록의 `usage` 항목에서 복원되므로 이어 가도 유지된다. 한도는 `JUNEES_CONTEXT_WINDOW` x `JUNEES_COMPACT_THRESHOLD`(기본 200000 x 0.8 = 160000).
-- 1차 대응(오래된 도구 결과 비우기): 모델 호출 직전에 크기가 한도 이상이면, 도구 결과가 든 메시지 중 최근 3개를 뺀 이전 것들의 출력을 `[tool output cleared to save context]`로 바꾼다. `tool_use_id`와 `is_error`는 그대로라 호출/결과 짝이 유지된다. 기록 항목은 `clear_tool_results { upto }`.
-- 2차 대응(압축): 비울 것이 없거나, 비운 뒤 다음 응답에서도 한도 이상이면 앞부분을 같은 모델로 요약한다. 꼬리는 최근 두 사용자 입력(안 되면 마지막 입력)부터 끝까지이고, 도구 결과가 든 메시지나 도구 호출 바로 뒤에서는 자르지 않는다. 입력이 첫 메시지 하나뿐인 긴 턴(`-p` 한 번으로 끝까지 가는 작업 등)은 그 턴 안에서 자른다: 도구 결과만 든 user 메시지 바로 다음 assistant 메시지(앞의 호출이 모두 결과를 받은 지점)에서, 최근 도구 왕복 두 번(안 되면 한 번)을 남긴다. 이때는 요약과 그 턴의 원래 입력(원문 그대로)을 담은 user 메시지를 꼬리 앞에 새로 넣는다. 사용자 입력에서 자를 수 있으면 그쪽을 먼저 쓴다. 요약 호출은 도구 없이, 요약 전용 시스템 프롬프트로, 앞부분을 텍스트로 옮긴 user 메시지 하나를 보낸다(`max_tokens` 4096). 요약은 꼬리 첫 user 메시지 맨 앞에 `[Summary of the earlier conversation]` 블록으로 들어가 역할 교대가 유지된다. 기록 항목은 `compact { summary, keep_from }`이고, 요약 호출의 사용량은 `summary_usage`로 남아 `/usage`에는 더해지지만 컨텍스트 크기에는 쓰이지 않는다. 압축하면 `(compacted the conversation: N messages -> M)` 한 줄이 나온다.
+- 1차 대응(오래된 도구 결과 비우기): 모델 호출 직전에 크기가 한도 이상이면, 도구 결과가 든 메시지 중 최근 3개를 뺀 이전 것들의 출력을 `[tool output cleared to save context]`로 바꾼다. `tool_use_id`와 `is_error`는 그대로라 호출/결과 짝이 유지된다. 기록 항목은 `clear_tool_results { upto }`(수동 thinking 모드면 `keep_thinking: true`, 위 확장 사고 참고).
+- 2차 대응(압축): 비울 것이 없거나, 비운 뒤 다음 응답에서도 한도 이상이면 앞부분을 같은 모델로 요약한다. 꼬리는 최근 두 사용자 입력(안 되면 마지막 입력)부터 끝까지이고, 도구 결과가 든 메시지나 도구 호출 바로 뒤에서는 자르지 않는다. 입력이 첫 메시지 하나뿐인 긴 턴(`-p` 한 번으로 끝까지 가는 작업 등)은 그 턴 안에서 자른다: 도구 결과만 든 user 메시지 바로 다음 assistant 메시지(앞의 호출이 모두 결과를 받은 지점)에서, 최근 도구 왕복 두 번(안 되면 한 번)을 남긴다. 이때는 요약과 그 턴의 원래 입력(원문 그대로)을 담은 user 메시지를 꼬리 앞에 새로 넣는다. 사용자 입력에서 자를 수 있으면 그쪽을 먼저 쓴다. 요약 호출은 도구 없이, 사고(thinking) 없이, 요약 전용 시스템 프롬프트로, 앞부분을 텍스트로 옮긴 user 메시지 하나를 보낸다(`max_tokens` 4096). 텍스트로 옮길 때 thinking 블록은 빼고, 다른 원본 블록은 `[assistant: server_tool_use block]`처럼 종류만 적는다. 요약은 꼬리 첫 user 메시지 맨 앞에 `[Summary of the earlier conversation]` 블록으로 들어가 역할 교대가 유지된다. 기록 항목은 `compact { summary, keep_from }`이고, 요약 호출의 사용량은 `summary_usage`로 남아 `/usage`에는 더해지지만 컨텍스트 크기에는 쓰이지 않는다. 압축하면 `(compacted the conversation: N messages -> M)` 한 줄이 나온다.
 - 요약 호출이 실패하거나, 빈 요약이 오거나, 요약이 출력 한도(`max_tokens`)에 걸려 잘리면 경고만 띄우고 기록은 그대로 둔다(요약 호출 사용량은 더한다).
 - `/compact`는 한도와 상관없이 지금 압축한다.
 - API가 컨텍스트 초과(400 "prompt is too long")로 거절하면, 크기 추적과 상관없이 비우기와 압축을 하고, 이어서 최근 3개를 포함한 모든 도구 결과도 비운다(한 응답의 병렬 `read_file` 결과처럼 최근 결과가 원인일 수 있어서). 줄어든 게 있으면 한 번만 다시 보내고, 그래도 실패하면 오류로 끝난다.
@@ -90,6 +102,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `JUNEES_MAX_TURNS` | `50` | 입력 하나당 최대 모델 호출 횟수 |
 | `JUNEES_CONTEXT_WINDOW` | `200000` | 모델의 컨텍스트 창 크기(토큰) |
 | `JUNEES_COMPACT_THRESHOLD` | `0.8` | 컨텍스트 창 중 이 비율부터 도구 결과 비우기/압축 (0 초과 1 이하) |
+| `JUNEES_THINKING_BUDGET` | `0` | 확장 사고(extended thinking) 토큰 예산. `0`이면 끔. 켜려면 1024 이상이고 `JUNEES_MAX_TOKENS`보다 작아야 한다(아니면 시작할 때 오류) |
 | `JUNEES_HOME` | `~/.junees` | 세션 기록 등 상태를 두는 폴더 |
 | `JUNEES_DENY_COMMANDS` | (없음) | `bash`에서 추가로 막을 명령 접두사, 쉼표 구분 (예: `docker rm,kubectl delete`) |
 | `JUNEES_ALLOW_DANGEROUS` | `0` | `1`이면 기본 명령 차단 규칙을 끈다 (사용자 책임) |
@@ -152,17 +165,17 @@ src/
     status.rs          task status (읽기 전용, 텍스트/JSON)
     prompt.rs          초기화/작업 세션 프롬프트
     git.rs             저장소 확인, 커밋, 로그
-  message.rs         대화 메시지 타입 (Messages API 형식)
+  message.rs         대화 메시지 타입 (Messages API 형식, 모르는 블록은 원본 JSON 그대로)
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
-  provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시)
+  provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정)
   tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책(policy.rs)
   config.rs          환경 변수 설정 (도구 설정 ToolSettings 포함)
   prompt.rs          시스템 프롬프트
   cli.rs             인자 파싱(task 서브커맨드 포함), 출력 보조 함수
 tests/
   common/              테스트용 가짜 Anthropic API 서버
-  anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증
-  session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행 검증
+  anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
+  session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행, 이어 간 세션의 thinking 블록 보존 검증
   secret_env.rs        기본 bash에서 API 키와 웹훅 URL이 보이지 않는지 검증
   hidden_env.rs        JUNEES_HIDDEN_ENV로 지정한 변수가 bash에서 보이지 않는지 검증
   proc_environ.rs      실제 바이너리의 bash 손자 프로세스가 조상들의 /proc/<pid>/environ에서 API 키와 웹훅 URL을 읽지 못하는지 검증

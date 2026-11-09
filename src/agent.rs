@@ -34,6 +34,10 @@ impl AgentOptions {
 #[derive(Debug)]
 pub enum Event<'a> {
     Text(&'a str),
+    /// The model thought before going on (a `thinking` or
+    /// `redacted_thinking` block). The block is kept and sent back, but its
+    /// content is not shown.
+    Thinking,
     /// Something the user should know about, such as a cut-off response.
     Warning(&'a str),
     ToolCall {
@@ -229,6 +233,7 @@ impl Agent {
                     ContentBlock::ToolUse { id, name, input } => {
                         tool_calls.push((id.clone(), name.clone(), input.clone()));
                     }
+                    block if block.is_thinking() => on_event(Event::Thinking),
                     _ => {}
                 }
             }
@@ -238,8 +243,12 @@ impl Agent {
                 content: response.content,
             };
             let text = reply.text();
-            // The API rejects empty assistant turns in the history.
-            if !reply.content.is_empty() {
+            // The API rejects empty assistant turns in the history. A reply
+            // of nothing but thinking (cut off by the token limit before
+            // the model got to answer) has nothing worth keeping either.
+            let answered = reply.content.iter().any(|block| !block.is_thinking());
+            let only_thought = !answered && !reply.content.is_empty();
+            if answered {
                 self.record(Entry::Message(reply), &mut on_event);
             }
 
@@ -258,8 +267,16 @@ impl Agent {
 
             if tool_calls.is_empty() {
                 if response.stop_reason == StopReason::MaxTokens {
+                    on_event(Event::Warning(if answered {
+                        "the answer hit the output token limit and may be cut off"
+                    } else {
+                        "the response hit the output token limit while the model was still \
+                         thinking, so there is no answer; raise JUNEES_MAX_TOKENS or lower \
+                         JUNEES_THINKING_BUDGET"
+                    }));
+                } else if only_thought {
                     on_event(Event::Warning(
-                        "the answer hit the output token limit and may be cut off",
+                        "the model only thought and gave no answer; ask again or rephrase",
                     ));
                 }
                 return Ok(text);
@@ -372,6 +389,7 @@ impl Agent {
                 tools: specs,
                 max_tokens: self.options.max_tokens,
                 cache: true,
+                thinking: true,
             })
             .await
     }
@@ -384,7 +402,10 @@ impl Agent {
     async fn shrink(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
         let cleared = self.clear_tool_results(on_event);
         let compacted = self.summarize(on_event).await;
-        let cleared_latest = match self.transcript.clear_entry_keeping(0) {
+        let cleared_latest = match self
+            .transcript
+            .clear_entry_keeping(0, self.provider.manual_thinking())
+        {
             Some(entry) => {
                 self.record(entry, on_event);
                 true
@@ -420,7 +441,11 @@ impl Agent {
     /// Returns whether it did; if there is nothing to compact yet or the
     /// summary fails, it says so in a warning and changes nothing.
     pub async fn compact(&mut self, mut on_event: impl FnMut(Event<'_>)) -> bool {
-        if self.transcript.compact_point().is_none() {
+        if self
+            .transcript
+            .compact_point(self.provider.manual_thinking())
+            .is_none()
+        {
             on_event(Event::Warning(
                 "nothing to compact yet: the conversation is too short to summarize",
             ));
@@ -431,7 +456,8 @@ impl Agent {
 
     /// Compacts at [`Transcript::compact_point`], if there is one.
     async fn summarize(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
-        let Some(keep_from) = self.transcript.compact_point() else {
+        let manual_thinking = self.provider.manual_thinking();
+        let Some(keep_from) = self.transcript.compact_point(manual_thinking) else {
             return false;
         };
         let request = [context::summary_request(
@@ -447,6 +473,9 @@ impl Agent {
                 // The summarized prefix is sent once; caching it would only
                 // add the cost of a cache write.
                 cache: false,
+                // Its own small output limit leaves no room for a thinking
+                // budget, and a summary needs none.
+                thinking: false,
             })
             .await;
         let response = match result {
@@ -482,7 +511,12 @@ impl Agent {
         }
 
         let before_messages = self.transcript.messages.len();
-        self.record(Entry::Compact { summary, keep_from }, on_event);
+        let entry = Entry::Compact {
+            summary,
+            keep_from,
+            keep_thinking: manual_thinking,
+        };
+        self.record(entry, on_event);
         self.cleared = false;
         on_event(Event::Compacted {
             before_messages,
@@ -494,7 +528,7 @@ impl Agent {
     /// Clears the output of all but the latest tool results. Returns
     /// whether there was anything to clear.
     fn clear_tool_results(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
-        match self.transcript.clear_entry() {
+        match self.transcript.clear_entry(self.provider.manual_thinking()) {
             Some(entry) => {
                 self.record(entry, on_event);
                 true
@@ -536,8 +570,9 @@ mod tests {
     type Reply = std::result::Result<CompletionResponse, ProviderError>;
     use crate::tools::Tool;
 
-    /// System prompt, tool count, max_tokens and caching of a request.
-    type Settings = (String, usize, u32, bool);
+    /// System prompt, tool count, max_tokens, caching and thinking of a
+    /// request.
+    type Settings = (String, usize, u32, bool, bool);
 
     /// Replays canned responses and records the history it was sent.
     #[derive(Clone, Default)]
@@ -545,6 +580,8 @@ mod tests {
         responses: Arc<Mutex<VecDeque<Reply>>>,
         seen: Arc<Mutex<Vec<Vec<Message>>>>,
         settings: Arc<Mutex<Vec<Settings>>>,
+        /// What [`Provider::manual_thinking`] says.
+        manual_thinking: bool,
     }
 
     impl Scripted {
@@ -568,12 +605,17 @@ mod tests {
                 request.tools.len(),
                 request.max_tokens,
                 request.cache,
+                request.thinking,
             ));
             self.responses
                 .lock()
                 .unwrap()
                 .pop_front()
                 .expect("no scripted response left")
+        }
+
+        fn manual_thinking(&self) -> bool {
+            self.manual_thinking
         }
     }
 
@@ -899,6 +941,108 @@ mod tests {
             .unwrap();
         assert_eq!(answer, "half an ans");
         assert!(warned);
+    }
+
+    fn thinking_block(signature: &str) -> ContentBlock {
+        ContentBlock::Other(json!({"type": "thinking", "thinking": "first upper it",
+                                   "signature": signature}))
+    }
+
+    #[tokio::test]
+    async fn thinking_blocks_are_reported_kept_and_sent_back() {
+        let redacted = ContentBlock::Other(json!({"type": "redacted_thinking", "data": "x"}));
+        let mut call = tool_use("toolu_1", "upper", json!({"text": "abc"}));
+        if let Ok(response) = &mut call {
+            response
+                .content
+                .splice(0..0, [thinking_block("sig-1"), redacted]);
+        }
+        let reply = call.as_ref().unwrap().content.clone();
+        let provider = Scripted::new(vec![call, text("ABC")]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let mut events = Vec::new();
+        agent
+            .run("shout", |event| events.push(format!("{event:?}")))
+            .await
+            .unwrap();
+
+        // Reported in the order they came, ahead of the text and the call.
+        assert_eq!(events[..2], ["Thinking", "Thinking"]);
+        assert!(events[2].starts_with("Text"), "{events:?}");
+        assert!(events[3].starts_with("ToolCall"), "{events:?}");
+        assert_eq!(agent.messages()[1].content, reply);
+        assert_eq!(seen.lock().unwrap()[1][1].content, reply);
+        assert_valid(agent.messages());
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_while_thinking_is_not_stored() {
+        let provider = Scripted::new(vec![
+            Ok(CompletionResponse {
+                content: vec![thinking_block("")],
+                stop_reason: StopReason::MaxTokens,
+                usage: Usage::default(),
+            }),
+            text("ok"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let mut warnings = Vec::new();
+        let answer = agent
+            .run("think hard", |event| {
+                if let Event::Warning(w) = event {
+                    warnings.push(w.to_string());
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("still thinking"), "{warnings:?}");
+        assert_eq!(agent.messages(), [Message::user_text("think hard")]);
+
+        // The next input joins the input left without an answer.
+        agent.run("again", |_| {}).await.unwrap();
+        assert_eq!(seen.lock().unwrap()[1][0].text(), "think hard\nagain");
+        assert_valid(agent.messages());
+    }
+
+    #[tokio::test]
+    async fn a_reply_of_only_thinking_warns_that_there_is_no_answer() {
+        let provider = Scripted::new(vec![
+            Ok(CompletionResponse {
+                content: vec![thinking_block("sig")],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+            Ok(CompletionResponse {
+                content: vec![],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+        ]);
+        let mut agent = agent(provider, 5);
+        let mut warnings = Vec::new();
+        let answer = agent
+            .run("hm", |event| {
+                if let Event::Warning(w) = event {
+                    warnings.push(w.to_string());
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("only thought"), "{warnings:?}");
+        assert_eq!(agent.messages(), [Message::user_text("hm")]);
+        // An empty reply is no thinking: nothing to say about it.
+        agent
+            .run("again", |event| {
+                assert!(!matches!(event, Event::Warning(_)), "{event:?}")
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1241,10 +1385,106 @@ mod tests {
         assert_eq!(
             clears,
             [
-                &Entry::ClearToolResults { upto: 4 },
-                &Entry::ClearToolResults { upto: 8 }
+                &Entry::ClearToolResults {
+                    upto: 4,
+                    keep_thinking: false
+                },
+                &Entry::ClearToolResults {
+                    upto: 8,
+                    keep_thinking: false
+                }
             ]
         );
+        assert_valid(agent.messages());
+        assert_eq!(replay(entries), agent.transcript);
+    }
+
+    fn thinking_in(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(|block| block.is_thinking())
+            .map(|block| match block {
+                ContentBlock::Other(value) => value["signature"].to_string(),
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn thinking_is_not_sent_back_after_tool_output_was_cleared() {
+        // Every reply thinks first, as Claude 5 models do by default.
+        let mut script = resized(tool_rounds(6, 1), &[100, 100, 100, 900, 100, 100]);
+        for (i, reply) in script.iter_mut().enumerate() {
+            if let Ok(response) = reply {
+                let signature = format!("sig-{}", i + 1);
+                response.content.insert(0, thinking_block(&signature));
+            }
+        }
+        script.push(sized(text("done"), 100));
+        let provider = Scripted::new(script);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        agent.run("go", |_| {}).await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 7);
+        // Sent back unchanged while nothing before them changed.
+        assert_eq!(
+            thinking_in(&seen[3]),
+            ["\"sig-1\"", "\"sig-2\"", "\"sig-3\""]
+        );
+        // The fourth call went over the threshold, so old tool output was
+        // cleared before the fifth: none of the thinking made before that
+        // goes out again, and what came after it does.
+        assert_eq!(tool_output(&seen[4][2])[0].1, session::CLEARED);
+        assert!(thinking_in(&seen[4]).is_empty(), "{:#?}", seen[4]);
+        assert_eq!(thinking_in(&seen[6]), ["\"sig-5\"", "\"sig-6\""]);
+        assert_valid(agent.messages());
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
+    #[tokio::test]
+    async fn manual_thinking_keeps_thinking_and_compacts_a_turn_whole() {
+        // Manual extended thinking: only the turn's first reply thinks.
+        let mut script = resized(tool_rounds(5, 1), &[100, 100, 100, 900, 900]);
+        if let Ok(response) = &mut script[0] {
+            response.content.insert(0, thinking_block("sig-1"));
+        }
+        script.push(sized(text("SUMMARY"), 50));
+        script.push(sized(text("done"), 100));
+        let provider = Scripted {
+            manual_thinking: true,
+            ..Scripted::new(script)
+        };
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        agent.run("go", |_| {}).await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 7);
+        // Old tool output was cleared before the fifth call; the models
+        // that take a thinking budget do not check what came before a
+        // thinking block, and the turn has to keep starting with it.
+        assert_eq!(tool_output(&seen[4][2])[0].1, session::CLEARED);
+        assert_eq!(thinking_in(&seen[4]), ["\"sig-1\""]);
+        // Still over, so the turn was compacted: all of it, since a kept
+        // tail would start with a reply that has no thinking. The model
+        // starts the turn again, thinking first, from summary and input.
+        assert_eq!(seen[6].len(), 1, "{:#?}", seen[6]);
+        assert_eq!(summary_text(&seen[6][0]).as_deref(), Some("SUMMARY"));
+        assert_eq!(
+            seen[6][0].content[1],
+            ContentBlock::Text { text: "go".into() }
+        );
+        let entries = entries_of(&journal);
+        assert!(entries.contains(&Entry::Compact {
+            summary: "SUMMARY".into(),
+            keep_from: 11,
+            keep_thinking: true,
+        }));
         assert_valid(agent.messages());
         assert_eq!(replay(entries), agent.transcript);
     }
@@ -1309,10 +1549,16 @@ mod tests {
         let settings = settings.lock().unwrap();
         assert_eq!(seen.len(), 9);
         assert_eq!(tool_output(&seen[6][2])[0].1, session::CLEARED);
-        let (system, tools, max_tokens, cache) = &settings[7];
+        let (system, tools, max_tokens, cache, thinking) = &settings[7];
         assert_eq!(system, context::SUMMARY_SYSTEM);
-        assert_eq!((*tools, *max_tokens, *cache), (0, 4096, false));
-        assert_eq!((settings[8].1, settings[8].3), (1, true));
+        assert_eq!(
+            (*tools, *max_tokens, *cache, *thinking),
+            (0, 4096, false, false)
+        );
+        assert_eq!(
+            (settings[8].1, settings[8].3, settings[8].4),
+            (1, true, true)
+        );
         // The summary call saw the history before the second-last input
         // ("third", at 12) as text in one message.
         assert_eq!(seen[7].len(), 1);
@@ -1352,7 +1598,8 @@ mod tests {
         let entries = entries_of(&journal);
         assert!(entries.contains(&Entry::Compact {
             summary: "SUMMARY".into(),
-            keep_from: 12
+            keep_from: 12,
+            keep_thinking: false,
         }));
         assert_eq!(replay(entries), agent.transcript);
     }
@@ -1548,7 +1795,8 @@ mod tests {
         assert_eq!(compacted, [(13, 5)]);
         assert!(entries_of(&journal).contains(&Entry::Compact {
             summary: "SUMMARY".into(),
-            keep_from: 9
+            keep_from: 9,
+            keep_thinking: false,
         }));
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }

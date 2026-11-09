@@ -33,6 +33,15 @@ impl ProviderError {
         }
     }
 
+    /// The model does not take a thinking budget (`thinking.type:
+    /// "enabled"`): Claude 4.7 and later models reject it.
+    pub fn is_thinking_budget_unsupported(&self) -> bool {
+        matches!(
+            self,
+            Self::Api { status: 400, message, .. } if message.contains("thinking.type.enabled")
+        )
+    }
+
     /// The credentials were rejected.
     pub fn is_auth(&self) -> bool {
         matches!(
@@ -59,6 +68,13 @@ impl fmt::Display for ProviderError {
                 }
                 if !message.is_empty() {
                     write!(f, ": {message}")?;
+                }
+                if self.is_thinking_budget_unsupported() {
+                    write!(
+                        f,
+                        " (this model takes no thinking budget: set JUNEES_THINKING_BUDGET \
+                         to 0; models that think by default keep doing so)"
+                    )?;
                 }
                 Ok(())
             }
@@ -112,6 +128,32 @@ mod tests {
         assert!(overflow.is_context_overflow());
         assert!(!api(400, None, "messages: field required").is_context_overflow());
         assert!(!api(500, None, "prompt is too long").is_context_overflow());
+    }
+
+    #[test]
+    fn a_rejected_thinking_budget_names_the_setting() {
+        // The message Claude 4.7 and later models send for a budget.
+        let rejected = api(
+            400,
+            Some("invalid_request_error"),
+            "\"thinking.type.enabled\" is not supported for this model. Use \
+             \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking \
+             behavior.",
+        );
+        assert!(rejected.is_thinking_budget_unsupported());
+        let shown = rejected.to_string();
+        assert!(shown.starts_with("API error 400 (invalid_request_error): \"thinking"));
+        assert!(shown.contains("set JUNEES_THINKING_BUDGET to 0"), "{shown}");
+        assert!(
+            !api(400, None, "thinking.type.adaptive is not supported")
+                .is_thinking_budget_unsupported()
+        );
+        assert!(!api(500, None, "thinking.type.enabled").is_thinking_budget_unsupported());
+        assert!(
+            !api(400, None, "messages: field required")
+                .to_string()
+                .contains("JUNEES")
+        );
     }
 
     #[test]

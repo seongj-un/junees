@@ -29,6 +29,9 @@ pub struct CompletionRequest<'a> {
     /// Ask the provider to cache the request's prefix for the next call.
     /// Off for one-off calls, whose prefix is never sent again.
     pub cache: bool,
+    /// Let the model think before it answers, if the provider was set up
+    /// with a thinking budget. Off for summary calls.
+    pub thinking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,4 +47,13 @@ pub trait Provider: Send + Sync {
         &self,
         request: CompletionRequest<'_>,
     ) -> Result<CompletionResponse, ProviderError>;
+
+    /// Whether requests that allow thinking ask for manual extended thinking
+    /// (a fixed token budget). The API then wants the turn in progress to
+    /// start with a thinking block, and only models that do not check what
+    /// came before a returned thinking block (Claude 4.6 and earlier) accept
+    /// it, so the history keeps its thinking blocks when it is shrunk.
+    fn manual_thinking(&self) -> bool {
+        false
+    }
 }

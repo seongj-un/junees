@@ -153,7 +153,7 @@ async fn clears_then_compacts_over_the_threshold_and_replays() {
     agent.reset(None);
     let session = Session::load(&path).unwrap();
     assert_eq!(session.meta.id, meta.id);
-    assert_eq!(session.meta.format, 2);
+    assert_eq!(session.meta.format, junees::session::FORMAT);
     assert_eq!(session.transcript.messages, messages);
     assert_eq!(session.transcript.usage, usage);
     assert_eq!(session.transcript.context_tokens, context_tokens);
