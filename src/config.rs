@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::approval::ApprovalMode;
 use crate::task::budget::parse_duration;
 use crate::tools::ToolSettings;
 
@@ -44,6 +45,9 @@ pub struct Config {
     /// Settings for the default tools: the bash command policy and the
     /// variables hidden from bash.
     pub tools: ToolSettings,
+    /// Which tool calls the conversation mode asks about first
+    /// (`JUNEES_APPROVAL`).
+    pub approval: ApprovalMode,
     /// Default token budget of `task run` (`JUNEES_TASK_MAX_TOKENS`).
     pub task_max_tokens: Option<u64>,
     /// Default time budget of `task run` (`JUNEES_TASK_MAX_TIME`).
@@ -55,7 +59,7 @@ impl Config {
     /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_CONTEXT_WINDOW`,
     /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_THINKING_BUDGET`, `JUNEES_HOME`, `HOME`,
     /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
-    /// `JUNEES_HIDDEN_ENV`, `JUNEES_TASK_MAX_TOKENS` and
+    /// `JUNEES_HIDDEN_ENV`, `JUNEES_APPROVAL`, `JUNEES_TASK_MAX_TOKENS` and
     /// `JUNEES_TASK_MAX_TIME`.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
@@ -130,6 +134,7 @@ impl Config {
             deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),
             allow_dangerous: parse_flag(get("JUNEES_ALLOW_DANGEROUS"), "JUNEES_ALLOW_DANGEROUS")?,
         };
+        let approval = ApprovalMode::parse(get("JUNEES_APPROVAL").as_deref())?;
 
         let task_max_tokens = match get("JUNEES_TASK_MAX_TOKENS") {
             None => None,
@@ -152,6 +157,7 @@ impl Config {
             thinking_budget,
             home,
             tools,
+            approval,
             task_max_tokens,
             task_max_time,
         })
@@ -240,8 +246,25 @@ mod tests {
         assert_eq!(config.thinking_budget, 0);
         assert_eq!(config.home, Some(PathBuf::from("/home/tester/.junees")));
         assert_eq!(config.tools, ToolSettings::default());
+        assert_eq!(config.approval, ApprovalMode::Risky);
         assert_eq!(config.task_max_tokens, None);
         assert_eq!(config.task_max_time, None);
+    }
+
+    #[test]
+    fn reads_the_approval_mode() {
+        for (raw, expected) in [
+            ("off", ApprovalMode::Off),
+            (" All ", ApprovalMode::All),
+            ("risky", ApprovalMode::Risky),
+        ] {
+            let parsed = config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_APPROVAL", raw)]);
+            assert_eq!(parsed.unwrap().approval, expected, "{raw}");
+        }
+        let err = config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_APPROVAL", "ask")])
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("JUNEES_APPROVAL"), "{err}");
     }
 
     #[test]
