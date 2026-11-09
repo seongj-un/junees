@@ -1,9 +1,12 @@
 //! Command-line parsing and terminal output helpers.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 
 use crate::session::{Summary, format_utc};
 use crate::task::DEFAULT_MAX_SESSIONS;
+use crate::task::budget::parse_duration;
 
 pub const HELP: &str = "\
 junees - an AI agent in your terminal
@@ -12,7 +15,7 @@ Usage:
   junees [OPTIONS]              start an interactive session
   junees [OPTIONS] -p <PROMPT>  run one prompt and exit
   junees task init \"<GOAL>\"     plan a long-running task in this git repository
-  junees task run [--max-sessions <N>]
+  junees task run [--max-sessions <N>] [--max-tokens <N>] [--max-time <DURATION>]
                                 work on the task, one feature per session
 
 Options:
@@ -28,7 +31,9 @@ Sessions are saved as they happen to $JUNEES_HOME/sessions/<id>.jsonl.
 Task mode keeps the feature list, progress notes and state in .junees/ of
 the repository. `task run` stops when every feature passes, after
 --max-sessions sessions (default 20), after 3 sessions in a row without a
-newly passing feature, or when a session fails.
+newly passing feature, when a session fails, or when the budget runs out:
+--max-tokens counts the tokens of every session of the task (over all
+runs), --max-time the time of this run (90s, 30m, 2h, 1h30m).
 
 Environment:
   ANTHROPIC_API_KEY   required
@@ -41,6 +46,8 @@ Environment:
                             cleared and the conversation compacted (default 0.8)
   JUNEES_HOME         where Junees keeps sessions (default ~/.junees;
                       with neither it nor HOME set, sessions are not saved)
+  JUNEES_TASK_MAX_TOKENS  default --max-tokens of task run
+  JUNEES_TASK_MAX_TIME    default --max-time of task run
 ";
 
 pub const REPL_HELP: &str = "\
@@ -65,11 +72,17 @@ pub enum Command {
 pub enum TaskCommand {
     /// Plan a new task for this goal.
     Init { goal: String },
-    /// Work on the task for at most this many sessions.
-    Run { max_sessions: usize },
+    /// Work on the task for at most this many sessions, within the budget
+    /// (unset parts come from the environment).
+    Run {
+        max_sessions: usize,
+        max_tokens: Option<u64>,
+        max_time: Option<Duration>,
+    },
 }
 
-const TASK_USAGE: &str = "usage: junees task init \"<goal>\" | junees task run [--max-sessions N]";
+const TASK_USAGE: &str = "usage: junees task init \"<goal>\" | \
+                          junees task run [--max-sessions N] [--max-tokens N] [--max-time 2h]";
 
 /// What to do when not printing help or the version.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -148,6 +161,8 @@ fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
         }
         Some("run") => {
             let mut max_sessions = DEFAULT_MAX_SESSIONS;
+            let mut max_tokens = None;
+            let mut max_time = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "-h" | "--help" => return Ok(Command::Help),
@@ -164,14 +179,35 @@ fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
                                     )
                                 })?;
                     }
+                    "--max-tokens" => {
+                        let value = args.next().context("--max-tokens needs a number")?;
+                        max_tokens = Some(positive(&value).with_context(|| {
+                            format!("--max-tokens must be a positive integer, got `{value}`")
+                        })?);
+                    }
+                    "--max-time" => {
+                        let value = args
+                            .next()
+                            .context("--max-time needs a duration such as 2h")?;
+                        max_time = Some(parse_duration(&value).context("--max-time")?);
+                    }
                     other => bail!("unknown argument `{other}` for task run ({TASK_USAGE})"),
                 }
             }
-            TaskCommand::Run { max_sessions }
+            TaskCommand::Run {
+                max_sessions,
+                max_tokens,
+                max_time,
+            }
         }
         _ => bail!(TASK_USAGE),
     };
     Ok(Command::Task(command))
+}
+
+/// A whole number above 0.
+pub fn positive(text: &str) -> Option<u64> {
+    text.trim().parse().ok().filter(|&n| n > 0)
 }
 
 /// One `/sessions` line: id, last write (UTC), first input.
@@ -291,12 +327,34 @@ mod tests {
         assert_eq!(
             parse(&["task", "run"]).unwrap(),
             Command::Task(TaskCommand::Run {
-                max_sessions: DEFAULT_MAX_SESSIONS
+                max_sessions: DEFAULT_MAX_SESSIONS,
+                max_tokens: None,
+                max_time: None,
             })
         );
         assert_eq!(
             parse(&["task", "run", "--max-sessions", "3"]).unwrap(),
-            Command::Task(TaskCommand::Run { max_sessions: 3 })
+            Command::Task(TaskCommand::Run {
+                max_sessions: 3,
+                max_tokens: None,
+                max_time: None,
+            })
+        );
+        assert_eq!(
+            parse(&[
+                "task",
+                "run",
+                "--max-time",
+                "1h30m",
+                "--max-tokens",
+                "2000000"
+            ])
+            .unwrap(),
+            Command::Task(TaskCommand::Run {
+                max_sessions: DEFAULT_MAX_SESSIONS,
+                max_tokens: Some(2_000_000),
+                max_time: Some(Duration::from_secs(5400)),
+            })
         );
         assert_eq!(parse(&["task", "--help"]).unwrap(), Command::Help);
         // Only a leading `task` is the subcommand.
@@ -318,6 +376,12 @@ mod tests {
             &["task", "run", "--max-sessions", "0"],
             &["task", "run", "--max-sessions", "many"],
             &["task", "run", "-p", "x"],
+            &["task", "run", "--max-tokens"],
+            &["task", "run", "--max-tokens", "0"],
+            &["task", "run", "--max-tokens", "1e6"],
+            &["task", "run", "--max-time"],
+            &["task", "run", "--max-time", "90"],
+            &["task", "run", "--max-time", "0m"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }

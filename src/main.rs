@@ -13,6 +13,7 @@ use junees::prompt;
 use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
+use junees::task::budget::Budget;
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -207,6 +208,18 @@ async fn run_task(command: TaskCommand) -> Result<()> {
             config.model.clone(),
         )?))
     };
+    let budget = match &command {
+        TaskCommand::Run {
+            max_tokens,
+            max_time,
+            ..
+        } => Budget {
+            max_tokens: max_tokens.or(config.task_max_tokens),
+            max_time: max_time.or(config.task_max_time),
+            ..Budget::default()
+        },
+        TaskCommand::Init { .. } => Budget::default(),
+    };
     let env = TaskEnv {
         root,
         home: config.home.clone(),
@@ -217,6 +230,7 @@ async fn run_task(command: TaskCommand) -> Result<()> {
         context_window: config.context_window,
         compact_threshold: config.compact_threshold,
         provider: &provider,
+        budget,
     };
     let mut report = |report: Report<'_>| match report {
         Report::Line(line) => println!("{line}"),
@@ -224,7 +238,7 @@ async fn run_task(command: TaskCommand) -> Result<()> {
     };
     match command {
         TaskCommand::Init { goal } => task::init(&env, &goal, &mut report).await,
-        TaskCommand::Run { max_sessions } => {
+        TaskCommand::Run { max_sessions, .. } => {
             let stop = task::run(&env, max_sessions, &mut report).await?;
             if stop.reason.is_failure() {
                 bail!("task stopped: {stop}");

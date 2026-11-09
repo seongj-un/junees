@@ -7,6 +7,7 @@
 //! [`state`]). Only the harness decides that a feature passes, by running the
 //! feature's verify command itself.
 
+pub mod budget;
 pub mod features;
 pub mod git;
 mod prompt;

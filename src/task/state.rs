@@ -36,7 +36,8 @@ pub struct Stop {
     pub reason: StopReason,
     /// The last session that ran (0 if none ever did).
     pub session: u64,
-    /// The error, for [`StopReason::Error`].
+    /// The error, for [`StopReason::Error`]; which budget ran out, for
+    /// [`StopReason::Budget`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -52,6 +53,8 @@ pub enum StopReason {
     Stalled,
     /// A session ended with an error.
     Error,
+    /// The task used up its token budget, or the run its time budget.
+    Budget,
 }
 
 impl StopReason {
@@ -77,6 +80,9 @@ impl fmt::Display for Stop {
                 self.session,
                 self.detail.as_deref().unwrap_or("unknown error")
             ),
+            StopReason::Budget => {
+                write!(f, "{}", self.detail.as_deref().unwrap_or("budget used up"))
+            }
         }
     }
 }

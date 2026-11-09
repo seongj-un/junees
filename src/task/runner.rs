@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 
+use super::budget::{self, Budget};
 use super::features::{self, Ledger};
 use super::state::{State, Stop, StopReason};
 use super::tools::{MarkFeaturePassing, Verifier, session_tools};
 use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt, rejected_features_path};
-use crate::agent::{Agent, AgentOptions, Event, TurnLimit};
+use crate::agent::{Agent, AgentOptions, Event, Limit, LimitReached, TurnLimit};
 use crate::cli::preview;
 use crate::message::Usage;
 use crate::provider::Provider;
@@ -61,6 +62,8 @@ pub struct TaskEnv<'a> {
     pub context_window: u64,
     pub compact_threshold: f64,
     pub provider: &'a ProviderFactory<'a>,
+    /// Token and time limits of `task run`.
+    pub budget: Budget,
 }
 
 /// What the runner tells the user: its own status lines and the events of
@@ -227,8 +230,12 @@ fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
 
 /// Runs work sessions on the task in `env.root` until every feature passes,
 /// `max_sessions` sessions have run, [`STALL_LIMIT`] sessions in a row
-/// passed no new feature, or a session fails. Returns why it stopped, which
-/// is also recorded in state.json.
+/// passed no new feature, a session fails, or the budget runs out. Returns
+/// why it stopped, which is also recorded in state.json.
+///
+/// The budget is checked before each session and, inside a session, before
+/// each model call; a session that runs out ends there and is wrapped up
+/// like any other.
 ///
 /// Every session is a new agent with a fresh context and its own journal.
 /// After each one the harness puts its copy of the feature list back into
@@ -241,6 +248,7 @@ pub async fn run(
     report: &mut Reporter<'_>,
 ) -> Result<Stop> {
     let root = &env.root;
+    let started = env.budget.now();
     git::toplevel(root)?;
     features::load(root)
         .context("cannot load the feature list (start a task with `junees task init`)")?;
@@ -272,13 +280,22 @@ pub async fn run(
         if ran == max_sessions {
             break stop(StopReason::MaxSessions, state.sessions);
         }
+        let used = budget::tokens(state.usage);
+        if let Some(detail) = env.budget.exceeded(used, started) {
+            break Stop {
+                reason: StopReason::Budget,
+                session: state.sessions,
+                detail: Some(detail),
+            };
+        }
         ran += 1;
         state.sessions += 1;
         let n = state.sessions;
         state.save(root)?;
         let before = ledger.lock().unwrap().passing_ids();
 
-        let (result, usage) = work_session(env, n, &ledger, report).await;
+        let limit = env.budget.session_limit(used, started);
+        let (result, usage) = work_session(env, n, &ledger, limit, report).await;
         state.usage.add(usage);
 
         let (summary, progressed, passing, total) =
@@ -299,15 +316,25 @@ pub async fn run(
         state.stalled = if progressed { 0 } else { state.stalled + 1 };
         line(report, &format!("== session {n} done: {summary} =="));
 
-        if let Err(err) = result {
-            break Stop {
-                reason: StopReason::Error,
-                session: n,
-                detail: Some(format!("{err:#}")),
-            };
-        }
+        let ended = match result {
+            Ok(ended) => ended,
+            Err(err) => {
+                break Stop {
+                    reason: StopReason::Error,
+                    session: n,
+                    detail: Some(format!("{err:#}")),
+                };
+            }
+        };
         if passing == total {
             break stop(StopReason::Complete, n);
+        }
+        if let Ended::Budget(detail) = ended {
+            break Stop {
+                reason: StopReason::Budget,
+                session: n,
+                detail: Some(detail),
+            };
         }
         if state.stalled >= STALL_LIMIT {
             break stop(StopReason::Stalled, n);
@@ -371,6 +398,7 @@ fn wrap_up(
             "{passes}, ended at the turn limit ({} model calls)",
             env.max_turns
         ),
+        Ok(Ended::Budget(reason)) => format!("{passes}, ended early: {reason}"),
         Err(err) => format!("failed: {}", preview(&format!("{err:#}"), ERROR_CHARS)),
     };
     append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
@@ -395,15 +423,30 @@ enum Ended {
     /// calls. Its work is kept like any other session's, and a session that
     /// keeps doing this counts towards the stall limit.
     TurnLimit,
+    /// The budget ran out before a model call; the run stops after it.
+    Budget(String),
+}
+
+/// How a session whose agent returned `err` ended: the turn limit and the
+/// budget end a session, anything else is a failure.
+fn ended_early(err: anyhow::Error) -> Result<Ended> {
+    if err.downcast_ref::<TurnLimit>().is_some() {
+        return Ok(Ended::TurnLimit);
+    }
+    if let Some(LimitReached(reason)) = err.downcast_ref::<LimitReached>() {
+        return Ok(Ended::Budget(reason.clone()));
+    }
+    Err(err)
 }
 
 /// One work session: a fresh agent told where the task stands, with the
-/// default tools and `mark_feature_passing`. Returns how it ended and the
-/// tokens it used.
+/// default tools and `mark_feature_passing`, stopped by `limit` before a
+/// model call. Returns how it ended and the tokens it used.
 async fn work_session(
     env: &TaskEnv<'_>,
     n: u64,
     ledger: &Arc<Mutex<Ledger>>,
+    limit: Option<Limit>,
     report: &mut Reporter<'_>,
 ) -> (Result<Ended>, Usage) {
     let root = &env.root;
@@ -420,6 +463,9 @@ async fn work_session(
         Ok(created) => created,
         Err(err) => return (Err(err), Usage::default()),
     };
+    if let Some(limit) = limit {
+        agent = agent.with_limit(limit);
+    }
     line(
         report,
         &format!(
@@ -432,8 +478,7 @@ async fn work_session(
         .await
     {
         Ok(_) => Ok(Ended::Answered),
-        Err(err) if err.downcast_ref::<TurnLimit>().is_some() => Ok(Ended::TurnLimit),
-        Err(err) => Err(err),
+        Err(err) => ended_early(err),
     };
     (result, agent.usage())
 }
@@ -590,7 +635,9 @@ fn warn(report: &mut Reporter<'_>, text: &str) {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use serde_json::{Value, json};
@@ -605,18 +652,21 @@ mod tests {
     type Seen = (String, Vec<Message>);
 
     /// Replays canned responses, shared by every session it makes, and
-    /// records each request's system prompt and messages.
+    /// records each request's system prompt and messages. Each call moves
+    /// `clock` on by `tick` seconds.
     #[derive(Clone, Default)]
     struct Scripted {
         responses: Arc<Mutex<VecDeque<Reply>>>,
         seen: Arc<Mutex<Vec<Seen>>>,
+        clock: Arc<AtomicU64>,
+        tick: u64,
     }
 
     impl Scripted {
         fn new(responses: Vec<Reply>) -> Self {
             Self {
                 responses: Arc::new(Mutex::new(responses.into())),
-                seen: Arc::default(),
+                ..Self::default()
             }
         }
 
@@ -631,6 +681,7 @@ mod tests {
             &self,
             request: CompletionRequest<'_>,
         ) -> Result<CompletionResponse, ProviderError> {
+            self.clock.fetch_add(self.tick, Ordering::SeqCst);
             self.seen
                 .lock()
                 .unwrap()
@@ -707,6 +758,7 @@ mod tests {
             context_window: 200_000,
             compact_threshold: 0.8,
             provider: factory,
+            budget: Budget::default(),
         }
     }
 
@@ -1399,6 +1451,90 @@ mod tests {
         assert!(detail.contains("git commit"), "{detail}");
         assert_eq!(State::load(root).unwrap().stop, Some(stop));
         assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+    }
+
+    #[tokio::test]
+    async fn the_token_budget_ends_the_session_and_counts_over_runs() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        // 7 tokens a call; the budget is checked before each call.
+        let provider = Scripted::new(
+            ["a", "b", "c", "d"]
+                .iter()
+                .map(|name| calls(&[write(&root.join(name), name)]))
+                .collect(),
+        );
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        env.budget.max_tokens = Some(20);
+        let mut out = Collected::default();
+        let stop = run(&env, 5, &mut out.reporter()).await.unwrap();
+
+        assert_eq!(stop.reason, StopReason::Budget);
+        assert_eq!(stop.session, 1);
+        assert_eq!(
+            stop.detail.as_deref(),
+            Some("token budget used up: 21 of 20 tokens")
+        );
+        assert!(!stop.reason.is_failure());
+        assert_eq!(provider.left(), 1);
+        // The session's work is in its checkpoint.
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        assert!(root.join("c").exists());
+        assert!(!git::is_dirty(root).unwrap());
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains(
+                "- [junees] session 1: 0/1 passing, nothing new, ended early: \
+                 token budget used up: 21 of 20 tokens, tokens in 15 out 6\n"
+            ),
+            "{progress}"
+        );
+        let state = State::load(root).unwrap();
+        assert_eq!(state.stop, Some(stop));
+        assert_eq!(state.usage.input_tokens + state.usage.output_tokens, 21);
+
+        // Tokens add up over runs: the next run starts no session.
+        let stop = run(&env, 5, &mut |_| {}).await.unwrap();
+        assert_eq!(stop.reason, StopReason::Budget);
+        assert_eq!(stop.session, 1);
+        assert_eq!(provider.left(), 1);
+        assert_eq!(State::load(root).unwrap().sessions, 1);
+    }
+
+    #[tokio::test]
+    async fn the_time_budget_stops_the_run_between_calls() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        // Each model call takes 40 seconds of the fake clock.
+        let mut provider = Scripted::new(vec![
+            calls(&[write(&root.join("a"), "a")]),
+            calls(&[write(&root.join("b"), "b")]),
+            text("never asked for"),
+        ]);
+        provider.tick = 40;
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        env.budget.max_time = Some(Duration::from_secs(60));
+        env.budget.clock = budget::testing::fake_clock(provider.clock.clone());
+        let stop = run(&env, 5, &mut |_| {}).await.unwrap();
+
+        assert_eq!(stop.reason, StopReason::Budget);
+        assert_eq!(
+            stop.to_string(),
+            "time budget used up: 1m20s of 1m",
+            "{stop:?}"
+        );
+        assert_eq!(provider.left(), 1);
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        assert!(root.join("b").exists());
+
+        // Time counts per run: a new run gets the full minute again.
+        let stop = run(&env, 1, &mut |_| {}).await.unwrap();
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(provider.left(), 0);
     }
 
     #[tokio::test]
