@@ -40,6 +40,10 @@ pub const SUMMARY_HEADER: &str = "[Summary of the earlier conversation]\n";
 /// User inputs a compaction keeps whole when it can.
 const KEEP_INPUTS: usize = 2;
 
+/// Tool rounds (a model reply and the results of its calls) a compaction
+/// inside a single turn keeps whole when it can.
+const KEEP_ROUNDS: usize = 2;
+
 /// The first line of every journal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
@@ -79,8 +83,11 @@ pub enum Entry {
     /// Token usage of a call that summarized the conversation. It counts
     /// toward the session's usage but says nothing about the context size.
     SummaryUsage(Usage),
-    /// The messages before index `keep_from` were replaced by `summary`,
-    /// which leads the first kept message (a user input).
+    /// The messages before index `keep_from` were replaced by `summary`.
+    /// It leads the first kept message when that is a user input; when the
+    /// tail starts with a model reply (a cut inside one turn), it goes into
+    /// a new user message, followed by the text of the input that started
+    /// the turn, word for word.
     Compact {
         summary: String,
         keep_from: usize,
@@ -148,19 +155,40 @@ impl Transcript {
             }
             Entry::SummaryUsage(usage) => self.usage.add(usage),
             Entry::Compact { summary, keep_from } => {
-                self.messages.drain(..keep_from.min(self.messages.len()));
+                let dropped: Vec<Message> = self
+                    .messages
+                    .drain(..keep_from.min(self.messages.len()))
+                    .collect();
                 let block = ContentBlock::Text {
                     text: format!("{SUMMARY_HEADER}{summary}"),
                 };
                 match self.messages.first_mut() {
                     Some(first) if first.role == Role::User => first.content.insert(0, block),
-                    _ => self.messages.insert(
-                        0,
-                        Message {
-                            role: Role::User,
-                            content: vec![block],
-                        },
-                    ),
+                    _ => {
+                        // The cut was inside the turn of the first message's
+                        // input. That input is the task the turn works on,
+                        // so it stays as typed rather than only summarized.
+                        let mut content = vec![block];
+                        if let Some(input) = dropped.first() {
+                            content.extend(
+                                input
+                                    .content
+                                    .iter()
+                                    .filter(|block| {
+                                        matches!(block, ContentBlock::Text { text }
+                                            if !text.starts_with(SUMMARY_HEADER))
+                                    })
+                                    .cloned(),
+                            );
+                        }
+                        self.messages.insert(
+                            0,
+                            Message {
+                                role: Role::User,
+                                content,
+                            },
+                        );
+                    }
                 }
                 // Unknown until the next model call measures it.
                 self.context_tokens = 0;
@@ -168,14 +196,20 @@ impl Transcript {
         }
     }
 
-    /// Where a compaction should cut the history: the index of the user
-    /// input the kept tail starts with, or `None` when the history holds
-    /// no input to cut at besides the first message.
+    /// Where a compaction should cut the history: the index of the first
+    /// kept message, or `None` when there is nowhere to cut.
     ///
-    /// The tail starts at a user message that carries typed input and no
-    /// tool results, right after a message without tool calls, so no tool
-    /// call is cut off from its result. It keeps the last two inputs and
-    /// everything after them when it can, else the last one.
+    /// Cuts before a user input come first: the tail starts at a user
+    /// message that carries typed input and no tool results, right after a
+    /// message without tool calls, so no tool call is cut off from its
+    /// result. It keeps the last two inputs and everything after them when
+    /// it can, else the last one.
+    ///
+    /// When the first message is the only input (one long turn, as in a
+    /// one-shot task), the cut goes inside that turn instead: at a model
+    /// reply that directly follows a message holding nothing but tool
+    /// results, so every earlier tool call has its result. It keeps the
+    /// last two such rounds when it can, else the last one.
     pub fn compact_point(&self) -> Option<usize> {
         let inputs: Vec<usize> = (1..self.messages.len())
             .filter(|&i| {
@@ -192,11 +226,24 @@ impl Transcript {
                         .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
             })
             .collect();
-        inputs
+        if !inputs.is_empty() {
+            return inputs
+                .iter()
+                .rev()
+                .nth(KEEP_INPUTS - 1)
+                .or(inputs.last())
+                .copied();
+        }
+        let rounds: Vec<usize> = (2..self.messages.len())
+            .filter(|&i| {
+                self.messages[i].role == Role::Assistant && only_tool_results(&self.messages[i - 1])
+            })
+            .collect();
+        rounds
             .iter()
             .rev()
-            .nth(KEEP_INPUTS - 1)
-            .or(inputs.last())
+            .nth(KEEP_ROUNDS - 1)
+            .or(rounds.last())
             .copied()
     }
 
@@ -265,6 +312,16 @@ fn has_tool_result(message: &Message) -> bool {
         .content
         .iter()
         .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}
+
+/// A user message that answers tool calls and says nothing else.
+fn only_tool_results(message: &Message) -> bool {
+    message.role == Role::User
+        && !message.content.is_empty()
+        && message
+            .content
+            .iter()
+            .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
 /// Appends entries to a journal file, one JSON line per entry, each written
@@ -1017,10 +1074,88 @@ mod tests {
     }
 
     #[test]
-    fn compaction_needs_an_earlier_input_to_cut_at() {
+    fn a_single_turn_is_cut_after_a_closed_tool_round() {
         assert_eq!(Transcript::default().compact_point(), None);
-        // One turn, however long, has nowhere to cut.
-        assert_eq!(tool_rounds(6).compact_point(), None);
+        // The first reply answers the input itself: nothing to cut yet.
+        assert_eq!(tool_rounds(1).compact_point(), None);
+        // Replies sit at 1, 3, 5, ...; each after the first follows a
+        // message of tool results only. The last two rounds stay.
+        assert_eq!(tool_rounds(2).compact_point(), Some(3));
+        assert_eq!(tool_rounds(6).compact_point(), Some(9));
+
+        // Results that carry typed input too (a failed turn) are no round
+        // boundary.
+        let mut with_input = tool_results("toolu_1", "out", false);
+        with_input.content.push(ContentBlock::Text {
+            text: "and now?".into(),
+        });
+        let transcript = transcript_of(vec![
+            Message::user_text("first"),
+            tool_call("toolu_1"),
+            with_input,
+            tool_call("toolu_2"),
+            tool_results("toolu_2", "out", false),
+            tool_call("toolu_3"),
+            tool_results("toolu_3", "out", false),
+        ]);
+        assert_eq!(transcript.compact_point(), Some(5));
+    }
+
+    #[test]
+    fn compacting_inside_a_turn_keeps_its_input_word_for_word() {
+        let mut transcript = tool_rounds(4);
+        let before = transcript.clone();
+        let keep_from = transcript.compact_point().unwrap();
+        assert_eq!(keep_from, 5);
+        transcript.apply(Entry::Compact {
+            summary: "did 0 to 1".into(),
+            keep_from,
+        });
+
+        let head = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: format!("{SUMMARY_HEADER}did 0 to 1"),
+                },
+                ContentBlock::Text { text: "go".into() },
+            ],
+        };
+        assert_eq!(transcript.messages[0], head);
+        assert_eq!(transcript.messages[1..], before.messages[5..]);
+        for (i, message) in transcript.messages.iter().enumerate() {
+            let expected = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            assert_eq!(message.role, expected, "{:#?}", transcript.messages);
+        }
+
+        // A later cut in the same turn replaces the old summary and keeps
+        // the input once.
+        for i in 4..6 {
+            let id = format!("toolu_{i}");
+            transcript.apply(Entry::Message(tool_call(&id)));
+            transcript.apply(Entry::Message(tool_results(&id, "more", false)));
+        }
+        let keep_from = transcript.compact_point().unwrap();
+        assert_eq!(keep_from, 5);
+        transcript.apply(Entry::Compact {
+            summary: "did 0 to 3".into(),
+            keep_from,
+        });
+        assert_eq!(
+            transcript.messages[0].content,
+            [
+                ContentBlock::Text {
+                    text: format!("{SUMMARY_HEADER}did 0 to 3"),
+                },
+                ContentBlock::Text { text: "go".into() },
+            ]
+        );
+        assert_eq!(transcript.messages[1], tool_call("toolu_4"));
+        assert_eq!(transcript.messages.len(), 5);
     }
 
     #[test]

@@ -274,18 +274,18 @@ impl Agent {
             return;
         }
         self.cleared = false;
-        // A single turn cannot be compacted; clearing is all there is then.
         self.summarize(on_event).await;
     }
 
     /// Replaces the earlier part of the conversation with a summary written
-    /// by the model, keeping the latest user inputs and what followed them.
+    /// by the model, keeping the latest user inputs and what followed them
+    /// (or, within one long turn, its input and latest tool rounds).
     /// Returns whether it did; if there is nothing to compact yet or the
     /// summary fails, it says so in a warning and changes nothing.
     pub async fn compact(&mut self, mut on_event: impl FnMut(Event<'_>)) -> bool {
         if self.transcript.compact_point().is_none() {
             on_event(Event::Warning(
-                "nothing to compact yet: the conversation has no earlier input to summarize",
+                "nothing to compact yet: the conversation is too short to summarize",
             ));
             return false;
         }
@@ -1001,9 +1001,21 @@ mod tests {
         );
     }
 
+    /// `replies` with their context sizes set to `sizes`, in order.
+    fn resized(replies: Vec<Reply>, sizes: &[u64]) -> Vec<Reply> {
+        assert_eq!(replies.len(), sizes.len());
+        replies
+            .into_iter()
+            .zip(sizes)
+            .map(|(reply, &tokens)| sized(reply, tokens))
+            .collect()
+    }
+
     #[tokio::test]
     async fn clears_all_but_the_last_three_tool_results_over_the_threshold() {
-        let mut script = tool_rounds(6, 900);
+        // Clearing is enough the first time (700 after it), so no
+        // compaction comes between the two clears.
+        let mut script = resized(tool_rounds(6, 1), &[100, 100, 100, 900, 700, 900]);
         script.push(sized(text("done"), 900));
         let provider = Scripted::new(script);
         let seen = provider.seen.clone();
@@ -1012,7 +1024,6 @@ mod tests {
         agent.run("go", |_| {}).await.unwrap();
 
         let seen = seen.lock().unwrap();
-        // One turn has nothing to compact, so no summary was asked for.
         assert_eq!(seen.len(), 7);
         // Before the fifth call: results at 2, 4, 6, 8; the first is cleared,
         // keeping its id and error flag.
@@ -1022,8 +1033,8 @@ mod tests {
         );
         assert_eq!(tool_output(&seen[4][4]), [("toolu_2", "T2", false)]);
         assert_eq!(tool_output(&seen[3][2])[0].1, "unknown tool `missing`");
-        // The sixth call measured whether that was enough; before the
-        // seventh, the two results added since are past the last three.
+        // The fifth call measured under the threshold; before the seventh,
+        // the two results added since are past the last three.
         assert_eq!(seen[5][4], seen[4][4]);
         assert_eq!(
             tool_output(&seen[6][4]),
@@ -1234,6 +1245,63 @@ mod tests {
         assert_eq!(history[1].text(), "b");
     }
 
+    /// One input, a tool round per call, the reported size growing past
+    /// the threshold: once clearing is not enough, the turn is compacted
+    /// inside itself.
+    #[tokio::test]
+    async fn a_single_long_turn_is_compacted_inside_the_turn() {
+        let mut script = resized(tool_rounds(6, 1), &[300, 450, 600, 750, 900, 900]);
+        script.push(text("SUMMARY"));
+        script.push(sized(text("done"), 300));
+        let provider = Scripted::new(script);
+        let (seen, settings) = (provider.seen.clone(), provider.settings.clone());
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        let mut compacted = Vec::new();
+        let answer = agent
+            .run("go", |event| {
+                if let Event::Compacted {
+                    before_messages,
+                    after_messages,
+                } = event
+                {
+                    compacted.push((before_messages, after_messages));
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer, "done");
+
+        // Before the sixth call old output was cleared; the sixth still
+        // measured over, so a summary was asked for before the seventh.
+        let seen = seen.lock().unwrap();
+        let settings = settings.lock().unwrap();
+        assert_eq!(seen.len(), 8);
+        assert_eq!(tool_output(&seen[5][2])[0].1, session::CLEARED);
+        assert_eq!(settings[6].0, context::SUMMARY_SYSTEM);
+        let asked = seen[6][0].text();
+        assert!(asked.contains("[user]\ngo"), "{asked}");
+        assert!(asked.contains("[tool call toolu_4: upper]"), "{asked}");
+        assert!(!asked.contains("toolu_5"), "{asked}");
+
+        // The next request starts with the summary and the input as typed,
+        // then the last two tool rounds, and is a valid conversation.
+        let sent = &seen[7];
+        assert_eq!(sent.len(), 5);
+        assert_eq!(summary_text(&sent[0]).as_deref(), Some("SUMMARY"));
+        assert_eq!(sent[0].content[1], ContentBlock::Text { text: "go".into() });
+        assert_eq!(sent[1].role, Role::Assistant);
+        assert_eq!(tool_output(&sent[2])[0].0, "toolu_5");
+        assert_valid(sent);
+        assert_valid(agent.messages());
+        assert_eq!(compacted, [(13, 5)]);
+        assert!(entries_of(&journal).contains(&Entry::Compact {
+            summary: "SUMMARY".into(),
+            keep_from: 9
+        }));
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
     fn overflow() -> Reply {
         Err(ProviderError::Api {
             status: 400,
@@ -1284,6 +1352,34 @@ mod tests {
         );
         assert!(events[0].starts_with("Compacted"), "{events:?}");
         assert!(events[1].contains("retrying once"), "{events:?}");
+        assert_valid(agent.messages());
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
+    /// Momus's reproduction: one input, five tool rounds under the
+    /// threshold, then the API reports an overflow. The turn is compacted
+    /// inside itself and the retry goes through.
+    #[tokio::test]
+    async fn an_overflow_in_a_single_turn_compacts_and_retries() {
+        let mut script = tool_rounds(5, 100);
+        script.extend([overflow(), text("SUMMARY"), text("done")]);
+        let provider = Scripted::new(script);
+        let (seen, settings) = (provider.seen.clone(), provider.settings.clone());
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        assert_eq!(agent.run("go", |_| {}).await.unwrap(), "done");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 8);
+        assert_eq!(settings.lock().unwrap()[6].0, context::SUMMARY_SYSTEM);
+        let retried = &seen[7];
+        assert_eq!(summary_text(&retried[0]).as_deref(), Some("SUMMARY"));
+        assert_eq!(
+            retried[0].content[1],
+            ContentBlock::Text { text: "go".into() }
+        );
+        assert_eq!(retried.len(), 5);
+        assert_valid(retried);
         assert_valid(agent.messages());
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }
