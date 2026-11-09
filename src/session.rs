@@ -115,27 +115,28 @@ impl Transcript {
 
 /// Appends entries to a journal file, one JSON line per entry, each written
 /// with a single `write_all` on an unbuffered file.
+///
+/// A new session's file is only created with its first entry, so starting
+/// Junees and quitting right away leaves no empty session behind for
+/// `--continue` to pick.
 pub struct SessionWriter {
-    file: File,
+    path: PathBuf,
+    meta: Meta,
+    file: Option<File>,
 }
 
 impl SessionWriter {
-    /// Starts a new session file under `home/sessions` and writes its meta
-    /// line.
+    /// Picks an id for a new session under `home/sessions`. Nothing is
+    /// written until the first entry.
     pub fn create(home: &Path, cwd: &Path, model: &str) -> Result<(Meta, Self)> {
         let dir = sessions_dir(home);
-        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let now = unix_now();
         for _ in 0..16 {
             let id = new_id(now);
             let path = dir.join(format!("{id}.jsonl"));
-            let file = match OpenOptions::new().append(true).create_new(true).open(&path) {
-                Ok(file) => file,
-                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(err) => {
-                    return Err(err).with_context(|| format!("cannot create {}", path.display()));
-                }
-            };
+            if path.exists() {
+                continue;
+            }
             let meta = Meta {
                 id,
                 created_at: now,
@@ -143,23 +144,51 @@ impl SessionWriter {
                 model: model.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             };
-            let mut writer = Self { file };
-            writer
-                .record(&Entry::Meta(meta.clone()))
-                .with_context(|| format!("cannot write {}", path.display()))?;
+            let writer = Self {
+                path,
+                meta: meta.clone(),
+                file: None,
+            };
             return Ok((meta, writer));
         }
         bail!("could not pick an unused session id in {}", dir.display())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Creates the file and writes the meta line.
+    fn start(&self) -> io::Result<File> {
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .open(&self.path)?;
+        write_line(&mut file, &Entry::Meta(self.meta.clone()))?;
+        Ok(file)
     }
 }
 
 impl Journal for SessionWriter {
     fn record(&mut self, entry: &Entry) -> io::Result<()> {
-        let mut line = serde_json::to_vec(entry)?;
-        line.push(b'\n');
-        self.file.write_all(&line)?;
-        self.file.flush()
+        let mut file = match self.file.take() {
+            Some(file) => file,
+            None => self.start()?,
+        };
+        let result = write_line(&mut file, entry);
+        self.file = Some(file);
+        result
     }
+}
+
+fn write_line(file: &mut File, entry: &Entry) -> io::Result<()> {
+    let mut line = serde_json::to_vec(entry)?;
+    line.push(b'\n');
+    file.write_all(&line)?;
+    file.flush()
 }
 
 /// A journal read back from disk.
@@ -255,7 +284,11 @@ impl Session {
         if session.unterminated {
             file.write_all(b"\n")?;
         }
-        let mut writer = SessionWriter { file };
+        let mut writer = SessionWriter {
+            path: path.to_path_buf(),
+            meta: session.meta.clone(),
+            file: Some(file),
+        };
         if let Some(results) = session.transcript.interrupted_results() {
             let entry = Entry::Message(results);
             writer
@@ -546,11 +579,24 @@ mod tests {
         }
 
         let path = sessions_dir(home.path()).join(format!("{}.jsonl", meta.id));
+        assert_eq!(writer.path(), path);
         let session = Session::load(&path).unwrap();
         assert_eq!(session.meta, meta);
         assert_eq!(session.meta.cwd, "/work");
         assert_eq!(session.transcript, expected);
         assert!(session.warning.is_none());
+    }
+
+    #[test]
+    fn a_new_session_file_appears_with_its_first_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let (_, mut writer) = SessionWriter::create(home.path(), Path::new("/w"), "m").unwrap();
+        assert!(!sessions_dir(home.path()).exists());
+        writer
+            .record(&Entry::Message(Message::user_text("hi")))
+            .unwrap();
+        let session = Session::load(writer.path()).unwrap();
+        assert_eq!(session.transcript.messages, [Message::user_text("hi")]);
     }
 
     #[test]
@@ -765,12 +811,12 @@ mod tests {
         assert!(list_recent(home, 10).unwrap().is_empty());
         new_session(home, "/x", &["first question", "and more"], 1_000);
         new_session(home, "/y", &["두 번째"], 2_000);
-        new_session(home, "/y", &[], 3_000);
+        new_session(home, "/y", &["third"], 3_000);
 
         let list = list_recent(home, 2).unwrap();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].messages, 0);
-        assert_eq!(list[0].first_input, "");
+        assert_eq!(list[0].messages, 1);
+        assert_eq!(list[0].first_input, "third");
         assert_eq!(list[1].first_input, "두 번째");
         assert_eq!(list[1].updated, 2_000);
         assert_eq!(list[1].cwd, "/y");
