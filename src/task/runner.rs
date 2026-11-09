@@ -22,6 +22,13 @@ use crate::tools::ToolRegistry;
 /// Commit message of the commit that starts a task.
 pub const INIT_COMMIT: &str = "junees: initialize task";
 
+/// Why task mode does not start on a work tree with changes: its commits
+/// take everything a session leaves behind, and would take the user's
+/// unfinished work and stray files (`.env`) with it.
+const DIRTY_TREE: &str = "the work tree has uncommitted changes or untracked files; \
+                          commit or stash them first (`git stash -u`), because task \
+                          mode commits everything in the work tree after each session";
+
 /// Recent commits a work session sees in its system prompt.
 const GIT_LOG_LINES: usize = 20;
 
@@ -119,6 +126,10 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
              earlier `junees task init` did not finish)",
             path.display()
         );
+    }
+    // A failed init may have left .junees/ behind; the next one rewrites it.
+    if git::is_dirty_outside_task(root)? {
+        bail!(DIRTY_TREE);
     }
     prepare_dir(root)?;
 
@@ -222,8 +233,12 @@ pub async fn run(
 ) -> Result<Stop> {
     let root = &env.root;
     git::toplevel(root)?;
-    let ledger = Ledger::load(root)
+    features::load(root)
         .context("cannot load the feature list (start a task with `junees task init`)")?;
+    if git::is_dirty(root)? {
+        bail!(DIRTY_TREE);
+    }
+    let ledger = Ledger::load(root)?;
     let ledger = Arc::new(Mutex::new(ledger));
     prepare_dir(root)?;
     let mut state = State::load(root)?;
@@ -852,6 +867,36 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("already has a task"), "{err}");
         assert_eq!(provider.seen.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn init_and_run_refuse_a_work_tree_with_changes() {
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let home = tempfile::tempdir().unwrap();
+
+        let fresh = repo();
+        fs::write(fresh.path().join("wip.txt"), "unfinished").unwrap();
+        let err = init(
+            &env(fresh.path(), home.path(), &factory),
+            "goal",
+            &mut |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("uncommitted changes"), "{err}");
+        assert!(!dir(fresh.path()).exists());
+
+        let task = task_repo(&["false"]);
+        let root = task.path();
+        fs::write(root.join(".env"), "DB_PASSWORD=hunter2\n").unwrap();
+        let err = run(&env(root, home.path(), &factory), 5, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("git stash -u"), "{err}");
+        assert_eq!(subjects(root), [INIT_COMMIT]);
+        assert_eq!(provider.seen.lock().unwrap().len(), 0);
+        assert_eq!(State::load(root).unwrap().sessions, 0);
     }
 
     fn mark(id: &str) -> (&'static str, Value) {

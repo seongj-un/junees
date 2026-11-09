@@ -76,8 +76,18 @@ pub fn toplevel(dir: &Path) -> Result<PathBuf> {
 
 /// Whether the work tree has changes or untracked files that are not ignored.
 pub fn is_dirty(root: &Path) -> Result<bool> {
-    let status = git(root, &["status", "--porcelain", "--untracked-files=all"])?;
-    Ok(!status.trim().is_empty())
+    dirty(root, &[])
+}
+
+/// Like [`is_dirty`], but blind to the task folder `.junees/`.
+pub fn is_dirty_outside_task(root: &Path) -> Result<bool> {
+    dirty(root, &["--", ".", ":(exclude).junees"])
+}
+
+fn dirty(root: &Path, pathspec: &[&str]) -> Result<bool> {
+    let mut args = vec!["status", "--porcelain", "--untracked-files=all"];
+    args.extend(pathspec);
+    Ok(!git(root, &args)?.trim().is_empty())
 }
 
 /// Stages everything (`git add -A`) and commits it.
@@ -158,6 +168,14 @@ mod tests {
         assert!(!is_dirty(root).unwrap());
         assert_eq!(subjects(root), ["first"]);
         assert!(recent_log(root, 5).ends_with(" first\n"));
+
+        std::fs::create_dir_all(root.join(".junees")).unwrap();
+        std::fs::write(root.join(".junees/notes.md"), "n").unwrap();
+        assert!(is_dirty(root).unwrap());
+        assert!(!is_dirty_outside_task(root).unwrap());
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        assert!(is_dirty_outside_task(root).unwrap());
+        commit_all(root, "second").unwrap();
 
         let err = commit_all(root, "nothing").unwrap_err();
         assert!(err.to_string().contains("git commit"), "{err}");
