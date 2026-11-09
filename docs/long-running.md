@@ -37,6 +37,7 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - `/compact`로 수동 압축, 압축하면 CLI에 한 줄 표시
 - 컨텍스트 초과 400을 받으면 강제로 비우기+압축, 이어서 최근 것까지 모든 도구 결과를 비운 뒤 한 번만 재시도(줄어든 게 없으면 재시도 없이 오류)
 - 형식 1 세션을 L2로 이어 쓰면 meta는 형식 1 그대로라 L1 바이너리는 `line N is corrupt`로 거절한다(파일은 안전). L2부터는 모르는 항목 종류를 "continued by a newer Junees"로 알린다
+- 확장 사고 블록 보존(#3): 응답의 thinking, redacted_thinking, 서버 도구 블록을 `ContentBlock::Other`(원본 JSON)로 기록과 세션 파일에 그대로 남기고 다음 요청에 그대로 보낸다. 캐시 표시는 마지막 메시지의 마지막 일반 블록에, 요약 요청의 텍스트에서는 thinking을 빼고 다른 원본 블록은 종류만 적는다. 이런 블록을 이전 바이너리가 자리표시로 잘못 읽지 않도록 `FORMAT`을 3으로 올렸다. `JUNEES_THINKING_BUDGET`(기본 0, 켜면 1024 이상이고 `JUNEES_MAX_TOKENS` 미만)으로 확장 사고를 켜며, 요약 호출에는 쓰지 않는다
 
 ### L3. 장기 작업 모드
 - 작업 파일은 대상 저장소의 `.junees/`에 둔다. `features.json`(기능 목록: `id`, `description`, `verify` 셸 명령, `passes`), `progress.md`(사람이 읽는 진행 기록, 세션과 하네스가 함께 덧붙임), `state.json`(하네스 상태, `.junees/.gitignore`로 git에서 제외)
