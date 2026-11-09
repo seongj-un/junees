@@ -800,39 +800,40 @@ impl Workspace {
 /// `path` without `.` and `..`, with the part of it that exists resolved
 /// through symbolic links. `None` for a dangling link, whose target is
 /// unknown.
+///
+/// Like the kernel, it follows a link before applying a `..` after it:
+/// with `out -> /elsewhere/sub`, `out/../x` is `/elsewhere/x`. Only the
+/// part that does not exist yet is taken as written.
 fn resolve(path: &Path) -> Option<PathBuf> {
-    let mut normal = PathBuf::new();
+    let mut resolved = PathBuf::new();
+    // How many of the last components of `resolved` do not exist.
+    let mut missing: usize = 0;
     for component in path.components() {
         match component {
-            Component::ParentDir => {
-                normal.pop();
-            }
             Component::CurDir => {}
-            other => normal.push(other),
-        }
-    }
-    let mut existing = normal.as_path();
-    let mut missing = Vec::new();
-    loop {
-        if let Ok(canonical) = existing.canonicalize() {
-            return Some(
-                missing
-                    .iter()
-                    .rev()
-                    .fold(canonical, |path, name| path.join(name)),
-            );
-        }
-        if existing.symlink_metadata().is_ok() {
-            return None;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                missing.push(name.to_os_string());
-                existing = parent;
+            Component::ParentDir => {
+                // Existing parts are canonical, so their parent is real.
+                resolved.pop();
+                missing = missing.saturating_sub(1);
             }
-            _ => return Some(normal),
+            Component::Normal(name) if missing == 0 => {
+                let next = resolved.join(name);
+                if next.symlink_metadata().is_ok() {
+                    resolved = next.canonicalize().ok()?;
+                } else {
+                    resolved = next;
+                    missing = 1;
+                }
+            }
+            other => {
+                resolved.push(other);
+                if matches!(other, Component::Normal(_)) {
+                    missing += 1;
+                }
+            }
         }
     }
+    Some(resolved)
 }
 
 fn builtin_violation(name: &str, args: &[String]) -> Option<String> {
@@ -2274,7 +2275,13 @@ mod tests {
         std::fs::create_dir(root.join("src")).unwrap();
         std::os::unix::fs::symlink(dir.path(), root.join("out")).unwrap();
         std::os::unix::fs::symlink(dir.path().join("missing"), root.join("dangling")).unwrap();
+        // `..` after a link applies to the link's target, as in the kernel.
+        std::fs::create_dir_all(dir.path().join("elsewhere/sub")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("elsewhere/sub"), root.join("deep")).unwrap();
+        std::os::unix::fs::symlink(root.join("src"), root.join("source")).unwrap();
         for inside in [
+            "source/../b.txt",
+            "src/new/../c.txt",
             "a.txt",
             "./src/main.rs",
             "src/new/deeper/file",
@@ -2300,6 +2307,9 @@ mod tests {
             // A link that leads out, and one whose target is unknown.
             "out/a.txt",
             "dangling",
+            "deep/../escaped.txt",
+            "deep/../../escaped.txt",
+            "./deep/./../escaped.txt",
         ] {
             assert!(!workspace.contains(elsewhere), "`{elsewhere}` is elsewhere");
         }

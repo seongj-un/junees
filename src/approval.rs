@@ -544,6 +544,27 @@ mod tests {
     }
 
     #[test]
+    fn a_dotdot_after_a_link_is_judged_where_the_write_lands() {
+        let (dir, workspace) = workspace();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::create_dir(elsewhere.path().join("sub")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join("sub"), dir.path().join("out")).unwrap();
+        let gate = approval(ApprovalMode::Risky, &workspace);
+        // `out/..` is `elsewhere`, not the working folder.
+        let write = json!({"path": "out/../escaped.txt", "content": "x"});
+        assert_eq!(
+            gate.request("write_file", &write).unwrap().kinds,
+            ["write_file: write outside the working folder"]
+        );
+        assert_eq!(
+            gate.request("bash", &bash("echo x > out/../escaped.txt"))
+                .unwrap()
+                .kinds,
+            ["bash: write outside the working folder"]
+        );
+    }
+
+    #[test]
     fn all_asks_about_every_bash_and_file_write_and_off_about_none() {
         let (_dir, workspace) = workspace();
         let all = approval(ApprovalMode::All, &workspace);
