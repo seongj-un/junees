@@ -290,26 +290,47 @@ fn preview_lines(preview: &mut String, marker: &str, text: &str) {
     }
 }
 
-/// The question as shown on the terminal, without the choices.
+/// The question as shown on the terminal, without the choices. What the
+/// model wrote goes through [`visible`], so it cannot move the cursor or
+/// erase what the question shows.
 pub fn render(request: &Request) -> String {
     let mut lines = request.target.lines();
     let mut text = format!(
         "  ?? approve {}: {}\n",
-        request.tool,
-        lines.next().unwrap_or_default()
+        visible(&request.tool),
+        visible(lines.next().unwrap_or_default())
     );
     for line in lines {
-        text.push_str(&format!("     | {line}\n"));
+        text.push_str(&format!("     | {}\n", visible(line)));
     }
     for reason in &request.reasons {
-        text.push_str(&format!("     * {reason}\n"));
+        for line in reason.lines() {
+            text.push_str(&format!("     * {}\n", visible(line)));
+        }
     }
     if let Some(preview) = &request.preview {
         for line in preview.lines() {
-            text.push_str(&format!("     {line}\n"));
+            text.push_str(&format!("     {}\n", visible(line)));
         }
     }
     text
+}
+
+/// One line of `text` with control characters (other than tab) and
+/// bidirectional formatting characters written out as escapes (`\r`,
+/// `\u{1b}`, `\u{202e}`), so they show instead of acting on the terminal.
+fn visible(line: &str) -> String {
+    let mut shown = String::with_capacity(line.len());
+    for c in line.chars() {
+        let hidden = (c.is_control() && c != '\t')
+            || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        if hidden {
+            shown.extend(c.escape_default());
+        } else {
+            shown.push(c);
+        }
+    }
+    shown
 }
 
 const CHOICES: &str = "  [y] run  [n] decline  [a] always allow this kind this session  \
@@ -691,6 +712,31 @@ mod tests {
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
         }
+    }
+
+    #[test]
+    fn the_question_shows_control_characters_instead_of_obeying_them() {
+        let (_dir, workspace) = workspace();
+        let gate = approval(ApprovalMode::Risky, &workspace);
+        let command = "rm -rf ~/projects # \r\x1b[2Kecho tidy up build cache";
+        let shown = render(&gate.request("bash", &bash(command)).unwrap());
+        assert_eq!(
+            shown.lines().next().unwrap(),
+            "  ?? approve bash: rm -rf ~/projects # \\r\\u{1b}[2Kecho tidy up build cache"
+        );
+        let write = json!({"path": "/etc/x\u{202e}txt.sh", "content": "a\tb\x07\r\nc\u{8}"});
+        let shown = render(&gate.request("write_file", &write).unwrap());
+        assert_eq!(
+            shown,
+            "  ?? approve write_file: /etc/x\\u{202e}txt.sh\n     \
+             * writes to `/etc/x\\u{202e}txt.sh` outside the working folder\n     \
+             (new file, 2 lines)\n     + a\tb\\u{7}\n     + c\\u{8}\n"
+        );
+        assert!(
+            !shown
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        );
     }
 
     async fn ask_with(input: &str) -> (Answer, String) {
