@@ -155,13 +155,12 @@ fn plan_edit(text: &str, old: &str, new: &str, replace_all: bool) -> Result<Edit
     let crlf = uses_crlf(text);
     // read_file shows lines without `\r`, so in a CRLF file the model's
     // `\n` usually stands for `\r\n`. An exact match still wins.
-    let (old, new) = if crlf && find_all(text, old).is_empty() && has_bare_lf(old) {
-        (to_crlf(old), to_crlf(new))
-    } else if crlf && !has_bare_lf(old) {
-        (old.to_string(), to_crlf(new))
+    let old = if crlf && find_all(text, old).is_empty() && has_bare_lf(old) {
+        to_crlf(old)
     } else {
-        (old.to_string(), new.to_string())
+        old.to_string()
     };
+    let new_crlf = to_crlf(new);
 
     let starts = find_all(text, &old);
     if starts.is_empty() {
@@ -189,11 +188,22 @@ fn plan_edit(text: &str, old: &str, new: &str, replace_all: bool) -> Result<Edit
     let mut out = String::with_capacity(text.len());
     let mut changes = Vec::new();
     let mut last = 0;
-    for (start, _) in text.match_indices(old.as_str()) {
+    for (mut start, _) in text.match_indices(old.as_str()) {
+        let end = start + old.len();
+        let new = if crlf_match(text, start, end, crlf) {
+            // A match starting at the `\n` of a `\r\n` takes the `\r` too:
+            // that line break is what the model's `\n` stands for.
+            if old.starts_with('\n') && start > last && text.as_bytes()[start - 1] == b'\r' {
+                start -= 1;
+            }
+            new_crlf.as_str()
+        } else {
+            new
+        };
         out.push_str(&text[last..start]);
         changes.push((out.len(), out.len() + new.len()));
-        out.push_str(&new);
-        last = start + old.len();
+        out.push_str(new);
+        last = end;
     }
     out.push_str(&text[last..]);
 
@@ -227,6 +237,19 @@ fn find_all(text: &str, needle: &str) -> Vec<usize> {
 fn uses_crlf(text: &str) -> bool {
     let crlf = text.matches("\r\n").count();
     crlf > 0 && crlf * 2 >= text.matches('\n').count()
+}
+
+/// Whether the text replacing `text[start..end]` gets `\r\n` line breaks:
+/// when every line break in the match is a `\r\n` in the file (a match can
+/// start at the `\n` of a `\r\n`), or, for a match without line breaks,
+/// when most of the file's line breaks are.
+fn crlf_match(text: &str, start: usize, end: usize, crlf_file: bool) -> bool {
+    let bytes = text.as_bytes();
+    let mut breaks = (start..end).filter(|&i| bytes[i] == b'\n').peekable();
+    if breaks.peek().is_none() {
+        return crlf_file;
+    }
+    breaks.all(|i| i > 0 && bytes[i - 1] == b'\r')
 }
 
 fn has_bare_lf(text: &str) -> bool {
@@ -856,6 +879,33 @@ mod tests {
         assert!(now == content || now == content.replace("old", "new"));
     }
 
+    #[tokio::test]
+    async fn crlf_matches_starting_with_a_newline_keep_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(&dir, "x\r\ny\r\n");
+        let output = run(&path, "\ny", "\nz\nw").await;
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\r\nz\r\nw\r\n");
+        // Without a line break of its own, the replacement joins the lines.
+        let output = run(&path, "\nz", "Z").await;
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "xZ\r\nw\r\n");
+    }
+
+    #[tokio::test]
+    async fn replace_all_takes_line_endings_from_each_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(&dir, "p\r\nk\r\nq\r\nr\nk\ns\n");
+        let output = EditFile
+            .run(json!({"path": path, "old_string": "\nk", "new_string": "\nK\nK", "replace_all": true}))
+            .await;
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "p\r\nK\r\nK\r\nq\r\nr\nK\nK\ns\n"
+        );
+    }
+
     #[test]
     fn crlf_helpers() {
         assert!(uses_crlf("a\r\nb\r\nc\n"));
@@ -864,5 +914,9 @@ mod tests {
         assert_eq!(to_crlf("a\nb\r\nc\n"), "a\r\nb\r\nc\r\n");
         assert!(has_bare_lf("\n"));
         assert!(!has_bare_lf("a\r\nb"));
+        assert!(crlf_match("x\r\ny", 2, 4, false));
+        assert!(!crlf_match("x\ny\r\n", 1, 3, true));
+        assert!(crlf_match("xy\n", 0, 1, true));
+        assert!(!crlf_match("\ny", 0, 2, true));
     }
 }
