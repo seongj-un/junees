@@ -480,11 +480,13 @@ impl Repl<'_> {
                 "/usage" => {
                     let usage = self.agent.usage();
                     println!(
-                        "input {} tokens (cache write {}, cache read {}), output {} tokens",
+                        "input {} tokens (cache write {}, cache read {}), output {} tokens, \
+                         web searches {}",
                         usage.input_tokens,
                         usage.cache_creation_input_tokens,
                         usage.cache_read_input_tokens,
-                        usage.output_tokens
+                        usage.output_tokens,
+                        usage.web_searches()
                     );
                     false
                 }

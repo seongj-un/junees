@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::{CompletionResponse, ProviderError, StreamEvent};
-use crate::message::{ContentBlock, StopReason, Usage};
+use crate::message::{ContentBlock, ServerToolUsage, StopReason, Usage};
 
 /// One event of the stream: its `event:` name and `data:` lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +109,7 @@ struct DeltaUsage {
     output_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
+    server_tool_use: Option<ServerToolUsage>,
 }
 
 impl Assembler {
@@ -221,6 +222,9 @@ impl Assembler {
                         if let Some(count) = count {
                             *field = count;
                         }
+                    }
+                    if let Some(server) = usage.server_tool_use {
+                        total.server_tool_use = server;
                     }
                 }
             }
@@ -546,6 +550,9 @@ data: {"type":"message_stop"}
                 output_tokens: 70,
                 cache_read_input_tokens: 900,
                 cache_creation_input_tokens: 0,
+                server_tool_use: ServerToolUsage {
+                    web_search_requests: 1
+                },
             }
         );
         assert_eq!(reported, [StreamEvent::Thinking, StreamEvent::Thinking]);

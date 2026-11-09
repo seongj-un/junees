@@ -647,7 +647,8 @@ fn recheck_commit(root: &Path, report: &mut Reporter<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The task's tokens and this run's time, with their budgets.
+/// The task's tokens and this run's time, with their budgets, and the web
+/// searches the API ran for the task, if any (billed apart).
 fn spent(env: &TaskEnv<'_>, state: &State, started: std::time::Instant) -> String {
     let tokens = budget::tokens(state.usage);
     let time = format_duration(env.budget.now().saturating_duration_since(started));
@@ -659,7 +660,11 @@ fn spent(env: &TaskEnv<'_>, state: &State, started: std::time::Instant) -> Strin
         Some(max) => format!("{time} of {}", format_duration(max)),
         None => time,
     };
-    format!("task tokens {tokens}, run time {time}")
+    let searches = match state.usage.web_searches() {
+        0 => String::new(),
+        n => format!(", web searches {n}"),
+    };
+    format!("task tokens {tokens}{searches}, run time {time}")
 }
 
 /// Adds a line to `.junees/run.log`. The log is for people watching; a

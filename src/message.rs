@@ -178,10 +178,40 @@ pub struct Usage {
     pub cache_creation_input_tokens: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cache_read_input_tokens: u64,
+    /// Calls of the tools the API runs itself, billed apart from tokens.
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "ServerToolUsage::is_empty"
+    )]
+    pub server_tool_use: ServerToolUsage,
+}
+
+/// `usage.server_tool_use` of a response: how often the API ran its own
+/// tools for the call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerToolUsage {
+    #[serde(default)]
+    pub web_search_requests: u64,
+}
+
+impl ServerToolUsage {
+    fn is_empty(&self) -> bool {
+        self.web_search_requests == 0
+    }
 }
 
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+/// The API sends `null` for a count object it has nothing for.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Usage {
@@ -190,6 +220,12 @@ impl Usage {
         self.output_tokens += other.output_tokens;
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
         self.cache_read_input_tokens += other.cache_read_input_tokens;
+        self.server_tool_use.web_search_requests += other.server_tool_use.web_search_requests;
+    }
+
+    /// Web searches the API ran.
+    pub fn web_searches(&self) -> u64 {
+        self.server_tool_use.web_search_requests
     }
 
     /// Size of the conversation after this call: everything it read plus
@@ -315,6 +351,7 @@ mod tests {
             output_tokens: 1,
             cache_creation_input_tokens: 7,
             cache_read_input_tokens: 9,
+            ..Default::default()
         });
         total.add(Usage {
             cache_read_input_tokens: 1,
@@ -327,6 +364,7 @@ mod tests {
                 output_tokens: 3,
                 cache_creation_input_tokens: 7,
                 cache_read_input_tokens: 10,
+                ..Default::default()
             }
         );
     }
@@ -338,6 +376,7 @@ mod tests {
             output_tokens: 40,
             cache_creation_input_tokens: 300,
             cache_read_input_tokens: 9000,
+            ..Default::default()
         };
         assert_eq!(usage.context_tokens(), 9345);
     }

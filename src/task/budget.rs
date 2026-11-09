@@ -201,6 +201,7 @@ mod tests {
             output_tokens: 2,
             cache_creation_input_tokens: 3,
             cache_read_input_tokens: 4,
+            ..Default::default()
         };
         assert_eq!(tokens(usage), 10);
 

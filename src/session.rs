@@ -156,8 +156,8 @@ pub trait Journal: Send {
 pub struct Transcript {
     pub messages: Vec<Message>,
     pub usage: Usage,
-    /// Size of the conversation as of the last model call (see
-    /// [`Usage::context_tokens`]); 0 until one is measured.
+    /// Size of the conversation as of the last model call that searched
+    /// nothing (see [`Usage::context_tokens`]); 0 until one is measured.
     pub context_tokens: u64,
 }
 
@@ -176,7 +176,15 @@ impl Transcript {
             },
             Entry::Usage(usage) => {
                 self.usage.add(usage);
-                self.context_tokens = usage.context_tokens();
+                // A call that searched the web reports the cache reads of
+                // every step of the API's own search loop, far more than
+                // the conversation holds (context editing docs, "Server-side
+                // tools"), so it says nothing about the size. The next call
+                // without one measures it again; until then the last size
+                // stands, and an overflow still shrinks the history.
+                if usage.web_searches() == 0 {
+                    self.context_tokens = usage.context_tokens();
+                }
             }
             Entry::ClearToolResults {
                 upto,
@@ -1661,6 +1669,38 @@ mod tests {
             serde_json::to_value(Entry::SummaryUsage(usage)).unwrap()["type"],
             "summary_usage"
         );
+    }
+
+    #[test]
+    fn a_call_that_searched_the_web_counts_but_does_not_size_the_context() {
+        let mut transcript = Transcript::default();
+        let plain = |input_tokens| Usage {
+            input_tokens,
+            ..Default::default()
+        };
+        transcript.apply(Entry::Usage(plain(100)));
+        let searched = Usage {
+            input_tokens: 40,
+            // Read again by every step of the API's search loop.
+            cache_read_input_tokens: 270_000,
+            server_tool_use: crate::message::ServerToolUsage {
+                web_search_requests: 3,
+            },
+            ..Default::default()
+        };
+        transcript.apply(Entry::Usage(searched));
+        assert_eq!(transcript.context_tokens, 100);
+        assert_eq!(transcript.usage.cache_read_input_tokens, 270_000);
+        assert_eq!(transcript.usage.web_searches(), 3);
+        // Journaled and read back, the count stays.
+        let line = serde_json::to_value(Entry::Usage(searched)).unwrap();
+        assert_eq!(line["server_tool_use"], json!({"web_search_requests": 3}));
+        assert_eq!(
+            serde_json::from_value::<Entry>(line).unwrap(),
+            Entry::Usage(searched)
+        );
+        transcript.apply(Entry::Usage(plain(300)));
+        assert_eq!(transcript.context_tokens, 300);
     }
 
     #[test]
