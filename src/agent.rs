@@ -256,6 +256,12 @@ impl Agent {
         self.cleared = false;
     }
 
+    /// Makes the next model calls use `system` as the system prompt, for a
+    /// new session (fresh memory); the conversation stays.
+    pub fn set_system(&mut self, system: String) {
+        self.options.system = system;
+    }
+
     /// Makes the next model calls through `provider` (another model); the
     /// conversation stays.
     pub fn set_provider(&mut self, provider: Box<dyn Provider>) {

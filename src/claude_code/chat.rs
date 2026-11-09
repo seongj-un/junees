@@ -31,6 +31,9 @@ pub struct Chat {
     transcript: Transcript,
     journal: Option<Box<dyn Journal>>,
     cancel: Cancel,
+    /// What Junees adds to Claude Code's system prompt
+    /// (`--append-system-prompt`), such as its memory; empty for nothing.
+    system: String,
 }
 
 impl Chat {
@@ -49,7 +52,15 @@ impl Chat {
             transcript: Transcript::default(),
             journal: None,
             cancel,
+            system: String::new(),
         }
+    }
+
+    /// Adds `system` to Claude Code's system prompt from the next turn on
+    /// (empty for nothing). Every turn passes it again: `--resume` does not
+    /// keep it.
+    pub fn set_system(&mut self, system: String) {
+        self.system = system;
     }
 
     /// Continues the Claude Code conversation of a saved session and
@@ -136,6 +147,10 @@ impl Chat {
         if let Some(model) = &self.claude.model {
             args.push("--model".into());
             args.push(model.clone());
+        }
+        if !self.system.is_empty() {
+            args.push("--append-system-prompt".into());
+            args.push(self.system.clone());
         }
         // Last: the option takes every argument up to the next option.
         let mut deny = deny_rules(&self.settings);
@@ -389,6 +404,18 @@ mod tests {
         assert_eq!(
             args[18..23],
             ["--resume", "c-1", "--model", "opus", "--disallowedTools"]
+        );
+
+        // Memory goes on top of Claude Code's own system prompt, each turn.
+        chat.set_system("\nMEMORY (persistent notes)\n...".into());
+        let args = chat.arguments();
+        assert_eq!(
+            args[22..25],
+            [
+                "--append-system-prompt",
+                "\nMEMORY (persistent notes)\n...",
+                "--disallowedTools"
+            ]
         );
     }
 
