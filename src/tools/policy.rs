@@ -144,7 +144,8 @@ impl CommandPolicy {
 
     /// The words of a simple command without leading variable assignments,
     /// keywords (`then`, `do`, `!`, ...) and wrappers (`env`, `nohup`,
-    /// `timeout`, ...), so the rules see the program that actually runs.
+    /// `timeout`, `setsid`, `taskset`, `busybox`, ...), so the rules see the
+    /// program that actually runs.
     fn command_words<'a>(&self, words: &'a [String]) -> Result<&'a [String], String> {
         let mut i = 0;
         while let Some(word) = words.get(i) {
@@ -161,8 +162,18 @@ impl CommandPolicy {
                     &["-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t"]
                 }
                 "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!" | "{" | "time"
-                | "command" | "builtin" | "nohup" => &[],
+                | "command" | "builtin" | "nohup" | "setsid" | "busybox" | "taskset" => &[],
                 "exec" => &["-a"],
+                "stdbuf" => &["-i", "-o", "-e"],
+                "ionice" => &["-c", "--class", "-n", "--classdata", "-p", "--pid"],
+                "chrt" => &[
+                    "-T",
+                    "--sched-runtime",
+                    "-P",
+                    "--sched-period",
+                    "-D",
+                    "--sched-deadline",
+                ],
                 "env" => &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
                 "nice" => &["-n", "--adjustment"],
                 "timeout" => &["-s", "--signal", "-k", "--kill-after"],
@@ -187,8 +198,8 @@ impl CommandPolicy {
                     1
                 };
             }
-            if name == "timeout" {
-                // The duration.
+            if matches!(name, "timeout" | "chrt" | "taskset") {
+                // The duration, priority or CPU mask.
                 i += 1;
             }
         }
@@ -1164,8 +1175,29 @@ mod tests {
         denied("bash -o pipefail -c 'git push -f'");
         denied("eval 'rm -rf /'");
         denied("eval rm -rf /");
+        for command in [
+            "setsid rm -rf ~",
+            "setsid -f reboot",
+            "stdbuf -o0 rm -rf ~",
+            "stdbuf -o L -e 0 reboot",
+            "ionice -c 3 rm -rf /",
+            "ionice -c3 -n7 reboot",
+            "chrt -f 10 reboot",
+            "chrt 0 rm -rf ~",
+            "taskset -c 0-3 rm -rf ~",
+            "taskset 0x1 reboot",
+            "busybox rm -rf ~",
+            "nohup setsid nice -n 5 reboot",
+        ] {
+            denied(command);
+        }
         allowed("bash -c 'echo hi'");
         allowed("bash script.sh -c reboot");
+        allowed("setsid cargo run");
+        allowed("stdbuf -oL cargo test");
+        allowed("taskset -c 0 cargo build");
+        allowed("ionice -p 123");
+        allowed("busybox --list");
         allowed("env | sort");
         allowed("command -v reboot");
         allowed("timeout 5 cargo test");
