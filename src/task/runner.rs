@@ -147,6 +147,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     };
     let mut state = State::load(root)?;
     state.usage.add(usage);
+    state.goal = Some(goal.to_string());
     state.save(root)?;
     append_progress(
         root,
@@ -314,7 +315,7 @@ pub async fn run(
         }
         state.save(root)?;
     };
-    state.stop = Some(stop.clone());
+    state.record_stop(stop.clone());
     state.save(root)?;
     Ok(stop)
 }
@@ -772,7 +773,9 @@ mod tests {
             "{progress}"
         );
         // state.json stays out of git.
-        assert_eq!(State::load(root).unwrap().usage.input_tokens, 15);
+        let state = State::load(root).unwrap();
+        assert_eq!(state.usage.input_tokens, 15);
+        assert_eq!(state.goal.as_deref(), Some("build it"));
         assert!(super::super::state_path(root).exists());
         assert!(
             out.lines[0].starts_with("== init session, journal "),
@@ -1045,6 +1048,7 @@ mod tests {
         let state = State::load(root).unwrap();
         assert_eq!((state.sessions, state.stalled), (2, 0));
         assert_eq!(state.stop, Some(stop));
+        assert!(state.stopped_at.is_some());
         let progress = fs::read_to_string(progress_path(root)).unwrap();
         assert!(
             progress.contains("- [junees] session 1: 1/2 passing, new: F1, tokens in 15 out 3\n")

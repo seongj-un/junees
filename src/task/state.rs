@@ -6,6 +6,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,12 @@ pub struct State {
     /// `None` at the start of a run means the previous one crashed.
     #[serde(default)]
     pub stop: Option<Stop>,
+    /// When the last recorded stop happened, in unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<u64>,
+    /// The goal `task init` planned the task for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,6 +89,16 @@ impl fmt::Display for Stop {
 }
 
 impl State {
+    /// Records why a run stopped, and when.
+    pub fn record_stop(&mut self, stop: Stop) {
+        self.stop = Some(stop);
+        self.stopped_at = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs()),
+        );
+    }
+
     /// The state of the task in `root`; a fresh one if there is no file yet.
     pub fn load(root: &Path) -> Result<Self> {
         let path = state_path(root);
@@ -125,6 +142,8 @@ mod tests {
                 session: 4,
                 detail: Some("network down".into()),
             }),
+            stopped_at: Some(1_794_205_024),
+            goal: Some("할 일 앱".into()),
         };
         state.save(root.path()).unwrap();
         assert_eq!(State::load(root.path()).unwrap(), state);
@@ -135,6 +154,25 @@ mod tests {
             state.stop.unwrap().to_string(),
             "session 4 failed: network down"
         );
+    }
+
+    #[test]
+    fn record_stop_notes_the_time_and_old_files_still_load() {
+        let mut state = State::default();
+        state.record_stop(Stop {
+            reason: StopReason::Complete,
+            session: 3,
+            detail: None,
+        });
+        assert_eq!(state.stop.as_ref().unwrap().session, 3);
+        // Some time after 2026-01-01.
+        assert!(state.stopped_at.unwrap() > 1_767_225_600);
+
+        // A state.json written before these fields existed.
+        let old: State =
+            serde_json::from_str(r#"{"sessions": 2, "stalled": 0, "usage": {}, "stop": null}"#)
+                .unwrap();
+        assert_eq!((old.goal, old.stopped_at), (None, None));
     }
 
     #[test]
