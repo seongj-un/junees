@@ -100,7 +100,7 @@ async fn without_a_terminal_risky_calls_are_declined_and_others_run() {
 
     assert!(
         stderr.contains(
-            "stdin is not a terminal: tool calls that need approval (JUNEES_APPROVAL=risky) \
+            "stdin or stderr is not a terminal: tool calls that need approval (JUNEES_APPROVAL=risky) \
              are declined"
         ),
         "{stderr}"
@@ -124,7 +124,7 @@ async fn without_a_terminal_risky_calls_are_declined_and_others_run() {
     assert_eq!(
         results[0].1,
         "not run: this call needs the user's approval (JUNEES_APPROVAL=risky), but junees \
-         cannot ask because its input is not a terminal"
+         cannot ask without a terminal on stdin and stderr"
     );
     assert_eq!(
         results[1],

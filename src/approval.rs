@@ -201,7 +201,7 @@ impl ToolGate for Approval {
         let Some(asker) = &mut self.asker else {
             return Some(ToolOutput::error(format!(
                 "not run: this call needs the user's approval (JUNEES_APPROVAL={}), but junees \
-                 cannot ask because its input is not a terminal",
+                 cannot ask without a terminal on stdin and stderr",
                 self.mode.name()
             )));
         };
@@ -219,8 +219,8 @@ impl ToolGate for Approval {
 
 /// The gate of the conversation mode, or `None` with `JUNEES_APPROVAL=off`.
 /// It asks on the terminal through `input`, which the prompt reads too;
-/// when stdin is not a terminal it declines every call that needs approval
-/// and says so on stderr now.
+/// when stdin or stderr is not a terminal it declines every call that needs
+/// approval and says so on stderr now.
 pub fn for_conversation(config: &Config, cwd: &Path, input: &SharedLines) -> Option<Approval> {
     if config.approval == ApprovalMode::Off {
         return None;
@@ -230,14 +230,16 @@ pub fn for_conversation(config: &Config, cwd: &Path, input: &SharedLines) -> Opt
         &config.tools,
         Workspace::new(cwd).with_temp_dirs(),
     );
-    if std::io::stdin().is_terminal() {
+    // The question goes to stderr: with that in a file (`junees 2>log`)
+    // the person would wait for a question they cannot see.
+    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
         return Some(approval.asking(Box::new(TerminalAsk::new(
             input.clone(),
             Box::new(std::io::stderr()),
         ))));
     }
     eprintln!(
-        "  !! stdin is not a terminal: tool calls that need approval (JUNEES_APPROVAL={}) are \
+        "  !! stdin or stderr is not a terminal: tool calls that need approval (JUNEES_APPROVAL={}) are \
          declined; set JUNEES_APPROVAL=off to run them without asking",
         config.approval.name()
     );
@@ -689,7 +691,7 @@ mod tests {
         assert_eq!(
             output.content,
             "not run: this call needs the user's approval (JUNEES_APPROVAL=risky), but junees \
-             cannot ask because its input is not a terminal"
+             cannot ask without a terminal on stdin and stderr"
         );
         assert_eq!(gate.check("bash", &bash("ls")).await, None);
     }
