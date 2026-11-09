@@ -8,9 +8,14 @@ use anyhow::{Context, Result, bail};
 use crate::tools::SECRET_ENV_VARS;
 
 /// Variables that point git at a repository other than the one in the
-/// current folder. Git hooks and `git rebase --exec` set some of them (a
-/// worktree's rebase exports `GIT_DIR`), and task mode always means the
-/// repository it found from its folder, so they are removed.
+/// current folder, or hand it settings from a parent git process. Git hooks
+/// and `git rebase --exec` set some of them (a worktree's rebase exports
+/// `GIT_DIR`, and `git -c ...` passes its settings, `core.worktree` or
+/// `core.hooksPath` among them, on in `GIT_CONFIG_PARAMETERS`). Task mode
+/// always means the repository it found from its folder, with that
+/// repository's own settings, so they are removed. Without
+/// `GIT_CONFIG_COUNT` git ignores the `GIT_CONFIG_KEY_<n>` and
+/// `GIT_CONFIG_VALUE_<n>` pairs.
 pub const REPO_ENV_VARS: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -20,6 +25,8 @@ pub const REPO_ENV_VARS: &[&str] = &[
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_NAMESPACE",
     "GIT_PREFIX",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
 ];
 
 /// Settings put in front of every git command the harness runs. A session

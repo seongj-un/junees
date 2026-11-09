@@ -1,6 +1,7 @@
-//! Task mode must work on the repository it was started in even when the
-//! environment names another one, as `git rebase --exec` does in a worktree
-//! (`GIT_DIR`) and git hooks do. This file holds a single test because it
+//! Task mode must work on the repository it was started in, with that
+//! repository's settings, even when the environment names another one or
+//! carries settings, as `git rebase --exec` does in a worktree (`GIT_DIR`,
+//! `GIT_CONFIG_PARAMETERS`) and git hooks do. This file holds a single test because it
 //! changes the process environment.
 
 use std::path::Path;
@@ -41,6 +42,11 @@ async fn git_dir_in_the_environment_does_not_redirect_task_mode() {
     // the environment concurrently.
     unsafe {
         std::env::set_var("GIT_DIR", decoy.path().join(".git"));
+        // Settings a parent `git -c` or `git rebase -x` passes on.
+        std::env::set_var("GIT_CONFIG_PARAMETERS", "'user.name'='Leaked Name'");
+        std::env::set_var("GIT_CONFIG_COUNT", "1");
+        std::env::set_var("GIT_CONFIG_KEY_0", "user.email");
+        std::env::set_var("GIT_CONFIG_VALUE_0", "leaked@junees.invalid");
     }
 
     // The harness's own git commands.
@@ -55,14 +61,17 @@ async fn git_dir_in_the_environment_does_not_redirect_task_mode() {
     git::commit_all(&root, "first").unwrap();
     assert!(!git::is_dirty(&root).unwrap());
 
-    // The session's bash.
+    // The session's bash, which sees the repository's own identity.
     let output = session_tools()
         .dispatch(
             "bash",
-            json!({"command": format!("cd '{}' && git log --format=%s", root.display())}),
+            json!({"command": format!("cd '{}' && git log --format='%s by %an <%ae>'", root.display())}),
         )
         .await;
-    assert_eq!(output.content, "first\n[exit code 0]");
+    assert_eq!(
+        output.content,
+        "first by Junees Test <test@junees.invalid>\n[exit code 0]"
+    );
 
     // Verify commands.
     let ledger = Arc::new(Mutex::new(Ledger::load(&root).unwrap()));
