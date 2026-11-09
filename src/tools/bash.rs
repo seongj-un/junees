@@ -60,13 +60,10 @@ impl Bash {
     /// the user's extra hidden variables, and runs only the commands the
     /// user's [`CommandPolicy`] allows.
     pub fn with_settings(settings: &ToolSettings) -> Self {
-        let policy = CommandPolicy::default()
-            .deny_prefixes(&settings.deny_commands)
-            .allow_dangerous(settings.allow_dangerous);
         Self::default()
             .hide_env(SECRET_ENV_VARS.iter().copied())
             .hide_env(settings.hidden_env.iter().cloned())
-            .policy(policy)
+            .policy(CommandPolicy::with_settings(settings))
     }
 
     /// Replaces the policy that decides which commands may run.

@@ -10,7 +10,7 @@ pub use bash::Bash;
 #[cfg(test)]
 pub(crate) use bash::testing;
 pub use edit_file::EditFile;
-pub use policy::{CommandPolicy, Verdict};
+pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};
 pub use read_file::ReadFile;
 pub use write_file::WriteFile;
 

@@ -9,6 +9,10 @@
 //! that builds the dangerous word at run time (`rm -rf $(echo /)`) still gets
 //! past it.
 
+use std::path::{Component, Path, PathBuf};
+
+use super::ToolSettings;
+
 /// Whether a command may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -288,6 +292,546 @@ impl CommandPolicy {
             return Some(format!("recursive `rm` of `{target}` after `cd {dir}`"));
         }
         builtin_violation(name, args)
+    }
+}
+
+/// Something about a command that a person should see before it runs.
+/// Only for commands [`CommandPolicy::check`] lets through; see
+/// [`CommandPolicy::cautions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caution {
+    /// The kind of risk, the same text for every command it covers (for
+    /// example `git push` or `delete files`), so an answer can cover a kind.
+    pub kind: &'static str,
+    /// What this command does, for the person.
+    pub reason: String,
+}
+
+const DELETE: &str = "delete files";
+const GIT_PUSH: &str = "git push";
+const GIT_RESET: &str = "git reset --hard";
+const GIT_CLEAN: &str = "git clean";
+const PACKAGES: &str = "install packages";
+const DOWNLOAD: &str = "download files";
+const PERMISSIONS: &str = "change permissions";
+/// Writing a file outside the working folder (also by the file tools).
+pub const OUTSIDE: &str = "write outside the working folder";
+const BLOCKED: &str = "commands the built-in rules block";
+
+impl CommandPolicy {
+    /// The policy of the user's tool settings, as the default bash uses it.
+    pub fn with_settings(settings: &ToolSettings) -> Self {
+        Self::default()
+            .deny_prefixes(&settings.deny_commands)
+            .allow_dangerous(settings.allow_dangerous)
+    }
+
+    /// Why a person should look at `command` before it runs, if at all:
+    /// deleting files, `git push`, `git reset --hard`, `git clean`,
+    /// installing packages, downloading files, changing permissions, and
+    /// writing outside `workspace`. With [`CommandPolicy::allow_dangerous`],
+    /// whatever the built-in rules would refuse is a caution too.
+    ///
+    /// It looks at the same parts of a command line as [`CommandPolicy::check`]
+    /// (`$(...)`, `sh -c`, `eval`, scripts piped into a shell, wrappers), except
+    /// the commands inside `env -S` and `su -c`.
+    pub fn cautions(&self, command: &str, workspace: &Workspace) -> Vec<Caution> {
+        let mut found = Vec::new();
+        if self.allow_dangerous
+            && let Verdict::Deny(reason) = Self::default().check(command)
+        {
+            found.push(Caution {
+                kind: BLOCKED,
+                reason: format!("the built-in rules would block it: {reason}"),
+            });
+        }
+        // With the rules off, `command_words` looks through `sudo` and
+        // friends instead of failing on them.
+        let reader = Self::default().allow_dangerous(true);
+        reader.add_cautions(command, workspace, 0, &mut found);
+        let mut unique: Vec<Caution> = Vec::with_capacity(found.len());
+        for caution in found {
+            if !unique.contains(&caution) {
+                unique.push(caution);
+            }
+        }
+        unique
+    }
+
+    fn add_cautions(
+        &self,
+        script: &str,
+        workspace: &Workspace,
+        depth: usize,
+        found: &mut Vec<Caution>,
+    ) {
+        // `check` refuses anything deeper.
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let parsed = parse(script);
+        for body in &parsed.nested {
+            self.add_cautions(body, workspace, depth + 1, found);
+        }
+        for pipeline in &parsed.pipelines {
+            let mut piped: Option<String> = None;
+            for command in pipeline {
+                for (op, target) in &command.redirects {
+                    if redirect_writes(op, target) && !workspace.contains(target) {
+                        found.push(outside(target));
+                    }
+                }
+                let words = match self.command_words(&command.words, depth) {
+                    Ok(words) if !words.is_empty() => words,
+                    _ => {
+                        piped = None;
+                        continue;
+                    }
+                };
+                self.simple_cautions(words, workspace, depth, found);
+                let name = basename(&words[0]);
+                let stdin = command.input.as_deref().or(piped.as_deref());
+                if SHELLS.contains(&name)
+                    && reads_stdin_script(&words[1..])
+                    && let Some(script) = stdin
+                {
+                    self.add_cautions(script, workspace, depth + 1, found);
+                }
+                piped = printed_text(name, &words[1..], command.input.as_deref());
+            }
+        }
+    }
+
+    fn simple_cautions(
+        &self,
+        words: &[String],
+        workspace: &Workspace,
+        depth: usize,
+        found: &mut Vec<Caution>,
+    ) {
+        let Some(first) = words.first() else {
+            return;
+        };
+        let name = basename(first);
+        let args = &words[1..];
+        match name {
+            "rm" | "rmdir" | "unlink" | "shred" => {
+                found.push(caution(DELETE, format!("`{name}` deletes files")));
+                for target in operands(args).filter(|target| !workspace.contains(target)) {
+                    found.push(outside(target));
+                }
+            }
+            "find" => {
+                if args.iter().any(|arg| arg == "-delete") {
+                    found.push(caution(DELETE, "`find -delete` deletes files"));
+                }
+                // `-exec cmd args ;` runs a command of its own.
+                let mut rest = args;
+                while let Some(start) = rest
+                    .iter()
+                    .position(|arg| matches!(arg.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))
+                {
+                    let after = &rest[start + 1..];
+                    let end = after
+                        .iter()
+                        .position(|arg| arg == ";" || arg == "+")
+                        .unwrap_or(after.len());
+                    if let Ok(words) = self.command_words(&after[..end], depth) {
+                        self.simple_cautions(words, workspace, depth + 1, found);
+                    }
+                    rest = &after[end.min(after.len())..];
+                }
+            }
+            "git" => {
+                if let Some((kind, reason)) = git_caution(args) {
+                    found.push(caution(kind, reason));
+                }
+            }
+            "chmod" | "chown" | "chgrp" | "chattr" | "setfacl" => {
+                found.push(caution(
+                    PERMISSIONS,
+                    format!("`{name}` changes permissions or ownership"),
+                ));
+            }
+            "curl" if curl_saves(args) => {
+                found.push(caution(DOWNLOAD, "`curl` saves a downloaded file"));
+            }
+            "wget" if wget_saves(args) => {
+                found.push(caution(DOWNLOAD, "`wget` saves a downloaded file"));
+            }
+            "cp" | "ln" | "install" => {
+                if let Some(target) = copy_target(args)
+                    && !workspace.contains(target)
+                {
+                    found.push(outside(target));
+                }
+            }
+            "mv" | "tee" | "touch" | "mkdir" | "truncate" => {
+                for target in operands(args).filter(|target| !workspace.contains(target)) {
+                    found.push(outside(target));
+                }
+            }
+            "sed" => {
+                for target in sed_in_place_files(args).filter(|target| !workspace.contains(target))
+                {
+                    found.push(outside(target));
+                }
+            }
+            "dd" => {
+                for target in args
+                    .iter()
+                    .filter_map(|arg| arg.strip_prefix("of="))
+                    .filter(|target| !workspace.contains(target))
+                {
+                    found.push(outside(target));
+                }
+            }
+            "eval" => self.add_cautions(&args.join(" "), workspace, depth + 1, found),
+            _ if SHELLS.contains(&name) => {
+                if let Some(script) = shell_script(args) {
+                    self.add_cautions(script, workspace, depth + 1, found);
+                }
+            }
+            _ => {
+                if let Some(reason) = package_change(name, args) {
+                    found.push(caution(PACKAGES, reason));
+                }
+            }
+        }
+    }
+}
+
+fn caution(kind: &'static str, reason: impl Into<String>) -> Caution {
+    Caution {
+        kind,
+        reason: reason.into(),
+    }
+}
+
+fn outside(target: &str) -> Caution {
+    Caution {
+        kind: OUTSIDE,
+        reason: format!("writes to `{target}` outside the working folder"),
+    }
+}
+
+/// True for a redirect that writes to a file: not `2>&1` or `>&-`.
+fn redirect_writes(op: &str, target: &str) -> bool {
+    op.contains('>')
+        && !(op.ends_with('&') && (target == "-" || target.chars().all(|c| c.is_ascii_digit())))
+}
+
+/// The arguments that are not options; everything after `--`.
+fn operands(args: &[String]) -> impl Iterator<Item = &String> {
+    let mut options_done = false;
+    args.iter().filter(move |arg| {
+        if !options_done && arg.as_str() == "--" {
+            options_done = true;
+            return false;
+        }
+        options_done || !(arg.starts_with('-') && arg.len() > 1)
+    })
+}
+
+/// Where `cp`, `ln` or `install` writes: the `-t` folder or the last operand.
+fn copy_target(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-t" || arg == "--target-directory" {
+            return iter.next().map(String::as_str);
+        }
+        if let Some(dir) = arg
+            .strip_prefix("--target-directory=")
+            .or_else(|| arg.strip_prefix("-t").filter(|dir| !dir.is_empty()))
+        {
+            return Some(dir);
+        }
+    }
+    let operands: Vec<&String> = operands(args).collect();
+    (operands.len() >= 2).then(|| operands[operands.len() - 1].as_str())
+}
+
+/// The files `sed -i` edits in place; none without `-i`.
+fn sed_in_place_files(args: &[String]) -> impl Iterator<Item = &String> {
+    let mut in_place = false;
+    let mut script_given = false;
+    let mut files = Vec::new();
+    let mut options_done = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if options_done || !(arg.starts_with('-') && arg.len() > 1) {
+            files.push(arg);
+        } else if arg == "--" {
+            options_done = true;
+        } else if matches!(arg.as_str(), "-e" | "--expression" | "-f" | "--file") {
+            script_given = true;
+            iter.next();
+        } else if arg.starts_with("--expression=") || arg.starts_with("--file=") {
+            script_given = true;
+        } else if arg == "--in-place" || arg.starts_with("--in-place=") {
+            in_place = true;
+        } else if !arg.starts_with("--") {
+            in_place |= arg.contains('i');
+            script_given |= arg.ends_with('e') || arg.ends_with('f');
+            if arg.ends_with('e') || arg.ends_with('f') {
+                iter.next();
+            }
+        }
+    }
+    // Without `-e` or `-f`, the first operand is the script.
+    let skip = usize::from(!script_given);
+    files.into_iter().skip(skip).filter(move |_| in_place)
+}
+
+/// The value of an option like curl's `-o` and wget's `-O`, given as
+/// `-o value`, `-ovalue`, a short group ending in it (`-sSLo value`) or
+/// `--long value`/`--long=value`.
+fn option_value<'a>(args: &'a [String], short: char, long: &str) -> Option<&'a str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == long {
+            return iter.next().map(String::as_str);
+        }
+        if let Some(value) = arg
+            .strip_prefix(long)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            return Some(value);
+        }
+        if arg.starts_with('-')
+            && !arg.starts_with("--")
+            && let Some(at) = arg[1..].find(short)
+        {
+            let value = &arg[1 + at + short.len_utf8()..];
+            if value.is_empty() {
+                return iter.next().map(String::as_str);
+            }
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Whether the value of an output option keeps the download off the disk.
+fn to_stdout(target: &str) -> bool {
+    target == "-" || target == "/dev/null"
+}
+
+fn curl_saves(args: &[String]) -> bool {
+    let remote_name = args.iter().any(|arg| {
+        matches!(arg.as_str(), "--remote-name" | "--remote-name-all")
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('O'))
+    });
+    remote_name || option_value(args, 'o', "--output").is_some_and(|target| !to_stdout(target))
+}
+
+fn wget_saves(args: &[String]) -> bool {
+    if args.iter().any(|arg| arg == "--spider") {
+        return false;
+    }
+    option_value(args, 'O', "--output-document").is_none_or(|target| !to_stdout(target))
+}
+
+/// What a `git` command with these arguments risks, if anything.
+fn git_caution(args: &[String]) -> Option<(&'static str, &'static str)> {
+    let mut iter = args.iter();
+    let mut subcommand = None;
+    while let Some(arg) = iter.next() {
+        if matches!(
+            arg.as_str(),
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace"
+        ) {
+            iter.next();
+        } else if !arg.starts_with('-') {
+            subcommand = Some(arg.as_str());
+            break;
+        }
+    }
+    let rest: Vec<&String> = iter.collect();
+    match subcommand? {
+        "push" => Some((GIT_PUSH, "`git push` publishes commits")),
+        "reset" if rest.iter().any(|arg| arg.as_str() == "--hard") => Some((
+            GIT_RESET,
+            "`git reset --hard` throws away uncommitted changes",
+        )),
+        "clean"
+            if !rest.iter().any(|arg| {
+                arg.as_str() == "--dry-run"
+                    || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('n'))
+            }) =>
+        {
+            Some((GIT_CLEAN, "`git clean` deletes untracked files"))
+        }
+        _ => None,
+    }
+}
+
+/// Why a package manager command changes what is installed, if it does.
+fn package_change(name: &str, args: &[String]) -> Option<String> {
+    let mut words = operands(args).map(String::as_str);
+    let subcommand = words.next();
+    let is = |subs: &[&str]| subcommand.is_some_and(|sub| subs.contains(&sub));
+    let changes = match name {
+        "apt" | "apt-get" | "aptitude" | "dnf" | "yum" | "zypper" | "snap" | "flatpak" | "brew"
+        | "port" => is(&[
+            "install",
+            "reinstall",
+            "remove",
+            "purge",
+            "upgrade",
+            "dist-upgrade",
+            "full-upgrade",
+            "autoremove",
+            "uninstall",
+            "in",
+            "rm",
+        ]),
+        "pacman" | "yay" | "paru" => args.iter().any(|arg| {
+            matches!(arg.as_str(), "--sync" | "--remove" | "--upgrade")
+                || (!arg.starts_with("--")
+                    && (arg.starts_with("-S") || arg.starts_with("-R") || arg.starts_with("-U")))
+        }),
+        "apk" => is(&["add", "del", "upgrade"]),
+        "pip" | "pip3" | "pipx" | "gem" | "cargo" => is(&["install", "uninstall"]),
+        "go" => is(&["install", "get"]),
+        "npm" | "pnpm" | "yarn" | "bun" => is(&[
+            "install",
+            "i",
+            "add",
+            "ci",
+            "uninstall",
+            "remove",
+            "rm",
+            "update",
+            "upgrade",
+            "dlx",
+        ]),
+        "uv" => match subcommand {
+            Some("pip" | "tool") => words.next().is_some_and(|sub| sub == "install"),
+            Some("add") => true,
+            _ => false,
+        },
+        "npx" | "pnpx" | "bunx" | "uvx" => {
+            return Some(format!("`{name}` runs a package fetched from the registry"));
+        }
+        _ if name.starts_with("python") => {
+            let mut iter = args.iter().skip_while(|arg| arg.as_str() != "-m").skip(1);
+            iter.next().is_some_and(|module| module == "pip")
+                && iter.any(|arg| arg == "install" || arg == "uninstall")
+        }
+        _ => false,
+    };
+    changes.then(|| {
+        let shown = match name {
+            "pacman" | "yay" | "paru" => None,
+            _ if name.starts_with("python") => None,
+            _ => subcommand,
+        };
+        match shown {
+            Some(sub) => format!("`{name} {sub}` installs or removes packages"),
+            None => format!("`{name}` installs or removes packages"),
+        }
+    })
+}
+
+/// The working folder, for telling writes inside it from writes elsewhere.
+#[derive(Debug, Clone)]
+pub struct Workspace {
+    root: PathBuf,
+    /// Folders that do not count as elsewhere (the temporary folders).
+    scratch: Vec<PathBuf>,
+    home: Option<PathBuf>,
+}
+
+impl Workspace {
+    /// `root` is the folder relative paths start from. `~` and `$HOME` mean
+    /// the `HOME` of this process.
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: resolve(root).unwrap_or_else(|| root.to_path_buf()),
+            scratch: Vec::new(),
+            home: std::env::var_os("HOME").map(PathBuf::from),
+        }
+    }
+
+    /// Also counts `/tmp` and the temporary folder (`TMPDIR`) as inside.
+    pub fn with_temp_dirs(mut self) -> Self {
+        for dir in [PathBuf::from("/tmp"), std::env::temp_dir()] {
+            if let Some(dir) = resolve(&dir)
+                && !self.scratch.contains(&dir)
+            {
+                self.scratch.push(dir);
+            }
+        }
+        self
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Whether writing to `path` stays in the working folder (or a
+    /// temporary folder). Symbolic links are followed as far as they
+    /// exist. Paths that depend on a variable other than `$HOME`, or on
+    /// another user's home (`~user`), count as elsewhere; device files
+    /// (`/dev/null`) as inside, since the command rules cover them.
+    pub fn contains(&self, path: &str) -> bool {
+        if path.is_empty() || path.starts_with("/dev/") {
+            return true;
+        }
+        let home_rest = ["~", "$HOME", "${HOME}"].iter().find_map(|home| {
+            path.strip_prefix(home)
+                .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+        });
+        let path = match home_rest {
+            Some(rest) => match &self.home {
+                Some(home) => home.join(rest.trim_start_matches('/')),
+                None => return false,
+            },
+            None if path.starts_with('~') || path.contains(['$', '`']) => return false,
+            None => self.root.join(path),
+        };
+        resolve(&path).is_some_and(|path| {
+            path.starts_with(&self.root) || self.scratch.iter().any(|dir| path.starts_with(dir))
+        })
+    }
+}
+
+/// `path` without `.` and `..`, with the part of it that exists resolved
+/// through symbolic links. `None` for a dangling link, whose target is
+/// unknown.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    let mut normal = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normal.pop();
+            }
+            Component::CurDir => {}
+            other => normal.push(other),
+        }
+    }
+    let mut existing = normal.as_path();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            return Some(
+                missing
+                    .iter()
+                    .rev()
+                    .fold(canonical, |path, name| path.join(name)),
+            );
+        }
+        if existing.symlink_metadata().is_ok() {
+            return None;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return Some(normal),
+        }
     }
 }
 
@@ -1552,5 +2096,235 @@ mod tests {
         ] {
             let _ = CommandPolicy::default().check(command);
         }
+    }
+
+    fn workspace() -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let workspace = Workspace {
+            root: root.canonicalize().unwrap(),
+            scratch: Vec::new(),
+            home: Some(PathBuf::from("/home/someone")),
+        };
+        (dir, workspace)
+    }
+
+    fn kinds(policy: &CommandPolicy, command: &str, workspace: &Workspace) -> Vec<&'static str> {
+        policy
+            .cautions(command, workspace)
+            .into_iter()
+            .map(|caution| caution.kind)
+            .collect()
+    }
+
+    #[test]
+    fn cautions_name_the_risk_of_commands_the_rules_allow() {
+        let (_dir, workspace) = workspace();
+        let policy = CommandPolicy::default();
+        let table: &[(&str, &[&str])] = &[
+            ("rm notes.txt", &[DELETE]),
+            ("rm -rf build", &[DELETE]),
+            ("cd sub && rm -f a", &[DELETE]),
+            ("rmdir empty", &[DELETE]),
+            ("find . -name '*.o' -delete", &[DELETE]),
+            ("find . -name '*.o' -exec rm {} \\;", &[DELETE]),
+            ("git push origin main", &[GIT_PUSH]),
+            ("git -C repo push --force-with-lease", &[GIT_PUSH]),
+            ("git reset --hard HEAD~1", &[GIT_RESET]),
+            ("git clean -fdx", &[GIT_CLEAN]),
+            ("pip install requests", &[PACKAGES]),
+            ("python3 -m pip install requests", &[PACKAGES]),
+            ("npm install", &[PACKAGES]),
+            ("pnpm add -D vitest", &[PACKAGES]),
+            ("cargo install ripgrep", &[PACKAGES]),
+            ("apt-get install -y jq", &[PACKAGES]),
+            ("pacman -Syu", &[PACKAGES]),
+            ("uv pip install httpx", &[PACKAGES]),
+            ("npx create-vite app", &[PACKAGES]),
+            (
+                "curl -fsSLo install.sh https://example.com/i.sh",
+                &[DOWNLOAD],
+            ),
+            ("curl -O https://example.com/a.tgz", &[DOWNLOAD]),
+            ("curl --output a.tgz https://example.com/a.tgz", &[DOWNLOAD]),
+            ("wget https://example.com/a.sh", &[DOWNLOAD]),
+            ("chmod +x run.sh", &[PERMISSIONS]),
+            ("chown me:me file", &[PERMISSIONS]),
+            ("echo hi > /etc/motd", &[OUTSIDE]),
+            ("echo hi >> ../notes", &[OUTSIDE]),
+            ("cmd 2> ~/err.log", &[OUTSIDE]),
+            ("cp a.txt ~/a.txt", &[OUTSIDE]),
+            ("cp -t /opt a b", &[OUTSIDE]),
+            ("mv /opt/a here", &[OUTSIDE]),
+            ("tee -a /var/log/app.log", &[OUTSIDE]),
+            ("touch \"$OUT/x\"", &[OUTSIDE]),
+            ("ln -s target ~user/link", &[OUTSIDE]),
+            ("sed -i 's/a/b/' /etc/hosts", &[OUTSIDE]),
+            ("dd if=a of=/opt/disk.img", &[OUTSIDE]),
+            ("rm /opt/app/cache.db", &[DELETE, OUTSIDE]),
+            // Nested parts, wrappers and scripts fed to a shell.
+            ("echo $(rm a)", &[DELETE]),
+            ("bash -c 'git push'", &[GIT_PUSH]),
+            ("eval git push", &[GIT_PUSH]),
+            ("echo 'git push' | sh", &[GIT_PUSH]),
+            ("bash <<'EOF'\nrm a\nEOF", &[DELETE]),
+            ("timeout 5 nice -n 1 rm a", &[DELETE]),
+            ("FOO=1 env chmod 600 key", &[PERMISSIONS]),
+            ("git push && npm install", &[GIT_PUSH, PACKAGES]),
+            // The same reason twice is listed once.
+            ("rm a; rm b", &[DELETE]),
+        ];
+        for (command, expected) in table {
+            assert_eq!(
+                kinds(&policy, command, &workspace),
+                *expected,
+                "cautions of `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_commands_have_no_cautions() {
+        let (_dir, workspace) = workspace();
+        let policy = CommandPolicy::default();
+        for command in [
+            "ls -la",
+            "cargo test -q",
+            "cargo build --release",
+            "npm run build",
+            "pip list",
+            "python3 script.py",
+            "git status && git diff",
+            "git commit -m 'git push later'",
+            "git clean -n",
+            "git clean --dry-run -d",
+            "git reset HEAD file",
+            "echo 'rm -rf x'",
+            "grep -rn rm src",
+            "curl https://example.com",
+            "curl -s -o /dev/null -w '%{http_code}' https://example.com",
+            "curl -X POST -d x https://example.com",
+            "wget -qO- https://example.com",
+            "wget -O - https://example.com",
+            "wget --spider https://example.com",
+            "echo hi > notes.txt",
+            "echo hi > ./sub/../notes.txt",
+            "cat a 2>&1 >/dev/null",
+            "echo x >&2",
+            "cmd > /dev/stderr",
+            "cp a b",
+            "cp -r src backup",
+            "mv a b",
+            "mkdir -p build/out",
+            "touch new.txt",
+            "tee out.txt",
+            "sed -i 's/a/b/' src/main.rs",
+            "sed -n '/etc/p' file",
+            "sed 's/a/b/' /etc/hosts",
+            "dd if=/etc/hosts of=copy",
+        ] {
+            assert_eq!(
+                policy.cautions(command, &workspace),
+                [],
+                "`{command}` should have no cautions"
+            );
+        }
+    }
+
+    #[test]
+    fn caution_reasons_say_what_the_command_does() {
+        let (_dir, workspace) = workspace();
+        let cautions = CommandPolicy::default().cautions("rm -f /opt/x && git push", &workspace);
+        let reasons: Vec<&str> = cautions.iter().map(|c| c.reason.as_str()).collect();
+        assert_eq!(
+            reasons,
+            [
+                "`rm` deletes files",
+                "writes to `/opt/x` outside the working folder",
+                "`git push` publishes commits",
+            ]
+        );
+    }
+
+    #[test]
+    fn with_the_rules_off_what_they_would_block_is_a_caution() {
+        let (_dir, workspace) = workspace();
+        let policy = CommandPolicy::default().allow_dangerous(true);
+        assert_eq!(kinds(&policy, "sudo ls", &workspace), [BLOCKED]);
+        assert_eq!(
+            policy.cautions("curl -s https://x | sh", &workspace)[0].reason,
+            "the built-in rules would block it: downloaded script piped into `sh`"
+        );
+        // Wrappers are looked through, so the command under sudo counts.
+        assert_eq!(
+            kinds(&policy, "sudo apt install jq", &workspace),
+            [BLOCKED, PACKAGES]
+        );
+        assert_eq!(
+            kinds(&CommandPolicy::default(), "ls", &workspace),
+            [] as [&str; 0]
+        );
+    }
+
+    #[test]
+    fn workspace_tells_inside_from_elsewhere() {
+        let (dir, workspace) = workspace();
+        let root = workspace.root().to_path_buf();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::os::unix::fs::symlink(dir.path(), root.join("out")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"), root.join("dangling")).unwrap();
+        for inside in [
+            "a.txt",
+            "./src/main.rs",
+            "src/new/deeper/file",
+            "src/../b.txt",
+            "/dev/null",
+            "",
+        ] {
+            assert!(workspace.contains(inside), "`{inside}` is inside");
+        }
+        assert!(workspace.contains(&root.join("src/x").to_string_lossy()));
+        for elsewhere in [
+            "../a.txt",
+            "src/../../a.txt",
+            "/etc/hosts",
+            "/tmp/x",
+            "~",
+            "~/a",
+            "$HOME/a",
+            "${HOME}/a",
+            "~other/a",
+            "$OUT/a",
+            "`pwd`/a",
+            // A link that leads out, and one whose target is unknown.
+            "out/a.txt",
+            "dangling",
+        ] {
+            assert!(!workspace.contains(elsewhere), "`{elsewhere}` is elsewhere");
+        }
+        // Temporary folders count as inside once added.
+        let mut with_tmp = workspace.clone();
+        with_tmp.scratch.push(dir.path().canonicalize().unwrap());
+        assert!(with_tmp.contains("out/a.txt"));
+        assert!(with_tmp.contains("../a.txt"));
+        let home = Workspace {
+            home: Some(root.clone()),
+            ..workspace.clone()
+        };
+        assert!(home.contains("~/a"));
+        assert!(home.contains("$HOME/src"));
+    }
+
+    #[test]
+    fn with_settings_uses_the_users_rules() {
+        let settings = ToolSettings {
+            deny_commands: vec!["docker rm".into()],
+            allow_dangerous: true,
+            ..ToolSettings::default()
+        };
+        let policy = CommandPolicy::with_settings(&settings);
+        assert!(matches!(policy.check("docker rm -f web"), Verdict::Deny(_)));
+        assert_eq!(policy.check("sudo ls"), Verdict::Allow);
     }
 }
