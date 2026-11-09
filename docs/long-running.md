@@ -16,10 +16,13 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 ## 단계
 
 ### L1. 세션 기록과 재개
-- 대화의 모든 변경을 `$JUNEES_HOME/sessions/<id>.jsonl`에 바로 추가 기록(append-only, 기본 `~/.junees`)
-- `--continue`(현재 폴더의 마지막 세션), `--resume <id>`, `--no-session`, 대화 중 `/sessions`
-- 재개할 때 기록 검증: 마지막 줄이 잘렸으면 무시, 결과 없는 tool_use는 "중단됨" 오류 결과로 채움
-- 토큰 사용량도 기록하고 복원
+- 대화의 모든 변경을 `$JUNEES_HOME/sessions/<id>.jsonl`에 바로 추가 기록(append-only, 기본 `~/.junees`). 항목은 `meta`(첫 줄), `message`, `append_text`(실패한 턴 뒤 입력이 마지막 user 메시지에 합쳐짐), `usage`
+- 에이전트와 복원이 같은 `Transcript::apply`로 기록을 재생하므로 복원 결과가 실행 중 기록과 같다
+- `--continue`/`-c`(현재 폴더에서 마지막으로 기록된 세션), `--resume <id>`(유일한 앞부분 허용), `--no-session`, 모두 `-p`와 함께 사용 가능. 대화 중 `/sessions`, `/reset`은 새 세션
+- 재개할 때 기록 검증: 마지막 줄이 잘렸으면 버리고 파일에서도 잘라 냄(중간 줄이 깨졌으면 오류), 결과 없는 tool_use는 "interrupted" 오류 결과로 채우고 그것도 기록
+- 토큰 사용량도 기록하고 복원(`/usage`는 현재 세션 기준)
+- 기록 쓰기가 실패하면 경고 한 번, 그 세션의 나머지는 기록하지 않음
+- 새 세션 파일은 첫 항목을 쓸 때 만든다(빈 세션이 `-c` 후보가 되지 않도록)
 
 ### L2. 컨텍스트 관리
 - 프롬프트 캐싱(system, tools, 최근 메시지에 `cache_control`)
