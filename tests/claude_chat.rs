@@ -230,6 +230,8 @@ async fn a_conversation_continues_one_claude_code_session() {
     assert_in_order(
         &stderr,
         &[
+            "(Claude Code runs commands without Junees approval questions; \
+             only the command policy deny rules apply)\n",
             "  -> Bash {\"command\":\"ls\"}\n",
             "  <- Bash ok: a.txt\n",
             "  !! Claude Code refused a tool call: Bash: Bash(sudo *) is in --disallowedTools\n",

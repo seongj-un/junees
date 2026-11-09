@@ -344,6 +344,12 @@ async fn claude_chat(
     for notice in claude.notices() {
         eprintln!("  !! {notice}");
     }
+    // `-p` has nobody to ask (`--permission-prompts none`): the allowed
+    // tools run without the questions the API backend asks.
+    eprintln!(
+        "(Claude Code runs commands without Junees approval questions; \
+         only the command policy deny rules apply)"
+    );
     let chat = Chat::new(
         claude,
         cwd.to_path_buf(),
