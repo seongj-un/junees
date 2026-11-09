@@ -588,6 +588,7 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         cancel,
         notify: Notifier::from_lookup(lookup)?,
         claude,
+        skill_manage: config.task_skill_manage,
     };
     let mut printer = Printer::new();
     let mut reporter = |report: Report<'_>| match report {

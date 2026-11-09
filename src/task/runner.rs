@@ -26,6 +26,7 @@ use crate::message::Usage;
 use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::session::{SessionWriter, format_utc};
+use crate::skills;
 use crate::tools::{ToolRegistry, ToolSettings};
 
 /// Commit message of the commit that starts a task.
@@ -121,6 +122,9 @@ pub struct TaskEnv<'a> {
     /// Runs the sessions with the Claude Code CLI instead of `provider`
     /// (the `claude-code` backend).
     pub claude: Option<ClaudeCode>,
+    /// Sessions may change skills (`JUNEES_TASK_SKILL_MANAGE`); otherwise
+    /// they only read them.
+    pub skill_manage: bool,
 }
 
 /// What the runner tells the user: its own status lines and the events of
@@ -179,9 +183,17 @@ impl TaskEnv<'_> {
     fn agent(
         &self,
         system: String,
-        tools: ToolRegistry,
+        mut tools: ToolRegistry,
         report: &mut Reporter<'_>,
     ) -> Result<(Agent, Option<String>)> {
+        let home = self.home.as_deref();
+        skills::register(&mut tools, home, self.skill_manage);
+        let mode = if self.skill_manage {
+            skills::Mode::Manage
+        } else {
+            skills::Mode::ReadOnly
+        };
+        let system = system + &skills::system_section(home, mode);
         let agent = Agent::new(
             (self.provider)()?,
             tools,
@@ -308,7 +320,8 @@ async fn plan_with_claude(
     report: &mut Reporter<'_>,
 ) -> Result<(usize, Usage)> {
     let root = &env.root;
-    let system = prompt::claude_init_system();
+    let system = prompt::claude_init_system()
+        + &skills::system_section(env.home.as_deref(), skills::Mode::ClaudeCode);
     let verifier = env.verifier();
     let mut usage = Usage::default();
     let mut input = prompt::init_input(goal);
@@ -995,7 +1008,8 @@ async fn claude_session(
     let git_log = git::recent_log(root, GIT_LOG_LINES);
     let (system, passing, total) = {
         let ledger = ledger.lock().unwrap();
-        let system = prompt::claude_work_system(n, ledger.features(), &progress, &git_log);
+        let system = prompt::claude_work_system(n, ledger.features(), &progress, &git_log)
+            + &skills::system_section(env.home.as_deref(), skills::Mode::ClaudeCode);
         (system, ledger.passing(), ledger.total())
     };
     let output = sessions_dir(root).join(format!("session-{n}.jsonl"));
@@ -1477,6 +1491,7 @@ mod tests {
         TaskEnv {
             root: root.to_path_buf(),
             home: Some(home.to_path_buf()),
+            skill_manage: false,
             model: "m".into(),
             max_tokens: 100,
             max_turns: 10,
@@ -1510,6 +1525,87 @@ mod tests {
                 Report::Event(_) => {}
             }
         }
+    }
+
+    /// The tool results of the last message of a request.
+    fn tool_results(messages: &[Message]) -> Vec<(String, bool)> {
+        messages
+            .last()
+            .unwrap()
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => Some((content.clone(), *is_error)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn task_sessions_read_skills_and_change_them_only_when_allowed() {
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::skills::Store::new(crate::skills::dir(home.path()));
+        store
+            .create(
+                "deploy",
+                "---\nname: deploy\ndescription: Use when deploying\n---\n1. ship\n",
+            )
+            .unwrap();
+        let create = json!({"action": "create", "name": "new-one",
+            "content": "---\nname: new-one\ndescription: d\n---\nsteps\n"});
+        let session = |root: &Path| {
+            Scripted::new(vec![
+                calls(&[
+                    write(&features_path(root), &feature_list(&["test -f a"])),
+                    write(&progress_path(root), "# Plan"),
+                    ("skill_view", json!({"name": "deploy"})),
+                    ("skill_manage", create.clone()),
+                ]),
+                text("planned"),
+            ])
+        };
+
+        // By default task sessions only read skills.
+        let first = repo();
+        let root = first.path();
+        let provider = session(root);
+        let make = factory(&provider);
+        init(&env(root, home.path(), &make), "goal", &mut |_| {})
+            .await
+            .unwrap();
+        let seen = provider.seen.lock().unwrap().clone();
+        let system = &seen[0].0;
+        assert!(system.contains("initializer of a long-running task"));
+        assert!(system.contains("\n# Skills\n"), "{system}");
+        assert!(system.contains("skill_manage is not available"), "{system}");
+        assert!(
+            system.ends_with("\n\n- deploy: Use when deploying\n"),
+            "{system}"
+        );
+        let results = tool_results(&seen[1].1);
+        assert_eq!(results[2].0, store.view("deploy", None).unwrap());
+        assert!(!results[2].1);
+        assert_eq!(
+            results[3],
+            ("unknown tool `skill_manage`".to_string(), true)
+        );
+        assert!(store.view("new-one", None).is_err());
+
+        // JUNEES_TASK_SKILL_MANAGE lets them change skills.
+        let second = repo();
+        let root = second.path();
+        let provider = session(root);
+        let make = factory(&provider);
+        let mut allowed = env(root, home.path(), &make);
+        allowed.skill_manage = true;
+        init(&allowed, "goal", &mut |_| {}).await.unwrap();
+        let seen = provider.seen.lock().unwrap();
+        assert!(seen[0].0.contains("save the procedure with skill_manage"));
+        let results = tool_results(&seen[1].1);
+        assert!(!results[3].1, "{}", results[3].0);
+        assert!(store.view("new-one", None).unwrap().contains("steps"));
     }
 
     #[tokio::test]

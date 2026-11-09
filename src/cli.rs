@@ -81,6 +81,8 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_NOTIFY_EACH_SESSION  [notify_each_session] 1 to also post after every session
   JUNEES_TASK_MAX_TOKENS  [task_max_tokens] default --max-tokens of task run
   JUNEES_TASK_MAX_TIME    [task_max_time] default --max-time of task run
+  JUNEES_TASK_SKILL_MANAGE  [task_skill_manage] 1 lets task sessions change skills
+                            (they only read them by default)
   JUNEES_BACKEND       [backend] what runs the conversation and tasks (api or claude-code)
   JUNEES_CLAUDE_BIN    [claude_bin] the claude program of the claude-code backend
   JUNEES_CLAUDE_MODEL  [claude_model] model passed to claude with --model

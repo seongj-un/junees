@@ -27,6 +27,7 @@ fn no_provider() -> anyhow::Result<Box<dyn Provider>> {
 
 fn env<'a>(root: &Path, factory: &'a ProviderFactory<'a>, bin: &Path) -> TaskEnv<'a> {
     TaskEnv {
+        skill_manage: false,
         root: root.to_path_buf(),
         home: None,
         model: "unused".into(),
@@ -186,6 +187,38 @@ async fn initialized(root: &Path, fake: &Fake) {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn claude_code_sessions_get_the_skill_list() {
+    let fake = planned(|_| vec![answered("nothing done", 5)]);
+    let repo = repo();
+    let root = repo.path();
+    let home = tempfile::tempdir().unwrap();
+    crate::skills::Store::new(crate::skills::dir(home.path()))
+        .create(
+            "deploy",
+            "---\nname: deploy\ndescription: Use when deploying\n---\n1. ship\n",
+        )
+        .unwrap();
+    let factory = no_provider;
+    let mut env = env(root, &factory, &fake.bin);
+    env.home = Some(home.path().to_path_buf());
+    init(&env, "build a and b", &mut |_| {}).await.unwrap();
+    run(&env, 1, &mut |_| {}).await.unwrap();
+    assert_eq!(fake.runs(), 2);
+    for n in [1, 2] {
+        let args = fake.args(n);
+        let system = after(&args, "--append-system-prompt");
+        assert!(
+            system.ends_with(
+                "\n# Skills\nThe user keeps these Junees skills (saved procedures for \
+                 recurring tasks). Only their names and descriptions are given here; their \
+                 files cannot be read in this session.\n\n- deploy: Use when deploying\n"
+            ),
+            "{system}"
+        );
+    }
 }
 
 #[tokio::test]
