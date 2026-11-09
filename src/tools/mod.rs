@@ -1,10 +1,12 @@
 //! Tools the model can call, and the registry that dispatches them.
 
 mod bash;
+mod policy;
 mod read_file;
 mod write_file;
 
 pub use bash::Bash;
+pub use policy::{CommandPolicy, Verdict};
 pub use read_file::ReadFile;
 pub use write_file::WriteFile;
 
