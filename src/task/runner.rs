@@ -1,0 +1,1434 @@
+//! Runs task sessions: the init session that plans a task, and the work
+//! sessions that build it one feature at a time.
+
+use std::collections::HashSet;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result, bail};
+
+use super::features::{self, Ledger};
+use super::state::{State, Stop, StopReason};
+use super::tools::{MarkFeaturePassing, Verifier, session_tools};
+use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt, rejected_features_path};
+use crate::agent::{Agent, AgentOptions, Event, TurnLimit};
+use crate::cli::preview;
+use crate::message::Usage;
+use crate::provider::Provider;
+use crate::session::SessionWriter;
+use crate::tools::{ToolRegistry, ToolSettings};
+
+/// Commit message of the commit that starts a task.
+pub const INIT_COMMIT: &str = "junees: initialize task";
+
+/// Why task mode does not start on a work tree with changes: its commits
+/// take everything a session leaves behind, and would take the user's
+/// unfinished work and stray files (`.env`) with it.
+const DIRTY_TREE: &str = "the work tree has uncommitted changes or untracked files; \
+                          commit or stash them first (`git stash -u`), because task \
+                          mode commits everything in the work tree after each session";
+
+/// Recent commits a work session sees in its system prompt.
+const GIT_LOG_LINES: usize = 20;
+
+/// Characters of a session error kept in progress.md.
+const ERROR_CHARS: usize = 500;
+
+/// Commit message of the commit the harness makes when session `session`
+/// left changes behind.
+pub fn checkpoint_message(session: u64) -> String {
+    format!("junees: checkpoint after session {session}")
+}
+
+/// Makes the provider of each new session.
+pub type ProviderFactory<'a> = dyn Fn() -> Result<Box<dyn Provider>> + 'a;
+
+/// What task sessions need to run.
+pub struct TaskEnv<'a> {
+    /// Root of the git repository the task works on.
+    pub root: PathBuf,
+    /// Where session journals are saved; `None` runs sessions unsaved.
+    pub home: Option<PathBuf>,
+    pub model: String,
+    pub max_tokens: u32,
+    /// Model calls one session may make.
+    pub max_turns: usize,
+    /// The user's settings for the session tools and verify commands.
+    pub tool_settings: ToolSettings,
+    /// Context management of every session, as in a normal session.
+    pub context_window: u64,
+    pub compact_threshold: f64,
+    pub provider: &'a ProviderFactory<'a>,
+}
+
+/// What the runner tells the user: its own status lines and the events of
+/// the session agents.
+pub enum Report<'a> {
+    Line(&'a str),
+    Event(Event<'a>),
+}
+
+pub type Reporter<'r> = dyn FnMut(Report<'_>) + 'r;
+
+impl TaskEnv<'_> {
+    /// The tools of a task session, without `mark_feature_passing`. Every
+    /// task session gets its tools from here and every verify command runs
+    /// through [`TaskEnv::verifier`], so tool settings belong in these two.
+    fn tools(&self) -> ToolRegistry {
+        session_tools(&self.tool_settings)
+    }
+
+    fn verifier(&self) -> Verifier {
+        Verifier::new(self.root.clone(), &self.tool_settings)
+    }
+
+    /// A new agent with a fresh context, recording to a new session journal
+    /// when there is a state folder. Returns the journal's session id.
+    fn agent(
+        &self,
+        system: String,
+        tools: ToolRegistry,
+        report: &mut Reporter<'_>,
+    ) -> Result<(Agent, Option<String>)> {
+        let agent = Agent::new(
+            (self.provider)()?,
+            tools,
+            AgentOptions {
+                system,
+                max_tokens: self.max_tokens,
+                max_turns: self.max_turns,
+                context_window: self.context_window,
+                compact_threshold: self.compact_threshold,
+            },
+        );
+        let Some(home) = &self.home else {
+            return Ok((agent, None));
+        };
+        match SessionWriter::create(home, &self.root, &self.model) {
+            Ok((meta, writer)) => Ok((agent.with_journal(Box::new(writer)), Some(meta.id))),
+            Err(err) => {
+                warn(report, &format!("session not saved: {err:#}"));
+                Ok((agent, None))
+            }
+        }
+    }
+}
+
+/// Plans a new task in the repository at `env.root`: an init session writes
+/// the feature list and progress notes, the harness checks the list (giving
+/// the session one chance to fix it) and commits everything.
+pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> Result<()> {
+    let goal = goal.trim();
+    if goal.is_empty() {
+        bail!("the goal is empty");
+    }
+    let root = &env.root;
+    git::toplevel(root)?;
+    let path = features_path(root);
+    if path.exists() {
+        bail!(
+            "{} already exists: this repository already has a task \
+             (continue it with `junees task run`, or delete .junees/ if an \
+             earlier `junees task init` did not finish)",
+            path.display()
+        );
+    }
+    // A failed init may have left .junees/ behind; the next one rewrites it.
+    if git::is_dirty_outside_task(root)? {
+        bail!(DIRTY_TREE);
+    }
+    prepare_dir(root)?;
+
+    let (count, usage) = match plan(env, goal, report).await {
+        Ok(planned) => planned,
+        Err(err) => return Err(set_aside_rejected_list(root, err)),
+    };
+    let mut state = State::load(root)?;
+    state.usage.add(usage);
+    state.save(root)?;
+    append_progress(
+        root,
+        &format!("init: {count} features planned, {}", tokens(usage)),
+    )?;
+    let commit = git::commit_all(root, INIT_COMMIT).context("cannot commit the new task")?;
+    warn_left_out(report, &commit.left_out);
+    line(
+        report,
+        &format!("== init done: {count} features, committed; start with `junees task run` =="),
+    );
+    Ok(())
+}
+
+/// The init session: writes the feature list and gets one chance to fix
+/// it. Returns the number of features and the tokens used.
+async fn plan(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> Result<(usize, Usage)> {
+    let root = &env.root;
+    let (mut agent, journal) = env.agent(prompt::init_system(root), env.tools(), report)?;
+    line(
+        report,
+        &format!("== init session{} ==", journal_note(&journal)),
+    );
+    agent
+        .run(&prompt::init_input(goal), |event| {
+            report(Report::Event(event))
+        })
+        .await
+        .context("the init session failed")?;
+    let verifier = env.verifier();
+    let count = match check_new_list(root, &verifier, report).await {
+        Ok(count) => count,
+        Err(err) => {
+            let problem = format!("{err:#}");
+            warn(
+                report,
+                &format!("{problem}; asking the init session to fix it"),
+            );
+            agent
+                .run(&prompt::fix_input(&problem), |event| {
+                    report(Report::Event(event))
+                })
+                .await
+                .context("the init session failed")?;
+            check_new_list(root, &verifier, report)
+                .await
+                .context("the feature list is still invalid after one fix")?
+        }
+    };
+    // Writes the list in the harness's own formatting.
+    Ledger::load(root)?;
+    Ok((count, agent.usage()))
+}
+
+/// After a failed init, moves the list the session wrote out of the way:
+/// `task run` must not start from a list the harness rejected, and the
+/// next `task init` must not find a task already there. The file is kept
+/// (and ignored by git) for the user to look at.
+fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
+    let path = features_path(root);
+    if !path.exists() {
+        return err;
+    }
+    let rejected = rejected_features_path(root);
+    match fs::rename(&path, &rejected) {
+        Ok(()) => err.context(format!(
+            "task init failed; its feature list was moved to {}, so you can run \
+             `junees task init` again",
+            rejected.display()
+        )),
+        Err(rename) => err.context(format!(
+            "task init failed, and its feature list could not be moved out of the way \
+             ({rename}); delete {} before running `junees task init` again",
+            path.display()
+        )),
+    }
+}
+
+/// Runs work sessions on the task in `env.root` until every feature passes,
+/// `max_sessions` sessions have run, [`STALL_LIMIT`] sessions in a row
+/// passed no new feature, or a session fails. Returns why it stopped, which
+/// is also recorded in state.json.
+///
+/// Every session is a new agent with a fresh context and its own journal.
+/// After each one the harness puts its copy of the feature list back into
+/// features.json, adds a line to progress.md and commits whatever the
+/// session left uncommitted. Session numbers and counters continue from
+/// state.json, so a run picks up where the last one (or a crash) left off.
+pub async fn run(
+    env: &TaskEnv<'_>,
+    max_sessions: usize,
+    report: &mut Reporter<'_>,
+) -> Result<Stop> {
+    let root = &env.root;
+    git::toplevel(root)?;
+    features::load(root)
+        .context("cannot load the feature list (start a task with `junees task init`)")?;
+    if git::is_dirty(root)? {
+        bail!(DIRTY_TREE);
+    }
+    let ledger = Ledger::load(root)?;
+    let ledger = Arc::new(Mutex::new(ledger));
+    prepare_dir(root)?;
+    recheck_passing(env, &ledger, report).await?;
+    let mut state = State::load(root)?;
+    // A run that stopped on its own does not hold its stall streak against
+    // the next one; after a crash (no stop recorded) the streak carries on.
+    if state.stop.take().is_some() {
+        state.stalled = 0;
+    }
+    state.save(root)?;
+
+    let mut ran = 0;
+    let stop = loop {
+        let stop = |reason, session| Stop {
+            reason,
+            session,
+            detail: None,
+        };
+        if ledger.lock().unwrap().all_pass() {
+            break stop(StopReason::Complete, state.sessions);
+        }
+        if ran == max_sessions {
+            break stop(StopReason::MaxSessions, state.sessions);
+        }
+        ran += 1;
+        state.sessions += 1;
+        let n = state.sessions;
+        state.save(root)?;
+        let before = ledger.lock().unwrap().passing_ids();
+
+        let (result, usage) = work_session(env, n, &ledger, report).await;
+        state.usage.add(usage);
+
+        let (summary, progressed, passing, total) =
+            match wrap_up(env, n, &ledger, &before, &result, usage, report) {
+                Ok(wrapped) => wrapped,
+                // The session's work may be uncommitted, but the stop is
+                // recorded, so the next run does not take this for a crash.
+                Err(err) => {
+                    let detail = format!("could not wrap up session {n}: {err:#}");
+                    warn(report, &detail);
+                    break Stop {
+                        reason: StopReason::Error,
+                        session: n,
+                        detail: Some(detail),
+                    };
+                }
+            };
+        state.stalled = if progressed { 0 } else { state.stalled + 1 };
+        line(report, &format!("== session {n} done: {summary} =="));
+
+        if let Err(err) = result {
+            break Stop {
+                reason: StopReason::Error,
+                session: n,
+                detail: Some(format!("{err:#}")),
+            };
+        }
+        if passing == total {
+            break stop(StopReason::Complete, n);
+        }
+        if state.stalled >= STALL_LIMIT {
+            break stop(StopReason::Stalled, n);
+        }
+        state.save(root)?;
+    };
+    state.stop = Some(stop.clone());
+    state.save(root)?;
+    Ok(stop)
+}
+
+/// The harness's part after a work session: puts its copy of the feature
+/// list back, adds the session's line to progress.md and commits what the
+/// session left behind. Returns the summary line, whether a feature newly
+/// passes, and the passing and total counts.
+fn wrap_up(
+    env: &TaskEnv<'_>,
+    n: u64,
+    ledger: &Arc<Mutex<Ledger>>,
+    before: &HashSet<String>,
+    result: &Result<Ended>,
+    usage: Usage,
+    report: &mut Reporter<'_>,
+) -> Result<(String, bool, usize, usize)> {
+    let root = &env.root;
+    // The session may have deleted .junees/ or its .gitignore, which keeps
+    // state.json out of the checkpoint commit.
+    prepare_dir(root)?;
+    let (edited, newly, passing, total) = {
+        let mut ledger = ledger.lock().unwrap();
+        let edited = ledger.restore()?;
+        let newly: Vec<&str> = ledger
+            .features()
+            .iter()
+            .filter(|feature| feature.passes && !before.contains(&feature.id))
+            .map(|feature| feature.id.as_str())
+            .collect();
+        (edited, newly.join(", "), ledger.passing(), ledger.total())
+    };
+    if edited {
+        warn(
+            report,
+            "the session edited .junees/features.json; the harness restored its own copy",
+        );
+        append_progress(
+            root,
+            &format!(
+                "session {n}: .junees/features.json was edited directly; \
+                 the harness restored its own copy"
+            ),
+        )?;
+    }
+    let passes = if newly.is_empty() {
+        format!("{passing}/{total} passing, nothing new")
+    } else {
+        format!("{passing}/{total} passing, new: {newly}")
+    };
+    let summary = match &result {
+        Ok(Ended::Answered) => passes,
+        Ok(Ended::TurnLimit) => format!(
+            "{passes}, ended at the turn limit ({} model calls)",
+            env.max_turns
+        ),
+        Err(err) => format!("failed: {}", preview(&format!("{err:#}"), ERROR_CHARS)),
+    };
+    append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
+    if git::is_dirty(root)? {
+        let commit = git::commit_all(root, &checkpoint_message(n))?;
+        warn_left_out(report, &commit.left_out);
+        if commit.made {
+            line(
+                report,
+                &format!("checkpoint commit: {}", checkpoint_message(n)),
+            );
+        }
+    }
+    Ok((summary, !newly.is_empty(), passing, total))
+}
+
+/// How a work session that did not fail ended.
+enum Ended {
+    /// The model gave its final answer.
+    Answered,
+    /// The model was still working when the session used up its model
+    /// calls. Its work is kept like any other session's, and a session that
+    /// keeps doing this counts towards the stall limit.
+    TurnLimit,
+}
+
+/// One work session: a fresh agent told where the task stands, with the
+/// default tools and `mark_feature_passing`. Returns how it ended and the
+/// tokens it used.
+async fn work_session(
+    env: &TaskEnv<'_>,
+    n: u64,
+    ledger: &Arc<Mutex<Ledger>>,
+    report: &mut Reporter<'_>,
+) -> (Result<Ended>, Usage) {
+    let root = &env.root;
+    let progress = fs::read_to_string(progress_path(root)).unwrap_or_default();
+    let git_log = git::recent_log(root, GIT_LOG_LINES);
+    let (system, passing, total) = {
+        let ledger = ledger.lock().unwrap();
+        let system = prompt::work_system(root, n, ledger.features(), &progress, &git_log);
+        (system, ledger.passing(), ledger.total())
+    };
+    let mut tools = env.tools();
+    tools.register(MarkFeaturePassing::new(Arc::clone(ledger), env.verifier()));
+    let (mut agent, journal) = match env.agent(system, tools, report) {
+        Ok(created) => created,
+        Err(err) => return (Err(err), Usage::default()),
+    };
+    line(
+        report,
+        &format!(
+            "== session {n} start: {passing}/{total} passing{} ==",
+            journal_note(&journal)
+        ),
+    );
+    let result = match agent
+        .run(prompt::WORK_INPUT, |event| report(Report::Event(event)))
+        .await
+    {
+        Ok(_) => Ok(Ended::Answered),
+        Err(err) if err.downcast_ref::<TurnLimit>().is_some() => Ok(Ended::TurnLimit),
+        Err(err) => Err(err),
+    };
+    (result, agent.usage())
+}
+
+/// Runs the verify command of every feature the list marks as passing and
+/// takes back the passes that do not hold. The harness's copy of the list
+/// is made from the file at the start of a run, and the file may say
+/// things the harness never decided: a session killed before the harness
+/// could undo its edits, or a list written by hand. Running the commands
+/// again also catches features a later change broke.
+async fn recheck_passing(
+    env: &TaskEnv<'_>,
+    ledger: &Arc<Mutex<Ledger>>,
+    report: &mut Reporter<'_>,
+) -> Result<()> {
+    let marked: Vec<(String, String)> = ledger
+        .lock()
+        .unwrap()
+        .features()
+        .iter()
+        .filter(|feature| feature.passes)
+        .map(|feature| (feature.id.clone(), feature.verify.clone()))
+        .collect();
+    if marked.is_empty() {
+        return Ok(());
+    }
+    line(
+        report,
+        &format!(
+            "== checking the {} feature(s) marked as passing ==",
+            marked.len()
+        ),
+    );
+    let verifier = env.verifier();
+    let mut failed = Vec::new();
+    for (id, verify) in marked {
+        if verifier.run(&verify).await.is_error {
+            failed.push(id);
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    {
+        let mut ledger = ledger.lock().unwrap();
+        for id in &failed {
+            ledger.mark_failing(id)?;
+        }
+    }
+    let text = format!(
+        "marked as passing, but their verify commands fail: {}; \
+         they count as not passing",
+        failed.join(", ")
+    );
+    warn(report, &text);
+    append_progress(env.root.as_path(), &format!("run start: {text}"))
+}
+
+/// Checks the list a new task starts from and returns its length. Besides
+/// its form, every verify command must fail now: one that passes before
+/// any work (`true`, a test filter that matches no test, a pipe into
+/// `tail`) would pass a feature nobody built.
+async fn check_new_list(
+    root: &Path,
+    verifier: &Verifier,
+    report: &mut Reporter<'_>,
+) -> Result<usize> {
+    let list = features::load(root)?;
+    features::check_fresh(&list)?;
+    line(
+        report,
+        &format!(
+            "== checking that the {} verify commands fail before any work ==",
+            list.len()
+        ),
+    );
+    let mut passing = Vec::new();
+    for feature in &list {
+        if !verifier.run(&feature.verify).await.is_error {
+            passing.push(format!("{} (`{}`)", feature.id, feature.verify));
+        }
+    }
+    if !passing.is_empty() {
+        bail!(
+            "these verify commands already pass before any work: {}; a verify \
+             command must fail until its feature is built",
+            passing.join(", ")
+        );
+    }
+    Ok(list.len())
+}
+
+/// Creates `.junees/` and keeps the harness state out of git.
+fn prepare_dir(root: &Path) -> Result<()> {
+    let dir = dir(root);
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        fs::write(&ignore, "state.json\n.*.tmp\n*.rejected.json\n")
+            .with_context(|| format!("cannot write {}", ignore.display()))?;
+    }
+    Ok(())
+}
+
+/// Adds one harness line to progress.md.
+fn append_progress(root: &Path, text: &str) -> Result<()> {
+    let path = progress_path(root);
+    let needs_newline = fs::read(&path).is_ok_and(|data| data.last().is_some_and(|&b| b != b'\n'));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    let lead = if needs_newline { "\n" } else { "" };
+    file.write_all(format!("{lead}- [junees] {text}\n").as_bytes())
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
+fn tokens(usage: Usage) -> String {
+    format!(
+        "tokens in {} out {}",
+        usage.input_tokens, usage.output_tokens
+    )
+}
+
+fn journal_note(journal: &Option<String>) -> String {
+    match journal {
+        Some(id) => format!(", journal {id}"),
+        None => ", not saved".to_string(),
+    }
+}
+
+fn warn_left_out(report: &mut Reporter<'_>, left_out: &[String]) {
+    if !left_out.is_empty() {
+        warn(
+            report,
+            &format!(
+                "not committed, because the names look like secrets: {} \
+                 (commit them yourself if they belong in git)",
+                left_out.join(", ")
+            ),
+        );
+    }
+}
+
+fn line(report: &mut Reporter<'_>, text: &str) {
+    report(Report::Line(text));
+}
+
+fn warn(report: &mut Reporter<'_>, text: &str) {
+    report(Report::Event(Event::Warning(text)));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::message::{ContentBlock, Message, StopReason as ModelStop};
+    use crate::provider::{CompletionRequest, CompletionResponse, ProviderError};
+    use crate::task::git::testing::{repo, subjects};
+
+    type Reply = std::result::Result<CompletionResponse, ProviderError>;
+    /// A request's system prompt and messages.
+    type Seen = (String, Vec<Message>);
+
+    /// Replays canned responses, shared by every session it makes, and
+    /// records each request's system prompt and messages.
+    #[derive(Clone, Default)]
+    struct Scripted {
+        responses: Arc<Mutex<VecDeque<Reply>>>,
+        seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    impl Scripted {
+        fn new(responses: Vec<Reply>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into())),
+                seen: Arc::default(),
+            }
+        }
+
+        fn left(&self) -> usize {
+            self.responses.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for Scripted {
+        async fn complete(
+            &self,
+            request: CompletionRequest<'_>,
+        ) -> Result<CompletionResponse, ProviderError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.system.to_string(), request.messages.to_vec()));
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("no scripted response left")
+        }
+    }
+
+    fn text(text: &str) -> Reply {
+        Ok(CompletionResponse {
+            content: vec![ContentBlock::Text { text: text.into() }],
+            stop_reason: ModelStop::EndTurn,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 1,
+                ..Usage::default()
+            },
+        })
+    }
+
+    /// One response calling the given tools in order.
+    fn calls(calls: &[(&str, Value)]) -> Reply {
+        Ok(CompletionResponse {
+            content: calls
+                .iter()
+                .enumerate()
+                .map(|(i, (name, input))| ContentBlock::ToolUse {
+                    id: format!("toolu_{i}"),
+                    name: name.to_string(),
+                    input: input.clone(),
+                })
+                .collect(),
+            stop_reason: ModelStop::ToolUse,
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+                ..Usage::default()
+            },
+        })
+    }
+
+    fn write(path: &Path, content: &str) -> (&'static str, Value) {
+        (
+            "write_file",
+            json!({"path": path.to_string_lossy(), "content": content}),
+        )
+    }
+
+    fn feature_list(verifies: &[&str]) -> String {
+        let list: Vec<Value> = verifies
+            .iter()
+            .enumerate()
+            .map(|(i, verify)| {
+                json!({"id": format!("F{}", i + 1), "description": format!("feature {}", i + 1), "verify": verify, "passes": false})
+            })
+            .collect();
+        Value::from(list).to_string()
+    }
+
+    /// A task environment over `root` whose sessions get their provider
+    /// from `factory` and save their journals under `home`.
+    fn env<'a>(root: &Path, home: &Path, factory: &'a ProviderFactory<'a>) -> TaskEnv<'a> {
+        TaskEnv {
+            root: root.to_path_buf(),
+            home: Some(home.to_path_buf()),
+            model: "m".into(),
+            max_tokens: 100,
+            max_turns: 10,
+            tool_settings: ToolSettings::default(),
+            context_window: 200_000,
+            compact_threshold: 0.8,
+            provider: factory,
+        }
+    }
+
+    fn factory(provider: &Scripted) -> impl Fn() -> Result<Box<dyn Provider>> + '_ {
+        move || Ok(Box::new(provider.clone()) as Box<dyn Provider>)
+    }
+
+    /// Collects the status lines and warnings a runner reports.
+    #[derive(Default)]
+    struct Collected {
+        lines: Vec<String>,
+        warnings: Vec<String>,
+    }
+
+    impl Collected {
+        fn reporter(&mut self) -> impl FnMut(Report<'_>) + '_ {
+            |report| match report {
+                Report::Line(text) => self.lines.push(text.to_string()),
+                Report::Event(Event::Warning(text)) => self.warnings.push(text.to_string()),
+                Report::Event(_) => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn init_plans_and_commits_the_task() {
+        let repo = repo();
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![
+            calls(&[
+                write(
+                    &features_path(root),
+                    &feature_list(&["test -f a", "test -f b"]),
+                ),
+                write(&progress_path(root), "# Plan\n\nTwo features."),
+            ]),
+            text("planned"),
+        ]);
+        let factory = factory(&provider);
+        let mut out = Collected::default();
+        init(
+            &env(root, home.path(), &factory),
+            "  build it  ",
+            &mut out.reporter(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(subjects(root), [INIT_COMMIT]);
+        assert!(!git::is_dirty(root).unwrap());
+        let seen = provider.seen.lock().unwrap();
+        assert!(seen[0].0.contains("initializer of a long-running task"));
+        assert_eq!(seen[0].1[0].text(), "The goal of the task:\n\nbuild it");
+        // The harness rewrote the list in its own format and noted the session.
+        let list = fs::read_to_string(features_path(root)).unwrap();
+        assert_eq!(list, features::to_json(&features::load(root).unwrap()));
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.ends_with(
+                "Two features.\n- [junees] init: 2 features planned, tokens in 15 out 3\n"
+            ),
+            "{progress}"
+        );
+        // state.json stays out of git.
+        assert_eq!(State::load(root).unwrap().usage.input_tokens, 15);
+        assert!(super::super::state_path(root).exists());
+        assert!(
+            out.lines[0].starts_with("== init session, journal "),
+            "{:?}",
+            out.lines
+        );
+        assert_eq!(
+            out.lines[1],
+            "== checking that the 2 verify commands fail before any work =="
+        );
+        assert_eq!(
+            fs::read_dir(home.path().join("sessions")).unwrap().count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn init_lets_the_session_fix_a_bad_list_once() {
+        let repo = repo();
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let bad = r#"[{"id": "F1", "description": "a", "verify": "true", "passes": false},
+                      {"id": "F1", "description": "b", "verify": "", "passes": true}]"#;
+        let provider = Scripted::new(vec![
+            calls(&[write(&features_path(root), bad)]),
+            text("planned"),
+            calls(&[write(
+                &features_path(root),
+                &feature_list(&["test -f a", "test -f b"]),
+            )]),
+            text("fixed"),
+        ]);
+        let factory = factory(&provider);
+        let mut out = Collected::default();
+        init(
+            &env(root, home.path(), &factory),
+            "goal",
+            &mut out.reporter(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.left(), 0);
+        let seen = provider.seen.lock().unwrap();
+        let fix = seen[2].1.last().unwrap().text();
+        assert!(
+            fix.starts_with("The harness rejected .junees/features.json"),
+            "{fix}"
+        );
+        assert!(fix.contains("`F1` is used more than once"), "{fix}");
+        assert!(fix.contains("empty verify"), "{fix}");
+        assert_eq!(out.warnings.len(), 1);
+        assert_eq!(subjects(root), [INIT_COMMIT]);
+    }
+
+    #[tokio::test]
+    async fn init_rejects_verify_commands_that_already_pass() {
+        let repo = repo();
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![
+            calls(&[write(
+                &features_path(root),
+                &feature_list(&["true", "test -f a", "ls | tail -1"]),
+            )]),
+            text("planned"),
+            calls(&[write(
+                &features_path(root),
+                &feature_list(&["test -f z", "test -f a", "test -f b"]),
+            )]),
+            text("fixed"),
+        ]);
+        let factory = factory(&provider);
+        let mut out = Collected::default();
+        init(
+            &env(root, home.path(), &factory),
+            "goal",
+            &mut out.reporter(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.left(), 0);
+        let seen = provider.seen.lock().unwrap();
+        let fix = seen[2].1.last().unwrap().text();
+        assert!(
+            fix.contains("these verify commands already pass before any work: F1 (`true`), F3 ("),
+            "{fix}"
+        );
+        assert!(!fix.contains("F2"), "{fix}");
+        assert_eq!(subjects(root), [INIT_COMMIT]);
+        // The verify commands ran in the repository and left nothing behind.
+        assert!(!git::is_dirty(root).unwrap());
+    }
+
+    #[tokio::test]
+    async fn init_gives_up_after_one_fix_and_commits_nothing() {
+        let repo = repo();
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let passing = r#"[{"id": "F1", "description": "a", "verify": "true", "passes": true}]"#;
+        let provider = Scripted::new(vec![
+            calls(&[write(&features_path(root), passing)]),
+            text("planned"),
+            text("it is fine as it is"),
+        ]);
+        let factory = factory(&provider);
+        let err = init(&env(root, home.path(), &factory), "goal", &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("still invalid after one fix"),
+            "{err:#}"
+        );
+        assert!(format!("{err:#}").contains("these are true: F1"), "{err:#}");
+        assert!(subjects(root).is_empty());
+
+        // The rejected list is out of the way: no run starts from it, and
+        // init can start over.
+        assert!(
+            format!("{err:#}").contains("feature list was moved to"),
+            "{err:#}"
+        );
+        assert!(!features_path(root).exists());
+        assert!(super::super::rejected_features_path(root).exists());
+        let none = Scripted::new(vec![]);
+        let none_factory = self::factory(&none);
+        let err = run(&env(root, home.path(), &none_factory), 5, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot load the feature list"),
+            "{err:#}"
+        );
+        let again = Scripted::new(vec![
+            calls(&[write(&features_path(root), &feature_list(&["test -f a"]))]),
+            text("planned"),
+        ]);
+        let again_factory = self::factory(&again);
+        init(&env(root, home.path(), &again_factory), "goal", &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(subjects(root), [INIT_COMMIT]);
+        // The rejected list stays out of git.
+        assert!(!git::is_dirty(root).unwrap());
+    }
+
+    #[tokio::test]
+    async fn init_refuses_folders_outside_git_and_existing_tasks() {
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let home = tempfile::tempdir().unwrap();
+
+        let plain = tempfile::tempdir().unwrap();
+        let err = init(
+            &env(plain.path(), home.path(), &factory),
+            "goal",
+            &mut |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not inside a git repository"),
+            "{err}"
+        );
+        assert!(!dir(plain.path()).exists());
+
+        let repo = repo();
+        fs::create_dir_all(dir(repo.path())).unwrap();
+        fs::write(features_path(repo.path()), "[]").unwrap();
+        let err = init(
+            &env(repo.path(), home.path(), &factory),
+            "goal",
+            &mut |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("already has a task"), "{err}");
+        assert_eq!(provider.seen.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn init_and_run_refuse_a_work_tree_with_changes() {
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let home = tempfile::tempdir().unwrap();
+
+        let fresh = repo();
+        fs::write(fresh.path().join("wip.txt"), "unfinished").unwrap();
+        let err = init(
+            &env(fresh.path(), home.path(), &factory),
+            "goal",
+            &mut |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("uncommitted changes"), "{err}");
+        assert!(!dir(fresh.path()).exists());
+
+        let task = task_repo(&["false"]);
+        let root = task.path();
+        fs::write(root.join(".env"), "DB_PASSWORD=hunter2\n").unwrap();
+        let err = run(&env(root, home.path(), &factory), 5, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("git stash -u"), "{err}");
+        assert_eq!(subjects(root), [INIT_COMMIT]);
+        assert_eq!(provider.seen.lock().unwrap().len(), 0);
+        assert_eq!(State::load(root).unwrap().sessions, 0);
+    }
+
+    fn mark(id: &str) -> (&'static str, Value) {
+        ("mark_feature_passing", json!({"id": id}))
+    }
+
+    /// A repository with a committed task whose features have these verify
+    /// commands.
+    fn task_repo(verifies: &[&str]) -> tempfile::TempDir {
+        let repo = repo();
+        let root = repo.path();
+        prepare_dir(root).unwrap();
+        let list = features::parse(&feature_list(verifies)).unwrap();
+        fs::write(features_path(root), features::to_json(&list)).unwrap();
+        fs::write(progress_path(root), "# Plan\n").unwrap();
+        git::commit_all(root, INIT_COMMIT).unwrap();
+        repo
+    }
+
+    async fn run_task(
+        root: &Path,
+        provider: &Scripted,
+        max_sessions: usize,
+        out: &mut Collected,
+    ) -> Stop {
+        let home = tempfile::tempdir().unwrap();
+        let factory = factory(provider);
+        run(
+            &env(root, home.path(), &factory),
+            max_sessions,
+            &mut out.reporter(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sessions_pass_features_until_all_pass() {
+        let repo = task_repo(&["true", "test -f b.txt"]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![
+            calls(&[mark("F1")]),
+            text("F1 works"),
+            calls(&[write(&root.join("b.txt"), "b"), mark("F2")]),
+            text("F2 works"),
+        ]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 5, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::Complete);
+        assert_eq!(stop.session, 2);
+        assert_eq!(provider.left(), 0);
+        assert!(features::load(root).unwrap().iter().all(|f| f.passes));
+        assert_eq!(
+            subjects(root),
+            [
+                checkpoint_message(2),
+                checkpoint_message(1),
+                INIT_COMMIT.to_string()
+            ]
+        );
+        assert!(!git::is_dirty(root).unwrap());
+        let state = State::load(root).unwrap();
+        assert_eq!((state.sessions, state.stalled), (2, 0));
+        assert_eq!(state.stop, Some(stop));
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains("- [junees] session 1: 1/2 passing, new: F1, tokens in 15 out 3\n")
+        );
+        assert!(progress.contains("- [junees] session 2: 2/2 passing, new: F2, "));
+        assert!(out.lines[0].starts_with("== session 1 start: 0/2 passing, journal "));
+        assert!(
+            out.lines
+                .contains(&"== session 2 done: 2/2 passing, new: F2 ==".to_string())
+        );
+
+        // The second session saw the first one's result and commit.
+        {
+            let seen = provider.seen.lock().unwrap();
+            let system = &seen[2].0;
+            assert!(system.contains("work session 2"));
+            assert!(system.contains("- [x] F1: feature 1"));
+            assert!(system.contains("- [ ] F2: feature 2"));
+            assert!(system.contains(&format!(" {}\n", checkpoint_message(1))));
+            assert_eq!(seen[2].1[0].text(), prompt::WORK_INPUT);
+        }
+
+        // Nothing is left to do, so another run starts no session.
+        let again = run_task(root, &provider, 5, &mut Collected::default()).await;
+        assert_eq!(again.reason, StopReason::Complete);
+        assert_eq!(State::load(root).unwrap().sessions, 2);
+    }
+
+    #[tokio::test]
+    async fn edits_to_the_feature_list_are_undone() {
+        let repo = task_repo(&["false", "false"]);
+        let root = repo.path();
+        let original = fs::read_to_string(features_path(root)).unwrap();
+        let forged = original.replace("\"passes\": false", "\"passes\": true");
+        let provider = Scripted::new(vec![
+            calls(&[write(&features_path(root), &forged)]),
+            text("all done!"),
+        ]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 1, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(fs::read_to_string(features_path(root)).unwrap(), original);
+        assert!(!git::is_dirty(root).unwrap());
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(progress.contains("session 1: .junees/features.json was edited directly"));
+        assert!(progress.contains("session 1: 0/2 passing, nothing new"));
+    }
+
+    /// A repository whose committed task has these features, each
+    /// `(verify, passes)`.
+    fn task_repo_marked(features: &[(&str, bool)]) -> tempfile::TempDir {
+        let verifies: Vec<&str> = features.iter().map(|(verify, _)| *verify).collect();
+        let repo = task_repo(&verifies);
+        let root = repo.path();
+        let mut list = features::load(root).unwrap();
+        for (feature, (_, passes)) in list.iter_mut().zip(features) {
+            feature.passes = *passes;
+        }
+        fs::write(features_path(root), features::to_json(&list)).unwrap();
+        git::commit_all(root, "mark by hand").unwrap();
+        repo
+    }
+
+    #[tokio::test]
+    async fn a_run_believes_only_passes_whose_verify_still_passes() {
+        let repo = task_repo_marked(&[("true", true), ("false", true), ("false", false)]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![text("looking around")]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 1, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(provider.left(), 0);
+        let passes: Vec<bool> = features::load(root)
+            .unwrap()
+            .iter()
+            .map(|f| f.passes)
+            .collect();
+        assert_eq!(passes, [true, false, false]);
+        assert_eq!(
+            out.lines[0],
+            "== checking the 2 feature(s) marked as passing =="
+        );
+        assert_eq!(
+            out.warnings,
+            ["marked as passing, but their verify commands fail: F2; they count as not passing"]
+        );
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains(
+                "- [junees] run start: marked as passing, but their verify commands fail: F2;"
+            ),
+            "{progress}"
+        );
+        // The session saw the corrected list.
+        let seen = provider.seen.lock().unwrap();
+        assert!(seen[0].0.contains("- [ ] F2: feature 2"));
+    }
+
+    #[tokio::test]
+    async fn a_list_marked_passing_by_hand_does_not_complete_the_task() {
+        let repo = task_repo_marked(&[("false", true), ("false", true)]);
+        let provider = Scripted::new(vec![text("hm")]);
+        let stop = run_task(repo.path(), &provider, 1, &mut Collected::default()).await;
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(provider.left(), 0);
+    }
+
+    #[tokio::test]
+    async fn changes_left_behind_get_a_checkpoint_commit() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![
+            calls(&[write(&root.join("src/half.rs"), "fn half() {}")]),
+            text("ran out of ideas"),
+        ]);
+        let mut out = Collected::default();
+        run_task(root, &provider, 1, &mut out).await;
+
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        assert!(!git::is_dirty(root).unwrap());
+        let mut ls_files = std::process::Command::new("git");
+        ls_files
+            .args(["ls-files", "src/half.rs", ".junees"])
+            .current_dir(root);
+        for name in git::REPO_ENV_VARS {
+            ls_files.env_remove(name);
+        }
+        let tracked = ls_files.output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&tracked.stdout),
+            ".junees/.gitignore\n.junees/features.json\n.junees/progress.md\nsrc/half.rs\n"
+        );
+        assert!(
+            out.lines
+                .contains(&format!("checkpoint commit: {}", checkpoint_message(1)))
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoints_leave_files_that_look_like_secrets_out() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![
+            calls(&[
+                write(&root.join(".env"), "DB_PASSWORD=hunter2\n"),
+                write(&root.join("app.rs"), "fn main() {}"),
+            ]),
+            text("done for now"),
+            text("nothing to add"),
+        ]);
+        let mut out = Collected::default();
+        run_task(root, &provider, 2, &mut out).await;
+
+        assert_eq!(
+            subjects(root),
+            [
+                checkpoint_message(2),
+                checkpoint_message(1),
+                INIT_COMMIT.to_string()
+            ]
+        );
+        let mut ls_files = std::process::Command::new("git");
+        ls_files
+            .args(["ls-files", ".env", "app.rs"])
+            .current_dir(root);
+        for name in git::REPO_ENV_VARS {
+            ls_files.env_remove(name);
+        }
+        let tracked = ls_files.output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&tracked.stdout), "app.rs\n");
+        assert!(root.join(".env").exists());
+        assert_eq!(out.warnings.len(), 2, "{:?}", out.warnings);
+        assert!(
+            out.warnings[0].contains("look like secrets: .env "),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_at_max_sessions() {
+        let repo = task_repo(&["false", "false"]);
+        let provider = Scripted::new(vec![text("thinking"), text("still thinking")]);
+        let stop = run_task(repo.path(), &provider, 2, &mut Collected::default()).await;
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(stop.session, 2);
+        assert_eq!(provider.left(), 0);
+        assert_eq!(State::load(repo.path()).unwrap().stalled, 2);
+    }
+
+    #[tokio::test]
+    async fn stops_when_sessions_stall() {
+        let repo = task_repo(&["true", "false"]);
+        let provider = Scripted::new(vec![
+            calls(&[mark("F1")]),
+            text("one done"),
+            calls(&[mark("F2")]),
+            text("F2 does not pass yet"),
+            text("no idea"),
+            text("still no idea"),
+        ]);
+        let stop = run_task(repo.path(), &provider, 10, &mut Collected::default()).await;
+        assert_eq!(stop.reason, StopReason::Stalled);
+        assert_eq!(stop.session, 4);
+        assert_eq!(provider.left(), 0);
+        assert!(stop.to_string().starts_with("stalled"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_session_stops_the_run_and_is_recorded() {
+        let repo = task_repo(&["false", "false"]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![
+            calls(&[write(&root.join("wip.txt"), "wip")]),
+            Err(ProviderError::Transport("network down".into())),
+        ]);
+        let stop = run_task(root, &provider, 5, &mut Collected::default()).await;
+
+        assert_eq!(stop.reason, StopReason::Error);
+        assert_eq!(stop.session, 1);
+        assert!(stop.detail.as_deref().unwrap().contains("network down"));
+        assert!(stop.reason.is_failure());
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains("- [junees] session 1: failed: "),
+            "{progress}"
+        );
+        assert!(progress.contains("network down"));
+        // The work in progress is kept in a checkpoint.
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        assert_eq!(State::load(root).unwrap().stop, Some(stop));
+    }
+
+    #[tokio::test]
+    async fn a_session_at_the_turn_limit_ends_and_the_run_goes_on() {
+        let repo = task_repo(&["false", "false"]);
+        let root = repo.path();
+        // max_turns is 10 in these tests: ten replies that keep working.
+        let mut replies: Vec<Reply> = (0..10)
+            .map(|i| calls(&[write(&root.join(format!("step{i}.txt")), "x")]))
+            .collect();
+        replies.push(text("picking up from step 9"));
+        let provider = Scripted::new(replies);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 2, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(stop.session, 2);
+        assert_eq!(provider.left(), 0);
+        assert_eq!(State::load(root).unwrap().stalled, 2);
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains(
+                "- [junees] session 1: 0/2 passing, nothing new, \
+                 ended at the turn limit (10 model calls), "
+            ),
+            "{progress}"
+        );
+        // The work is kept.
+        assert_eq!(subjects(root)[1], checkpoint_message(1));
+        assert!(root.join("step9.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_session_that_deletes_the_task_folder_does_not_break_the_run() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let original = fs::read_to_string(features_path(root)).unwrap();
+        let provider = Scripted::new(vec![
+            calls(&[bash(format!("rm -rf '{}'", dir(root).display()))]),
+            text("cleaned up"),
+        ]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 1, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(fs::read_to_string(features_path(root)).unwrap(), original);
+        assert!(dir(root).join(".gitignore").exists());
+        assert!(!git::is_dirty(root).unwrap());
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        // state.json stays out of git.
+        let mut ls_files = std::process::Command::new("git");
+        ls_files.args(["ls-files", ".junees"]).current_dir(root);
+        for name in git::REPO_ENV_VARS {
+            ls_files.env_remove(name);
+        }
+        let tracked = ls_files.output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&tracked.stdout),
+            ".junees/.gitignore\n.junees/features.json\n.junees/progress.md\n"
+        );
+        assert_eq!(State::load(root).unwrap().stop, Some(stop));
+    }
+
+    #[tokio::test]
+    async fn session_bash_follows_the_users_deny_rules() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![
+            calls(&[bash(format!("cd '{}' && touch denied.txt", root.display()))]),
+            text("blocked"),
+        ]);
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        env.tool_settings.deny_commands = vec!["touch".into()];
+        run(&env, 1, &mut |_| {}).await.unwrap();
+
+        assert!(!root.join("denied.txt").exists());
+        let seen = provider.seen.lock().unwrap();
+        let result = seen[1].1.last().unwrap();
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &result.content[0]
+        else {
+            panic!("expected a tool result: {result:?}");
+        };
+        assert!(is_error);
+        assert!(content.starts_with("blocked by policy"), "{content}");
+    }
+
+    fn bash(command: String) -> (&'static str, Value) {
+        ("bash", json!({ "command": command }))
+    }
+
+    #[tokio::test]
+    async fn a_failed_checkpoint_commit_stops_the_run_and_is_recorded() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        // The session leaves the repository unable to commit.
+        let provider = Scripted::new(vec![
+            calls(&[bash(format!(
+                "cd '{}' && git config commit.gpgsign true && git config gpg.program false \
+                 && echo wip > wip.txt",
+                root.display()
+            ))]),
+            text("done"),
+        ]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 3, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::Error);
+        assert_eq!(stop.session, 1);
+        let detail = stop.detail.as_deref().unwrap();
+        assert!(
+            detail.starts_with("could not wrap up session 1: "),
+            "{detail}"
+        );
+        assert!(detail.contains("git commit"), "{detail}");
+        assert_eq!(State::load(root).unwrap().stop, Some(stop));
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+    }
+
+    #[tokio::test]
+    async fn a_new_run_continues_from_state_json() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![text("a"), text("b"), text("c")]);
+        run_task(root, &provider, 1, &mut Collected::default()).await;
+        assert_eq!(State::load(root).unwrap().stalled, 1);
+
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 1, &mut out).await;
+        assert_eq!(stop.session, 2);
+        assert!(
+            out.lines[0].starts_with("== session 2 start"),
+            "{:?}",
+            out.lines
+        );
+        assert_eq!(subjects(root)[0], checkpoint_message(2));
+        // The first run stopped on its own, so its streak was cleared.
+        assert_eq!(State::load(root).unwrap().stalled, 1);
+
+        // After a crash (no stop recorded) the streak carries on.
+        let mut state = State::load(root).unwrap();
+        state.stop = None;
+        state.stalled = STALL_LIMIT - 1;
+        state.save(root).unwrap();
+        let stop = run_task(root, &provider, 5, &mut Collected::default()).await;
+        assert_eq!(stop.reason, StopReason::Stalled);
+        assert_eq!(stop.session, 3);
+        assert_eq!(State::load(root).unwrap().usage.input_tokens, 30);
+    }
+}

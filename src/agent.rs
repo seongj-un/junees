@@ -1,7 +1,7 @@
 //! The agent loop: ask the model, run the tools it calls, feed the results
 //! back, and repeat until it answers without calling a tool.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::context;
@@ -49,6 +49,24 @@ pub enum Event<'a> {
         after_messages: usize,
     },
 }
+
+/// The error of [`Agent::run`] when the model was still calling tools after
+/// `max_turns` model calls. The history is valid and ends with the tool
+/// results, so callers can tell it from a failure (`downcast_ref`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnLimit(pub usize);
+
+impl std::fmt::Display for TurnLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "stopped after {} model calls without a final answer",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for TurnLimit {}
 
 pub struct Agent {
     provider: Box<dyn Provider>,
@@ -233,10 +251,7 @@ impl Agent {
             self.record(Entry::Message(results), &mut on_event);
         }
 
-        bail!(
-            "stopped after {} model calls without a final answer",
-            self.options.max_turns
-        )
+        Err(TurnLimit(self.options.max_turns).into())
     }
 
     async fn call(&self, specs: &[ToolSpec]) -> Result<CompletionResponse, ProviderError> {
@@ -592,6 +607,7 @@ mod tests {
         let mut agent = agent(provider, 2);
         let err = agent.run("loop", |_| {}).await.unwrap_err();
         assert!(err.to_string().contains("stopped after 2 model calls"));
+        assert_eq!(err.downcast_ref::<TurnLimit>(), Some(&TurnLimit(2)));
     }
 
     #[tokio::test]
