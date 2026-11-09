@@ -22,6 +22,8 @@ fn command(cwd: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
         .env_remove("JUNEES_MODEL")
         .env_remove("JUNEES_MAX_TOKENS")
         .env_remove("JUNEES_MAX_TURNS")
+        .env_remove("JUNEES_CONTEXT_WINDOW")
+        .env_remove("JUNEES_COMPACT_THRESHOLD")
         .stdin(Stdio::null());
     command
 }
