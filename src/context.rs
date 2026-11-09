@@ -27,7 +27,7 @@ pub fn summary_request(messages: &[Message]) -> Message {
         };
         for block in &message.content {
             match block {
-                ContentBlock::Text { text: body } => {
+                ContentBlock::Text { text: body, .. } => {
                     text.push_str(&format!("[{role}]\n{body}\n"));
                 }
                 ContentBlock::ToolUse { id, name, input } => {
@@ -106,9 +106,7 @@ mod tests {
                     ContentBlock::Other(json!({"type": "redacted_thinking", "data": "opaque"})),
                     ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_1",
                                                "name": "web_search", "input": {}})),
-                    ContentBlock::Text {
-                        text: "found it".into(),
-                    },
+                    ContentBlock::text("found it"),
                 ],
             },
         ];

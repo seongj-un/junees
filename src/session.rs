@@ -170,7 +170,7 @@ impl Transcript {
             Entry::Message(message) => self.messages.push(message),
             Entry::AppendText { text } => match self.messages.last_mut() {
                 Some(last) if last.role == Role::User => {
-                    last.content.push(ContentBlock::Text { text })
+                    last.content.push(ContentBlock::text(text))
                 }
                 _ => self.messages.push(Message::user_text(text)),
             },
@@ -203,9 +203,7 @@ impl Transcript {
                     .messages
                     .drain(..keep_from.min(self.messages.len()))
                     .collect();
-                let block = ContentBlock::Text {
-                    text: format!("{SUMMARY_HEADER}{summary}"),
-                };
+                let block = ContentBlock::text(format!("{SUMMARY_HEADER}{summary}"));
                 match self.messages.first_mut() {
                     Some(first) if first.role == Role::User => first.content.insert(0, block),
                     _ => {
@@ -219,7 +217,7 @@ impl Transcript {
                                     .content
                                     .iter()
                                     .filter(|block| {
-                                        matches!(block, ContentBlock::Text { text }
+                                        matches!(block, ContentBlock::Text { text, .. }
                                             if !text.starts_with(SUMMARY_HEADER))
                                     })
                                     .cloned(),
@@ -865,9 +863,7 @@ mod tests {
         Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text {
-                    text: "running".into(),
-                },
+                ContentBlock::text("running"),
                 ContentBlock::ToolUse {
                     id: id.into(),
                     name: "bash".into(),
@@ -1411,10 +1407,8 @@ mod tests {
             [Message {
                 role: Role::User,
                 content: vec![
-                    ContentBlock::Text {
-                        text: format!("{SUMMARY_HEADER}did 0 to 5"),
-                    },
-                    ContentBlock::Text { text: "go".into() },
+                    ContentBlock::text(format!("{SUMMARY_HEADER}did 0 to 5")),
+                    ContentBlock::text("go"),
                 ],
             }]
         );
@@ -1468,7 +1462,7 @@ mod tests {
     fn assistant(text: &str) -> Message {
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
         }
     }
 
@@ -1493,9 +1487,7 @@ mod tests {
         // Results that carry typed input too (a failed turn) are no round
         // boundary.
         let mut with_input = tool_results("toolu_1", "out", false);
-        with_input.content.push(ContentBlock::Text {
-            text: "and now?".into(),
-        });
+        with_input.content.push(ContentBlock::text("and now?"));
         let transcript = transcript_of(vec![
             Message::user_text("first"),
             tool_call("toolu_1"),
@@ -1523,10 +1515,8 @@ mod tests {
         let head = Message {
             role: Role::User,
             content: vec![
-                ContentBlock::Text {
-                    text: format!("{SUMMARY_HEADER}did 0 to 1"),
-                },
-                ContentBlock::Text { text: "go".into() },
+                ContentBlock::text(format!("{SUMMARY_HEADER}did 0 to 1")),
+                ContentBlock::text("go"),
             ],
         };
         assert_eq!(transcript.messages[0], head);
@@ -1557,10 +1547,8 @@ mod tests {
         assert_eq!(
             transcript.messages[0].content,
             [
-                ContentBlock::Text {
-                    text: format!("{SUMMARY_HEADER}did 0 to 3"),
-                },
-                ContentBlock::Text { text: "go".into() },
+                ContentBlock::text(format!("{SUMMARY_HEADER}did 0 to 3")),
+                ContentBlock::text("go"),
             ]
         );
         assert_eq!(transcript.messages[1], tool_call("toolu_4"));
@@ -1588,9 +1576,7 @@ mod tests {
         // Input typed after a failed turn joins the tool results; that
         // message cannot lead the tail, since its calls are before it.
         let mut with_results = tool_results("toolu_1", "out", false);
-        with_results.content.push(ContentBlock::Text {
-            text: "and now?".into(),
-        });
+        with_results.content.push(ContentBlock::text("and now?"));
         let transcript = transcript_of(vec![
             Message::user_text("first"),
             tool_call("toolu_1"),
@@ -1612,9 +1598,7 @@ mod tests {
         // A message with tool results never leads, even after one without
         // calls.
         let mut orphan = tool_results("toolu_7", "out", false);
-        orphan
-            .content
-            .push(ContentBlock::Text { text: "hi".into() });
+        orphan.content.push(ContentBlock::text("hi"));
         let odd = transcript_of(vec![Message::user_text("first"), assistant("hm"), orphan]);
         assert_eq!(odd.compact_point(false), None);
     }
@@ -1649,12 +1633,8 @@ mod tests {
         assert_eq!(
             transcript.messages[0].content,
             [
-                ContentBlock::Text {
-                    text: "[Summary of the earlier conversation]\ndid things".into()
-                },
-                ContentBlock::Text {
-                    text: "second".into()
-                },
+                ContentBlock::text("[Summary of the earlier conversation]\ndid things"),
+                ContentBlock::text("second"),
             ]
         );
         assert_eq!(transcript.messages[1..], tail[1..]);
@@ -1811,7 +1791,7 @@ mod tests {
         assert!(transcript.interrupted_results().is_none());
         transcript.apply(Entry::Message(Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text { text: "yo".into() }],
+            content: vec![ContentBlock::text("yo")],
         }));
         assert!(transcript.interrupted_results().is_none());
     }

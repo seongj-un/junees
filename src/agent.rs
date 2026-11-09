@@ -699,7 +699,7 @@ mod tests {
 
     fn text(text: &str) -> Reply {
         Ok(CompletionResponse {
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
             stop_reason: StopReason::EndTurn,
             usage: Usage {
                 input_tokens: 10,
@@ -712,9 +712,7 @@ mod tests {
     fn tool_use(id: &str, name: &str, input: Value) -> Reply {
         Ok(CompletionResponse {
             content: vec![
-                ContentBlock::Text {
-                    text: "let me check".into(),
-                },
+                ContentBlock::text("let me check"),
                 ContentBlock::ToolUse {
                     id: id.into(),
                     name: name.into(),
@@ -1551,10 +1549,7 @@ mod tests {
         // starts the turn again, thinking first, from summary and input.
         assert_eq!(seen[6].len(), 1, "{:#?}", seen[6]);
         assert_eq!(summary_text(&seen[6][0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(
-            seen[6][0].content[1],
-            ContentBlock::Text { text: "go".into() }
-        );
+        assert_eq!(seen[6][0].content[1], ContentBlock::text("go"));
         let entries = entries_of(&journal);
         assert!(entries.contains(&Entry::Compact {
             summary: "SUMMARY".into(),
@@ -1567,7 +1562,7 @@ mod tests {
 
     fn summary_text(message: &Message) -> Option<String> {
         match message.content.first() {
-            Some(ContentBlock::Text { text }) => text
+            Some(ContentBlock::Text { text, .. }) => text
                 .strip_prefix(session::SUMMARY_HEADER)
                 .map(str::to_string),
             _ => None,
@@ -1589,9 +1584,7 @@ mod tests {
     #[tokio::test]
     async fn compacts_when_clearing_was_not_enough() {
         let summary = Ok(CompletionResponse {
-            content: vec![ContentBlock::Text {
-                text: "SUMMARY".into(),
-            }],
+            content: vec![ContentBlock::text("SUMMARY")],
             stop_reason: StopReason::EndTurn,
             usage: Usage {
                 input_tokens: 50,
@@ -1653,12 +1646,7 @@ mod tests {
         let sent = &seen[8];
         assert_eq!(sent.len(), 3);
         assert_eq!(summary_text(&sent[0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(
-            sent[0].content[1],
-            ContentBlock::Text {
-                text: "third".into()
-            }
-        );
+        assert_eq!(sent[0].content[1], ContentBlock::text("third"));
         assert_eq!(sent[1].text(), "three");
         assert_eq!(sent[2], Message::user_text("fourth"));
         assert_valid(sent);
@@ -1812,10 +1800,7 @@ mod tests {
         let history = agent.messages();
         assert_eq!(history.len(), 2);
         assert_eq!(summary_text(&history[0]).as_deref(), Some("so far: a, b"));
-        assert_eq!(
-            history[0].content[1],
-            ContentBlock::Text { text: "two".into() }
-        );
+        assert_eq!(history[0].content[1], ContentBlock::text("two"));
         assert_eq!(history[1].text(), "b");
     }
 
@@ -1863,7 +1848,7 @@ mod tests {
         let sent = &seen[7];
         assert_eq!(sent.len(), 5);
         assert_eq!(summary_text(&sent[0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(sent[0].content[1], ContentBlock::Text { text: "go".into() });
+        assert_eq!(sent[0].content[1], ContentBlock::text("go"));
         assert_eq!(sent[1].role, Role::Assistant);
         assert_eq!(tool_output(&sent[2])[0].0, "toolu_5");
         assert_valid(sent);
@@ -1919,12 +1904,7 @@ mod tests {
         let retried = &seen[7];
         assert_eq!(retried.len(), 1);
         assert_eq!(summary_text(&retried[0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(
-            retried[0].content[1],
-            ContentBlock::Text {
-                text: "second".into()
-            }
-        );
+        assert_eq!(retried[0].content[1], ContentBlock::text("second"));
         assert!(events[0].starts_with("Compacted"), "{events:?}");
         assert!(events[1].contains("retrying once"), "{events:?}");
         assert_valid(agent.messages());
@@ -1949,10 +1929,7 @@ mod tests {
         assert_eq!(settings.lock().unwrap()[6].0, context::SUMMARY_SYSTEM);
         let retried = &seen[7];
         assert_eq!(summary_text(&retried[0]).as_deref(), Some("SUMMARY"));
-        assert_eq!(
-            retried[0].content[1],
-            ContentBlock::Text { text: "go".into() }
-        );
+        assert_eq!(retried[0].content[1], ContentBlock::text("go"));
         assert_eq!(retried.len(), 5);
         assert_valid(retried);
         assert_valid(agent.messages());
@@ -2079,12 +2056,7 @@ mod tests {
         assert_eq!(agent.run("next", |_| {}).await.unwrap(), "fine");
         let sent = &seen.lock().unwrap()[1];
         assert_eq!(sent.len(), 3);
-        assert_eq!(
-            sent[2].content.last(),
-            Some(&ContentBlock::Text {
-                text: "next".into()
-            })
-        );
+        assert_eq!(sent[2].content.last(), Some(&ContentBlock::text("next")));
         assert_valid(sent);
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }

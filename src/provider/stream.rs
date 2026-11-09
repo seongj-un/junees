@@ -435,9 +435,7 @@ data: {"type":"message_stop"}
         assert_eq!(
             response.content,
             vec![
-                ContentBlock::Text {
-                    text: "Okay, let's check:".into()
-                },
+                ContentBlock::text("Okay, let's check:"),
                 ContentBlock::ToolUse {
                     id: "toolu_01T1x1fJ34qAmk2tNTrN7Up6".into(),
                     name: "get_weather".into(),

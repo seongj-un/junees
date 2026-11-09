@@ -1304,7 +1304,7 @@ mod tests {
 
     fn text(text: &str) -> Reply {
         Ok(CompletionResponse {
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
             stop_reason: ModelStop::EndTurn,
             usage: Usage {
                 input_tokens: 10,

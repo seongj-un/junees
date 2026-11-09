@@ -139,9 +139,7 @@ async fn a_whole_json_answer_to_a_stream_request_is_read_as_is() {
     let (response, events) = call(&streaming(url)).await;
     assert_eq!(
         response.unwrap().content,
-        vec![ContentBlock::Text {
-            text: "not streamed".into()
-        }]
+        vec![ContentBlock::text("not streamed")]
     );
     assert_eq!(text_of(&events), "not streamed|");
     assert_eq!(body_of(&server.await.unwrap()[0])["stream"], true);
@@ -181,9 +179,7 @@ async fn an_error_event_mid_stream_retries_from_the_start() {
     let (response, events) = call(&streaming(url)).await;
     assert_eq!(
         response.unwrap().content,
-        vec![ContentBlock::Text {
-            text: "Hallo, Welt.".into()
-        }]
+        vec![ContentBlock::text("Hallo, Welt.")]
     );
     assert_eq!(text_of(&events), "Hal(retrying)Hallo, Welt.|");
     assert_eq!(server.await.unwrap().len(), 2);
@@ -205,12 +201,7 @@ async fn a_dropped_stream_retries_and_says_so_only_after_output() {
     ])
     .await;
     let (response, events) = call(&streaming(url)).await;
-    assert_eq!(
-        response.unwrap().content,
-        vec![ContentBlock::Text {
-            text: "done".into()
-        }]
-    );
+    assert_eq!(response.unwrap().content, vec![ContentBlock::text("done")]);
     assert_eq!(text_of(&events), "do(retrying)done|");
     assert_eq!(server.await.unwrap().len(), 4);
 }
@@ -256,9 +247,7 @@ async fn a_stalled_stream_times_out_and_is_retried() {
     let (response, events) = call(&provider).await;
     assert_eq!(
         response.unwrap().content,
-        vec![ContentBlock::Text {
-            text: "waited".into()
-        }]
+        vec![ContentBlock::text("waited")]
     );
     assert_eq!(text_of(&events), "wai(retrying)waited|");
     // 0.3 s idle and 0.5 s backoff, not the 300 s default.

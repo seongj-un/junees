@@ -22,6 +22,11 @@ pub enum Role {
 pub enum ContentBlock {
     Text {
         text: String,
+        /// The sources the API attached to the text (web search results
+        /// it cites), kept as it sent them: their `encrypted_index` must
+        /// go back with the text in later requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        citations: Option<Value>,
     },
     ToolUse {
         id: String,
@@ -42,6 +47,14 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
+    /// A text block of Junees's own, citing nothing.
+    pub fn text(text: impl Into<String>) -> Self {
+        ContentBlock::Text {
+            text: text.into(),
+            citations: None,
+        }
+    }
+
     /// The `type` of an [`ContentBlock::Other`] block.
     pub fn other_type(&self) -> Option<&str> {
         match self {
@@ -63,6 +76,8 @@ impl ContentBlock {
 enum Known {
     Text {
         text: String,
+        #[serde(default)]
+        citations: Option<Value>,
     },
     ToolUse {
         id: String,
@@ -90,7 +105,8 @@ impl TryFrom<Value> for ContentBlock {
         }
         Ok(
             match serde_json::from_value(value).map_err(|err| err.to_string())? {
-                Known::Text { text } => ContentBlock::Text { text },
+                // `citations: null` reads as `None`.
+                Known::Text { text, citations } => ContentBlock::Text { text, citations },
                 Known::ToolUse { id, name, input } => ContentBlock::ToolUse { id, name, input },
                 Known::ToolResult {
                     tool_use_id,
@@ -120,7 +136,7 @@ impl Message {
     pub fn user_text(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
         }
     }
 
@@ -129,7 +145,7 @@ impl Message {
         self.content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -229,7 +245,7 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(blocks[0], ContentBlock::Other(thinking.clone()));
-        assert_eq!(blocks[1], ContentBlock::Text { text: "hi".into() });
+        assert_eq!(blocks[1], ContentBlock::text("hi"));
         assert_eq!(blocks[2], ContentBlock::Other(redacted.clone()));
         assert_eq!(blocks[3], ContentBlock::Other(server.clone()));
         assert!(matches!(&blocks[4], ContentBlock::ToolUse { name, .. } if name == "bash"));
@@ -266,13 +282,13 @@ mod tests {
         let message = Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text { text: "a".into() },
+                ContentBlock::text("a"),
                 ContentBlock::ToolUse {
                     id: "t".into(),
                     name: "bash".into(),
                     input: json!({}),
                 },
-                ContentBlock::Text { text: "b".into() },
+                ContentBlock::text("b"),
             ],
         };
         assert_eq!(message.text(), "a\nb");

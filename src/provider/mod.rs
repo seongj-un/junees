@@ -101,7 +101,7 @@ pub trait Provider: Send + Sync {
 pub fn report_blocks(content: &[ContentBlock], events: &StreamSender) {
     for block in content {
         match block {
-            ContentBlock::Text { text } => {
+            ContentBlock::Text { text, .. } => {
                 let _ = events.send(StreamEvent::TextDelta(text.clone()));
                 let _ = events.send(StreamEvent::TextEnd);
             }

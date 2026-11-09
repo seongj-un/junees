@@ -634,9 +634,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: vec![
-                    ContentBlock::Text {
-                        text: "sure".into(),
-                    },
+                    ContentBlock::text("sure"),
                     ContentBlock::ToolUse {
                         id: "toolu_1".into(),
                         name: "bash".into(),
@@ -652,9 +650,7 @@ mod tests {
                         content: "a\nb".into(),
                         is_error: false,
                     },
-                    ContentBlock::Text {
-                        text: "and then?".into(),
-                    },
+                    ContentBlock::text("and then?"),
                 ],
             },
         ];
@@ -720,12 +716,7 @@ mod tests {
         let response = CompletionResponse::from(api);
         assert_eq!(
             response.content,
-            vec![
-                ContentBlock::Other(thinking),
-                ContentBlock::Text {
-                    text: "done".into()
-                }
-            ]
+            vec![ContentBlock::Other(thinking), ContentBlock::text("done")]
         );
         assert_eq!(response.stop_reason, StopReason::EndTurn);
         assert_eq!(response.usage.input_tokens, 12);
