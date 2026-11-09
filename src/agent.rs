@@ -148,7 +148,8 @@ impl Agent {
     /// Before each model call, asks `limit` with this session's usage so
     /// far (summary calls included) whether to go on. When it gives a
     /// reason, [`Agent::run`] fails with [`LimitReached`] instead of
-    /// calling the model. Task runs use it for their token and time budget.
+    /// calling the model. A summary call that compaction makes before a
+    /// model call is asked about on its own. Task runs use it for their token and time budget.
     pub fn with_limit(mut self, limit: Limit) -> Self {
         self.limit = Some(limit);
         self
@@ -211,11 +212,7 @@ impl Agent {
         let cancel = self.cancel.clone();
 
         for _ in 0..self.options.max_turns {
-            if let Some(limit) = &mut self.limit
-                && let Some(reason) = limit(self.transcript.usage)
-            {
-                return Err(LimitReached(reason).into());
-            }
+            self.check_limit()?;
             // Nothing is recorded while a call is in flight, so abandoning
             // it leaves the history as it was: ending with a user message.
             let response = tokio::select! {
@@ -326,21 +323,37 @@ impl Agent {
         Err(TurnLimit(self.options.max_turns).into())
     }
 
+    /// Fails with [`LimitReached`] if the limit says to stop.
+    fn check_limit(&mut self) -> Result<()> {
+        if let Some(limit) = &mut self.limit
+            && let Some(reason) = limit(self.transcript.usage)
+        {
+            return Err(LimitReached(reason).into());
+        }
+        Ok(())
+    }
+
     /// The next model response: keeps the context under its limit first,
-    /// and on an overflow shrinks the history and retries once.
+    /// and on an overflow shrinks the history and retries once. The limit
+    /// was asked before the first call this makes; it is asked again
+    /// before each later one, summary calls included.
     async fn respond(
         &mut self,
         specs: &[ToolSpec],
         on_event: &mut impl FnMut(Event<'_>),
     ) -> Result<CompletionResponse> {
-        self.manage_context(on_event).await;
+        if self.manage_context(on_event).await {
+            self.check_limit()?;
+        }
         match self.call(specs).await {
             Ok(response) => Ok(response),
             // Shrink the history as far as it goes and try once more.
             Err(err) if err.is_context_overflow() => {
+                self.check_limit()?;
                 if !self.shrink(on_event).await {
                     return Err(err.into());
                 }
+                self.check_limit()?;
                 on_event(Event::Warning(
                     "the conversation did not fit the context window; \
                      retrying once with the shrunk history",
@@ -385,18 +398,20 @@ impl Agent {
     /// Keeps the conversation under the compaction threshold: once the
     /// context size reaches it, old tool output is cleared first. If there
     /// is none to clear, or the next call still measures over the threshold,
-    /// the conversation is compacted.
-    async fn manage_context(&mut self, on_event: &mut impl FnMut(Event<'_>)) {
+    /// the conversation is compacted. Returns whether it tried to, which
+    /// takes a summary call.
+    async fn manage_context(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
         if self.transcript.context_tokens < self.options.compact_limit() {
             self.cleared = false;
-            return;
+            return false;
         }
         if !self.cleared && self.clear_tool_results(on_event) {
             self.cleared = true;
-            return;
+            return false;
         }
         self.cleared = false;
         self.summarize(on_event).await;
+        true
     }
 
     /// Replaces the earlier part of the conversation with a summary written
@@ -1340,6 +1355,32 @@ mod tests {
             keep_from: 12
         }));
         assert_eq!(replay(entries), agent.transcript);
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_asked_again_after_a_summary_call() {
+        let summary = sized(text("SUMMARY"), 51);
+        let provider = Scripted::new(long_conversation(summary));
+        let seen = provider.seen.clone();
+        // Under 2300 tokens until the summary call (50 in) of "fourth".
+        let mut agent = agent(provider, 10).with_limit(Box::new(|usage: Usage| {
+            (usage.input_tokens >= 2300).then(|| format!("used {}", usage.input_tokens))
+        }));
+        for input in ["first", "second", "third"] {
+            agent.run(input, |_| {}).await.unwrap();
+        }
+        let err = agent.run("fourth", |_| {}).await.unwrap_err();
+
+        assert_eq!(
+            err.downcast_ref::<LimitReached>(),
+            Some(&LimitReached("used 2343".into()))
+        );
+        // The summary call was made, the model call after it was not.
+        assert_eq!(seen.lock().unwrap().len(), 8);
+        let history = agent.messages();
+        assert_eq!(summary_text(&history[0]).as_deref(), Some("SUMMARY"));
+        assert_eq!(history.last(), Some(&Message::user_text("fourth")));
+        assert_valid(history);
     }
 
     #[tokio::test]
