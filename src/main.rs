@@ -20,6 +20,7 @@ use junees::task::claude_code::{Backend, ClaudeCode};
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
+use junees::web_search;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -639,7 +640,7 @@ impl Printer {
                 eprintln!("  (retrying)");
             }
             // Reported during the call; its text is not done yet.
-            Event::Thinking => print_event(event),
+            Event::Thinking | Event::ServerToolUse { .. } => print_event(event),
             // Anything else comes after a model call.
             event => {
                 self.end_line();
@@ -677,6 +678,14 @@ fn print_event(event: Event<'_>) {
                 cli::preview(&input.to_string(), PREVIEW_CHARS)
             );
         }
+        Event::ServerToolUse { name, input } => {
+            eprintln!(
+                "  -> {name} {} (run by the API)",
+                cli::preview(&input.to_string(), PREVIEW_CHARS)
+            );
+        }
+        // Part of the answer, after its text.
+        Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),
         Event::Compacted {
             before_messages,
             after_messages,

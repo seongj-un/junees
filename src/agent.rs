@@ -13,6 +13,12 @@ use crate::provider::{
 };
 use crate::session::{Entry, Journal, Transcript};
 use crate::tools::{ToolOutput, ToolRegistry};
+use crate::web_search;
+
+/// Replies in a row the API may pause (`stop_reason: "pause_turn"`, when
+/// its own tool loop, such as web search, runs long) before the loop stops
+/// asking it to go on.
+pub const MAX_PAUSES: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct AgentOptions {
@@ -54,6 +60,15 @@ pub enum Event<'a> {
         name: &'a str,
         input: &'a Value,
     },
+    /// The API ran one of its own tools (such as a web search) with this
+    /// input, while the reply arrived. Junees does not run it.
+    ServerToolUse {
+        name: &'a str,
+        input: &'a Value,
+    },
+    /// The web pages the replies to this input cited, each once, after
+    /// the final answer.
+    Sources(&'a [String]),
     ToolResult {
         name: &'a str,
         output: &'a ToolOutput,
@@ -227,6 +242,8 @@ impl Agent {
     ///
     /// If the loop fails midway, the history still ends with a user message,
     /// and the next input is appended to it, so the conversation stays valid.
+    /// The exception is a reply the API paused (`pause_turn`): it is kept,
+    /// and the next input follows it as a new user message.
     pub async fn run(
         &mut self,
         input: &str,
@@ -236,6 +253,12 @@ impl Agent {
         self.record(entry, &mut on_event);
         let specs = self.tools.specs();
         let cancel = self.cancel.clone();
+        // The URLs the replies cite, listed after the answer.
+        let mut sources = Vec::new();
+        // The text of the replies since the last tool round: a reply the
+        // API paused is continued by the next one.
+        let mut answer: Vec<String> = Vec::new();
+        let mut pauses = 0;
 
         for _ in 0..self.options.max_turns {
             self.check_limit()?;
@@ -247,6 +270,7 @@ impl Agent {
                 response = self.respond(&specs, &mut on_event) => response?,
             };
             self.record(Entry::Usage(response.usage), &mut on_event);
+            web_search::collect_sources(&response.content, &mut sources);
 
             // Its text and thinking were reported while it arrived.
             let tool_calls: Vec<_> = response
@@ -288,7 +312,22 @@ impl Agent {
             };
 
             if tool_calls.is_empty() {
-                if response.stop_reason == StopReason::MaxTokens {
+                if !text.is_empty() {
+                    answer.push(text);
+                }
+                if response.stop_reason == StopReason::PauseTurn {
+                    // The API stopped its own tool loop midway. The reply,
+                    // recorded as it came, goes back unchanged with no user
+                    // message after it, and the API goes on from there.
+                    pauses += 1;
+                    if pauses <= MAX_PAUSES {
+                        continue;
+                    }
+                    on_event(Event::Warning(&format!(
+                        "the API paused this turn {MAX_PAUSES} times in a row; stopping \
+                         here (send a message to let it go on)"
+                    )));
+                } else if response.stop_reason == StopReason::MaxTokens {
                     on_event(Event::Warning(if answered {
                         "the answer hit the output token limit and may be cut off"
                     } else {
@@ -301,8 +340,13 @@ impl Agent {
                         "the model only thought and gave no answer; ask again or rephrase",
                     ));
                 }
-                return Ok(text);
+                if !sources.is_empty() {
+                    on_event(Event::Sources(&sources));
+                }
+                return Ok(answer.join("\n"));
             }
+            pauses = 0;
+            answer.clear();
 
             if let Some(reason) = cut_off {
                 on_event(Event::Warning(reason));
@@ -615,6 +659,7 @@ fn forward(event: StreamEvent, on_event: &mut impl FnMut(Event<'_>)) {
         StreamEvent::TextEnd => Event::TextEnd,
         StreamEvent::Thinking => Event::Thinking,
         StreamEvent::Retrying => Event::Retrying,
+        StreamEvent::ServerToolUse { name, input } => Event::ServerToolUse { name, input },
     });
 }
 
@@ -746,6 +791,145 @@ mod tests {
                 compact_threshold: 0.8,
             },
         )
+    }
+
+    /// A reply that searched the web once and cites `url`.
+    fn searched(stop_reason: StopReason, text: &str, url: &str) -> Reply {
+        Ok(CompletionResponse {
+            content: vec![
+                ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_1",
+                    "name": "web_search", "input": {"query": "news"}})),
+                ContentBlock::Other(json!({"type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_1", "content": [{"type": "web_search_result",
+                    "url": url, "title": "T", "encrypted_content": "EqgfCioIARgB"}]})),
+                ContentBlock::Text {
+                    text: text.into(),
+                    citations: Some(json!([{"type": "web_search_result_location", "url": url,
+                        "title": "T", "encrypted_index": "Eo8B", "cited_text": "..."}])),
+                },
+            ],
+            stop_reason,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 1,
+                server_tool_use: crate::message::ServerToolUsage {
+                    web_search_requests: 1,
+                },
+                ..Default::default()
+            },
+        })
+    }
+
+    /// The events of a run that are not text, as short strings.
+    fn notable(log: &mut Vec<String>) -> impl FnMut(Event<'_>) + '_ {
+        |event| match event {
+            Event::Sources(urls) => log.push(format!("sources {}", urls.join(" "))),
+            Event::ToolCall { name, .. } => log.push(format!("tool {name}")),
+            Event::Warning(warning) => log.push(format!("warning {warning}")),
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paused_turn_goes_on_without_a_user_message() {
+        let provider = Scripted::new(vec![
+            searched(StopReason::PauseTurn, "Searching.", "https://b.example"),
+            searched(
+                StopReason::PauseTurn,
+                "Still searching.",
+                "https://a.example",
+            ),
+            searched(StopReason::EndTurn, "Done.", "https://b.example"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let mut log = Vec::new();
+        let answer = agent.run("news?", notable(&mut log)).await.unwrap();
+        assert_eq!(answer, "Searching.\nStill searching.\nDone.");
+        // Cited pages once each, after the answer; nothing ran here.
+        assert_eq!(log, ["sources https://b.example https://a.example"]);
+
+        let messages = agent.messages();
+        assert_eq!(messages.len(), 4);
+        let seen = seen.lock().unwrap();
+        // Each continuation sent the history as it was: the paused replies,
+        // unchanged and last.
+        assert_eq!(seen[1], messages[..2]);
+        assert_eq!(seen[2], messages[..3]);
+        assert!(messages[1..].iter().all(|m| m.role == Role::Assistant));
+        assert_eq!(messages[1], {
+            let Ok(reply) = searched(StopReason::PauseTurn, "Searching.", "https://b.example")
+            else {
+                unreachable!()
+            };
+            Message {
+                role: Role::Assistant,
+                content: reply.content,
+            }
+        });
+        assert_eq!(agent.usage().web_searches(), 3);
+    }
+
+    #[tokio::test]
+    async fn pauses_in_a_row_stop_at_the_limit() {
+        let provider = Scripted::new(
+            (0..=MAX_PAUSES)
+                .map(|_| searched(StopReason::PauseTurn, "more", "https://a.example"))
+                .collect(),
+        );
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 50);
+        let mut log = Vec::new();
+        agent.run("go", notable(&mut log)).await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), MAX_PAUSES + 1);
+        assert_eq!(
+            log,
+            [
+                format!(
+                    "warning the API paused this turn {MAX_PAUSES} times in a row; stopping \
+                     here (send a message to let it go on)"
+                ),
+                "sources https://a.example".into(),
+            ]
+        );
+        // The next input follows the last paused reply.
+        assert_eq!(agent.messages().last().unwrap().role, Role::Assistant);
+        assert!(matches!(
+            agent.transcript.user_text_entry("go on"),
+            Entry::Message(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn server_tool_blocks_are_not_dispatched() {
+        // The docs' mixed turn: a search the API holds back until the
+        // client tool's result comes, in the same reply.
+        let mixed = Ok(CompletionResponse {
+            content: vec![
+                ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_9",
+                    "name": "web_search", "input": {"query": "rust"}})),
+                ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "upper".into(),
+                    input: json!({"text": "x"}),
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        });
+        let provider = Scripted::new(vec![
+            mixed,
+            searched(StopReason::EndTurn, "found", "https://a.example"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let mut log = Vec::new();
+        agent.run("go", notable(&mut log)).await.unwrap();
+        assert_eq!(log, ["tool upper", "sources https://a.example"]);
+        let seen = seen.lock().unwrap();
+        // One result, for the client call; the server call went back as is.
+        assert_eq!(tool_output(&seen[1][2]), [("toolu_1", "X", false)]);
+        assert_eq!(seen[1][1].content[0].other_type(), Some("server_tool_use"));
     }
 
     #[tokio::test]

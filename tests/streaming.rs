@@ -86,6 +86,7 @@ fn text_of(events: &[StreamEvent]) -> String {
             StreamEvent::TextEnd => "|",
             StreamEvent::Thinking => "(thinking)",
             StreamEvent::Retrying => "(retrying)",
+            StreamEvent::ServerToolUse { .. } => "(server tool)",
         })
         .collect()
 }
@@ -113,8 +114,12 @@ async fn a_streamed_reply_equals_the_plain_one() {
     assert_eq!(text_of(&plain_events), text_of(&streamed_events));
     assert_eq!(
         text_of(&streamed_events),
-        "(thinking)(thinking)목록을 확인하겠습니다. Let me look.|"
+        "(thinking)(thinking)목록을 확인하겠습니다. Let me look.|(server tool)"
     );
+    assert!(streamed_events.contains(&StreamEvent::ServerToolUse {
+        name: "web_search".into(),
+        input: json!({"query": "rust sse"}),
+    }));
     let deltas = streamed_events
         .iter()
         .filter(|event| matches!(event, StreamEvent::TextDelta(_)))
