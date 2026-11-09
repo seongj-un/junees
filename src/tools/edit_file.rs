@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -116,8 +118,8 @@ async fn edit(
     let text = String::from_utf8(bytes)
         .map_err(|_| ToolOutput::error(format!("{path} is not valid UTF-8 text")))?;
 
-    let edit = plan_edit(&text, old, new, replace_all).map_err(ToolOutput::error)?;
-    write_atomically(&real, &edit.text, meta.permissions())
+    let mut edit = plan_edit(&text, old, new, replace_all).map_err(ToolOutput::error)?;
+    edit.text = write_atomically(&real, std::mem::take(&mut edit.text), meta.permissions())
         .await
         .map_err(|err| ToolOutput::error(format!("cannot write {path}: {err}")))?;
     Ok(ToolOutput::ok(edit.summary(path)))
@@ -378,31 +380,65 @@ fn preview(text: &str, changes: &[(usize, usize)]) -> String {
 /// Writes `text` to a temporary file next to `path` with `path`'s
 /// permissions, then renames it over `path`, so a crash or a full disk never
 /// leaves a half-written file behind.
+///
+/// The whole sequence runs on one blocking thread with `std::fs`: every
+/// error comes back from the call that hit it (tokio's `File::write_all`
+/// returns before the data is written, and its `sync_all` drops a failed
+/// background write), and dropping this future when a turn is cancelled
+/// cannot stop it between creating the temporary file and renaming or
+/// removing it. Returns `text` for the caller's preview.
 async fn write_atomically(
     path: &Path,
-    text: &str,
+    text: String,
+    permissions: std::fs::Permissions,
+) -> std::io::Result<String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        write_and_rename(&path, text.as_bytes(), permissions).map(|()| text)
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+fn write_and_rename(
+    path: &Path,
+    bytes: &[u8],
     permissions: std::fs::Permissions,
 ) -> std::io::Result<()> {
     let temp = temp_path(path);
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-            .await?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, text.as_bytes()).await?;
-        // The creation mode went through the umask; set the original exactly.
-        file.set_permissions(permissions).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&temp, path).await
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)?;
+    // Created by this call, so it is ours to remove on any error below.
+    let mut guard = RemoveOnDrop {
+        path: &temp,
+        armed: true,
+    };
+    file.write_all(bytes)?;
+    // The creation mode went through the umask; set the original exactly.
+    file.set_permissions(permissions)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&temp, path)?;
+    guard.armed = false;
+    Ok(())
+}
+
+/// Removes the temporary file unless disarmed, so no error path (or panic)
+/// leaves it in the working tree, where a task checkpoint would commit it.
+struct RemoveOnDrop<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl Drop for RemoveOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(self.path);
+        }
     }
-    .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&temp).await;
-    }
-    result
 }
 
 fn temp_path(path: &Path) -> PathBuf {
@@ -789,6 +825,35 @@ mod tests {
         assert!(!output.is_error, "{}", output.content);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         assert!(output.content.ends_with("[the file is now empty]\n"));
+    }
+
+    #[tokio::test]
+    async fn cancelling_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = format!("{}\nold\n", "x".repeat(4 << 20));
+        let path = temp_file(&dir, &content);
+        let edit = run(&path, "old", "new");
+        // Drop the edit as soon as its temporary file exists, as a cancelled
+        // turn drops the tool call.
+        let temp_exists = async {
+            while entries(&dir).len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::select! {
+            biased;
+            () = temp_exists => {}
+            _ = edit => {}
+        }
+        for _ in 0..500 {
+            if entries(&dir) == ["file.txt"] {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(entries(&dir), ["file.txt"]);
+        let now = std::fs::read_to_string(&path).unwrap();
+        assert!(now == content || now == content.replace("old", "new"));
     }
 
     #[test]
