@@ -87,6 +87,24 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// Asked before each model call with the tokens used so far; a reason to
+/// stop ends the run there. See [`Agent::with_limit`].
+pub type Limit = Box<dyn FnMut(Usage) -> Option<String> + Send>;
+
+/// The error of [`Agent::run`] when its [`Limit`] stopped it before a
+/// model call, with the limit's reason. Like [`TurnLimit`], the history is
+/// valid and ends with a user message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitReached(pub String);
+
+impl std::fmt::Display for LimitReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for LimitReached {}
+
 pub struct Agent {
     provider: Box<dyn Provider>,
     tools: ToolRegistry,
@@ -99,6 +117,8 @@ pub struct Agent {
     cleared: bool,
     /// Stops the current turn when set; see [`Agent::with_cancel`].
     cancel: Cancel,
+    /// Checked before each model call; see [`Agent::with_limit`].
+    limit: Option<Limit>,
 }
 
 impl Agent {
@@ -121,7 +141,17 @@ impl Agent {
             journal: None,
             cleared: false,
             cancel: Cancel::new(),
+            limit: None,
         }
+    }
+
+    /// Before each model call, asks `limit` with this session's usage so
+    /// far (summary calls included) whether to go on. When it gives a
+    /// reason, [`Agent::run`] fails with [`LimitReached`] instead of
+    /// calling the model. Task runs use it for their token and time budget.
+    pub fn with_limit(mut self, limit: Limit) -> Self {
+        self.limit = Some(limit);
+        self
     }
 
     /// Stops [`Agent::run`] when `cancel` is set: a model call in flight is
@@ -181,6 +211,11 @@ impl Agent {
         let cancel = self.cancel.clone();
 
         for _ in 0..self.options.max_turns {
+            if let Some(limit) = &mut self.limit
+                && let Some(reason) = limit(self.transcript.usage)
+            {
+                return Err(LimitReached(reason).into());
+            }
             // Nothing is recorded while a call is in flight, so abandoning
             // it leaves the history as it was: ending with a user message.
             let response = tokio::select! {
@@ -670,6 +705,36 @@ mod tests {
         let err = agent.run("loop", |_| {}).await.unwrap_err();
         assert!(err.to_string().contains("stopped after 2 model calls"));
         assert_eq!(err.downcast_ref::<TurnLimit>(), Some(&TurnLimit(2)));
+    }
+
+    #[tokio::test]
+    async fn a_limit_stops_the_run_between_model_calls() {
+        let provider = Scripted::new(vec![
+            tool_use("toolu_1", "upper", json!({"text": "a"})),
+            tool_use("toolu_2", "upper", json!({"text": "b"})),
+            text("never asked for"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut asked = Vec::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut agent = agent(provider, 5).with_limit(Box::new(move |usage: Usage| {
+            sender.send(usage.input_tokens).unwrap();
+            (usage.input_tokens >= 10).then(|| format!("used {}", usage.input_tokens))
+        }));
+        let err = agent.run("go", |_| {}).await.unwrap_err();
+        asked.extend(receiver.try_iter());
+
+        assert_eq!(
+            err.downcast_ref::<LimitReached>(),
+            Some(&LimitReached("used 10".into()))
+        );
+        // Asked before each call: 0, 5, then 10 stops it.
+        assert_eq!(asked, [0, 5, 10]);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let history = agent.messages();
+        assert_eq!(history.len(), 5);
+        assert_eq!(tool_output(&history[4]), [("toolu_2", "B", false)]);
+        assert_valid(history);
     }
 
     #[tokio::test]
