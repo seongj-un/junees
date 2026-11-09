@@ -135,8 +135,11 @@ async fn clears_then_compacts_over_the_threshold_and_replays() {
         messages[2]["content"][0]["cache_control"]["type"],
         "ephemeral"
     );
+    // The last tool carries the mark.
+    let tools = last["tools"].as_array().unwrap();
     assert_eq!(
-        last["tools"][2]["cache_control"]["type"], "ephemeral",
+        tools.last().unwrap()["cache_control"]["type"],
+        "ephemeral",
         "{last}"
     );
 
