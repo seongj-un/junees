@@ -20,6 +20,7 @@ use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::setup::{self, EchoOff, Prompter};
+use junees::skills;
 use junees::slash::{self, Slash};
 use junees::task::budget::Budget;
 use junees::task::state::StopReason;
@@ -313,11 +314,13 @@ fn api_agent(
     cancel: &Cancel,
     input: Option<&SharedLines>,
 ) -> Result<Agent> {
+    let mut tools = ToolRegistry::with_defaults(&config.tools);
+    skills::register(&mut tools, config.home.as_deref(), true);
     let mut agent = Agent::new(
         make_provider(config)?,
-        ToolRegistry::with_defaults(&config.tools),
+        tools,
         AgentOptions {
-            system: prompt::system_prompt(cwd),
+            system: conversation_system(config, cwd),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
             context_window: config.context_window,
@@ -329,6 +332,19 @@ fn api_agent(
         agent = agent.with_gate(Box::new(gate));
     }
     Ok(agent)
+}
+
+/// The system prompt of a conversation on the API backend, with the
+/// skills as they are now.
+fn conversation_system(config: &Config, cwd: &Path) -> String {
+    prompt::system_prompt(cwd)
+        + &skills::system_section(config.home.as_deref(), skills::Mode::Manage)
+}
+
+/// What a conversation on the claude-code backend appends to Claude
+/// Code's system prompt: the skill list as it is now.
+fn claude_system(config: &Config) -> String {
+    skills::system_section(config.home.as_deref(), skills::Mode::ClaudeCode)
 }
 
 /// Claude Code for the conversation, once `claude --version` and its
@@ -350,13 +366,14 @@ async fn claude_chat(
         "(Claude Code runs commands without Junees approval questions; \
          only the command policy deny rules apply)"
     );
-    let chat = Chat::new(
+    let mut chat = Chat::new(
         claude,
         cwd.to_path_buf(),
         config.tools.clone(),
         config.max_turns,
         cancel.clone(),
     );
+    chat.set_system(claude_system(config));
     Ok((chat, version))
 }
 
@@ -884,6 +901,8 @@ impl Repl {
                      used"
                 ),
             },
+            Slash::Skills => self.skills(),
+            Slash::Skill(name) => self.skill(&name),
             Slash::Bad(message) => eprintln!("{message}"),
             Slash::Exit => {}
         }
@@ -1076,6 +1095,11 @@ impl Repl {
     }
 
     fn reset(&mut self) {
+        // A new session reads the skills again.
+        match &mut self.engine {
+            Engine::Api(agent) => agent.set_system(conversation_system(&self.config, &self.cwd)),
+            Engine::Claude(chat) => chat.set_system(claude_system(&self.config)),
+        }
         if !self.saving {
             self.engine.reset(None);
             println!("(new conversation, not saved)");
@@ -1090,6 +1114,54 @@ impl Repl {
         self.engine.reset(opened.journal);
         self.session_id = opened.id;
         println!("(new conversation) {}", opened.status);
+    }
+
+    /// The skills folder, or why there is none.
+    fn skills_store(&self) -> Option<skills::Store> {
+        match self.config.require_home() {
+            Ok(home) => Some(skills::Store::new(skills::dir(home))),
+            Err(err) => {
+                eprintln!("no skills: {err}");
+                None
+            }
+        }
+    }
+
+    /// `/skills`: the skills in the folder now, and the folders that are
+    /// not skills.
+    fn skills(&self) {
+        let Some(store) = self.skills_store() else {
+            return;
+        };
+        let index = skills::Index::load(store.dir());
+        if index.skills.is_empty() {
+            println!("(no skills in {})", store.dir().display());
+        } else {
+            println!(
+                "{} skills in {} (prompt list {} / {} characters):",
+                index.skills.len(),
+                store.dir().display(),
+                index.listing_chars(),
+                skills::INDEX_MAX_CHARS
+            );
+            for entry in &index.skills {
+                println!("  {}: {}", entry.name, entry.description);
+            }
+        }
+        for problem in &index.problems {
+            eprintln!("  !! {problem}");
+        }
+    }
+
+    /// `/skill <name>`: a skill's SKILL.md and the list of its files.
+    fn skill(&self, name: &str) {
+        let Some(store) = self.skills_store() else {
+            return;
+        };
+        match store.view(name, None) {
+            Ok(text) => println!("{}", text.trim_end()),
+            Err(err) => eprintln!("{err}"),
+        }
     }
 
     /// `/sessions`: lists recent sessions and continues the one picked by

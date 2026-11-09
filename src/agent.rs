@@ -258,6 +258,12 @@ impl Agent {
 
     /// Makes the next model calls through `provider` (another model); the
     /// conversation stays.
+    /// Replaces the system prompt, for a new conversation (`/new`) that
+    /// reads the skills again.
+    pub fn set_system(&mut self, system: String) {
+        self.options.system = system;
+    }
+
     pub fn set_provider(&mut self, provider: Box<dyn Provider>) {
         self.provider = provider;
     }

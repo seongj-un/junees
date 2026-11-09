@@ -104,6 +104,8 @@ pub const REPL_HELP: &str = "\
                    Claude Code compacts its own)
 /context           show the context size and its limit (api backend)
 /usage             show token usage of this session
+/skills            list the skills ($JUNEES_HOME/skills)
+/skill <name>      show a skill
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
 approval question it skips the call and cancels the turn. During /task it

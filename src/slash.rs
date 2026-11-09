@@ -19,6 +19,10 @@ pub enum Slash {
     Compact,
     Context,
     Usage,
+    /// `/skills` lists the skills.
+    Skills,
+    /// `/skill <name>` shows one.
+    Skill(String),
     Help,
     Exit,
     /// A command typed wrong: what to tell the user.
@@ -65,6 +69,14 @@ pub fn parse(line: &str) -> Option<Slash> {
         "compact" => plain(Slash::Compact),
         "context" => plain(Slash::Context),
         "usage" => plain(Slash::Usage),
+        "skills" => plain(Slash::Skills),
+        "skill" => match arg {
+            None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
+            Some(name) => match crate::skills::check_name(&name) {
+                Ok(()) => Slash::Skill(name),
+                Err(err) => Slash::Bad(err),
+            },
+        },
         "help" => plain(Slash::Help),
         "exit" | "quit" => plain(Slash::Exit),
         _ => Slash::Bad(format!("unknown command /{name}; /help lists the commands")),
@@ -125,6 +137,8 @@ mod tests {
             ("/compact", Slash::Compact),
             ("/context", Slash::Context),
             ("/usage", Slash::Usage),
+            ("/skills", Slash::Skills),
+            ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),
             ("/exit", Slash::Exit),
             ("/quit", Slash::Exit),
@@ -146,6 +160,12 @@ mod tests {
         assert_eq!(bad("/status now"), "/status takes no argument");
         assert!(bad("/backend codex").contains("unknown backend `codex`"));
         assert!(bad("/model two words").contains("no spaces"));
+        assert_eq!(
+            bad("/skill"),
+            "/skill takes a skill name; /skills lists them"
+        );
+        assert!(bad("/skill ../x").contains("invalid skill name"));
+        assert_eq!(bad("/skills all"), "/skills takes no argument");
     }
 
     #[test]
