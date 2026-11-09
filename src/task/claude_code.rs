@@ -1145,9 +1145,12 @@ impl Stream {
         };
         match &self.result {
             Some(result) => Err(anyhow!(
-                "Claude Code ended the session with `{}` ({}): {}{stderr}",
+                "Claude Code ended the session with `{}` ({}{}): {}{stderr}",
                 result.subtype,
                 exit.status,
+                result
+                    .api_error_status
+                    .map_or_else(String::new, |status| format!(", API status {status}")),
                 preview(&result.text, ERROR_CHARS)
             )),
             None => Err(anyhow!(
@@ -1158,16 +1161,28 @@ impl Stream {
     }
 
     /// The usage limit, if that is why a session that did not finish
-    /// ended: the latest model call failed with [`RATE_LIMIT_ERROR`], the
-    /// result names a 429, or the latest `rate_limit_event` refuses
-    /// requests.
+    /// ended: the latest `rate_limit_event` refuses requests, or a 429
+    /// (the result's status or a model call failing with
+    /// [`RATE_LIMIT_ERROR`]) comes with Claude Code's usage-limit message.
+    /// A 429 alone is not enough: the server also throttles for a moment
+    /// without any plan limit ("Server is temporarily limiting requests
+    /// (not your usage limit)"), and that is an error to look at, not a
+    /// reset to wait for.
     fn usage_limit(&self) -> Option<UsageLimit> {
         let refused = self.rate_limit.as_ref().filter(|limit| limit.rejected);
         let status_429 = self
             .result
             .as_ref()
             .is_some_and(|result| result.api_error_status == Some(429));
-        if self.rate_limited.is_none() && refused.is_none() && !status_429 {
+        let says_limit = || {
+            self.result
+                .as_ref()
+                .map(|result| result.text.as_str())
+                .into_iter()
+                .chain(self.rate_limited.as_deref())
+                .any(says_usage_limit)
+        };
+        if refused.is_none() && !((self.rate_limited.is_some() || status_429) && says_limit()) {
             return None;
         }
         let said = self
@@ -1232,6 +1247,19 @@ impl Finished {
             turns: event["num_turns"].as_u64(),
         }
     }
+}
+
+/// Whether `text` is one of Claude Code's usage-limit messages
+/// (<https://code.claude.com/docs/en/errors>, "Usage limits"): "You've hit
+/// your session limit", "... weekly limit", "... monthly spend limit",
+/// "... team's shared budget", "Usage credits required ...".
+fn says_usage_limit(text: &str) -> bool {
+    let text = text.replace('\u{2019}', "'").to_lowercase();
+    text.contains("usage credits required")
+        || text.split("you've hit your").skip(1).any(|rest| {
+            let what = rest.split(['.', '\n', '\u{b7}']).next().unwrap_or("");
+            what.contains("limit") || what.contains("budget")
+        })
 }
 
 /// The tokens a result reports: `modelUsage` counts every model the
@@ -1896,7 +1924,8 @@ mod tests {
             .unwrap(),
             limit(Some(1_794_205_024))
         );
-        // Each signal alone is enough; only the event has the reset time.
+        // The event, or a 429 with the limit message, is enough; only the
+        // event has the reset time.
         assert_eq!(
             end_of(
                 &[
@@ -1918,17 +1947,35 @@ mod tests {
         };
         assert_eq!(alone.resets_at, Some(1_794_205_024));
         assert_eq!(alone.message, "requests refused by the usage limit");
-        let End::UsageLimit(retried) = end_of(
+        // A 429 without Claude Code's limit message is the server's short
+        // throttle, not the plan limit: an error showing the 429.
+        let throttled = "API Error: Server is temporarily limiting requests (not your usage limit)";
+        let err = end_of(
             &[
-                json!({"type": "system", "subtype": "api_retry", "attempt": 3,
+                json!({"type": "system", "subtype": "api_retry", "attempt": 10,
                 "max_retries": 10, "error": "rate_limit"}),
+                json!({"type": "assistant", "error": "rate_limit", "parent_tool_use_id": null,
+                "message": {"content": [{"type": "text", "text": throttled}]}}),
+                json!({"type": "result", "subtype": "success", "is_error": true,
+                "api_error_status": 429, "result": throttled}),
             ],
             "",
         )
-        .unwrap() else {
-            panic!("not a usage limit");
-        };
-        assert_eq!(retried.message, "rate_limit");
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("API status 429"), "{err:#}");
+        assert!(
+            end_of(
+                &[
+                    json!({"type": "system", "subtype": "api_retry", "attempt": 3,
+                "max_retries": 10, "error": "rate_limit"})
+                ],
+                "",
+            )
+            .is_err()
+        );
+        assert!(says_usage_limit("You\u{2019}ve hit your weekly limit"));
+        assert!(says_usage_limit("You've hit your team's shared budget"));
+        assert!(!says_usage_limit("You've hit your stride · 429"));
         // A reset time Junees cannot read is none.
         let End::UsageLimit(odd) = end_of(&[refused(json!("3:45pm")), result.clone()], "").unwrap()
         else {
