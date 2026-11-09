@@ -120,7 +120,7 @@ async fn a_bad_settings_file_names_the_line() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("line 2: `claude-sonnet-4-6` needs quotes"),
+        stderr.contains("line 2: the value needs quotes"),
         "{stderr}"
     );
 }

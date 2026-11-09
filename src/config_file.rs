@@ -104,8 +104,17 @@ impl ConfigFile {
             };
             let key = key.trim();
             let Some(&(known, _)) = KEYS.iter().find(|(name, _)| *name == key) else {
+                // Only a name-like key is shown: the text before `=` may
+                // be a pasted secret.
+                let shown = if key.len() <= 32
+                    && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    format!(" `{key}`")
+                } else {
+                    String::new()
+                };
                 bail!(
-                    "line {number}: unknown setting `{key}` (known: {})",
+                    "line {number}: unknown setting{shown} (known: {})",
                     KEYS.iter()
                         .map(|(name, _)| *name)
                         .collect::<Vec<_>>()
@@ -223,13 +232,13 @@ fn parse_value(text: &str) -> Result<String> {
             bail!("the value is missing");
         }
         if !valid {
-            bail!("`{bare}` needs quotes");
+            bail!("the value needs quotes");
         }
         (bare.to_string(), &text[end..])
     };
     let rest = rest.trim();
     if !rest.is_empty() && !rest.starts_with('#') {
-        bail!("unexpected `{rest}` after the value");
+        bail!("unexpected text after the value");
     }
     Ok(value)
 }
@@ -256,10 +265,10 @@ fn basic_string(body: &str) -> Result<(String, &str)> {
                             .ok()
                             .filter(|_| hex.len() == digits)
                             .and_then(char::from_u32)
-                            .with_context(|| format!("bad escape \\{escape}{hex}"))?;
+                            .with_context(|| format!("bad \\{escape} escape"))?;
                         value.push(code);
                     }
-                    other => bail!("unknown escape \\{other}"),
+                    _ => bail!("unknown escape"),
                 }
             }
             c => value.push(c),
@@ -415,7 +424,7 @@ mod tests {
     #[test]
     fn rejects_bad_files_with_the_line() {
         for (text, expected) in [
-            ("api_key = sk-ant-x\n", "line 1: `sk-ant-x` needs quotes"),
+            ("api_key = sk-ant-x\n", "line 1: the value needs quotes"),
             ("\nmodel\n", "line 2: expected `key = value`"),
             ("token = \"x\"\n", "line 1: unknown setting `token`"),
             ("[junees]\n", "line 1: sections are not supported"),
@@ -426,16 +435,33 @@ mod tests {
             ("model = \"open\n", "line 1: the string has no closing \""),
             (
                 "model = \"a\" b\n",
-                "line 1: unexpected `b` after the value",
+                "line 1: unexpected text after the value",
             ),
-            ("task_max_time = 2h\n", "line 1: `2h` needs quotes"),
+            ("task_max_time = 2h\n", "line 1: the value needs quotes"),
             ("model =\n", "line 1: the value is missing"),
-            ("model = \"\\q\"\n", "line 1: unknown escape \\q"),
+            ("model = \"\\q\"\n", "line 1: unknown escape"),
         ] {
             let err = ConfigFile::parse(text)
                 .err()
                 .unwrap_or_else(|| panic!("{text}"));
             assert!(err.to_string().starts_with(expected), "{text}: {err}");
+        }
+    }
+
+    #[test]
+    fn errors_never_show_the_value() {
+        let secret = "sk-ant-api03-SECRETvalue";
+        for text in [
+            format!("api_key = {secret}\n"),
+            format!("api_key = \"x\" {secret}\n"),
+            format!("api_key = '{secret}' {secret}\n"),
+            format!("api_key = \"{secret}\\q\"\n"),
+            format!("api_key = \"{secret}\\uZZZZ\"\n"),
+            format!("{secret}x = \"x\"\n"),
+        ] {
+            let err = format!("{:#}", ConfigFile::parse(&text).err().unwrap());
+            assert!(!err.contains("SECRET"), "{text}: {err}");
+            assert!(err.starts_with("line 1: "), "{err}");
         }
     }
 
@@ -449,7 +475,7 @@ mod tests {
             err.starts_with(&format!("{} is not a valid settings file", path.display())),
             "{err}"
         );
-        assert!(err.ends_with("line 1: `claude` needs quotes (for example: model = \"value\")"));
+        assert!(err.ends_with("line 1: the value needs quotes (for example: model = \"value\")"));
         // So does Settings, which main uses.
         let home = dir.path().to_string_lossy().into_owned();
         let err = Settings::load(env(&[("JUNEES_HOME", &home)]))
