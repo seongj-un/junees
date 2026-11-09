@@ -60,6 +60,25 @@ pub enum Entry {
     Usage(Usage),
 }
 
+/// An entry as a journal line stores it: stamped with when it was written.
+#[derive(Serialize)]
+struct LineOut<'a> {
+    #[serde(flatten)]
+    entry: &'a Entry,
+    /// Unix seconds.
+    ts: u64,
+}
+
+/// A journal line read back. Lines from before `ts` existed have none.
+#[derive(Deserialize)]
+struct LineIn {
+    #[serde(flatten)]
+    entry: Entry,
+    #[serde(default)]
+    #[allow(dead_code)] // Kept in the format for time budgets and status views.
+    ts: Option<u64>,
+}
+
 /// Somewhere the agent records its history changes.
 pub trait Journal: Send {
     fn record(&mut self, entry: &Entry) -> io::Result<()>;
@@ -228,7 +247,10 @@ fn lock(file: &File, path: &Path) -> io::Result<()> {
 }
 
 fn write_line(file: &mut File, entry: &Entry) -> io::Result<()> {
-    let mut line = serde_json::to_vec(entry)?;
+    let mut line = serde_json::to_vec(&LineOut {
+        entry,
+        ts: unix_now(),
+    })?;
     line.push(b'\n');
     file.write_all(&line)?;
     file.flush()
@@ -271,7 +293,7 @@ impl Session {
                 pos = next;
                 continue;
             }
-            match serde_json::from_slice::<Entry>(line) {
+            match serde_json::from_slice::<LineIn>(line).map(|line| line.entry) {
                 Ok(entry) => {
                     if let Entry::Meta(meta) = &entry
                         && meta.format > FORMAT
@@ -408,7 +430,7 @@ fn read_meta(path: &Path) -> Option<Meta> {
     io::BufReader::new(File::open(path).ok()?)
         .read_line(&mut first)
         .ok()?;
-    match serde_json::from_str(&first).ok()? {
+    match serde_json::from_str::<LineIn>(&first).ok()?.entry {
         Entry::Meta(meta) => Some(meta),
         _ => None,
     }
@@ -638,6 +660,29 @@ mod tests {
         assert_eq!(session.meta.cwd, "/work");
         assert_eq!(session.transcript, expected);
         assert!(session.warning.is_none());
+    }
+
+    #[test]
+    fn written_lines_carry_a_timestamp() {
+        // The other tests write their fixtures without `ts`, as journals
+        // from before the field were, and those still load.
+        let home = tempfile::tempdir().unwrap();
+        let (meta, mut writer) = SessionWriter::create(home.path(), Path::new("/w"), "m").unwrap();
+        writer
+            .record(&Entry::Message(Message::user_text("hi")))
+            .unwrap();
+        let data = fs::read_to_string(writer.path()).unwrap();
+        let lines: Vec<serde_json::Value> = data
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            assert!(line["ts"].as_u64().unwrap() >= meta.created_at, "{line}");
+        }
+        assert_eq!(lines[1]["type"], "message");
+        let session = Session::load(writer.path()).unwrap();
+        assert_eq!(session.transcript.messages, [Message::user_text("hi")]);
     }
 
     #[test]
