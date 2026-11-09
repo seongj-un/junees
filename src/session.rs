@@ -10,6 +10,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -119,6 +120,9 @@ impl Transcript {
 /// A new session's file is only created with its first entry, so starting
 /// Junees and quitting right away leaves no empty session behind for
 /// `--continue` to pick.
+///
+/// While a writer has its file open it holds an exclusive `flock` on it, so
+/// a second Junees cannot resume (and repair) a session that is still live.
 pub struct SessionWriter {
     path: PathBuf,
     meta: Meta,
@@ -158,7 +162,7 @@ impl SessionWriter {
         &self.path
     }
 
-    /// Creates the file and writes the meta line.
+    /// Creates the file, locks it and writes the meta line.
     fn start(&self) -> io::Result<File> {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
@@ -167,6 +171,7 @@ impl SessionWriter {
             .append(true)
             .create_new(true)
             .open(&self.path)?;
+        lock(&file, &self.path)?;
         write_line(&mut file, &Entry::Meta(self.meta.clone()))?;
         Ok(file)
     }
@@ -182,6 +187,25 @@ impl Journal for SessionWriter {
         self.file = Some(file);
         result
     }
+}
+
+/// Takes an exclusive `flock` on a journal without waiting. The kernel drops
+/// it when the file is closed or the process dies, so a lock that is held
+/// means the session's writer is still running.
+fn lock(file: &File, path: &Path) -> io::Result<()> {
+    // SAFETY: `file` owns the descriptor and outlives the call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.kind() != io::ErrorKind::WouldBlock {
+        return Err(err);
+    }
+    let id = path.file_stem().unwrap_or_default().to_string_lossy();
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("session {id} is in use by another Junees"),
+    ))
 }
 
 fn write_line(file: &mut File, entry: &Entry) -> io::Result<()> {
@@ -267,20 +291,17 @@ impl Session {
     /// Loads a journal to continue it: drops a cut-off last line from the
     /// file, answers tool calls that never finished (and records that), and
     /// returns a writer that appends to the file.
+    ///
+    /// The file is locked before it is read or changed, so a session another
+    /// Junees still has open is refused instead of repaired under it.
     pub fn resume(path: &Path) -> Result<(Self, SessionWriter)> {
-        let mut session = Self::load(path)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .with_context(|| format!("cannot open {}", path.display()))?;
-        file.set_len(session.valid_len)?;
-        drop(file);
-
         let mut file = OpenOptions::new()
             .append(true)
             .open(path)
             .with_context(|| format!("cannot open {}", path.display()))?;
+        lock(&file, path)?;
+        let mut session = Self::load(path)?;
+        file.set_len(session.valid_len)?;
         if session.unterminated {
             file.write_all(b"\n")?;
         }
@@ -687,7 +708,8 @@ mod tests {
         ];
         write_lines(&path, &lines, "");
 
-        let (session, _writer) = Session::resume(&path).unwrap();
+        let (session, writer) = Session::resume(&path).unwrap();
+        drop(writer);
         let expected = Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
@@ -702,6 +724,46 @@ mod tests {
         // The fix is in the file too, so it is not added twice.
         let (again, _writer) = Session::resume(&path).unwrap();
         assert_eq!(again.transcript, session.transcript);
+    }
+
+    #[test]
+    fn resume_refuses_a_session_another_writer_holds() {
+        let home = tempfile::tempdir().unwrap();
+        let (meta, mut live) = SessionWriter::create(home.path(), Path::new("/w"), "m").unwrap();
+        live.record(&Entry::Message(Message::user_text("build it")))
+            .unwrap();
+        live.record(&Entry::Message(tool_call("toolu_1"))).unwrap();
+        let path = live.path().to_path_buf();
+        let before = fs::read(&path).unwrap();
+
+        let err = Session::resume(&path).err().unwrap();
+        assert_eq!(
+            format!("{err:#}"),
+            format!("session {} is in use by another Junees", meta.id)
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        // The lock goes with the writer; then the tool call counts as cut off.
+        drop(live);
+        let (session, _writer) = Session::resume(&path).unwrap();
+        assert_eq!(session.transcript.messages.len(), 3);
+    }
+
+    #[test]
+    fn a_resumed_session_is_locked_until_its_writer_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let user = Entry::Message(Message::user_text("hi"));
+        write_lines(&path, &[line(&meta()), line(&user)], "");
+
+        let (_, first) = Session::resume(&path).unwrap();
+        let err = Session::resume(&path).err().unwrap();
+        assert!(
+            format!("{err:#}").contains("in use by another Junees"),
+            "{err:#}"
+        );
+        drop(first);
+        assert!(Session::resume(&path).is_ok());
     }
 
     #[test]

@@ -667,9 +667,12 @@ mod tests {
         agent.run("second", |_| {}).await.unwrap();
 
         let path = crate::session::sessions_dir(home.path()).join(format!("{}.jsonl", meta.id));
+        // Close the first writer (and its lock), as an exiting process would.
+        let (messages, usage) = (agent.messages().to_vec(), agent.usage());
+        agent.reset(None);
         let (session, writer) = Session::resume(&path).unwrap();
-        assert_eq!(session.transcript.messages, agent.messages());
-        assert_eq!(session.transcript.usage, agent.usage());
+        assert_eq!(session.transcript.messages, messages);
+        assert_eq!(session.transcript.usage, usage);
 
         let provider = Scripted::new(vec![text("again")]);
         let seen = provider.seen.clone();
@@ -684,10 +687,7 @@ mod tests {
         .with_journal(Box::new(writer));
         restored.run("third", |_| {}).await.unwrap();
         assert_eq!(seen.lock().unwrap()[0].len(), 7);
-        assert_eq!(
-            restored.usage().input_tokens,
-            agent.usage().input_tokens + 10
-        );
+        assert_eq!(restored.usage().input_tokens, usage.input_tokens + 10);
 
         let reloaded = Session::load(&path).unwrap();
         assert_eq!(reloaded.transcript.messages, restored.messages());
