@@ -22,6 +22,7 @@ use crate::agent::{Agent, AgentOptions, Cancelled, Event, Limit, LimitReached, T
 use crate::cancel::Cancel;
 use crate::cli::preview;
 use crate::message::Usage;
+use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::session::{SessionWriter, format_utc};
 use crate::tools::{ToolRegistry, ToolSettings};
@@ -80,6 +81,8 @@ pub struct TaskEnv<'a> {
     pub context_window: u64,
     pub compact_threshold: f64,
     pub provider: &'a ProviderFactory<'a>,
+    /// Where `run` reports its stop (and sessions, if asked).
+    pub notify: Notifier,
     /// Token and time limits of `task run`.
     pub budget: Budget,
     /// Set by SIGINT/SIGTERM: the session that runs is cancelled (its tool
@@ -172,6 +175,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     };
     let mut state = State::load(root)?;
     state.usage.add(usage);
+    state.goal = Some(goal.to_string());
     state.save(root)?;
     append_progress(
         root,
@@ -254,7 +258,7 @@ fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
 /// `max_sessions` sessions have run, [`STALL_LIMIT`] sessions in a row
 /// passed no new feature, a session fails, the budget runs out, or
 /// `env.cancel` is set. Returns why it stopped, which is also recorded in
-/// state.json.
+/// state.json and posted through `env.notify`.
 ///
 /// The budget is checked before each session and, inside a session, before
 /// each model call; a session that runs out ends there and is wrapped up
@@ -269,7 +273,27 @@ fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
 /// A run holds the task's [`RunLock`] and marks itself running in
 /// state.json until it stops. A run that finds the mark of one that no
 /// longer holds the lock recovers from that crash first (see [`recover`]).
+///
+/// A run that fails before it can record a stop (a dirty work tree, a
+/// feature list that does not load, a state file that cannot be written)
+/// returns the error, and posts it through `env.notify` too: an unattended
+/// run that never starts needs the alert most.
 pub async fn run(
+    env: &TaskEnv<'_>,
+    max_sessions: usize,
+    report: &mut Reporter<'_>,
+) -> Result<Stop> {
+    let result = run_until_stop(env, max_sessions, report).await;
+    if let Err(err) = &result
+        && let Err(notify) = env.notify.run_failed(&env.root, err).await
+    {
+        warn(report, &notify.to_string());
+    }
+    result
+}
+
+/// [`run`] without the notification of a failure.
+async fn run_until_stop(
     env: &TaskEnv<'_>,
     max_sessions: usize,
     report: &mut Reporter<'_>,
@@ -407,36 +431,44 @@ pub async fn run(
         );
 
         let ended = match result {
-            Ok(ended) => ended,
-            Err(err) => {
-                break Stop {
-                    reason: StopReason::Error,
-                    session: n,
-                    detail: Some(format!("{err:#}")),
-                };
-            }
-        };
-        if passing == total {
-            break stop(StopReason::Complete, n);
-        }
-        if let Ended::Interrupted = ended {
-            break stop(StopReason::Interrupted, n);
-        }
-        if let Ended::Budget(detail) = ended {
-            break Stop {
+            Err(err) => Some(Stop {
+                reason: StopReason::Error,
+                session: n,
+                detail: Some(format!("{err:#}")),
+            }),
+            Ok(_) if passing == total => Some(stop(StopReason::Complete, n)),
+            Ok(Ended::Interrupted) => Some(stop(StopReason::Interrupted, n)),
+            Ok(Ended::Budget(detail)) => Some(Stop {
                 reason: StopReason::Budget,
                 session: n,
                 detail: Some(detail),
-            };
-        }
-        if state.stalled >= STALL_LIMIT {
-            break stop(StopReason::Stalled, n);
+            }),
+            Ok(_) if state.stalled >= STALL_LIMIT => Some(stop(StopReason::Stalled, n)),
+            Ok(_) => None,
+        };
+        // Saved before the notification, which may take seconds: a run
+        // killed while it waits (a second Ctrl-C) keeps the session's tokens
+        // and its stop, so the next run does not take it for a crash.
+        if let Some(ended) = &ended {
+            state.record_stop(ended.clone());
+            state.running = None;
         }
         save_state(root, &mut state, &ledger)?;
+        // After a signal the run only waits for its stop notification.
+        if !env.cancel.is_cancelled()
+            && let Err(err) = env.notify.session_done(root, n, &summary).await
+        {
+            warn(report, &err.to_string());
+        }
+        if let Some(ended) = ended {
+            break ended;
+        }
     };
-    state.stop = Some(stop.clone());
-    state.running = None;
-    save_state(root, &mut state, &ledger)?;
+    if state.stop.is_none() {
+        state.record_stop(stop.clone());
+        state.running = None;
+        save_state(root, &mut state, &ledger)?;
+    }
     let reason = serde_json::to_value(stop.reason).unwrap_or_default();
     log(
         root,
@@ -447,6 +479,18 @@ pub async fn run(
             spent(env, &state, started)
         ),
     );
+    let (passing, total) = {
+        let ledger = ledger.lock().unwrap();
+        (ledger.passing(), ledger.total())
+    };
+    // A failed notification does not change how the run ended.
+    if let Err(err) = env
+        .notify
+        .task_stopped(root, &stop, passing, total, &state)
+        .await
+    {
+        warn(report, &err.to_string());
+    }
     Ok(stop)
 }
 
@@ -1052,6 +1096,7 @@ mod tests {
             context_window: 200_000,
             compact_threshold: 0.8,
             provider: factory,
+            notify: Notifier::default(),
             budget: Budget::default(),
             cancel: Cancel::new(),
         }
@@ -1119,7 +1164,9 @@ mod tests {
             "{progress}"
         );
         // state.json stays out of git.
-        assert_eq!(State::load(root).unwrap().usage.input_tokens, 15);
+        let state = State::load(root).unwrap();
+        assert_eq!(state.usage.input_tokens, 15);
+        assert_eq!(state.goal.as_deref(), Some("build it"));
         assert!(super::super::state_path(root).exists());
         assert!(
             out.lines[0].starts_with("== init session, journal "),
@@ -1392,6 +1439,7 @@ mod tests {
         let state = State::load(root).unwrap();
         assert_eq!((state.sessions, state.stalled), (2, 0));
         assert_eq!(state.stop, Some(stop));
+        assert!(state.stopped_at.is_some());
         let progress = fs::read_to_string(progress_path(root)).unwrap();
         assert!(
             progress.contains("- [junees] session 1: 1/2 passing, new: F1, tokens in 15 out 3\n")

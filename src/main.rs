@@ -9,6 +9,7 @@ use junees::agent::{Agent, AgentOptions, Cancelled, Event};
 use junees::cancel::Cancel;
 use junees::cli::{self, Command, SessionMode, TaskCommand};
 use junees::config::Config;
+use junees::notify::Notifier;
 use junees::prompt;
 use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
@@ -25,6 +26,7 @@ const PREVIEW_CHARS: usize = 120;
 const SESSIONS_LISTED: usize = 10;
 
 fn main() -> ExitCode {
+    protect_environment();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -50,6 +52,28 @@ fn main() -> ExitCode {
     code
 }
 
+/// Makes this process non-dumpable. Hiding the API key and the webhook
+/// from bash's environment is not enough while the environment of junees
+/// itself is readable at `/proc/<pid>/environ` (bash's `$PPID`) by every
+/// process of the same user. A non-dumpable process's `/proc` files belong
+/// to root, so its `environ` and `mem` cannot be read, nor can it be
+/// traced. Children get a dumpable process again when they exec, so the
+/// tools work as before; only junees's own core dumps are lost.
+#[cfg(target_os = "linux")]
+fn protect_environment() {
+    // SAFETY: PR_SET_DUMPABLE only changes a flag of this process and
+    // touches no memory of ours.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        eprintln!(
+            "  !! cannot hide the environment of junees from other processes: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn protect_environment() {}
+
 async fn run() -> Result<ExitCode> {
     let args = match cli::parse_args(std::env::args().skip(1))? {
         Command::Help => {
@@ -61,6 +85,8 @@ async fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
+        // Needs no API key, and writes nothing.
+        Command::Task(TaskCommand::Status { json }) => return task_status(json),
         Command::Task(command) => return run_task(command).await,
     };
 
@@ -124,6 +150,18 @@ async fn run() -> Result<ExitCode> {
             repl.run().await
         }
     }
+}
+
+/// `junees task status`, for the git repository the current folder is in.
+fn task_status(json: bool) -> Result<ExitCode> {
+    let root = task::git::toplevel(&std::env::current_dir()?)?;
+    let status = task::status::load(&root)?;
+    if json {
+        println!("{}", status.to_json());
+    } else {
+        print!("{}", status.to_text());
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// SIGINT (Ctrl-C) and SIGTERM, taken over from their default action of
@@ -217,7 +255,7 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
             max_time: max_time.or(config.task_max_time),
             ..Budget::default()
         },
-        TaskCommand::Init { .. } => Budget::default(),
+        TaskCommand::Init { .. } | TaskCommand::Status { .. } => Budget::default(),
     };
     let env = TaskEnv {
         root,
@@ -231,6 +269,7 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
         provider: &provider,
         budget,
         cancel: Cancel::new(),
+        notify: Notifier::from_env()?,
     };
     let received = cancel_on_signals(Signals::install()?, env.cancel.clone());
     let interrupted = || signal_exit(received.load(Ordering::SeqCst));
@@ -258,6 +297,7 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        TaskCommand::Status { json } => task_status(json),
     }
 }
 

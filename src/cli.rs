@@ -17,6 +17,7 @@ Usage:
   junees task init \"<GOAL>\"     plan a long-running task in this git repository
   junees task run [--max-sessions <N>] [--max-tokens <N>] [--max-time <DURATION>]
                                 work on the task, one feature per session
+  junees task status [--json]   show where the task stands (read-only)
 
 Options:
   -p, --prompt <PROMPT>  run a single prompt non-interactively
@@ -46,6 +47,8 @@ Environment:
                             cleared and the conversation compacted (default 0.8)
   JUNEES_HOME         where Junees keeps sessions (default ~/.junees;
                       with neither it nor HOME set, sessions are not saved)
+  JUNEES_NOTIFY_WEBHOOK       Discord webhook URL `task run` posts to when it stops
+  JUNEES_NOTIFY_EACH_SESSION  1 to also post a line after every task session
   JUNEES_TASK_MAX_TOKENS  default --max-tokens of task run
   JUNEES_TASK_MAX_TIME    default --max-time of task run
 ";
@@ -79,10 +82,13 @@ pub enum TaskCommand {
         max_tokens: Option<u64>,
         max_time: Option<Duration>,
     },
+    /// Show where the task stands, as text or JSON.
+    Status { json: bool },
 }
 
 const TASK_USAGE: &str = "usage: junees task init \"<goal>\" | \
-                          junees task run [--max-sessions N] [--max-tokens N] [--max-time 2h]";
+                          junees task run [--max-sessions N] [--max-tokens N] [--max-time 2h] | \
+                          junees task status [--json]";
 
 /// What to do when not printing help or the version.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -199,6 +205,17 @@ fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
                 max_tokens,
                 max_time,
             }
+        }
+        Some("status") => {
+            let mut json = false;
+            for arg in args {
+                match arg.as_str() {
+                    "-h" | "--help" => return Ok(Command::Help),
+                    "--json" => json = true,
+                    other => bail!("unknown argument `{other}` for task status ({TASK_USAGE})"),
+                }
+            }
+            TaskCommand::Status { json }
         }
         _ => bail!(TASK_USAGE),
     };
@@ -356,6 +373,14 @@ mod tests {
                 max_time: Some(Duration::from_secs(5400)),
             })
         );
+        assert_eq!(
+            parse(&["task", "status"]).unwrap(),
+            Command::Task(TaskCommand::Status { json: false })
+        );
+        assert_eq!(
+            parse(&["task", "status", "--json"]).unwrap(),
+            Command::Task(TaskCommand::Status { json: true })
+        );
         assert_eq!(parse(&["task", "--help"]).unwrap(), Command::Help);
         // Only a leading `task` is the subcommand.
         assert_eq!(
@@ -376,6 +401,7 @@ mod tests {
             &["task", "run", "--max-sessions", "0"],
             &["task", "run", "--max-sessions", "many"],
             &["task", "run", "-p", "x"],
+            &["task", "status", "--yaml"],
             &["task", "run", "--max-tokens"],
             &["task", "run", "--max-tokens", "0"],
             &["task", "run", "--max-tokens", "1e6"],

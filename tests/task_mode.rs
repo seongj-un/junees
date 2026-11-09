@@ -35,6 +35,39 @@ async fn git(repo: &Path, home: &Path, args: &[&str]) -> String {
 }
 
 async fn junees(cwd: &Path, home: &Path, url: &str, args: &[&str]) -> Output {
+    let output = junees_env(cwd, home, url, args, &[]).await;
+    assert!(
+        output.status.success(),
+        "junees {args:?} failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+/// Runs junees with these extra environment variables and returns its
+/// output, whether it succeeded or not.
+async fn junees_env(
+    cwd: &Path,
+    home: &Path,
+    url: &str,
+    args: &[&str],
+    vars: &[(&str, &str)],
+) -> Output {
+    junees_command(cwd, home, url, args, vars)
+        .output()
+        .await
+        .unwrap()
+}
+
+/// The command [`junees_env`] runs.
+fn junees_command(
+    cwd: &Path,
+    home: &Path,
+    url: &str,
+    args: &[&str],
+    vars: &[(&str, &str)],
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
     command
         .args(args)
@@ -45,16 +78,27 @@ async fn junees(cwd: &Path, home: &Path, url: &str, args: &[&str]) -> Output {
         .env_remove("JUNEES_MODEL")
         .env_remove("JUNEES_MAX_TOKENS")
         .env_remove("JUNEES_MAX_TURNS")
+        .env_remove("JUNEES_NOTIFY_WEBHOOK")
+        .env_remove("JUNEES_NOTIFY_EACH_SESSION")
+        .envs(vars.iter().copied())
         .stdin(Stdio::null());
     isolate_git(&mut command, home);
-    let output = command.output().await.unwrap();
-    assert!(
-        output.status.success(),
-        "junees {args:?} failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
+    command
+}
+
+/// `junees task status` with the given arguments, without an API key: the
+/// status needs none.
+async fn status(cwd: &Path, home: &Path, args: &[&str]) -> Output {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    command
+        .args(["task", "status"])
+        .args(args)
+        .current_dir(cwd)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("JUNEES_HOME", home.join("junees"))
+        .stdin(Stdio::null());
+    isolate_git(&mut command, home);
+    command.output().await.unwrap()
 }
 
 /// A reply calling these tools, in order.
@@ -220,6 +264,40 @@ async fn init_then_run_builds_the_features_and_commits() {
         .count();
     assert_eq!(journals, 3);
 
+    // The status, from a subfolder, as JSON and as text.
+    let shown = status(&sub, home.path(), &["--json"]).await;
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["goal"], "make hello and world");
+    assert_eq!(
+        (shown["passing"].clone(), shown["total"].clone()),
+        (json!(2), json!(2))
+    );
+    assert_eq!(shown["features"][1]["id"], "F2");
+    assert_eq!(shown["sessions"], 2);
+    assert_eq!(shown["tokens"]["input"], 49);
+    assert_eq!(shown["stop"]["reason"], "complete");
+    assert!(shown["stop"]["at"].as_u64().is_some());
+    assert!(
+        shown["progress_tail"][4]
+            .as_str()
+            .unwrap()
+            .starts_with("- [junees] session 2: 2/2 passing, new: F2")
+    );
+    let shown = status(root, home.path(), &[]).await;
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(text.contains("\ngoal: make hello and world\n"), "{text}");
+    assert!(
+        text.contains("\n  [x] F1  hello.txt says hello\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nlast stop: every feature passes (session 2, "),
+        "{text}"
+    );
+    // Reading the status changed nothing.
+    assert_eq!(git(root, home.path(), &["status", "--porcelain"]).await, "");
+
     let requests = server.await.unwrap();
     assert_eq!(requests.len(), 7);
     let first_work = body_of(&requests[2]);
@@ -254,6 +332,404 @@ async fn init_then_run_builds_the_features_and_commits() {
             .to_string()
             .contains("junees: checkpoint after session 1")
     );
+}
+
+/// The replies of a `task init` that plans two features, F1 (a.txt) and
+/// F2 (b.txt).
+fn init_replies() -> Vec<(u16, Value)> {
+    let features = json!([
+        {"id": "F1", "description": "a.txt exists", "verify": "test -f a.txt", "passes": false},
+        {"id": "F2", "description": "b.txt exists", "verify": "test -f b.txt", "passes": false}
+    ]);
+    vec![
+        (
+            200,
+            tool_calls(&[
+                write_file(".junees/features.json", &features.to_string()),
+                write_file(".junees/progress.md", "# Plan\n"),
+            ]),
+        ),
+        (200, text_reply("Planned.")),
+    ]
+}
+
+/// The requests a fake webhook got; fails rather than waits if it did not
+/// get as many as it was set up for.
+async fn posts_of(webhook: tokio::task::JoinHandle<Vec<String>>) -> Vec<String> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), webhook)
+        .await
+        .expect("the webhook got fewer posts than expected")
+        .unwrap()
+}
+
+/// The token part of the fake webhook URLs, which must never be printed.
+const HOOK_TOKEN: &str = "hook-t0ken-do-not-print";
+
+#[tokio::test]
+async fn task_run_notifies_the_webhook_of_each_session_and_the_stop() {
+    let mut replies = init_replies();
+    replies.extend([
+        // session 1 also checks that its bash cannot see the webhook.
+        (
+            200,
+            tool_calls(&[
+                ("bash", json!({"command": "printenv JUNEES_NOTIFY_WEBHOOK"})),
+                write_file("a.txt", "a"),
+                mark("F1"),
+            ]),
+        ),
+        (200, text_reply("F1 done.")),
+        (200, tool_calls(&[write_file("b.txt", "b"), mark("F2")])),
+        (200, text_reply("F2 done.")),
+    ]);
+    let (url, api) = fake_api(replies).await;
+    let (hook, webhook) =
+        fake_api(vec![(200, json!({})), (200, json!({})), (200, json!({}))]).await;
+    let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let name = root.file_name().unwrap().to_string_lossy().to_string();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+
+    let run = junees_env(
+        root,
+        home.path(),
+        &url,
+        &["task", "run"],
+        &[
+            ("JUNEES_NOTIFY_WEBHOOK", &hook),
+            ("JUNEES_NOTIFY_EACH_SESSION", "1"),
+        ],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.ends_with("task stopped: every feature passes\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains(HOOK_TOKEN) && !stderr.contains(HOOK_TOKEN));
+
+    let posts = posts_of(webhook).await;
+    assert_eq!(posts.len(), 3);
+    for post in &posts {
+        assert!(
+            post.starts_with(&format!("POST /api/webhooks/7/{HOOK_TOKEN} HTTP/1.1\r\n")),
+            "{post}"
+        );
+        assert_eq!(body_of(post)["allowed_mentions"], json!({"parse": []}));
+    }
+    let content = |i: usize| body_of(&posts[i])["content"].as_str().unwrap().to_string();
+    assert_eq!(
+        content(0),
+        format!("junees: task in `{name}` session 1 done: `1/2 passing, new: F1`")
+    );
+    assert_eq!(
+        content(1),
+        format!("junees: task in `{name}` session 2 done: `2/2 passing, new: F2`")
+    );
+    assert_eq!(
+        content(2),
+        format!(
+            "junees: task in `{name}` stopped (complete): `every feature passes`\n\
+             features: 2/2 passing\n\
+             sessions: 2\n\
+             tokens: input 39, output 18, cache write 0, cache read 0"
+        )
+    );
+
+    let requests = api.await.unwrap();
+    let results = tool_results(&requests[3]);
+    assert_eq!(results[0].0, "[exit code 1]");
+}
+
+#[tokio::test]
+async fn a_failing_webhook_leaves_the_exit_code_alone() {
+    let mut replies = init_replies();
+    replies.extend([
+        // run 1: one session that passes nothing.
+        (200, text_reply("Looked around.")),
+        // run 2: the session fails.
+        (
+            400,
+            json!({"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}}),
+        ),
+    ]);
+    let (url, _api) = fake_api(replies).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+
+    // The webhook answers 500: the run still ends as it would without it.
+    let (hook, webhook) = fake_api(vec![(500, json!({"message": "oops"}))]).await;
+    let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
+    let run = junees_env(
+        root,
+        home.path(),
+        &url,
+        &["task", "run", "--max-sessions", "1"],
+        &[("JUNEES_NOTIFY_WEBHOOK", &hook)],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        stdout.ends_with("task stopped: reached --max-sessions\n"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("  !! notification to 127.0.0.1 failed: HTTP 500 Internal Server Error\n"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains(HOOK_TOKEN) && !stderr.contains(HOOK_TOKEN));
+    assert_eq!(posts_of(webhook).await.len(), 1);
+
+    // Nothing listens at the webhook: a failed run still exits with 1.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let hook = format!(
+        "http://{}/api/webhooks/7/{HOOK_TOKEN}",
+        closed.local_addr().unwrap()
+    );
+    drop(closed);
+    let run = junees_env(
+        root,
+        home.path(),
+        &url,
+        &["task", "run"],
+        &[("JUNEES_NOTIFY_WEBHOOK", &hook)],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("error: task stopped: session 2 failed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("  !! notification to 127.0.0.1 failed: "),
+        "{stderr}"
+    );
+    assert!(!stdout.contains(HOOK_TOKEN) && !stderr.contains(HOOK_TOKEN));
+}
+
+#[tokio::test]
+async fn a_run_that_cannot_start_notifies_the_webhook() {
+    let (url, _api) = fake_api(init_replies()).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let name = root.file_name().unwrap().to_string_lossy().to_string();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+    // Left behind by something else: the run refuses to start.
+    std::fs::write(root.join("stray.txt"), "left over").unwrap();
+
+    let (hook, webhook) = fake_api(vec![(204, json!({}))]).await;
+    let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
+    let run = junees_env(
+        root,
+        home.path(),
+        &url,
+        &["task", "run"],
+        &[("JUNEES_NOTIFY_WEBHOOK", &hook)],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("error: the work tree has uncommitted changes"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains(HOOK_TOKEN) && !stderr.contains(HOOK_TOKEN));
+
+    let posts = posts_of(webhook).await;
+    assert_eq!(posts.len(), 1);
+    assert_eq!(body_of(&posts[0])["allowed_mentions"], json!({"parse": []}));
+    let content = body_of(&posts[0])["content"].as_str().unwrap().to_string();
+    assert!(
+        content.starts_with(&format!(
+            "junees: task in `{name}` run failed: `the work tree has uncommitted changes"
+        )),
+        "{content}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_killed_during_the_session_notification_keeps_its_stop() {
+    let mut replies = init_replies();
+    replies.extend([
+        (
+            200,
+            tool_calls(&[
+                write_file("a.txt", "a"),
+                write_file("b.txt", "b"),
+                mark("F1"),
+                mark("F2"),
+            ]),
+        ),
+        (200, text_reply("Both done.")),
+    ]);
+    let (url, _api) = fake_api(replies).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+
+    // A webhook that takes the session's post and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook = format!(
+        "http://{}/api/webhooks/7/{HOOK_TOKEN}",
+        listener.local_addr().unwrap()
+    );
+    let mut run = junees_command(
+        root,
+        home.path(),
+        &url,
+        &["task", "run"],
+        &[
+            ("JUNEES_NOTIFY_WEBHOOK", &hook),
+            ("JUNEES_NOTIFY_EACH_SESSION", "1"),
+        ],
+    )
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let (_held, _) = tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+        .await
+        .expect("no session notification")
+        .unwrap();
+    // Killed while it waits for the webhook, as by a second Ctrl-C.
+    run.kill().await.unwrap();
+
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".junees/state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["sessions"], 1, "{state}");
+    assert_eq!(state["stop"]["reason"], "complete", "{state}");
+    assert!(state["stopped_at"].is_u64(), "{state}");
+    // The tokens of the init session and of session 1.
+    assert_eq!(state["usage"]["input_tokens"], 26, "{state}");
+}
+
+#[tokio::test]
+async fn status_sees_a_run_that_is_going() {
+    let mut replies = init_replies();
+    replies.extend([
+        (200, tool_calls(&[write_file("a.txt", "a"), mark("F1")])),
+        (200, text_reply("F1 done.")),
+    ]);
+    let (url, _api) = fake_api(replies).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+
+    // The run waits on the webhook after session 1, with F2 still to do.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook = format!(
+        "http://{}/api/webhooks/7/{HOOK_TOKEN}",
+        listener.local_addr().unwrap()
+    );
+    let mut run = junees_command(
+        root,
+        home.path(),
+        &url,
+        &["task", "run"],
+        &[
+            ("JUNEES_NOTIFY_WEBHOOK", &hook),
+            ("JUNEES_NOTIFY_EACH_SESSION", "1"),
+        ],
+    )
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let pid = run.id().unwrap();
+    let (_held, _) = tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+        .await
+        .expect("no session notification")
+        .unwrap();
+
+    let output = status(root, home.path(), &["--json"]).await;
+    run.kill().await.unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["running"], true, "{value}");
+    assert_eq!(value["run"]["pid"], pid, "{value}");
+    assert_eq!(value["features_from"], "harness", "{value}");
+    assert_eq!(value["passing"], 1, "{value}");
+    assert_eq!(value["stop"], Value::Null, "{value}");
+
+    // Killed, the run leaves its mark behind: a crash.
+    let output = status(root, home.path(), &[]).await;
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(&format!("running: no; the run with pid {pid} ")),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_budget_stop_is_posted() {
+    let (url, _api) = fake_api(init_replies()).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let name = root.file_name().unwrap().to_string_lossy().to_string();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+
+    let (hook, webhook) = fake_api(vec![(204, json!({}))]).await;
+    let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
+    // The init session alone used more than 10 tokens.
+    let run = junees_env(
+        root,
+        home.path(),
+        &url,
+        &["task", "run", "--max-tokens", "10"],
+        &[("JUNEES_NOTIFY_WEBHOOK", &hook)],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stdout}\n{stderr}");
+    let posts = posts_of(webhook).await;
+    assert_eq!(posts.len(), 1);
+    let content = body_of(&posts[0])["content"].as_str().unwrap().to_string();
+    assert!(
+        content.starts_with(&format!(
+            "junees: task in `{name}` stopped (budget): `token budget used up"
+        )),
+        "{content}"
+    );
+    assert!(content.contains("\nfeatures: 0/2 passing\n"), "{content}");
+}
+
+#[tokio::test]
+async fn status_without_a_task_says_to_run_init() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), home.path(), &["init", "-q"]).await;
+    let output = status(repo.path(), home.path(), &["--json"]).await;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("has no task (no .junees/ folder); start one with `junees task init"),
+        "{stderr}"
+    );
+    assert!(!repo.path().join(".junees").exists());
 }
 
 #[tokio::test]
@@ -325,6 +801,8 @@ async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
     let root = repo.path();
     git(root, home.path(), &["init", "-q"]).await;
     junees(root, home.path(), &url, &["task", "init", "make done.txt"]).await;
+    let (hook, webhook) = fake_api(vec![(204, json!({}))]).await;
+    let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
 
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
     command
@@ -333,6 +811,9 @@ async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", &url)
         .env("JUNEES_HOME", home.path().join("junees"))
+        // After the signal only the stop is posted, not the session line.
+        .env("JUNEES_NOTIFY_WEBHOOK", &hook)
+        .env("JUNEES_NOTIFY_EACH_SESSION", "1")
         .env_remove("JUNEES_TASK_MAX_TOKENS")
         .env_remove("JUNEES_TASK_MAX_TIME")
         .stdin(Stdio::null())
@@ -370,6 +851,20 @@ async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
             .unwrap();
     assert_eq!(state["stop"]["reason"], "interrupted");
     assert_eq!(state["stop"]["session"], 1);
+    assert!(state["stopped_at"].is_u64(), "{state}");
+    assert!(state.get("running").is_none(), "{state}");
+    let posts = posts_of(webhook).await;
+    assert_eq!(posts.len(), 1);
+    let content = body_of(&posts[0])["content"].as_str().unwrap().to_string();
+    let name = root.file_name().unwrap().to_string_lossy();
+    assert!(
+        content.starts_with(&format!(
+            "junees: task in `{name}` stopped (interrupted): `interrupted`\nfeatures: 0/1 passing\n"
+        )),
+        "{content}"
+    );
+    // A second post would have found the fake webhook gone.
+    assert!(!stderr.contains("notification to"), "{stderr}");
     let log = git(root, home.path(), &["log", "--format=%s"]).await;
     assert_eq!(
         log,

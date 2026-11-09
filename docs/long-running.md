@@ -62,8 +62,10 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
   - L4a: `bash` 명령 정책(`src/tools/policy.rs`). 실행 전에 루트/홈/상위 폴더 재귀 삭제(그 폴더로 `cd` 한 뒤 `rm -rf *` 포함), 디스크 파괴, 시스템 종료, fork bomb, `curl | sh`, 강제 push, `sudo` 같은 권한 상승을 막고(셸의 표준 입력으로 넘긴 스크립트도 검사) `blocked by policy: <이유>` 오류 결과를 돌려준다. `JUNEES_DENY_COMMANDS`로 접두사 추가, `JUNEES_ALLOW_DANGEROUS=1`로 기본 규칙 끔. 숨길 환경 변수 `JUNEES_HIDDEN_ENV`(#4). 작업 폴더 밖 쓰기 경고와 대화형 승인은 아직
 
 ### L5. 상태 보기와 알림
-- `junees task status`: 기능별 통과 여부, 세션 수, 토큰 사용량, 최근 진행 기록
-- 작업 완료나 정지 시 알림(디스코드 웹훅)
+- `junees task status [--json]`: `.junees/`를 읽기만 한다(실행 중인 run 옆에서도 안전, API 키 불필요). 목표, 통과 수/전체와 진행 막대, 기능별 id/통과 여부/설명 첫 줄, 세션 수, 연속 무진전 수, 누적 토큰(입력/출력/캐시), 마지막 정지 이유와 시각, `progress.md` 마지막 5줄. `--json` 필드는 README에 정리. `.junees/`가 없으면 `task init`을 먼저 하라는 오류
+- 이를 위해 `state.json`에 `goal`(init 때 기록)과 `stopped_at`(정지 기록 시각, unix 초)을 추가했다. 둘 다 선택 필드라 예전 파일도 읽힌다. status는 L4b의 실행 중 표시(`running {pid, started}`)와 그 프로세스가 살아 있는지(`kill(pid, 0)`, 잠금은 잡지 않음)로 실행 중/크래시를 구분하고, 표시가 있는 동안에는 기능 목록을 `state.json`의 하네스 사본에서 읽는다(세션이 `features.json`을 직접 고친 통과가 verify 없이 보이지 않도록). `budget`/`interrupted` 정지도 텍스트, JSON, 알림에 그대로 나온다
+- 알림: `JUNEES_NOTIFY_WEBHOOK`(디스코드 웹훅 URL)이 있으면 `task run`이 정지를 기록한 뒤 한 번 POST(저장소 이름, 정지 이유 키와 문장, 통과 수/전체, 세션 수, 토큰). 정지 이유는 `state.json`의 값을 그대로 쓰므로 L4b의 `budget`/`interrupted`도 따로 손대지 않고 알림에 나온다. `JUNEES_NOTIFY_EACH_SESSION=1`이면 세션마다 한 줄. `allowed_mentions: {"parse": []}`, 2000자 제한, 타임아웃 10초, 리다이렉트 안 따라감. 실패는 경고만 하고 종료 코드는 그대로. URL은 출력하지 않고 호스트만 보여 주며, 세션의 bash와 하네스 git에도 넘기지 않는다. 정지를 기록하기 전에 실패한 run(더러운 작업 트리 등)도 `run failed: <오류>` 한 번을 보낸다. 세션 알림은 상태(그 세션의 토큰, 마지막 세션이면 정지 기록)를 저장한 뒤에 보낸다. 웹훅은 https만 받고(평문 http는 루프백만), 바뀌는 텍스트는 인라인 코드로 감싸 마크다운이 적용되지 않게 한다
+- 보안: junees는 시작할 때 `prctl(PR_SET_DUMPABLE, 0)`으로 dump 불가 프로세스가 되어, bash가 `/proc/$PPID/environ`(또는 더 위 조상)에서 숨긴 API 키와 웹훅 URL을 읽지 못한다(PR #1부터 있던 우회로)
 
 ## 상태
 
