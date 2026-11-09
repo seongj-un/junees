@@ -99,7 +99,16 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | `JUNEES_TASK_MAX_TOKENS` | (없음) | `task run --max-tokens`의 기본값 (작업 전체 누적 토큰) |
 | `JUNEES_TASK_MAX_TIME` | (없음) | `task run --max-time`의 기본값 (이번 실행 시간, 예: `2h`, `1h30m`) |
 
-기본 도구는 `bash`, `read_file`, `write_file` 세 가지다. `bash`는 승인 절차 없이 바로 실행되니(로드맵 3단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다. 리눅스에서는 junees가 시작할 때 자기 프로세스를 dump 불가(`PR_SET_DUMPABLE` 0)로 만들어, 같은 사용자의 프로세스도 `/proc/<junees pid>/environ`과 `mem`을 읽지 못한다. 그래서 `bash`가 `/proc/$PPID/environ`처럼 부모를 거슬러 올라가도 이 변수들을 읽을 수 없다. 자식 프로세스는 exec할 때 다시 보통 프로세스가 되므로 도구 동작은 그대로이고, junees 자신의 코어 덤프만 남지 않는다.
+기본 도구는 `bash`, `read_file`, `write_file`, `edit_file` 네 가지다(`task` 작업 세션도 같은 네 가지에 `mark_feature_passing`을 더해 쓴다). `bash`는 승인 절차 없이 바로 실행되니(로드맵 3단계에서 추가 예정) 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다. 리눅스에서는 junees가 시작할 때 자기 프로세스를 dump 불가(`PR_SET_DUMPABLE` 0)로 만들어, 같은 사용자의 프로세스도 `/proc/<junees pid>/environ`과 `mem`을 읽지 못한다. 그래서 `bash`가 `/proc/$PPID/environ`처럼 부모를 거슬러 올라가도 이 변수들을 읽을 수 없다. 자식 프로세스는 exec할 때 다시 보통 프로세스가 되므로 도구 동작은 그대로이고, junees 자신의 코어 덤프만 남지 않는다.
+
+`edit_file {path, old_string, new_string, replace_all?}`은 파일의 일부만 고치는 도구다. 큰 파일을 고칠 때 `write_file`로 전체를 다시 쓰지 않아도 되므로 출력 토큰이 줄고, 긴 출력이 `max_tokens`에 잘리는 일도 줄어든다. 시스템 프롬프트에도 "부분 수정은 `edit_file`, 새 파일이나 전체 교체는 `write_file`"이라고 적혀 있다.
+
+- `old_string`은 공백과 들여쓰기까지 정확히 같아야 하고, 파일에서 정확히 한 번 나와야 한다(겹치는 위치도 따로 센다. `aaa`에서 `aa`는 두 번). 여러 번 나오면 횟수와 줄 번호(최대 20개)를 오류로 돌려주고 아무것도 바꾸지 않는다. 모두 바꾸려면 `replace_all: true`.
+- 찾지 못하면 `old_string`의 첫 줄(공백 제외)과 가장 비슷한 줄을 최대 3개, 줄 번호와 함께 힌트로 보여 준다(문자 2-gram 유사도 0.5 이상).
+- 빈 `old_string`, `old_string`과 같은 `new_string`은 오류다. 대상은 이미 있는 일반 파일이고 10 MB 이하(`read_file`과 같은 한도), UTF-8이어야 한다. 심볼릭 링크는 가리키는 파일을 고친다.
+- 줄바꿈 보존: 줄바꿈 대부분이 CRLF인 파일에서, `read_file`이 보여 준 대로 `\n`으로 쓴 `old_string`이 그대로는 없으면 `\r\n`으로 바꿔 다시 찾는다. 이때나 `old_string`에 줄바꿈이 없을 때 `new_string`의 `\n`도 `\r\n`으로 쓴다. 원래 파일이 개행으로 끝났는데 고친 결과가 개행 없이 끝나면 개행을 다시 붙인다(결과에 `kept the final newline` 표시).
+- 같은 폴더의 임시 파일에 원래 권한으로 쓰고 `fsync`한 뒤 `rename`으로 바꿔 넣으므로 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 소유자와 하드 링크는 유지되지 않는다(새 inode).
+- 성공하면 바꾼 부분과 위아래 3줄을 `read_file`과 같은 줄 번호 형식으로 보여 준다(`replace_all`이면 처음 3곳까지, 나머지는 개수만).
 
 ### 명령 정책
 
@@ -146,7 +155,7 @@ src/
   message.rs         대화 메시지 타입 (Messages API 형식)
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시)
-  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file, bash 명령 정책(policy.rs)
+  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책(policy.rs)
   config.rs          환경 변수 설정 (도구 설정 ToolSettings 포함)
   prompt.rs          시스템 프롬프트
   cli.rs             인자 파싱(task 서브커맨드 포함), 출력 보조 함수
