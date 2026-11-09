@@ -1,9 +1,12 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result, bail};
-use junees::agent::{Agent, AgentOptions, Event};
+use junees::agent::{Agent, AgentOptions, Cancelled, Event};
+use junees::cancel::Cancel;
 use junees::cli::{self, Command, SessionMode, TaskCommand};
 use junees::config::Config;
 use junees::prompt;
@@ -13,34 +16,53 @@ use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PREVIEW_CHARS: usize = 120;
 const SESSIONS_LISTED: usize = 10;
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
-        Ok(()) => ExitCode::SUCCESS,
+fn main() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
         Err(err) => {
-            report(&err);
-            ExitCode::FAILURE
+            eprintln!("error: cannot start the async runtime: {err}");
+            return ExitCode::FAILURE;
         }
-    }
+    };
+    let code = runtime.block_on(async {
+        match run().await {
+            Ok(code) => code,
+            Err(err) => {
+                report(&err);
+                ExitCode::FAILURE
+            }
+        }
+    });
+    // After Ctrl-C at the prompt a read of stdin is still waiting on a
+    // blocking thread; dropping the runtime normally would wait for it.
+    runtime.shutdown_background();
+    code
 }
 
-async fn run() -> Result<()> {
+async fn run() -> Result<ExitCode> {
     let args = match cli::parse_args(std::env::args().skip(1))? {
         Command::Help => {
             print!("{}", cli::HELP);
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         Command::Version => {
             println!("junees {VERSION}");
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         Command::Run(args) => args,
-        Command::Task(command) => return run_task(command).await,
+        Command::Task(command) => {
+            run_task(command).await?;
+            return Ok(ExitCode::SUCCESS);
+        }
     };
 
     let config = Config::from_env()?;
@@ -66,13 +88,24 @@ async fn run() -> Result<()> {
     if let Some(journal) = opened.journal {
         agent = agent.with_journal(journal);
     }
+    let cancel = Cancel::new();
+    agent = agent.with_cancel(cancel.clone());
+    let signals = Signals::install()?;
 
     match args.prompt {
         Some(prompt) => {
+            let received = cancel_on_signals(signals, cancel);
             // stdout carries only the answer.
             eprintln!("{}", opened.status);
-            agent.run(&prompt, print_event).await?;
-            Ok(())
+            match agent.run(&prompt, print_event).await {
+                Ok(_) => Ok(ExitCode::SUCCESS),
+                Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
+                    let signal = received.load(Ordering::SeqCst);
+                    eprintln!("interrupted by {}", signal_name(signal));
+                    Ok(signal_exit(signal))
+                }
+                Err(err) => Err(err),
+            }
         }
         None => {
             println!(
@@ -86,10 +119,77 @@ async fn run() -> Result<()> {
                 cwd: &cwd,
                 saving: args.session != SessionMode::Off,
                 session_id: opened.id,
+                cancel,
+                signals,
             };
             repl.run().await
         }
     }
+}
+
+/// SIGINT (Ctrl-C) and SIGTERM, taken over from their default action of
+/// ending Junees on the spot.
+struct Signals {
+    interrupt: Signal,
+    terminate: Signal,
+}
+
+impl Signals {
+    fn install() -> Result<Self> {
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt()).context("cannot handle SIGINT")?,
+            terminate: signal(SignalKind::terminate()).context("cannot handle SIGTERM")?,
+        })
+    }
+
+    /// Waits for the next one and returns its number.
+    async fn next(&mut self) -> i32 {
+        tokio::select! {
+            _ = self.interrupt.recv() => libc::SIGINT,
+            _ = self.terminate.recv() => libc::SIGTERM,
+        }
+    }
+}
+
+/// For runs without a prompt to return to (`-p`, task mode): the first
+/// signal sets `cancel`, so the work stops cleanly; a second one exits at
+/// once. Returns where the first signal's number is kept (0 until then).
+fn cancel_on_signals(mut signals: Signals, cancel: Cancel) -> Arc<AtomicI32> {
+    let received = Arc::new(AtomicI32::new(0));
+    let first = Arc::clone(&received);
+    tokio::spawn(async move {
+        loop {
+            let signal = signals.next().await;
+            if first
+                .compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                eprintln!("  !! {} again: quitting at once", signal_name(signal));
+                std::process::exit(128 + signal);
+            }
+            eprintln!(
+                "  !! {}: stopping the current step (send it again to quit at once)",
+                signal_name(signal)
+            );
+            cancel.cancel();
+        }
+    });
+    received
+}
+
+fn signal_name(signal: i32) -> &'static str {
+    match signal {
+        libc::SIGINT => "SIGINT",
+        libc::SIGTERM => "SIGTERM",
+        _ => "a signal",
+    }
+}
+
+/// The shell's exit status for a process ended by `signal`: 130 for
+/// SIGINT, 143 for SIGTERM.
+fn signal_exit(signal: i32) -> ExitCode {
+    let signal = if signal == 0 { libc::SIGINT } else { signal };
+    ExitCode::from(u8::try_from(128 + signal).unwrap_or(1))
 }
 
 /// `junees task init|run`, in the root of the git repository the current
@@ -230,24 +330,56 @@ struct Repl<'a> {
     /// False with --no-session, so /reset starts another unsaved session.
     saving: bool,
     session_id: Option<String>,
+    /// Set to cancel the turn that is running.
+    cancel: Cancel,
+    signals: Signals,
 }
 
 impl Repl<'_> {
-    async fn run(&mut self) -> Result<()> {
+    /// Reads and handles input until /exit, Ctrl-D or two Ctrl-C in a row
+    /// at the prompt. Ctrl-C during a turn cancels just that turn; SIGTERM
+    /// cancels it and quits.
+    async fn run(&mut self) -> Result<ExitCode> {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        let mut interrupted = false;
         loop {
             print!("> ");
             std::io::stdout().flush()?;
-            let Some(line) = lines.next_line().await? else {
-                println!();
-                return Ok(());
+            let line = tokio::select! {
+                line = lines.next_line() => line?,
+                signal = self.signals.next() => {
+                    println!();
+                    if signal == libc::SIGTERM {
+                        return Ok(signal_exit(signal));
+                    }
+                    if interrupted {
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    interrupted = true;
+                    println!("(press Ctrl-C again or Ctrl-D to quit)");
+                    continue;
+                }
             };
-            match line.trim() {
-                "" => {}
-                "/exit" | "/quit" => return Ok(()),
-                "/help" => println!("{}", cli::REPL_HELP),
-                "/reset" => self.reset(),
-                "/sessions" => self.list_sessions(),
+            interrupted = false;
+            let Some(line) = line else {
+                println!();
+                return Ok(ExitCode::SUCCESS);
+            };
+            let terminated = match line.trim() {
+                "" => false,
+                "/exit" | "/quit" => return Ok(ExitCode::SUCCESS),
+                "/help" => {
+                    println!("{}", cli::REPL_HELP);
+                    false
+                }
+                "/reset" => {
+                    self.reset();
+                    false
+                }
+                "/sessions" => {
+                    self.list_sessions();
+                    false
+                }
                 "/usage" => {
                     let usage = self.agent.usage();
                     println!(
@@ -257,10 +389,17 @@ impl Repl<'_> {
                         usage.cache_read_input_tokens,
                         usage.output_tokens
                     );
+                    false
                 }
-                "/compact" => {
-                    self.agent.compact(print_event).await;
-                }
+                // Nothing is recorded until the summary is back, so the
+                // compaction can simply be dropped.
+                "/compact" => tokio::select! {
+                    _ = self.agent.compact(print_event) => false,
+                    signal = self.signals.next() => {
+                        eprintln!("(compaction cancelled)");
+                        signal == libc::SIGTERM
+                    }
+                },
                 "/context" => {
                     let options = self.agent.options();
                     println!(
@@ -269,14 +408,40 @@ impl Repl<'_> {
                         options.context_window,
                         options.compact_limit()
                     );
+                    false
                 }
-                input => {
-                    if let Err(err) = self.agent.run(input, print_event).await {
-                        report(&err);
-                    }
-                }
+                input => self.turn(input).await,
+            };
+            if terminated {
+                return Ok(signal_exit(libc::SIGTERM));
             }
         }
+    }
+
+    /// Runs one input. A signal cancels the turn; returns whether it was
+    /// SIGTERM, which also quits.
+    async fn turn(&mut self, input: &str) -> bool {
+        self.cancel.reset();
+        let run = self.agent.run(input, print_event);
+        tokio::pin!(run);
+        let mut terminated = false;
+        let result = loop {
+            tokio::select! {
+                result = &mut run => break result,
+                signal = self.signals.next() => {
+                    terminated |= signal == libc::SIGTERM;
+                    self.cancel.cancel();
+                }
+            }
+        };
+        match result {
+            Ok(_) => {}
+            Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
+                eprintln!("(turn cancelled)");
+            }
+            Err(err) => report(&err),
+        }
+        terminated
     }
 
     fn reset(&mut self) {

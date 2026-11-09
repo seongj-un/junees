@@ -49,7 +49,8 @@ pub const REPL_HELP: &str = "\
 /usage     show token usage of this session
 /context   show the context size and its limit
 /compact   replace the earlier conversation with a summary
-/exit      quit (also /quit or Ctrl-D)";
+/exit      quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
+Ctrl-C during a turn cancels the turn and stops a running tool.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
