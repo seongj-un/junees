@@ -3,10 +3,12 @@
 pub mod agent;
 pub mod approval;
 pub mod cancel;
+pub mod claude_code;
 pub mod cli;
 pub mod config;
 pub mod config_file;
 pub mod context;
+pub mod flock;
 pub mod message;
 pub mod notify;
 pub mod prompt;

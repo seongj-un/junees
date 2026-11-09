@@ -1,6 +1,6 @@
 //! The slash commands of the conversation mode.
 
-use crate::task::claude_code::Backend;
+use crate::claude_code::Backend;
 
 /// One command typed at the conversation prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,7 +13,8 @@ pub enum Slash {
     New,
     /// `/model` shows the model, `/model <name>` switches to it.
     Model(Option<String>),
-    /// `/backend` shows what runs `/task`, `/backend <name>` switches it.
+    /// `/backend` shows what runs the conversation and `/task`,
+    /// `/backend <name>` switches both.
     Backend(Option<Backend>),
     Compact,
     Context,

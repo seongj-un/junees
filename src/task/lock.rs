@@ -1,15 +1,9 @@
 //! Keeps two `task run` from working on one repository at the same time.
 
 use std::fs::File;
-use std::io;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-
-/// How often, and how far apart, [`RunLock::acquire`] tries a taken lock.
-const RETRIES: usize = 20;
-const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// An exclusive `flock` on the root folder of the repository a task works
 /// in, held for as long as this value lives. The kernel drops it when the
@@ -33,18 +27,9 @@ impl RunLock {
     /// with it a lock this process just released, until the child execs.
     pub fn acquire(root: &Path) -> Result<Option<Self>> {
         let file = File::open(root).with_context(|| format!("cannot open {}", root.display()))?;
-        for _ in 0..RETRIES {
-            // SAFETY: `file` owns the descriptor and outlives the call.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(Some(Self { _dir: file }));
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::WouldBlock {
-                return Err(err).with_context(|| format!("cannot lock {}", root.display()));
-            }
-            std::thread::sleep(RETRY_PAUSE);
-        }
-        Ok(None)
+        let taken = crate::flock::try_exclusive(&file)
+            .with_context(|| format!("cannot lock {}", root.display()))?;
+        Ok(taken.then_some(Self { _dir: file }))
     }
 }
 

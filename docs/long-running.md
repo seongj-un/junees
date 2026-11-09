@@ -82,9 +82,21 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 ### 사용법 단순화 (Hermes처럼)
 - `junees` 하나만 외우면 되게: `junees`(대화), `junees "질문"`(한 번만, `-p`와 같음), `junees -c`, `junees task "목표"`(init + run을 한 프로세스에서), `junees task`(이어서 run), `junees status`, `junees setup`. 예전 플래그와 `task init/run/status`는 그대로 동작하고 `--help`의 `Advanced` 절로 옮겼다
 - 설정 파일 `$JUNEES_HOME/config.toml`(0600, 폴더 0700): 평평한 TOML 부분집합을 직접 파싱(의존성 없음). 키마다 환경 변수 하나에 대응하고, `Settings`가 실행 중 변경(`/model`, `/backend`) -> 환경 변수 -> 파일 순서로 찾아 기존 `from_lookup` 이음새에 넘긴다. 설정 파일 키는 표(`KEYS`)에 있는 것만 받아서 Junees가 원래 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 생기지 않는다. 모델의 도구는 이 파일을 건드리지 못한다(`src/tools/settings_file.rs`): `read_file`/`write_file`/`edit_file`은 경로를 풀어서(`..`, 심볼릭 링크, 하드 링크) 거절하고, `bash` 정책은 파일을 이름(글롭, 중괄호 포함)으로 가리키는 명령과 `$JUNEES_HOME` 폴더를 `ls`/`cd`/`stat` 등 말고 통째로 다루는 명령을 `JUNEES_ALLOW_DANGEROUS=1`이어도 막는다. bash 쪽은 차단 목록이라 다른 변수, 실행 중에 만든 경로, 더 위 폴더(`grep -r api_key ~`)를 통한 접근은 통과한다
-- 처음 실행 마법사(파일도 `ANTHROPIC_API_KEY`도 없고 stdin/stderr가 터미널일 때, 또는 `junees setup`): 구독(claude-code) 또는 API 키, 구독이면 task 백엔드의 `claude --version`/`auth status` 검사를 그대로 써서 로그인 방법(Linux면 bubblewrap)을 안내하고, 대화 모드는 API 키가 필요하다고 알린다. 키는 termios echo를 끄고 입력받고 다시 출력하지 않는다. 모델, 작업 기본 예산(2h, 토큰 상한 선택). 마법사 입력은 대화와 같은 `SharedLines`로 읽고 Ctrl-C는 echo를 되돌린 뒤 취소한다
+- 처음 실행 마법사(파일도 `ANTHROPIC_API_KEY`도 없고 stdin/stderr가 터미널일 때, 또는 `junees setup`): 구독(claude-code) 또는 API 키, 구독이면 task 백엔드의 `claude --version`/`auth status` 검사를 그대로 써서 로그인 방법(Linux면 bubblewrap)을 안내한다(대화도 구독으로 돌므로 API 키는 묻지 않는다, 아래 대화 모드 구독 백엔드). 키는 termios echo를 끄고 입력받고 다시 출력하지 않는다. 모델, 작업 기본 예산(2h, 토큰 상한 선택). 마법사 입력은 대화와 같은 `SharedLines`로 읽고 Ctrl-C는 echo를 되돌린 뒤 취소한다
 - 대화 안 슬래시 명령: `/task [목표]`(같은 프로세스에서 init + run, 끝나면 원래 폴더로 돌아옴, Ctrl-C는 `junees task`처럼 세션을 마무리하고 멈춤), `/status`, `/sessions`(번호로 골라 이어 가기), `/new`(`/reset`), `/model [이름]`, `/backend [api|claude-code]`. `/model`과 `/backend`는 이 실행에만 적용(파일은 `junees setup`만 바꿈)
-- 남은 것: 대화 모드를 구독(claude-code)으로 돌리기, 모델이 bash로 설정 파일의 키를 읽는 것을 막기
+- 남은 것: 모델이 bash로 설정 파일의 키를 읽는 것을 막기 (대화 모드 구독은 아래 단계)
+
+### 대화 모드 구독 백엔드 (claude-code로 대화)
+- `backend = claude-code`(설정 파일, `JUNEES_BACKEND`, `/backend claude-code`)이면 대화, `junees "질문"`/`-p`, `-c`도 `claude`로 돌린다. API 키는 필요 없다
+- task 전용이던 `src/task/claude_code.rs`의 공통 부분(백엔드 설정, `--version`/`auth status` 확인, 환경 정리와 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, 세션 실행과 예산/취소, 프로세스 그룹과 자손 종료, stream-json 읽기, 로그인 실패/사용 한도 판정, deny 규칙)을 `src/claude_code/`로 옮겼다. task 쪽은 인자(`acceptEdits`, 시스템 프롬프트)와 실행만 남았고 동작과 기존 테스트는 그대로다
+- 한 턴 = 지금 폴더에서 `claude -p --output-format stream-json --verbose --include-partial-messages --permission-mode default --permission-prompts none --tools/--allowedTools Read,Edit,Write,Glob,Grep,Bash --setting-sources user --strict-mcp-config --max-turns N [--resume <id>] [--model M] --disallowedTools <규칙>`. 두 번째 턴부터 앞 턴이 알려 준 `session_id`를 `--resume`으로 넘긴다(headless 문서 Continue conversations, cli-reference `--resume`). 입력은 표준 입력으로 쓰고 닫는다(headless 문서 "Non-interactive mode reads stdin"): 인자 하나의 128 KiB 한도(E2BIG)와 `-`로 시작하는 입력이 옵션으로 읽히는 문제를 피한다
+- 권한: `--permission-mode default`(cli-reference: `manual`은 별칭)에 task와 같은 허용/거절 규칙. 확인이 필요한 호출은 `--permission-prompts none`으로 거절되고, `permission_denied` 이벤트(도구 이름, 이유)와 `result.permission_denials`(이벤트로 못 본 것)를 화면에 보여 준다. `--permission-prompt-tool`(MCP)로 Junees 승인 질문을 붙이는 것은 문서상 가능하지만(stdio MCP 서버 구현, 대화 프로세스와의 통로, `--permission-prompts host`, 이때 거절 이벤트 없음, MCP 연결 대기) 후속으로 미뤘다
+- 출력: `stream_event`의 텍스트 조각을 #18 스트리밍처럼 찍고 같은 응답의 완성 블록은 다시 찍지 않는다. `api_retry`면 `Retrying`으로 끊긴 조각을 버린다. 도구는 `-> Tool`/`<- Tool ok`. `/usage`는 턴들의 토큰, 턴 수, Claude Code 세션 id. 이어 간 턴은 `result` 합계에 이전 실행분이 들어 있어서(headless 문서) 응답별 합만 센다
+- 세션 기록 형식 5: meta의 `backend: "claude-code"`와 턴마다 `claude_turn { claude_session, input, text, usage, end }`. 재생하면 마지막 Claude Code 세션 id와 턴 수, 사용량이 복원되고 메시지 기록은 비어 있다(Claude Code가 들고 있음). 형식 4 바이너리가 빈 API 대화로 잘못 열지 않도록 `FORMAT`을 5로 올렸다. `-c`는 지금 백엔드의 세션만 고르고, `--resume`/`/sessions`로 다른 백엔드 세션을 고르면 `/backend`로 바꾸라는 오류. Junees 쪽 압축(L2)은 이 백엔드에서 쓰지 않는다
+- 슬래시 명령: `/compact`, `/context`는 Claude Code가 컨텍스트를 스스로 관리한다는 안내(문서의 `-p` 지원 명령에 없음). `/model`은 `--model`로 전달(`JUNEES_CLAUDE_MODEL` 덮어씀). `/backend`는 대화와 `/task`를 함께 바꾸고 대화를 바꾸면 새 세션
+- 한도: 턴이 사용 한도로 끝나면 #26 판정 그대로 리셋 시각과 함께 알리고 턴을 끝낸다(`-p`는 종료 코드 1). Ctrl-C: claude와 자손을 끝내고 턴을 `interrupted`로 기록, 다음 입력은 같은 세션을 이어 간다
+- 마법사: 구독을 고르면 대화도 구독으로 된다고 안내하고 API 키를 묻지 않는다
+- 한계: 실제 `claude`로는 테스트하지 않았다(가짜 실행 파일로 검증). Claude Code가 세션 id를 알리기 전에 끊긴 첫 턴은 이어 갈 수 없다
 
 ## 상태
 

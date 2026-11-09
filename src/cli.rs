@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::claude_code::Backend;
 use crate::session::{Summary, format_utc};
 use crate::task::DEFAULT_MAX_SESSIONS;
 use crate::task::budget::parse_duration;
-use crate::task::claude_code::Backend;
 
 pub const HELP: &str = "\
 junees - an AI agent in your terminal
@@ -53,14 +53,18 @@ newly passing feature, when a session fails, or when the budget runs out:
 --max-tokens counts the tokens of every session of the task (over all
 runs), --max-time the time of this run (90s, 30m, 2h, 1h30m).
 
---backend picks what runs the task sessions: `api` (default), Junees's own
-agent on ANTHROPIC_API_KEY, or `claude-code`, the official Claude Code CLI
-signed in with your own Claude subscription. Junees only starts `claude`;
-sign in yourself first (run `claude`, then /login). It needs no
-ANTHROPIC_API_KEY, and removes the API variables from claude's environment.
+The backend picks what runs the conversation and the task sessions: `api`
+(default), Junees's own agent on ANTHROPIC_API_KEY, or `claude-code`, the
+official Claude Code CLI signed in with your own Claude subscription
+(JUNEES_BACKEND, `backend` in config.toml, /backend in the conversation;
+--backend for one task). Junees only starts `claude`; sign in yourself
+first (run `claude`, then /login). It needs no ANTHROPIC_API_KEY, and
+removes the API variables from claude's environment. On claude-code each
+turn of the conversation is one `claude -p` run that continues the same
+Claude Code session (--resume).
 
 Environment (each also a key of config.toml, named in brackets):
-  ANTHROPIC_API_KEY   [api_key] needed, except for tasks on the claude-code backend
+  ANTHROPIC_API_KEY   [api_key] needed on the api backend only
   ANTHROPIC_BASE_URL  [base_url] API base URL (default https://api.anthropic.com)
   JUNEES_MODEL        [model] model id (default claude-sonnet-4-6)
   JUNEES_MAX_TOKENS   [max_tokens] max output tokens per model call (default 8192)
@@ -77,7 +81,7 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_NOTIFY_EACH_SESSION  [notify_each_session] 1 to also post after every session
   JUNEES_TASK_MAX_TOKENS  [task_max_tokens] default --max-tokens of task run
   JUNEES_TASK_MAX_TIME    [task_max_time] default --max-time of task run
-  JUNEES_BACKEND       [backend] default --backend of tasks (api or claude-code)
+  JUNEES_BACKEND       [backend] what runs the conversation and tasks (api or claude-code)
   JUNEES_CLAUDE_BIN    [claude_bin] the claude program of the claude-code backend
   JUNEES_CLAUDE_MODEL  [claude_model] model passed to claude with --model
   (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
@@ -92,9 +96,11 @@ pub const REPL_HELP: &str = "\
 /new               start a new conversation (also /reset)
 /model [<name>]    show the model, or switch to another for this session
 /backend [api|claude-code]
-                   show what runs /task, or switch it for this session
-/compact           replace the earlier conversation with a summary
-/context           show the context size and its limit
+                   show what runs the conversation and /task, or switch both
+                   for this session (a switch starts a new conversation)
+/compact           replace the earlier conversation with a summary (api backend;
+                   Claude Code compacts its own)
+/context           show the context size and its limit (api backend)
 /usage             show token usage of this session
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
@@ -376,9 +382,13 @@ pub fn session_line(summary: &Summary, current: bool) -> String {
         preview(&summary.first_input, SESSION_PREVIEW_CHARS)
     };
     format!(
-        "{marker} {}  {} UTC  {first}",
+        "{marker} {}  {} UTC  {}{first}",
         summary.id,
-        format_utc(summary.updated)
+        format_utc(summary.updated),
+        match summary.backend.as_deref() {
+            Some(backend) => format!("[{backend}] "),
+            None => String::new(),
+        }
     )
 }
 
@@ -680,6 +690,7 @@ mod tests {
             updated: 1_794_205_024,
             cwd: "/work".into(),
             first_input: "이 폴더에\n뭐가 있어? ".repeat(10),
+            backend: None,
         };
         let line = session_line(&summary, true);
         assert!(
@@ -689,9 +700,16 @@ mod tests {
         assert!(line.ends_with("..."));
         let empty = Summary {
             first_input: String::new(),
-            ..summary
+            ..summary.clone()
         };
         assert!(session_line(&empty, false).ends_with("UTC  (empty)"));
+        // A conversation Claude Code runs says so.
+        let claude = Summary {
+            first_input: "hi".into(),
+            backend: Some("claude-code".into()),
+            ..summary
+        };
+        assert!(session_line(&claude, false).ends_with("UTC  [claude-code] hi"));
     }
 
     #[test]

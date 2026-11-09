@@ -9,11 +9,11 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 
+use crate::claude_code::{ClaudeCode, NotLoggedIn};
 use crate::cli::positive;
 use crate::config::DEFAULT_MODEL;
 use crate::config_file::ConfigFile;
 use crate::task::budget::parse_duration;
-use crate::task::claude_code::{ClaudeCode, NotLoggedIn};
 use crate::tools::ToolSettings;
 
 /// The time budget of a task run the wizard offers.
@@ -141,7 +141,7 @@ pub async fn wizard(
                      ({detail})."
                 ));
                 io.say(&login_steps());
-                io.say("  The settings are saved anyway; sign in before your first task.");
+                io.say("  The settings are saved anyway; sign in before you start.");
             }
             ClaudeStatus::Unavailable(problem) => {
                 io.say(&format!("  Claude Code is not ready: {problem}"));
@@ -150,34 +150,23 @@ pub async fn wizard(
                      claude_bin in the settings file at it), then:",
                 );
                 io.say(&login_steps());
-                io.say("  The settings are saved anyway; fix this before your first task.");
+                io.say("  The settings are saved anyway; fix this before you start.");
             }
         }
         for notice in claude.notices() {
             io.say(&format!("  Note: {notice}"));
         }
         io.say(
-            "The subscription runs long tasks (`junees task \"<goal>\"`, /task in the \
-             conversation).\nThe conversation itself (`junees`, `junees \"<question>\"`) \
-             still talks to the Anthropic API\nand needs an API key: it cannot use the \
-             subscription yet.",
+            "The subscription runs everything: the conversation (`junees`, \
+             `junees \"<question>\"`)\nand long tasks (`junees task \"<goal>\"`, /task in \
+             the conversation), each through Claude Code.",
         );
-        let has_key = file.get("api_key").is_some();
-        let question = if has_key {
-            "Change the API key for the conversation? [y/N] > "
-        } else {
-            "Add an API key for the conversation now? [y/N] > "
-        };
-        let answer = ask(io, question).await?;
-        if matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
-            ask_key(io, &mut file, true).await?;
-        }
     } else {
         file.set("backend", "api");
-        ask_key(io, &mut file, false).await?;
+        ask_key(io, &mut file).await?;
     }
 
-    if file.get("api_key").is_some() {
+    if !subscription && file.get("api_key").is_some() {
         let current = file.get("model").unwrap_or(DEFAULT_MODEL).to_string();
         loop {
             let answer = ask(io, &format!("Model for the conversation [{current}] > ")).await?;
@@ -252,13 +241,11 @@ async fn ask(io: &mut dyn Prompter, question: &str) -> Result<String> {
 }
 
 /// Asks for the API key without showing it, until it looks like one. An
-/// empty answer keeps the current key, or skips it when `optional`.
-async fn ask_key(io: &mut dyn Prompter, file: &mut ConfigFile, optional: bool) -> Result<()> {
+/// empty answer keeps the current key.
+async fn ask_key(io: &mut dyn Prompter, file: &mut ConfigFile) -> Result<()> {
     let has_key = file.get("api_key").is_some();
     let keep = if has_key {
         "Enter keeps the current one"
-    } else if optional {
-        "Enter skips"
     } else {
         "get one at https://console.anthropic.com"
     };
@@ -273,7 +260,7 @@ async fn ask_key(io: &mut dyn Prompter, file: &mut ConfigFile, optional: bool) -
         };
         let key = answer.trim();
         if key.is_empty() {
-            if has_key || optional {
+            if has_key {
                 return Ok(());
             }
             io.say("  the API key is needed for this choice");
@@ -467,7 +454,7 @@ mod tests {
         let probe = Probe(ClaudeStatus::NotSignedIn(
             "`claude auth status`: none".into(),
         ));
-        let (file, io) = run(&["1", "n", "", ""], &probe, ConfigFile::default()).await;
+        let (file, io) = run(&["1", "", ""], &probe, ConfigFile::default()).await;
         let file = file.unwrap();
         assert_eq!(file.get("backend"), Some("claude-code"));
         assert_eq!(file.get("api_key"), None);
@@ -489,33 +476,45 @@ mod tests {
             "{}",
             io.shown
         );
-        // Honest about the conversation mode.
+        // The conversation runs on the subscription too: no key asked.
         assert!(
             io.shown
-                .contains("needs an API key: it cannot use the subscription")
+                .contains("The subscription runs everything: the conversation"),
+            "{}",
+            io.shown
         );
+        assert!(!io.shown.contains("needs an API key"), "{}", io.shown);
         assert_eq!(io.secret_questions, 0);
     }
 
     #[tokio::test]
-    async fn a_ready_subscription_can_add_a_key_for_the_conversation() {
-        let (file, io) = run(
-            &["1", "y", KEY, "", "", ""],
-            &ready(),
-            ConfigFile::default(),
-        )
-        .await;
+    async fn a_ready_subscription_asks_for_no_key_and_keeps_one_it_has() {
+        let (file, io) = run(&["1", "", ""], &ready(), ConfigFile::default()).await;
         let file = file.unwrap();
         assert_eq!(file.get("backend"), Some("claude-code"));
-        assert_eq!(file.get("api_key"), Some(KEY));
+        assert_eq!(file.get("api_key"), None);
         assert!(
             io.shown
                 .contains("Claude Code 2.1.319 (Claude Code) is signed in")
         );
-        assert!(!io.shown.contains(KEY));
-        // An optional key can be skipped with Enter.
-        let (file, _) = run(&["1", "yes", "", "", ""], &ready(), ConfigFile::default()).await;
-        assert_eq!(file.unwrap().get("api_key"), None);
+        assert!(!io.shown.contains("needs an API key"), "{}", io.shown);
+        assert_eq!(io.secret_questions, 0);
+
+        // A key saved for the api backend stays for a later switch back,
+        // and no model of the API is asked about.
+        let mut old = ConfigFile::default();
+        old.set("backend", "api");
+        old.set("api_key", "sk-ant-old");
+        old.set("model", "claude-haiku-4-5");
+        let (file, io) = run(&["1", "", ""], &ready(), old).await;
+        let file = file.unwrap();
+        assert_eq!(file.get("backend"), Some("claude-code"));
+        assert_eq!(file.get("api_key"), Some("sk-ant-old"));
+        assert!(
+            !io.shown.contains("Model for the conversation"),
+            "{}",
+            io.shown
+        );
     }
 
     #[tokio::test]

@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use junees::agent::{Agent, AgentOptions, Cancelled, Event};
 use junees::approval::{self, SharedLines};
 use junees::cancel::Cancel;
+use junees::claude_code::chat::Chat;
+use junees::claude_code::{BACKEND_ENV, Backend, ClaudeCode, MODEL_ENV, UsageLimit};
 use junees::cli::{self, Command, SessionMode, TaskCommand, TaskRun};
 use junees::config::Config;
 use junees::config_file::Settings;
@@ -20,7 +22,6 @@ use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::setup::{self, EchoOff, Prompter};
 use junees::slash::{self, Slash};
 use junees::task::budget::Budget;
-use junees::task::claude_code::{BACKEND_ENV, Backend, ClaudeCode};
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
@@ -144,7 +145,7 @@ fn on_terminal() -> bool {
 
 /// The first run asks the setup questions: no settings file, no
 /// `ANTHROPIC_API_KEY`, a terminal to ask on, and a command that needs a
-/// key (a task on the claude-code backend does not).
+/// key (nothing on the claude-code backend does).
 fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     if settings.file_exists()
         || settings.path().is_none()
@@ -152,14 +153,14 @@ fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     {
         return false;
     }
-    if let Command::Task(task) = command {
-        let backend = match task.backend() {
-            Some(backend) => Ok(backend),
-            None => Backend::from_lookup(|key| settings.get(key)),
-        };
-        if matches!(backend, Ok(Backend::ClaudeCode)) {
-            return false;
-        }
+    let backend = match command {
+        Command::Task(task) => task
+            .backend()
+            .map_or_else(|| Backend::from_lookup(|key| settings.get(key)), Ok),
+        _ => Backend::from_lookup(|key| settings.get(key)),
+    };
+    if matches!(backend, Ok(Backend::ClaudeCode)) {
+        return false;
     }
     on_terminal()
 }
@@ -231,21 +232,64 @@ impl Prompter for TerminalPrompter<'_> {
     }
 }
 
-/// The settings of the conversation mode, which always needs an API key.
-fn conversation_config(settings: &Settings) -> Result<Config> {
-    Config::from_lookup(|key| settings.get(key)).map_err(|err| {
-        let subscription = Backend::from_lookup(|key| settings.get(key))
-            .is_ok_and(|backend| backend == Backend::ClaudeCode);
-        if settings.get("ANTHROPIC_API_KEY").is_none() && subscription {
-            anyhow::anyhow!(
-                "the conversation needs an Anthropic API key: the Claude subscription \
-                 (claude-code backend) runs only tasks for now (`junees task \"<goal>\"`). \
-                 Add a key with `junees setup`, or set ANTHROPIC_API_KEY"
-            )
-        } else {
-            err
+/// What runs the conversation: the `backend` setting.
+enum Engine {
+    /// Junees's own agent on the Anthropic API.
+    Api(Box<Agent>),
+    /// Claude Code, signed in with the user's subscription.
+    Claude(Box<Chat>),
+}
+
+impl Engine {
+    fn backend(&self) -> Backend {
+        match self {
+            Engine::Api(_) => Backend::Api,
+            Engine::Claude(_) => Backend::ClaudeCode,
         }
-    })
+    }
+
+    /// The `backend` of this engine's session journals.
+    fn session_backend(&self) -> Option<&'static str> {
+        session_backend(self.backend())
+    }
+
+    /// The model a new session's meta line names.
+    fn model(&self, config: &Config) -> String {
+        match self {
+            Engine::Api(_) => config.model.clone(),
+            Engine::Claude(chat) => chat.claude().model.clone().unwrap_or_default(),
+        }
+    }
+
+    /// Runs one input.
+    async fn turn(&mut self, input: &str, on_event: impl FnMut(Event<'_>)) -> Result<()> {
+        match self {
+            Engine::Api(agent) => agent.run(input, on_event).await.map(drop),
+            Engine::Claude(chat) => chat.turn(input, on_event).await,
+        }
+    }
+
+    fn resume(&mut self, transcript: Transcript, journal: Option<Box<dyn Journal>>) {
+        match self {
+            Engine::Api(agent) => agent.resume(transcript, journal),
+            Engine::Claude(chat) => chat.resume(transcript, journal),
+        }
+    }
+
+    fn reset(&mut self, journal: Option<Box<dyn Journal>>) {
+        match self {
+            Engine::Api(agent) => agent.reset(journal),
+            Engine::Claude(chat) => chat.reset(journal),
+        }
+    }
+}
+
+/// The `backend` of the session journals a backend writes.
+fn session_backend(backend: Backend) -> Option<&'static str> {
+    match backend {
+        Backend::Api => None,
+        Backend::ClaudeCode => Some(session::CLAUDE_CODE),
+    }
 }
 
 fn make_provider(config: &Config) -> Result<Box<dyn Provider>> {
@@ -261,32 +305,106 @@ fn make_provider(config: &Config) -> Result<Box<dyn Provider>> {
     ))
 }
 
-/// `junees`, `junees "<question>"` and their options.
-async fn conversation(
-    args: cli::RunArgs,
-    settings: Settings,
-    input: SharedLines,
-) -> Result<ExitCode> {
-    let config = conversation_config(&settings)?;
-    let cwd = std::env::current_dir()?;
-    let opened = open_session(&args.session, &config, &cwd)?;
-    let mut agent = Agent::restore(
-        make_provider(&config)?,
+/// Junees's own agent for the conversation. It asks before risky tool
+/// calls when `input` is given (the prompt) and the settings want it.
+fn api_agent(
+    config: &Config,
+    cwd: &Path,
+    cancel: &Cancel,
+    input: Option<&SharedLines>,
+) -> Result<Agent> {
+    let mut agent = Agent::new(
+        make_provider(config)?,
         ToolRegistry::with_defaults(&config.tools),
         AgentOptions {
-            system: prompt::system_prompt(&cwd),
+            system: prompt::system_prompt(cwd),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
             context_window: config.context_window,
             compact_threshold: config.compact_threshold,
         },
-        opened.transcript,
-    );
-    if let Some(journal) = opened.journal {
-        agent = agent.with_journal(journal);
+    )
+    .with_cancel(cancel.clone());
+    if let Some(gate) = input.and_then(|input| approval::for_conversation(config, cwd, input)) {
+        agent = agent.with_gate(Box::new(gate));
     }
+    Ok(agent)
+}
+
+/// Claude Code for the conversation, once `claude --version` and its
+/// sign-in are checked; also returns the version it printed.
+async fn claude_chat(
+    settings: &Settings,
+    config: &Config,
+    cwd: &Path,
+    cancel: &Cancel,
+) -> Result<(Chat, String)> {
+    let claude = ClaudeCode::from_lookup(|key| settings.get(key));
+    let version = claude.check(cwd, &config.tools).await?;
+    for notice in claude.notices() {
+        eprintln!("  !! {notice}");
+    }
+    // `-p` has nobody to ask (`--permission-prompts none`): the allowed
+    // tools run without the questions the API backend asks.
+    eprintln!(
+        "(Claude Code runs commands without Junees approval questions; \
+         only the command policy deny rules apply)"
+    );
+    let chat = Chat::new(
+        claude,
+        cwd.to_path_buf(),
+        config.tools.clone(),
+        config.max_turns,
+        cancel.clone(),
+    );
+    Ok((chat, version))
+}
+
+/// The settings of the conversation: the API backend needs a key, the
+/// claude-code backend none.
+fn conversation_config(settings: &Settings, backend: Backend) -> Result<Config> {
+    let lookup = |key: &str| settings.get(key);
+    match backend {
+        Backend::Api => Config::from_lookup(lookup),
+        Backend::ClaudeCode => Config::from_lookup_without_key(lookup),
+    }
+}
+
+/// `junees`, `junees "<question>"` and their options, on the backend the
+/// settings name.
+async fn conversation(
+    args: cli::RunArgs,
+    settings: Settings,
+    input: SharedLines,
+) -> Result<ExitCode> {
+    let backend = Backend::from_lookup(|key| settings.get(key))?;
+    let config = conversation_config(&settings, backend)?;
+    let cwd = std::env::current_dir()?;
     let cancel = Cancel::new();
-    agent = agent.with_cancel(cancel.clone());
+    let interactive = args.prompt.is_none();
+    let (mut engine, banner) = match backend {
+        Backend::Api => {
+            let agent = api_agent(&config, &cwd, &cancel, interactive.then_some(&input))?;
+            (Engine::Api(Box::new(agent)), config.model.clone())
+        }
+        Backend::ClaudeCode => {
+            let (chat, version) = claude_chat(&settings, &config, &cwd, &cancel).await?;
+            let model = chat.claude().model.clone();
+            let banner = format!(
+                "Claude Code {version}, model {}",
+                model.as_deref().unwrap_or("of Claude Code's choice")
+            );
+            (Engine::Claude(Box::new(chat)), banner)
+        }
+    };
+    let opened = open_session(
+        &args.session,
+        &config,
+        &cwd,
+        &engine.model(&config),
+        engine.session_backend(),
+    )?;
+    engine.resume(opened.transcript, opened.journal);
     let signals = Signals::install()?;
 
     match args.prompt {
@@ -295,10 +413,10 @@ async fn conversation(
             // stdout carries only the answer.
             eprintln!("{}", opened.status);
             let mut printer = Printer::new();
-            let result = agent.run(&prompt, |event| printer.event(event)).await;
+            let result = engine.turn(&prompt, |event| printer.event(event)).await;
             printer.end_line();
             match result {
-                Ok(_) => Ok(ExitCode::SUCCESS),
+                Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
                     let signal = received.load(Ordering::SeqCst);
                     eprintln!("interrupted by {}", signal_name(signal));
@@ -308,16 +426,10 @@ async fn conversation(
             }
         }
         None => {
-            if let Some(gate) = approval::for_conversation(&config, &cwd, &input) {
-                agent = agent.with_gate(Box::new(gate));
-            }
-            println!(
-                "junees {VERSION} ({}). /help for commands, /exit to quit.",
-                config.model
-            );
+            println!("junees {VERSION} ({banner}). /help for commands, /exit to quit.");
             println!("{}", opened.status);
             let mut repl = Repl {
-                agent,
+                engine,
                 config,
                 settings,
                 cwd,
@@ -527,7 +639,15 @@ struct Opened {
     status: String,
 }
 
-fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opened> {
+/// The session `mode` asks for, of the conversations `backend` runs
+/// ([`session::Meta::backend`]); `model` goes into a new one's meta line.
+fn open_session(
+    mode: &SessionMode,
+    config: &Config,
+    cwd: &Path,
+    model: &str,
+    backend: Option<&str>,
+) -> Result<Opened> {
     let path = match mode {
         SessionMode::Off => {
             return Ok(Opened {
@@ -542,7 +662,7 @@ fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opene
             let home = config
                 .require_home()
                 .context("cannot continue a saved session")?;
-            let latest = session::find_latest(home, cwd)?;
+            let latest = session::find_latest(home, cwd, backend)?;
             if latest.is_none() {
                 eprintln!(
                     "no earlier session in {}; starting a new one",
@@ -560,13 +680,29 @@ fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opene
     };
 
     let Some(path) = path else {
-        return Ok(new_session(config, cwd));
+        return Ok(new_session(config, cwd, model, backend));
     };
-    resume_session(&path, cwd)
+    resume_session(&path, cwd, backend)
 }
 
-/// The saved session at `path`, locked for this process.
-fn resume_session(path: &Path, cwd: &Path) -> Result<Opened> {
+/// The saved session at `path`, locked for this process. It has to be a
+/// conversation of `backend`: Claude Code cannot see a conversation held by
+/// Junees, nor Junees's agent one held by Claude Code.
+fn resume_session(path: &Path, cwd: &Path, backend: Option<&str>) -> Result<Opened> {
+    if let Some(meta) = session::read_meta(path)
+        && meta.backend.as_deref() != backend
+    {
+        let (ran, switch) = match meta.backend.as_deref() {
+            Some(other) => (format!("by {other}"), other.to_string()),
+            None => ("on the API".to_string(), "api".to_string()),
+        };
+        bail!(
+            "session {} was run {ran}, and this conversation runs on {}; continue it with \
+             `/backend {switch}` or JUNEES_BACKEND={switch}",
+            meta.id,
+            backend.unwrap_or("the API")
+        );
+    }
     let (session, writer) = Session::resume(path)?;
     if let Some(warning) = &session.warning {
         eprintln!("  !! {warning}");
@@ -577,12 +713,13 @@ fn resume_session(path: &Path, cwd: &Path) -> Result<Opened> {
     } else {
         format!(", started in {}", session.meta.cwd)
     };
+    let size = if session.meta.backend.is_some() {
+        format!("{} Claude Code turns", session.transcript.claude_turns)
+    } else {
+        format!("{} messages", session.transcript.messages.len())
+    };
     Ok(Opened {
-        status: format!(
-            "resumed {} ({} messages{elsewhere})",
-            session.meta.id,
-            session.transcript.messages.len()
-        ),
+        status: format!("resumed {} ({size}{elsewhere})", session.meta.id),
         id: Some(session.meta.id),
         transcript: session.transcript,
         journal: Some(Box::new(writer)),
@@ -591,10 +728,10 @@ fn resume_session(path: &Path, cwd: &Path) -> Result<Opened> {
 
 /// A fresh saved session. Without a state folder, or if its file cannot be
 /// created, Junees still runs, just without saving.
-fn new_session(config: &Config, cwd: &Path) -> Opened {
+fn new_session(config: &Config, cwd: &Path, model: &str, backend: Option<&str>) -> Opened {
     let created = config
         .require_home()
-        .and_then(|home| SessionWriter::create(home, cwd, &config.model));
+        .and_then(|home| SessionWriter::create_for(home, cwd, model, backend));
     match created {
         Ok((meta, writer)) => Opened {
             transcript: Transcript::default(),
@@ -612,7 +749,7 @@ fn new_session(config: &Config, cwd: &Path) -> Opened {
 }
 
 struct Repl {
-    agent: Agent,
+    engine: Engine,
     config: Config,
     /// Where `/task` gets its settings; `/model` and `/backend` change
     /// them for this process only.
@@ -684,39 +821,68 @@ impl Repl {
             }
             Slash::Task(goal) => return self.task(goal).await,
             Slash::Model(model) => self.model(model),
-            Slash::Backend(backend) => self.backend(backend),
-            Slash::Usage => {
-                let usage = self.agent.usage();
-                println!(
-                    "input {} tokens (cache write {}, cache read {}), output {} tokens, \
-                     web searches {}",
-                    usage.input_tokens,
-                    usage.cache_creation_input_tokens,
-                    usage.cache_read_input_tokens,
-                    usage.output_tokens,
-                    usage.web_searches()
-                );
-            }
+            Slash::Backend(backend) => self.backend(backend).await,
+            Slash::Usage => match &self.engine {
+                Engine::Api(agent) => {
+                    let usage = agent.usage();
+                    println!(
+                        "input {} tokens (cache write {}, cache read {}), output {} tokens, \
+                         web searches {}",
+                        usage.input_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.cache_read_input_tokens,
+                        usage.output_tokens,
+                        usage.web_searches()
+                    );
+                }
+                Engine::Claude(chat) => {
+                    let usage = chat.usage();
+                    println!(
+                        "input {} tokens (cache write {}, cache read {}), output {} tokens, \
+                         {} Claude Code turns{}",
+                        usage.input_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.cache_read_input_tokens,
+                        usage.output_tokens,
+                        chat.turns(),
+                        chat.claude_session()
+                            .map_or_else(String::new, |id| format!(", Claude Code session {id}"))
+                    );
+                }
+            },
             // Nothing is recorded until the summary is back, so the
             // compaction can simply be dropped.
-            Slash::Compact => {
-                return tokio::select! {
-                    _ = self.agent.compact(print_event) => false,
-                    signal = self.signals.next() => {
-                        eprintln!("(compaction cancelled)");
-                        signal == libc::SIGTERM
-                    }
-                };
-            }
-            Slash::Context => {
-                let options = self.agent.options();
-                println!(
-                    "context {} / {} tokens; old tool output is cleared from {} tokens",
-                    self.agent.context_tokens(),
-                    options.context_window,
-                    options.compact_limit()
-                );
-            }
+            Slash::Compact => match &mut self.engine {
+                Engine::Api(agent) => {
+                    return tokio::select! {
+                        _ = agent.compact(print_event) => false,
+                        signal = self.signals.next() => {
+                            eprintln!("(compaction cancelled)");
+                            signal == libc::SIGTERM
+                        }
+                    };
+                }
+                Engine::Claude(_) => eprintln!(
+                    "/compact is not available on the claude-code backend: Claude Code \
+                     manages the conversation's context and compacts it by itself"
+                ),
+            },
+            Slash::Context => match &self.engine {
+                Engine::Api(agent) => {
+                    let options = agent.options();
+                    println!(
+                        "context {} / {} tokens; old tool output is cleared from {} tokens",
+                        agent.context_tokens(),
+                        options.context_window,
+                        options.compact_limit()
+                    );
+                }
+                Engine::Claude(_) => eprintln!(
+                    "/context is not available on the claude-code backend: Claude Code \
+                     keeps the context (and compacts it by itself); /usage shows the tokens \
+                     used"
+                ),
+            },
             Slash::Bad(message) => eprintln!("{message}"),
             Slash::Exit => {}
         }
@@ -730,7 +896,7 @@ impl Repl {
         let mut printer = Printer::new();
         let mut terminated = false;
         let result = {
-            let run = self.agent.run(input, |event| printer.event(event));
+            let run = self.engine.turn(input, |event| printer.event(event));
             tokio::pin!(run);
             loop {
                 tokio::select! {
@@ -744,7 +910,7 @@ impl Repl {
         };
         printer.end_line();
         match result {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
                 eprintln!("(turn cancelled)");
             }
@@ -798,8 +964,31 @@ impl Repl {
     }
 
     /// `/model [<name>]`: shows the model, or uses another for the rest of
-    /// this process (the conversation and `/task` on the api backend).
+    /// this process (the conversation and `/task` on the same backend).
     fn model(&mut self, model: Option<String>) {
+        let agent = match &mut self.engine {
+            Engine::Claude(chat) => {
+                match model {
+                    None => println!(
+                        "model: {} (Claude Code runs the conversation)",
+                        chat.claude()
+                            .model
+                            .as_deref()
+                            .unwrap_or("of Claude Code's choice")
+                    ),
+                    Some(model) => {
+                        chat.set_model(Some(model.clone()));
+                        self.settings.set_override(MODEL_ENV, model.as_str());
+                        println!(
+                            "model: {model} (this session, passed to Claude Code with --model; \
+                             `claude_model` in the settings file changes the default)"
+                        );
+                    }
+                }
+                return;
+            }
+            Engine::Api(agent) => agent,
+        };
         let Some(model) = model else {
             println!("model: {}", self.config.model);
             return;
@@ -813,7 +1002,7 @@ impl Repl {
         config.model = model.clone();
         match make_provider(&config) {
             Ok(provider) => {
-                self.agent.set_provider(provider);
+                agent.set_provider(provider);
                 self.config = config;
                 self.settings.set_override("JUNEES_MODEL", model.as_str());
                 println!("model: {model} (this session; `junees setup` changes the default)");
@@ -822,35 +1011,82 @@ impl Repl {
         }
     }
 
-    /// `/backend [api|claude-code]`: shows what runs `/task`, or switches
-    /// it for the rest of this process. The conversation always uses the
-    /// API.
-    fn backend(&mut self, backend: Option<Backend>) {
-        if let Some(backend) = backend {
-            self.settings
-                .set_override(BACKEND_ENV, slash::backend_name(backend));
+    /// `/backend [api|claude-code]`: shows what runs the conversation and
+    /// `/task`, or switches both for the rest of this process. Switching
+    /// the conversation starts a new session: neither side can see the
+    /// other's conversation.
+    async fn backend(&mut self, backend: Option<Backend>) {
+        let current = self.engine.backend();
+        let Some(backend) = backend else {
+            match Backend::from_lookup(|key| self.settings.get(key)) {
+                Ok(task) if task == current => println!(
+                    "the conversation and /task run on {}",
+                    slash::backend_name(current)
+                ),
+                Ok(task) => println!(
+                    "the conversation runs on {}, /task on {}",
+                    slash::backend_name(current),
+                    slash::backend_name(task)
+                ),
+                Err(err) => report(&err),
+            }
+            return;
+        };
+        let name = slash::backend_name(backend);
+        let previous = self.settings.get(BACKEND_ENV);
+        self.settings.set_override(BACKEND_ENV, name);
+        if backend != current
+            && let Err(err) = self.switch(backend).await
+        {
+            report(&err);
+            self.settings.set_override(
+                BACKEND_ENV,
+                previous.unwrap_or_else(|| slash::backend_name(current).to_string()),
+            );
+            println!("the conversation stays on {}", slash::backend_name(current));
+            return;
         }
-        match Backend::from_lookup(|key| self.settings.get(key)) {
-            Ok(current) if backend.is_some() => println!(
-                "/task now runs on {} (this session; `junees setup` changes the default)",
-                slash::backend_name(current)
-            ),
-            Ok(current) => println!(
-                "/task runs on {}; the conversation always uses the API",
-                slash::backend_name(current)
-            ),
-            Err(err) => report(&err),
-        }
+        println!(
+            "the conversation and /task now run on {name} (this session; `junees setup` \
+             changes the default)"
+        );
+    }
+
+    /// Moves the conversation to `backend`, in a new session.
+    async fn switch(&mut self, backend: Backend) -> Result<()> {
+        let config = conversation_config(&self.settings, backend)?;
+        self.engine = match backend {
+            Backend::Api => Engine::Api(Box::new(api_agent(
+                &config,
+                &self.cwd,
+                &self.cancel,
+                Some(&self.input),
+            )?)),
+            Backend::ClaudeCode => {
+                let (chat, version) =
+                    claude_chat(&self.settings, &config, &self.cwd, &self.cancel).await?;
+                println!("Claude Code {version}");
+                Engine::Claude(Box::new(chat))
+            }
+        };
+        self.config = config;
+        self.reset();
+        Ok(())
     }
 
     fn reset(&mut self) {
         if !self.saving {
-            self.agent.reset(None);
+            self.engine.reset(None);
             println!("(new conversation, not saved)");
             return;
         }
-        let opened = new_session(&self.config, &self.cwd);
-        self.agent.reset(opened.journal);
+        let opened = new_session(
+            &self.config,
+            &self.cwd,
+            &self.engine.model(&self.config),
+            self.engine.session_backend(),
+        );
+        self.engine.reset(opened.journal);
         self.session_id = opened.id;
         println!("(new conversation) {}", opened.status);
     }
@@ -908,14 +1144,15 @@ impl Repl {
             println!("(this conversation is not saved: --no-session)");
             return false;
         }
+        let backend = self.engine.session_backend();
         let opened = self
             .config
             .require_home()
             .and_then(|home| session::find_by_prefix(home, &summary.id))
-            .and_then(|path| resume_session(&path, &self.cwd));
+            .and_then(|path| resume_session(&path, &self.cwd, backend));
         match opened {
             Ok(opened) => {
-                self.agent.resume(opened.transcript, opened.journal);
+                self.engine.resume(opened.transcript, opened.journal);
                 self.session_id = opened.id;
                 println!("{}", opened.status);
             }
@@ -936,6 +1173,11 @@ fn report(err: &anyhow::Error) {
         } else if provider_error.is_auth() {
             eprintln!("hint: check the API key (`junees setup`, or ANTHROPIC_API_KEY).");
         }
+    }
+    if err.downcast_ref::<UsageLimit>().is_some() {
+        eprintln!(
+            "hint: the subscription's usage limit stopped the turn; once it resets,              the next input continues the same conversation."
+        );
     }
 }
 
