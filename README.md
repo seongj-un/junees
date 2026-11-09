@@ -22,6 +22,7 @@ junees setup                        # 설정 다시
 - `/new`: 새 대화(예전 이름 `/reset`도 됨).
 - `/model [이름]`: 지금 모델을 보여 주거나, 이 실행 동안만 다른 모델로 바꾼다(claude-code 백엔드에서는 Claude Code에 `--model`로 넘긴다).
 - `/backend [api|claude-code]`: 대화와 `/task`를 무엇으로 돌릴지 보여 주거나, 이 실행 동안만 둘 다 바꾼다. 대화를 바꾸면 새 세션으로 시작한다(아래 구독 모드).
+- `/memory`: 영구 메모리 세 저장소의 파일, 사용량, 항목을 보여 준다. `/memory clear user|notes|project`는 한 저장소를 비운다(`y`로 확인한 뒤. 아래 메모리).
 - `/compact`, `/context`(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), `/usage`, `/help`, `/exit`.
 
 명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
@@ -47,7 +48,7 @@ task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
 task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 ```
 
-그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열). 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
+그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
 파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령과, 이 파일이 든 폴더(`$JUNEES_HOME`)를 통째로 다루는 명령을 막는다(아래 명령 정책 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽은 차단 목록일 뿐 샌드박스가 아니어서 다른 변수나 실행 중에 만든 경로, 더 위 폴더를 통째로 다루는 명령으로는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
 
@@ -155,6 +156,20 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - 사용량: `usage.server_tool_use.web_search_requests`를 세션마다 더해 `/usage`에 `web searches N`으로, `task run`의 실행 로그(run.log) 정지 줄에 `web searches N`으로 보여 준다. 토큰 예산(`--max-tokens`)에는 들어가지 않는다.
 - 컨텍스트: 검색한 호출의 사용량은 컨텍스트 크기로 쓰지 않는다. 그 호출의 캐시 읽기에는 API의 검색 반복 단계마다 읽은 양이 모두 들어 있어 실제보다 훨씬 커서, 압축이 너무 일찍 일어난다(context editing 문서의 서버 도구 주의). 대신 그 응답(검색 결과 포함)은 아래 추정치로 크기에 더해지므로, 매 호출이 검색하는 세션도 제때 압축된다. 검색하지 않은 다음 호출이 다시 잰다. 도구 결과 비우기는 검색 결과 블록을 건드리지 않는다. `encrypted_content`는 바꾸면 400이고, Junees가 대신 넣을 수 있는 유효한 자리표시가 없으며, 블록 짝을 지우면 뒤 텍스트의 인용이 가리킬 곳이 사라진다. 검색 결과는 압축 때 요약으로 정리된다(요약 텍스트에는 검색어와 앞 5개 결과의 제목/URL만 넣는다). 검색을 클라이언트 도구와 같은 응답에서 부르면 검색은 그 도구 결과를 보낸 다음 요청에서 실행되어 결과 블록이 다음 응답에 오는데, 턴 안 압축은 이 둘 사이를 자르지 않는다(검색 호출 없이 결과만 남지 않도록).
 - 조직에서 웹 검색이 꺼져 있다는 400이 오면 오류 끝에 `JUNEES_WEB_SEARCH=off`로 하거나 관리자에게 켜 달라는 안내가 붙는다.
+
+### 메모리
+
+세션이 끝나도 남는 짧은 메모. 모델이 `memory` 도구로 저장하고, 다음 세션부터 시스템 프롬프트의 `MEMORY (persistent notes)` 절로 본다. 상태 폴더(`JUNEES_HOME` 또는 `HOME`)가 없으면 메모리도 없다(도구와 절 모두 빠진다).
+
+- 저장소 셋: `user`(사용자에 대한 사실: 이름, 선호, 언어) `$JUNEES_HOME/memory/user.md`, `notes`(환경, 관례, 교훈) `$JUNEES_HOME/memory/notes.md`, `project`(이 프로젝트에만 해당하는 메모) `$JUNEES_HOME/projects/<루트 경로 해시>/notes.md`. 프로젝트는 작업 폴더가 든 git 저장소의 루트(git 밖이면 그 폴더)이고, 해시는 루트 경로의 FNV-1a 64비트 값(16자리 hex)이라 버전이 바뀌어도 폴더가 옮겨지지 않는다. 저장소 안에는 아무것도 쓰지 않는다.
+- 파일은 `§` 한 글자만 있는 줄로 항목을 나눈 텍스트다(손으로 고쳐도 된다). 파일은 `0600`, 새로 만드는 폴더는 `0700`, 쓰기는 임시 파일 + rename이고, 바꾸는 동안 저장소 폴더에 `flock`을 잡아 두 Junees가 동시에 바꿔도 한쪽 변경이 사라지지 않는다.
+- 도구 `memory {target: user|notes|project, action: add|replace|remove, content?, old_text?}`: `add`는 `content`를 새 항목으로(똑같은 항목이 있으면 `already saved`), `replace`는 `old_text`가 든 항목 하나를 `content`로 바꾸고, `remove`는 그 항목을 지운다. `old_text`는 정확히 한 항목에만 들어 있어야 하고, 없거나 여러 항목에 있으면 해당 항목 목록과 함께 오류를 돌려준다. 결과에는 저장소의 항목 수와 사용량(`12/1500 characters`)이 나온다. 승인 질문은 없다.
+- 상한: 저장소마다 문자 수(바이트 아님, 항목 사이 구분 줄 포함) 기본 user 1500, notes 2500, project 2500. 설정 파일 `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`(환경 변수 `JUNEES_MEMORY_USER_CHARS` 등, 1~8000)로 바꾼다. 상한을 넘기는 변경은 저장하지 않고, 지금 항목을 길이와 함께 보여 주며 무엇을 지우거나 줄이라고 알려 준다. 손으로 고쳐 이미 상한을 넘은 저장소는 줄이는 변경만 받고, 프롬프트에는 상한까지만 넣는다(`[... cut at the N-character limit ...]` 표시).
+- 비밀 거절: API 키처럼 보이는 내용(`sk-ant-`, `ghp_`/`github_pat_` 등 GitHub 토큰, `glpat-`, `xoxb-` 같은 Slack 토큰, `AKIA...` AWS 키 id, `-----BEGIN ... PRIVATE KEY-----`, 32자 이상의 hex, 대소문자와 숫자가 섞인 32자 이상의 토큰 문자열)은 저장하지 않고 오류로 돌려준다(오류에 그 값은 다시 넣지 않는다). 경로와 `.`는 토큰을 끊으므로 경로, URL, 짧은 커밋 id, UUID는 저장된다.
+- 프롬프트: 세션이 시작할 때 세 저장소를 한 번 읽어 시스템 프롬프트 끝에 넣고 그 세션 동안 바꾸지 않는다. 프롬프트 캐시가 깨지지 않게 하기 위해서다. 세션 중에 저장한 내용은 파일에는 바로 쓰이고 다음 세션부터 보인다(도구 결과가 그렇게 알려 준다). 대화의 `/new`(와 `/backend`로 바꿀 때)는 메모리를 다시 읽는다. 절에는 저장소마다 사용량과 내용, 그리고 언제 저장할지 짧은 지침이 들어간다: 사용자가 선호나 자신에 대한 사실을 말하거나 정정할 때(user), 다시 쓸 환경 사실이나 관례(notes, 이 프로젝트에만 해당하면 project)는 묻지 않아도 저장하고, 작업 진행 상황, 임시 상태, 금방 다시 찾을 수 있는 것, 비밀은 저장하지 않는다.
+- 장기 작업 모드: 세션마다 시작할 때 메모리를 읽어 프롬프트에 넣는다(앞 세션이 저장한 것은 다음 세션에 보인다). 작업 세션의 `memory` 도구는 `project`만 받는다. 무인 세션이 사용자 메모리를 바꾸지 않게 하기 위해서고, `user`/`notes`는 오류로 거절한다(도구 정의의 target도 `project` 하나뿐).
+- claude-code 백엔드(대화, 작업): 같은 절을 읽기 전용 안내와 함께 `--append-system-prompt`로 넘긴다(도구는 Junees 쪽에만 있다). 세 저장소가 모두 비었으면 넘기지 않는다. 상한을 모두 8000으로 해도 절은 128 KiB(리눅스의 인자 하나 한도)보다 작다.
+- `/memory`는 저장소마다 파일 경로, 항목 수, 사용량, 항목을 지금 파일 기준으로 보여 준다. `/memory clear <저장소>`는 `clear user memory (N entries)? [y/N]`로 물은 뒤 `y`/`yes`일 때만 파일을 지운다. 지금 세션의 프롬프트에는 남아 있고 `/new`부터 빠진다.
 
 ### 구독 모드 (claude-code 백엔드)
 
@@ -342,7 +357,7 @@ src/
     mod.rs             백엔드 설정, claude --version/auth status 확인, 환경 정리와 CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, 세션 실행(Spawn)과 예산/취소, 프로세스 그룹과 자손 종료
     stream.rs          stream-json 읽기 (텍스트 조각 스트리밍, 도구 호출/결과, 거절된 호출, 응답별 사용량, 로그인 실패와 사용 한도 판단)
     rules.rs           명령 정책과 설정 파일 보호를 Claude Code 권한 규칙(--disallowedTools)으로
-    chat.rs            구독으로 대화하기 (턴마다 claude -p, --resume으로 이어 가기, 턴 기록)
+    chat.rs            구독으로 대화하기 (턴마다 claude -p, --resume으로 이어 가기, 턴 기록, 메모리 절을 --append-system-prompt로)
   task/              장기 작업 모드
     runner.rs          task init/run 세션 루프, 체크포인트 커밋, 정지 조건, 크래시 복구, 실행 로그, Claude Code 세션 뒤 하네스 verify
     claude_code.rs     claude-code 백엔드의 작업 세션 인자(acceptEdits, 시스템 프롬프트)와 실행
@@ -366,6 +381,10 @@ src/
   setup.rs           설정 마법사 (Prompter 트레이트, Claude Code 확인 ClaudeProbe, 키 입력 때 터미널 echo 끄기 EchoOff)
   slash.rs           대화 안 슬래시 명령 파싱, /sessions 번호 고르기
   prompt.rs          시스템 프롬프트
+  memory/            영구 메모리
+    mod.rs             저장소 셋(user, notes, 프로젝트별 notes) 읽기/쓰기(0600, 원자적, flock), 항목 추가/교체/삭제와 상한, 프롬프트 절(대화, task, Claude Code 읽기 전용), /memory 보기
+    secret.rs          비밀처럼 보이는 내용 판단(API 키 접두어, 개인 키, 긴 hex/토큰)
+    tool.rs            memory 도구 (task 세션은 project만)
   cli.rs             인자 파싱(위치 인자 질문, task/status/setup 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
 tests/
   common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림)
@@ -384,6 +403,7 @@ tests/
   web_search.rs        가짜 API 서버(JSON, SSE)로 웹 검색 도구 정의, pause_turn 이어 가기(멈춘 응답을 그대로, 뒤에 user 메시지 없이), pause 상한 뒤 검색을 끄고 이어 갈 때 결과 없는 검색 호출 제거, 검색 블록과 citations 재전송, 클라이언트 도구 미실행, 바이너리의 출처 목록과 조직 비활성 안내 검증
   claude_code.rs       실제 바이너리와 가짜 claude로 API 키 없이 task init/run, claude 환경에 API 변수 없음, 로그인 실패 안내와 알림, SIGTERM 검증
   claude_chat.rs       실제 바이너리와 가짜 claude로 구독 대화: 두 번째 턴이 같은 세션을 --resume, 스트리밍과 도구/거절 표시, /usage와 /compact, /context 안내, 거절 규칙 인자, claude 환경에 API 변수 없음, -p와 -c, Ctrl-C 후 다음 턴, 사용 한도 안내 검증
+  memory.rs            실제 바이너리와 가짜 API 서버로 memory 도구가 저장한 항목이 지금 세션이 아니라 다음 세션의 시스템 프롬프트에 들어가는지, /memory 보기와 clear(확인 질문), /new가 메모리를 다시 읽는지 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
 
