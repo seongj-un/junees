@@ -7,6 +7,8 @@ use super::{Tool, ToolOutput, opt_u64_arg, str_arg, truncate_middle};
 
 const DEFAULT_LIMIT: u64 = 2000;
 const MAX_OUTPUT_CHARS: usize = 50_000;
+/// Larger files are refused instead of being loaded into memory whole.
+const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Reads a text file and returns it with line numbers.
 pub struct ReadFile;
@@ -48,6 +50,21 @@ impl Tool for ReadFile {
             Err(err) => return err,
         };
 
+        match tokio::fs::metadata(path).await {
+            Ok(meta) if !meta.is_file() => {
+                return ToolOutput::error(format!("{path} is not a regular file"));
+            }
+            Ok(meta) if meta.len() > MAX_FILE_BYTES => {
+                return ToolOutput::error(format!(
+                    "{path} is {} bytes; read_file reads files up to {} MB. \
+                     Use bash (head, tail, sed -n, grep) to look at parts of it.",
+                    meta.len(),
+                    MAX_FILE_BYTES / (1024 * 1024)
+                ));
+            }
+            Ok(_) => {}
+            Err(err) => return ToolOutput::error(format!("cannot read {path}: {err}")),
+        }
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(err) => return ToolOutput::error(format!("cannot read {path}: {err}")),
@@ -139,6 +156,24 @@ mod tests {
         let output = read(json!({"path": file.path()})).await;
         assert!(output.is_error);
         assert!(output.content.contains("binary"));
+    }
+
+    #[tokio::test]
+    async fn refuses_files_over_the_size_limit() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(MAX_FILE_BYTES + 1).unwrap();
+        let output = read(json!({"path": file.path()})).await;
+        assert!(output.is_error);
+        assert!(output.content.contains("up to 10 MB"), "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn refuses_devices_and_directories() {
+        let output = read(json!({"path": "/dev/zero"})).await;
+        assert!(output.is_error);
+        assert!(output.content.ends_with("is not a regular file"));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read(json!({"path": dir.path()})).await.is_error);
     }
 
     #[tokio::test]
