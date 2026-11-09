@@ -21,6 +21,8 @@ pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     model: String,
+    /// Extended thinking budget in tokens; 0 leaves thinking off.
+    thinking_budget: u32,
 }
 
 impl AnthropicProvider {
@@ -34,7 +36,17 @@ impl AnthropicProvider {
             api_key,
             base_url,
             model,
+            thinking_budget: 0,
         })
+    }
+
+    /// Turns on extended thinking with `budget` tokens for the requests
+    /// that allow it; 0 leaves it off. The budget must be at least 1024
+    /// and below the `max_tokens` of those requests (the API's rules,
+    /// checked by [`crate::config::Config`]).
+    pub fn with_thinking(mut self, budget: u32) -> Self {
+        self.thinking_budget = budget;
+        self
     }
 
     fn messages_url(&self) -> String {
@@ -113,10 +125,12 @@ struct ApiRequest<'a> {
     messages: Vec<ApiMessage<'a>>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     tools: Vec<Cached<&'a ToolSpec>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<Thinking>,
 }
 
 impl<'a> ApiRequest<'a> {
-    fn new(model: &'a str, request: CompletionRequest<'a>) -> Self {
+    fn new(model: &'a str, request: CompletionRequest<'a>, thinking_budget: u32) -> Self {
         let system = if request.system.is_empty() {
             Vec::new()
         } else {
@@ -167,8 +181,20 @@ impl<'a> ApiRequest<'a> {
             system,
             messages,
             tools,
+            thinking: (request.thinking && thinking_budget > 0).then_some(Thinking {
+                kind: "enabled",
+                budget_tokens: thinking_budget,
+            }),
         }
     }
+}
+
+/// `thinking: {type: "enabled", budget_tokens}` of a request.
+#[derive(Serialize)]
+struct Thinking {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    budget_tokens: u32,
 }
 
 #[derive(Serialize)]
@@ -244,7 +270,7 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompletionRequest<'_>,
     ) -> Result<CompletionResponse, ProviderError> {
-        let body = ApiRequest::new(&self.model, request);
+        let body = ApiRequest::new(&self.model, request, self.thinking_budget);
         let url = self.messages_url();
 
         let mut attempt = 1;
@@ -308,9 +334,35 @@ mod tests {
                 tools,
                 max_tokens: 10,
                 cache,
+                thinking: true,
             },
+            0,
         );
         serde_json::to_value(&body).unwrap()
+    }
+
+    #[test]
+    fn thinking_is_asked_for_only_with_a_budget_and_when_allowed() {
+        let messages = [Message::user_text("hi")];
+        let body = |thinking, budget| {
+            let request = CompletionRequest {
+                system: "",
+                messages: &messages,
+                tools: &[],
+                max_tokens: 4096,
+                cache: false,
+                thinking,
+            };
+            serde_json::to_value(ApiRequest::new("m", request, budget)).unwrap()
+        };
+        assert_eq!(
+            body(true, 2048)["thinking"],
+            json!({"type": "enabled", "budget_tokens": 2048})
+        );
+        for (thinking, budget) in [(false, 2048), (true, 0), (false, 0)] {
+            let value = body(thinking, budget);
+            assert!(value.get("thinking").is_none(), "{value}");
+        }
     }
 
     #[test]

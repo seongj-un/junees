@@ -29,6 +29,9 @@ pub struct CompletionRequest<'a> {
     /// Ask the provider to cache the request's prefix for the next call.
     /// Off for one-off calls, whose prefix is never sent again.
     pub cache: bool,
+    /// Let the model think before it answers, if the provider was set up
+    /// with a thinking budget. Off for summary calls.
+    pub thinking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

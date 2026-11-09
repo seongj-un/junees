@@ -16,6 +16,8 @@ pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 pub const DEFAULT_MAX_TURNS: usize = 50;
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 pub const DEFAULT_COMPACT_THRESHOLD: f64 = 0.8;
+/// The smallest extended thinking budget the API accepts.
+pub const MIN_THINKING_BUDGET: u32 = 1024;
 
 /// Runtime settings. Deliberately not `Debug`, so the API key cannot end up
 /// in logs by accident.
@@ -31,6 +33,10 @@ pub struct Config {
     /// Share of the context window at which old tool output is cleared and
     /// then the conversation compacted; in (0, 1].
     pub compact_threshold: f64,
+    /// Extended thinking budget in tokens (`JUNEES_THINKING_BUDGET`); 0
+    /// leaves thinking off. Otherwise at least [`MIN_THINKING_BUDGET`] and
+    /// below `max_tokens`, since thinking counts toward it.
+    pub thinking_budget: u32,
     /// Where Junees keeps its state (`$JUNEES_HOME`, default `$HOME/.junees`).
     /// `None` when neither is set (cron, some services and containers):
     /// Junees still runs, it just cannot save or find sessions.
@@ -47,7 +53,7 @@ pub struct Config {
 impl Config {
     /// Reads `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `JUNEES_MODEL`,
     /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_CONTEXT_WINDOW`,
-    /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_HOME`, `HOME`,
+    /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_THINKING_BUDGET`, `JUNEES_HOME`, `HOME`,
     /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
     /// `JUNEES_HIDDEN_ENV`, `JUNEES_TASK_MAX_TOKENS` and
     /// `JUNEES_TASK_MAX_TIME`.
@@ -98,6 +104,24 @@ impl Config {
                 ),
             },
         };
+        let thinking_budget = parse_or(
+            get("JUNEES_THINKING_BUDGET"),
+            "JUNEES_THINKING_BUDGET",
+            0u32,
+        )?;
+        if thinking_budget > 0 && thinking_budget < MIN_THINKING_BUDGET {
+            bail!(
+                "JUNEES_THINKING_BUDGET must be 0 (off) or at least {MIN_THINKING_BUDGET}, \
+                 got {thinking_budget}"
+            );
+        }
+        if thinking_budget > 0 && thinking_budget >= max_tokens {
+            bail!(
+                "JUNEES_THINKING_BUDGET ({thinking_budget}) must be less than \
+                 JUNEES_MAX_TOKENS ({max_tokens}): thinking counts toward the output limit \
+                 and the answer needs room too"
+            );
+        }
         let home = get("JUNEES_HOME")
             .map(PathBuf::from)
             .or_else(|| get("HOME").map(|home| PathBuf::from(home).join(".junees")));
@@ -125,6 +149,7 @@ impl Config {
             max_turns,
             context_window,
             compact_threshold,
+            thinking_budget,
             home,
             tools,
             task_max_tokens,
@@ -212,6 +237,7 @@ mod tests {
         assert_eq!(config.max_turns, DEFAULT_MAX_TURNS);
         assert_eq!(config.context_window, 200_000);
         assert_eq!(config.compact_threshold, 0.8);
+        assert_eq!(config.thinking_budget, 0);
         assert_eq!(config.home, Some(PathBuf::from("/home/tester/.junees")));
         assert_eq!(config.tools, ToolSettings::default());
         assert_eq!(config.task_max_tokens, None);
@@ -238,6 +264,59 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{key}={bad} was accepted"));
             assert!(format!("{err:#}").contains(key), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn reads_and_checks_the_thinking_budget() {
+        let with = |pairs: &[(&str, &str)]| {
+            let mut all = vec![("ANTHROPIC_API_KEY", "k")];
+            all.extend_from_slice(pairs);
+            config(&all)
+        };
+        assert_eq!(with(&[]).unwrap().thinking_budget, 0);
+        assert_eq!(
+            with(&[("JUNEES_THINKING_BUDGET", "0")])
+                .unwrap()
+                .thinking_budget,
+            0
+        );
+        assert_eq!(
+            with(&[("JUNEES_THINKING_BUDGET", " 4096 ")])
+                .unwrap()
+                .thinking_budget,
+            4096
+        );
+        let ok = with(&[
+            ("JUNEES_THINKING_BUDGET", "1024"),
+            ("JUNEES_MAX_TOKENS", "1025"),
+        ])
+        .unwrap();
+        assert_eq!((ok.thinking_budget, ok.max_tokens), (1024, 1025));
+
+        for (pairs, expected) in [
+            (vec![("JUNEES_THINKING_BUDGET", "1023")], "at least 1024"),
+            (vec![("JUNEES_THINKING_BUDGET", "lots")], "positive integer"),
+            (vec![("JUNEES_THINKING_BUDGET", "-1")], "positive integer"),
+            // The default JUNEES_MAX_TOKENS is 8192.
+            (
+                vec![("JUNEES_THINKING_BUDGET", "8192")],
+                "less than JUNEES_MAX_TOKENS (8192)",
+            ),
+            (
+                vec![
+                    ("JUNEES_THINKING_BUDGET", "2048"),
+                    ("JUNEES_MAX_TOKENS", "2048"),
+                ],
+                "less than JUNEES_MAX_TOKENS (2048)",
+            ),
+        ] {
+            let err = with(&pairs)
+                .err()
+                .unwrap_or_else(|| panic!("{pairs:?} was accepted"))
+                .to_string();
+            assert!(err.contains("JUNEES_THINKING_BUDGET"), "{err}");
+            assert!(err.contains(expected), "{err}");
         }
     }
 

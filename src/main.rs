@@ -95,7 +95,8 @@ async fn run() -> Result<ExitCode> {
         config.api_key.clone(),
         config.base_url.clone(),
         config.model.clone(),
-    )?;
+    )?
+    .with_thinking(config.thinking_budget);
     let cwd = std::env::current_dir()?;
     let opened = open_session(&args.session, &config, &cwd)?;
     let mut agent = Agent::restore(
@@ -239,11 +240,14 @@ async fn run_task(command: TaskCommand) -> Result<ExitCode> {
     std::env::set_current_dir(&root)
         .with_context(|| format!("cannot change to {}", root.display()))?;
     let provider = || -> Result<Box<dyn Provider>> {
-        Ok(Box::new(AnthropicProvider::new(
-            config.api_key.clone(),
-            config.base_url.clone(),
-            config.model.clone(),
-        )?))
+        Ok(Box::new(
+            AnthropicProvider::new(
+                config.api_key.clone(),
+                config.base_url.clone(),
+                config.model.clone(),
+            )?
+            .with_thinking(config.thinking_budget),
+        ))
     };
     let budget = match &command {
         TaskCommand::Run {
