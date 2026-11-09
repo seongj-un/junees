@@ -4,6 +4,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::approval::ToolGate;
 use crate::cancel::Cancel;
 use crate::context;
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
@@ -123,6 +124,8 @@ pub struct Agent {
     cancel: Cancel,
     /// Checked before each model call; see [`Agent::with_limit`].
     limit: Option<Limit>,
+    /// Asked before each tool call; see [`Agent::with_gate`].
+    gate: Option<Box<dyn ToolGate>>,
 }
 
 impl Agent {
@@ -146,6 +149,7 @@ impl Agent {
             cleared: false,
             cancel: Cancel::new(),
             limit: None,
+            gate: None,
         }
     }
 
@@ -166,6 +170,15 @@ impl Agent {
     /// resets the flag before the next input.
     pub fn with_cancel(mut self, cancel: Cancel) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Asks `gate` before each tool call; a call it turns down does not
+    /// run and gets the gate's output as its result. A cancel while the
+    /// gate waits (for a person's answer) cancels the call like a running
+    /// tool.
+    pub fn with_gate(mut self, gate: Box<dyn ToolGate>) -> Self {
+        self.gate = Some(gate);
         self
     }
 
@@ -314,7 +327,7 @@ impl Agent {
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => ToolOutput::error(CANCELLED),
-                        output = self.tools.dispatch(&name, input) => output,
+                        output = self.call_tool(&name, input) => output,
                     }
                 };
                 on_event(Event::ToolResult {
@@ -338,6 +351,16 @@ impl Agent {
         }
 
         Err(TurnLimit(self.options.max_turns).into())
+    }
+
+    /// Runs one tool call, unless the gate turns it down.
+    async fn call_tool(&mut self, name: &str, input: Value) -> ToolOutput {
+        if let Some(gate) = &mut self.gate
+            && let Some(refused) = gate.check(name, &input).await
+        {
+            return refused;
+        }
+        self.tools.dispatch(name, input).await
     }
 
     /// Fails with [`LimitReached`] if the limit says to stop.
@@ -2057,5 +2080,95 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 8);
         assert_eq!(agent.messages().len(), 1);
         assert_eq!(agent.messages()[0].role, Role::User);
+    }
+
+    /// Turns down calls whose input says `"deny": true`; never answers
+    /// when it says `"hang": true`.
+    struct TestGate(Arc<Mutex<Vec<String>>>);
+
+    #[async_trait]
+    impl ToolGate for TestGate {
+        async fn check(&mut self, tool: &str, input: &Value) -> Option<ToolOutput> {
+            self.0.lock().unwrap().push(tool.to_string());
+            if input["hang"] == true {
+                std::future::pending::<()>().await;
+            }
+            (input["deny"] == true).then(|| ToolOutput::error("the user declined: not now"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gate_decides_which_calls_run() {
+        let provider = Scripted::new(vec![
+            Ok(CompletionResponse {
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "no".into(),
+                        name: "count".into(),
+                        input: json!({"deny": true}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "yes".into(),
+                        name: "count".into(),
+                        input: json!({}),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            }),
+            text("ok"),
+        ]);
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (agent, calls) = counting_agent(provider);
+        let mut agent = agent.with_gate(Box::new(TestGate(asked.clone())));
+        assert_eq!(agent.run("go", |_| {}).await.unwrap(), "ok");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*asked.lock().unwrap(), ["count", "count"]);
+        assert_eq!(
+            tool_output(&agent.messages()[2]),
+            [
+                ("no", "the user declined: not now", true),
+                ("yes", "counted", false)
+            ]
+        );
+        assert_valid(agent.messages());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_while_the_gate_waits_cancels_the_turn() {
+        let provider = Scripted::new(vec![Ok(CompletionResponse {
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "waiting".into(),
+                    name: "count".into(),
+                    input: json!({"hang": true}),
+                },
+                ContentBlock::ToolUse {
+                    id: "next".into(),
+                    name: "count".into(),
+                    input: json!({}),
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        })]);
+        let cancel = Cancel::new();
+        let (agent, calls) = counting_agent(provider);
+        let mut agent = agent
+            .with_cancel(cancel.clone())
+            .with_gate(Box::new(TestGate(Arc::default())));
+        let setter = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            setter.cancel();
+        });
+        let err = agent.run("go", |_| {}).await.unwrap_err();
+        assert_eq!(err.downcast_ref::<Cancelled>(), Some(&Cancelled));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            tool_output(&agent.messages()[2]),
+            [("waiting", CANCELLED, true), ("next", CANCELLED, true)]
+        );
+        assert_valid(agent.messages());
     }
 }
