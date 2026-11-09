@@ -590,7 +590,8 @@ fn redirect_violation(redirects: &[(String, String)]) -> Option<String> {
 }
 
 /// True for device files other than the harmless ones (`/dev/null`,
-/// `/dev/stdout`, `/dev/tcp/...` and so on).
+/// `/dev/stdout`, `/dev/tcp/...`, files in the `/dev/shm` and
+/// `/dev/mqueue` memory filesystems and so on).
 fn is_device(path: &str) -> bool {
     let Some(device) = path.strip_prefix("/dev/") else {
         return false;
@@ -598,7 +599,7 @@ fn is_device(path: &str) -> bool {
     let harmless = matches!(
         device,
         "null" | "zero" | "full" | "random" | "urandom" | "stdin" | "stdout" | "stderr" | "tty"
-    ) || ["fd/", "pts/", "tcp/", "udp/"]
+    ) || ["fd/", "pts/", "tcp/", "udp/", "shm/", "mqueue/"]
         .iter()
         .any(|prefix| device.starts_with(prefix));
     !harmless
@@ -1204,6 +1205,10 @@ mod tests {
         allowed("echo hi > /dev/stderr");
         allowed("grep -r mkfs docs/");
         allowed("cat /dev/sda.txt.md");
+        allowed("echo hi > /dev/shm/x");
+        allowed("dd if=/dev/zero of=/dev/shm/scratch bs=1M count=1");
+        allowed("echo hi > /dev/mqueue/q");
+        denied("echo hi > /dev/shm");
     }
 
     #[test]
