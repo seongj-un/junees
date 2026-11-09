@@ -134,22 +134,26 @@ impl Tool for Bash {
             Ok(child) => child,
             Err(err) => return ToolOutput::error(format!("failed to start bash: {err}")),
         };
-        let group = child.id();
+        // Kills the command and everything it started if this call ends
+        // before the command does: on a timeout, and when the caller drops
+        // the call (a cancelled turn).
+        let mut group = GroupGuard(child.id());
         let mut stdout = Capture::start(child.stdout.take());
         let mut stderr = Capture::start(child.stderr.take());
 
         let status = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => Some(status),
             Ok(Err(err)) => {
-                kill_group(group);
                 return ToolOutput::error(format!("failed to wait for command: {err}"));
             }
             Err(_) => {
-                kill_group(group);
+                group.kill();
                 let _ = child.wait().await;
                 None
             }
         };
+        // bash is done; what it left running in the background stays.
+        group.disarm();
         let drained = tokio::time::timeout(DRAIN_GRACE, async {
             stdout.finished().await;
             stderr.finished().await;
@@ -189,13 +193,37 @@ impl Tool for Bash {
     }
 }
 
-fn kill_group(group: Option<u32>) {
-    if let Some(pid) = group.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
-        // SAFETY: killpg only sends a signal. The group was created for this
-        // command with process_group(0), so its id equals the child's pid.
-        unsafe {
-            libc::killpg(pid, libc::SIGKILL);
+/// The process group of a running command, killed when dropped unless
+/// disarmed first.
+struct GroupGuard(Option<u32>);
+
+impl GroupGuard {
+    /// Kills the group now.
+    fn kill(&mut self) {
+        if let Some(pid) = self
+            .0
+            .take()
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        {
+            // SAFETY: killpg only sends a signal. The group was created for
+            // this command with process_group(0), so its id equals the
+            // child's pid, and the child is not reaped yet, so the id still
+            // names this group.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
         }
+    }
+
+    /// Leaves the group alone from now on.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -296,6 +324,37 @@ impl HeadTail {
     }
 }
 
+/// Process checks shared by the tests that kill tool processes.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::time::Duration;
+
+    /// Whether the process runs: it exists and is not a zombie (a killed
+    /// child stays a zombie until its parent or init reaps it).
+    pub fn alive(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // The state follows the command name, which is in parentheses
+            // and may itself contain spaces or parentheses.
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .is_some_and(|state| state != "Z" && state != "X"),
+            Err(_) => false,
+        }
+    }
+
+    /// Waits up to two seconds for the process to stop running.
+    pub async fn gone_soon(pid: u32) -> bool {
+        for _ in 0..40 {
+            if !alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
@@ -329,20 +388,44 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_kills_the_whole_process_group() {
-        let marker = "sleep 41.37";
+        // The background child prints its own pid, so the check looks at
+        // exactly this process and not at a look-alike from another test
+        // run on the same machine.
         let output = Bash::default()
-            .run(json!({"command": format!("{marker} & sleep 30"), "timeout_secs": 1}))
+            .run(json!({"command": "sleep 30 & echo $!; sleep 30", "timeout_secs": 1}))
             .await;
         assert!(output.is_error);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let found = std::process::Command::new("pgrep")
-            .args(["-f", marker])
-            .output()
-            .unwrap();
+        let pid: u32 = output.content.lines().next().unwrap().parse().unwrap();
         assert!(
-            found.stdout.is_empty(),
-            "background child survived: {}",
-            String::from_utf8_lossy(&found.stdout)
+            testing::gone_soon(pid).await,
+            "background child {pid} survived"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_call_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let bash = Bash::default();
+        let command = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let pid = tokio::select! {
+            output = bash.run(json!({ "command": command })) => {
+                panic!("the command finished: {output:?}")
+            }
+            pid = async {
+                loop {
+                    let text = std::fs::read_to_string(&pid_file).unwrap_or_default();
+                    if let Ok(pid) = text.trim().parse::<u32>() {
+                        break pid;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            } => pid,
+        };
+        // The call was dropped when the other branch won.
+        assert!(
+            testing::gone_soon(pid).await,
+            "background child {pid} survived"
         );
     }
 

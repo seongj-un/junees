@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::features::Feature;
 use super::{state_path, write_atomic};
 use crate::message::Usage;
 
@@ -36,6 +37,25 @@ pub struct State {
     /// The goal `task init` planned the task for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    /// Set while a `task run` works and cleared when it stops. Found set by
+    /// a run that got the task's lock, it means the run that set it
+    /// crashed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<Running>,
+    /// The harness's copy of the feature list as of the last save. Crash
+    /// recovery takes from it which features passed, as claims the recheck
+    /// confirms; the definitions come from the task's init commit, since a
+    /// session can rewrite this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<Feature>>,
+}
+
+/// Which process runs the task, and since when.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Running {
+    pub pid: u32,
+    /// Unix seconds.
+    pub started: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,7 +63,8 @@ pub struct Stop {
     pub reason: StopReason,
     /// The last session that ran (0 if none ever did).
     pub session: u64,
-    /// The error, for [`StopReason::Error`].
+    /// The error, for [`StopReason::Error`]; which budget ran out, for
+    /// [`StopReason::Budget`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -59,6 +80,11 @@ pub enum StopReason {
     Stalled,
     /// A session ended with an error.
     Error,
+    /// The task used up its token budget, or the run its time budget.
+    Budget,
+    /// SIGINT or SIGTERM: the running session was cancelled, wrapped up
+    /// and checkpointed.
+    Interrupted,
 }
 
 impl StopReason {
@@ -84,6 +110,10 @@ impl fmt::Display for Stop {
                 self.session,
                 self.detail.as_deref().unwrap_or("unknown error")
             ),
+            StopReason::Budget => {
+                write!(f, "{}", self.detail.as_deref().unwrap_or("budget used up"))
+            }
+            StopReason::Interrupted => write!(f, "interrupted"),
         }
     }
 }
@@ -144,12 +174,27 @@ mod tests {
             }),
             stopped_at: Some(1_794_205_024),
             goal: Some("할 일 앱".into()),
+            running: Some(Running {
+                pid: 42,
+                started: 1_794_205_024,
+            }),
+            features: Some(
+                crate::task::features::parse(
+                    r#"[{"id": "F1", "description": "d", "verify": "true", "passes": true}]"#,
+                )
+                .unwrap(),
+            ),
         };
         state.save(root.path()).unwrap();
         assert_eq!(State::load(root.path()).unwrap(), state);
         let raw: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(state_path(root.path())).unwrap()).unwrap();
         assert_eq!(raw["stop"]["reason"], "error");
+        assert_eq!(raw["running"]["pid"], 42);
+        assert_eq!(raw["features"][0]["id"], "F1");
+        // An L3 state.json has neither.
+        let old: State = serde_json::from_str(r#"{"sessions": 2}"#).unwrap();
+        assert_eq!((old.running, old.features), (None, None));
         assert_eq!(
             state.stop.unwrap().to_string(),
             "session 4 failed: network down"

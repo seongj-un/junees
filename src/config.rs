@@ -3,9 +3,11 @@
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::task::budget::parse_duration;
 use crate::tools::ToolSettings;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -36,14 +38,19 @@ pub struct Config {
     /// Settings for the default tools: the bash command policy and the
     /// variables hidden from bash.
     pub tools: ToolSettings,
+    /// Default token budget of `task run` (`JUNEES_TASK_MAX_TOKENS`).
+    pub task_max_tokens: Option<u64>,
+    /// Default time budget of `task run` (`JUNEES_TASK_MAX_TIME`).
+    pub task_max_time: Option<Duration>,
 }
 
 impl Config {
     /// Reads `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `JUNEES_MODEL`,
     /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_CONTEXT_WINDOW`,
     /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_HOME`, `HOME`,
-    /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS` and
-    /// `JUNEES_HIDDEN_ENV`.
+    /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
+    /// `JUNEES_HIDDEN_ENV`, `JUNEES_TASK_MAX_TOKENS` and
+    /// `JUNEES_TASK_MAX_TIME`.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -100,6 +107,16 @@ impl Config {
             allow_dangerous: parse_flag(get("JUNEES_ALLOW_DANGEROUS"), "JUNEES_ALLOW_DANGEROUS")?,
         };
 
+        let task_max_tokens = match get("JUNEES_TASK_MAX_TOKENS") {
+            None => None,
+            Some(raw) => Some(crate::cli::positive(&raw).with_context(|| {
+                format!("JUNEES_TASK_MAX_TOKENS must be a positive integer, got `{raw}`")
+            })?),
+        };
+        let task_max_time = get("JUNEES_TASK_MAX_TIME")
+            .map(|raw| parse_duration(&raw).context("JUNEES_TASK_MAX_TIME"))
+            .transpose()?;
+
         Ok(Self {
             api_key,
             base_url: get("ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
@@ -110,6 +127,8 @@ impl Config {
             compact_threshold,
             home,
             tools,
+            task_max_tokens,
+            task_max_time,
         })
     }
 
@@ -195,6 +214,31 @@ mod tests {
         assert_eq!(config.compact_threshold, 0.8);
         assert_eq!(config.home, Some(PathBuf::from("/home/tester/.junees")));
         assert_eq!(config.tools, ToolSettings::default());
+        assert_eq!(config.task_max_tokens, None);
+        assert_eq!(config.task_max_time, None);
+    }
+
+    #[test]
+    fn reads_the_task_budget() {
+        let budget = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_TASK_MAX_TOKENS", " 500000 "),
+            ("JUNEES_TASK_MAX_TIME", "2h"),
+        ])
+        .unwrap();
+        assert_eq!(budget.task_max_tokens, Some(500_000));
+        assert_eq!(budget.task_max_time, Some(Duration::from_secs(7200)));
+        for (key, bad) in [
+            ("JUNEES_TASK_MAX_TOKENS", "0"),
+            ("JUNEES_TASK_MAX_TOKENS", "lots"),
+            ("JUNEES_TASK_MAX_TIME", "120"),
+            ("JUNEES_TASK_MAX_TIME", "2 days"),
+        ] {
+            let err = config(&[("ANTHROPIC_API_KEY", "k"), (key, bad)])
+                .err()
+                .unwrap_or_else(|| panic!("{key}={bad} was accepted"));
+            assert!(format!("{err:#}").contains(key), "{err:#}");
+        }
     }
 
     #[test]

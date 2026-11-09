@@ -1,6 +1,7 @@
 //! Junees: an AI agent harness.
 
 pub mod agent;
+pub mod cancel;
 pub mod cli;
 pub mod config;
 pub mod context;

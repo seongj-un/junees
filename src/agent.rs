@@ -4,6 +4,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::cancel::Cancel;
 use crate::context;
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError, ToolSpec};
@@ -68,6 +69,42 @@ impl std::fmt::Display for TurnLimit {
 
 impl std::error::Error for TurnLimit {}
 
+/// The result of a tool call that was cancelled while it ran, or before it
+/// could start.
+pub const CANCELLED: &str = "cancelled by the user";
+
+/// The error of [`Agent::run`] when its [`Cancel`] was set. Running tools
+/// were stopped and every tool call of the turn has a result, so the
+/// history is valid and ends with a user message; the next input joins it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// Asked before each model call with the tokens used so far; a reason to
+/// stop ends the run there. See [`Agent::with_limit`].
+pub type Limit = Box<dyn FnMut(Usage) -> Option<String> + Send>;
+
+/// The error of [`Agent::run`] when its [`Limit`] stopped it before a
+/// model call, with the limit's reason. Like [`TurnLimit`], the history is
+/// valid and ends with a user message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitReached(pub String);
+
+impl std::fmt::Display for LimitReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for LimitReached {}
+
 pub struct Agent {
     provider: Box<dyn Provider>,
     tools: ToolRegistry,
@@ -78,6 +115,10 @@ pub struct Agent {
     /// Old tool output was cleared before the last model call, so the
     /// context size measured since tells whether that was enough.
     cleared: bool,
+    /// Stops the current turn when set; see [`Agent::with_cancel`].
+    cancel: Cancel,
+    /// Checked before each model call; see [`Agent::with_limit`].
+    limit: Option<Limit>,
 }
 
 impl Agent {
@@ -99,7 +140,29 @@ impl Agent {
             transcript,
             journal: None,
             cleared: false,
+            cancel: Cancel::new(),
+            limit: None,
         }
+    }
+
+    /// Before each model call, asks `limit` with this session's usage so
+    /// far (summary calls included) whether to go on. When it gives a
+    /// reason, [`Agent::run`] fails with [`LimitReached`] instead of
+    /// calling the model. A summary call that compaction makes before a
+    /// model call is asked about on its own. Task runs use it for their token and time budget.
+    pub fn with_limit(mut self, limit: Limit) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Stops [`Agent::run`] when `cancel` is set: a model call in flight is
+    /// abandoned, a running tool is stopped (bash kills its process
+    /// group), and the tool calls without a result get a [`CANCELLED`]
+    /// error result. The run then fails with [`Cancelled`]. The caller
+    /// resets the flag before the next input.
+    pub fn with_cancel(mut self, cancel: Cancel) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// Records every later history change to `journal`.
@@ -146,23 +209,16 @@ impl Agent {
         let entry = self.transcript.user_text_entry(input);
         self.record(entry, &mut on_event);
         let specs = self.tools.specs();
+        let cancel = self.cancel.clone();
 
         for _ in 0..self.options.max_turns {
-            self.manage_context(&mut on_event).await;
-            let response = match self.call(&specs).await {
-                Ok(response) => response,
-                // Shrink the history as far as it goes and try once more.
-                Err(err) if err.is_context_overflow() => {
-                    if !self.shrink(&mut on_event).await {
-                        return Err(err.into());
-                    }
-                    on_event(Event::Warning(
-                        "the conversation did not fit the context window; \
-                         retrying once with the shrunk history",
-                    ));
-                    self.call(&specs).await?
-                }
-                Err(err) => return Err(err.into()),
+            self.check_limit()?;
+            // Nothing is recorded while a call is in flight, so abandoning
+            // it leaves the history as it was: ending with a user message.
+            let response = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(Cancelled.into()),
+                response = self.respond(&specs, &mut on_event) => response?,
             };
             self.record(Entry::Usage(response.usage), &mut on_event);
 
@@ -229,11 +285,21 @@ impl Agent {
 
             let mut results = Vec::with_capacity(tool_calls.len());
             for (id, name, input) in tool_calls {
-                on_event(Event::ToolCall {
-                    name: &name,
-                    input: &input,
-                });
-                let output = self.tools.dispatch(&name, input).await;
+                // After a cancel, the calls left get a result without running.
+                let output = if cancel.is_cancelled() {
+                    ToolOutput::error(CANCELLED)
+                } else {
+                    on_event(Event::ToolCall {
+                        name: &name,
+                        input: &input,
+                    });
+                    // Dropping the call stops the tool.
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => ToolOutput::error(CANCELLED),
+                        output = self.tools.dispatch(&name, input) => output,
+                    }
+                };
                 on_event(Event::ToolResult {
                     name: &name,
                     output: &output,
@@ -249,9 +315,53 @@ impl Agent {
                 content: results,
             };
             self.record(Entry::Message(results), &mut on_event);
+            if cancel.is_cancelled() {
+                return Err(Cancelled.into());
+            }
         }
 
         Err(TurnLimit(self.options.max_turns).into())
+    }
+
+    /// Fails with [`LimitReached`] if the limit says to stop.
+    fn check_limit(&mut self) -> Result<()> {
+        if let Some(limit) = &mut self.limit
+            && let Some(reason) = limit(self.transcript.usage)
+        {
+            return Err(LimitReached(reason).into());
+        }
+        Ok(())
+    }
+
+    /// The next model response: keeps the context under its limit first,
+    /// and on an overflow shrinks the history and retries once. The limit
+    /// was asked before the first call this makes; it is asked again
+    /// before each later one, summary calls included.
+    async fn respond(
+        &mut self,
+        specs: &[ToolSpec],
+        on_event: &mut impl FnMut(Event<'_>),
+    ) -> Result<CompletionResponse> {
+        if self.manage_context(on_event).await {
+            self.check_limit()?;
+        }
+        match self.call(specs).await {
+            Ok(response) => Ok(response),
+            // Shrink the history as far as it goes and try once more.
+            Err(err) if err.is_context_overflow() => {
+                self.check_limit()?;
+                if !self.shrink(on_event).await {
+                    return Err(err.into());
+                }
+                self.check_limit()?;
+                on_event(Event::Warning(
+                    "the conversation did not fit the context window; \
+                     retrying once with the shrunk history",
+                ));
+                Ok(self.call(specs).await?)
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     async fn call(&self, specs: &[ToolSpec]) -> Result<CompletionResponse, ProviderError> {
@@ -288,18 +398,20 @@ impl Agent {
     /// Keeps the conversation under the compaction threshold: once the
     /// context size reaches it, old tool output is cleared first. If there
     /// is none to clear, or the next call still measures over the threshold,
-    /// the conversation is compacted.
-    async fn manage_context(&mut self, on_event: &mut impl FnMut(Event<'_>)) {
+    /// the conversation is compacted. Returns whether it tried to, which
+    /// takes a summary call.
+    async fn manage_context(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
         if self.transcript.context_tokens < self.options.compact_limit() {
             self.cleared = false;
-            return;
+            return false;
         }
         if !self.cleared && self.clear_tool_results(on_event) {
             self.cleared = true;
-            return;
+            return false;
         }
         self.cleared = false;
         self.summarize(on_event).await;
+        true
     }
 
     /// Replaces the earlier part of the conversation with a summary written
@@ -608,6 +720,36 @@ mod tests {
         let err = agent.run("loop", |_| {}).await.unwrap_err();
         assert!(err.to_string().contains("stopped after 2 model calls"));
         assert_eq!(err.downcast_ref::<TurnLimit>(), Some(&TurnLimit(2)));
+    }
+
+    #[tokio::test]
+    async fn a_limit_stops_the_run_between_model_calls() {
+        let provider = Scripted::new(vec![
+            tool_use("toolu_1", "upper", json!({"text": "a"})),
+            tool_use("toolu_2", "upper", json!({"text": "b"})),
+            text("never asked for"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut asked = Vec::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut agent = agent(provider, 5).with_limit(Box::new(move |usage: Usage| {
+            sender.send(usage.input_tokens).unwrap();
+            (usage.input_tokens >= 10).then(|| format!("used {}", usage.input_tokens))
+        }));
+        let err = agent.run("go", |_| {}).await.unwrap_err();
+        asked.extend(receiver.try_iter());
+
+        assert_eq!(
+            err.downcast_ref::<LimitReached>(),
+            Some(&LimitReached("used 10".into()))
+        );
+        // Asked before each call: 0, 5, then 10 stops it.
+        assert_eq!(asked, [0, 5, 10]);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let history = agent.messages();
+        assert_eq!(history.len(), 5);
+        assert_eq!(tool_output(&history[4]), [("toolu_2", "B", false)]);
+        assert_valid(history);
     }
 
     #[tokio::test]
@@ -1216,6 +1358,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_limit_is_asked_again_after_a_summary_call() {
+        let summary = sized(text("SUMMARY"), 51);
+        let provider = Scripted::new(long_conversation(summary));
+        let seen = provider.seen.clone();
+        // Under 2300 tokens until the summary call (50 in) of "fourth".
+        let mut agent = agent(provider, 10).with_limit(Box::new(|usage: Usage| {
+            (usage.input_tokens >= 2300).then(|| format!("used {}", usage.input_tokens))
+        }));
+        for input in ["first", "second", "third"] {
+            agent.run(input, |_| {}).await.unwrap();
+        }
+        let err = agent.run("fourth", |_| {}).await.unwrap_err();
+
+        assert_eq!(
+            err.downcast_ref::<LimitReached>(),
+            Some(&LimitReached("used 2343".into()))
+        );
+        // The summary call was made, the model call after it was not.
+        assert_eq!(seen.lock().unwrap().len(), 8);
+        let history = agent.messages();
+        assert_eq!(summary_text(&history[0]).as_deref(), Some("SUMMARY"));
+        assert_eq!(history.last(), Some(&Message::user_text("fourth")));
+        assert_valid(history);
+    }
+
+    #[tokio::test]
     async fn a_failed_summary_leaves_the_history_alone() {
         let failure = Err(ProviderError::Transport("network down".into()));
         let provider = Scripted::new(long_conversation(failure));
@@ -1502,6 +1670,122 @@ mod tests {
         );
         assert_valid(retried);
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
+    /// A provider whose calls never finish.
+    struct Hang;
+
+    #[async_trait]
+    impl Provider for Hang {
+        async fn complete(
+            &self,
+            _request: CompletionRequest<'_>,
+        ) -> Result<CompletionResponse, ProviderError> {
+            std::future::pending().await
+        }
+    }
+
+    /// Sets `cancel` once `pid_file` holds a pid, and returns the pid.
+    fn cancel_when_started(
+        cancel: Cancel,
+        pid_file: std::path::PathBuf,
+    ) -> tokio::task::JoinHandle<u32> {
+        tokio::spawn(async move {
+            loop {
+                let text = std::fs::read_to_string(&pid_file).unwrap_or_default();
+                if let Ok(pid) = text.trim().parse() {
+                    cancel.cancel();
+                    break pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_tool_stops_it_and_the_next_input_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let command = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let provider = Scripted::new(vec![
+            Ok(CompletionResponse {
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "slow".into(),
+                        name: "bash".into(),
+                        input: json!({ "command": command }),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "next".into(),
+                        name: "count".into(),
+                        input: json!({}),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            }),
+            text("fine"),
+        ]);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let (agent, calls) = counting_agent(provider);
+        let cancel = Cancel::new();
+        let mut agent = agent
+            .with_journal(Box::new(journal.clone()))
+            .with_cancel(cancel.clone());
+        agent.tools.register(crate::tools::Bash::default());
+        let canceller = cancel_when_started(cancel.clone(), pid_file);
+
+        let err = agent.run("go", |_| {}).await.unwrap_err();
+        assert_eq!(err.downcast_ref::<Cancelled>(), Some(&Cancelled));
+        let pid = canceller.await.unwrap();
+        assert!(
+            crate::tools::testing::gone_soon(pid).await,
+            "the tool's child {pid} survived"
+        );
+        // The call after the cancelled one never ran; both are answered.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            tool_output(&agent.messages()[2]),
+            [("slow", CANCELLED, true), ("next", CANCELLED, true)]
+        );
+        assert_valid(agent.messages());
+
+        cancel.reset();
+        assert_eq!(agent.run("next", |_| {}).await.unwrap(), "fine");
+        let sent = &seen.lock().unwrap()[1];
+        assert_eq!(sent.len(), 3);
+        assert_eq!(
+            sent[2].content.last(),
+            Some(&ContentBlock::Text {
+                text: "next".into()
+            })
+        );
+        assert_valid(sent);
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_model_call_leaves_the_input_for_the_next_one() {
+        let cancel = Cancel::new();
+        let mut agent = Agent::new(
+            Box::new(Hang),
+            ToolRegistry::new(),
+            agent(Scripted::default(), 5).options.clone(),
+        )
+        .with_cancel(cancel.clone());
+        let setter = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            setter.cancel();
+        });
+        let err = agent.run("go", |_| {}).await.unwrap_err();
+        assert!(err.downcast_ref::<Cancelled>().is_some(), "{err}");
+        assert_eq!(agent.messages(), [Message::user_text("go")]);
+        // Still set: the next run stops before calling the model.
+        let err = agent.run("again", |_| {}).await.unwrap_err();
+        assert!(err.downcast_ref::<Cancelled>().is_some(), "{err}");
+        assert_eq!(agent.messages()[0].text(), "go\nagain");
     }
 
     #[tokio::test]

@@ -658,3 +658,111 @@ async fn task_mode_refuses_folders_outside_git() {
     );
     assert!(!plain.path().join(".junees").exists());
 }
+
+/// Whether the process runs (a zombie does not).
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z" && state != "X")
+    })
+}
+
+/// Waits up to ten seconds for `check` to hold.
+async fn until(what: &str, mut check: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
+    let home = tempfile::tempdir().unwrap();
+    let pid_file = home.path().join("pid");
+    let features = json!([
+        {"id": "F1", "description": "done.txt exists", "verify": "test -f done.txt", "passes": false}
+    ]);
+    let slow = format!(
+        "echo wip > wip.txt; sleep 30 & echo $! > '{}'; wait",
+        pid_file.display()
+    );
+    let (url, server) = fake_api(vec![
+        (
+            200,
+            tool_calls(&[
+                write_file(".junees/features.json", &features.to_string()),
+                write_file(".junees/progress.md", "# Plan\n"),
+            ]),
+        ),
+        (200, text_reply("Planned.")),
+        (200, tool_calls(&[("bash", json!({ "command": slow }))])),
+    ])
+    .await;
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make done.txt"]).await;
+
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    command
+        .args(["task", "run"])
+        .current_dir(root)
+        .env("ANTHROPIC_API_KEY", "sk-fake")
+        .env("ANTHROPIC_BASE_URL", &url)
+        .env("JUNEES_HOME", home.path().join("junees"))
+        .env_remove("JUNEES_TASK_MAX_TOKENS")
+        .env_remove("JUNEES_TASK_MAX_TIME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    isolate_git(&mut command, home.path());
+    let child = command.spawn().unwrap();
+    until("the session's tool to start", || {
+        std::fs::read_to_string(&pid_file).is_ok_and(|text| text.trim().parse::<u32>().is_ok())
+    })
+    .await;
+    let sleeper: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let pid = libc::pid_t::try_from(child.id().unwrap()).unwrap();
+    // SAFETY: kill only sends a signal to the child this test started.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait_with_output())
+        .await
+        .expect("junees did not exit")
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(143), "{stdout}\n{stderr}");
+    assert!(stdout.ends_with("task stopped: interrupted\n"), "{stdout}");
+    assert!(stderr.contains("SIGTERM: stopping"), "{stderr}");
+    until("the tool's child to be gone", || !alive(sleeper)).await;
+
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".junees/state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["stop"]["reason"], "interrupted");
+    assert_eq!(state["stop"]["session"], 1);
+    let log = git(root, home.path(), &["log", "--format=%s"]).await;
+    assert_eq!(
+        log,
+        "junees: checkpoint after session 1\njunees: initialize task\n"
+    );
+    assert_eq!(git(root, home.path(), &["status", "--porcelain"]).await, "");
+    let tracked = git(root, home.path(), &["ls-files", "wip.txt"]).await;
+    assert_eq!(tracked, "wip.txt\n");
+    let progress = std::fs::read_to_string(root.join(".junees/progress.md")).unwrap();
+    assert!(
+        progress.contains("- [junees] session 1: 0/1 passing, nothing new, interrupted, "),
+        "{progress}"
+    );
+    assert_eq!(server.await.unwrap().len(), 3);
+}
