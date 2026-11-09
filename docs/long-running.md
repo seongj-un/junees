@@ -55,7 +55,7 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
   - L4b: 공유 취소 플래그(`Cancel`, tokio `watch`)를 `Agent::with_cancel`로 넘긴다. 설정되면 모델 호출은 버리고, 실행 중인 도구 호출은 drop되어 bash가 프로세스 그룹 전체를 SIGKILL로 끝내며(정상 종료한 명령의 백그라운드 프로세스는 그대로), 결과 없는 tool_use는 `cancelled by the user` 오류 결과로 채운 뒤 `Cancelled` 오류로 끝난다. 기록은 user 메시지로 끝나서 다음 입력이 붙는다
   - 대화 모드: Ctrl-C는 턴만 취소, 프롬프트에서 두 번(또는 Ctrl-D)이면 종료, SIGTERM은 취소 후 143. `-p`: 취소 후 130/143. `task run`: 세션을 마무리하고 체크포인트 커밋, `interrupted` 정지 이유, 130/143. 두 번째 시그널은 즉시 종료
 - 크래시 복구와 실행 로그
-  - L4b: `task run`이 `.junees/`에 `flock`을 잡고 `state.json`에 `running {pid, started}`와 기능 목록의 하네스 사본을 남긴다. 잠금이 잡혀 있으면 거절, 표시만 남아 있으면 크래시로 보고 `features.json`의 기능 정의를 init 커밋에서 되돌림(사본과 파일에서는 `passes: true`만 가져와 init 커밋의 verify로 시작 시 재검증. 세션이 고칠 수 있는 `state.json` 사본의 정의는 믿지 않음), `progress.md` 한 줄, `junees: recover after crash` 커밋 후 이어 간다
+  - L4b: `task run`이 저장소 루트 폴더에 `flock`을 잡고(`.junees/`는 세션이 지웠다 다시 만들어지면 잠금이 풀리므로) `state.json`에 `running {pid, started}`와 기능 목록의 하네스 사본을 남긴다. 잠금이 잡혀 있으면 거절, 표시만 남아 있으면 크래시로 보고 `features.json`의 기능 정의를 init 커밋에서 되돌림(사본과 파일에서는 `passes: true`만 가져와 init 커밋의 verify로 시작 시 재검증. 세션이 고칠 수 있는 `state.json` 사본의 정의는 믿지 않음), `progress.md` 한 줄, `junees: recover after crash` 커밋 후 이어 간다
   - `.junees/run.log`: 실행 시작/정지(이유, 토큰, 경과 시간), 세션 시작/끝, 크래시 복구를 UTC 시각과 함께 한 줄씩. git 제외(예전 작업은 첫 실행에서 `.gitignore`를 고쳐 따로 커밋)
   - 남은 것: 크래시 난 세션의 토큰은 누적에 들어가지 않음, 세션이 `.junees/`를 통째로 지우면 잠금과 실행 중 표시도 사라짐
 - 무인 모드 명령 정책: 위험 명령 차단 목록, 작업 폴더 밖 쓰기 경고
