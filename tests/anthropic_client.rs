@@ -26,6 +26,7 @@ async fn sends_headers_and_body() {
             messages: &messages,
             tools: &[],
             max_tokens: 64,
+            cache: true,
         })
         .await
         .unwrap();
@@ -44,7 +45,10 @@ async fn sends_headers_and_body() {
     let body = body_of(&requests[0]);
     assert_eq!(body["model"], "test-model");
     assert_eq!(body["max_tokens"], 64);
-    assert_eq!(body["system"], "sys");
+    assert_eq!(
+        body["system"],
+        json!([{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}])
+    );
     assert_eq!(body["messages"][0]["content"][0]["text"], "hi");
 }
 
@@ -60,6 +64,7 @@ async fn retries_when_overloaded() {
             messages: &messages,
             tools: &[],
             max_tokens: 64,
+            cache: true,
         })
         .await
         .unwrap();
@@ -81,6 +86,7 @@ async fn does_not_retry_auth_errors() {
             messages: &messages,
             tools: &[],
             max_tokens: 64,
+            cache: true,
         })
         .await
         .unwrap_err();
@@ -97,6 +103,7 @@ async fn complete_hi(url: String) -> Result<CompletionResponse, ProviderError> {
             messages: &messages,
             tools: &[],
             max_tokens: 64,
+            cache: true,
         })
         .await
 }
@@ -168,6 +175,8 @@ async fn agent_runs_bash_through_the_real_client() {
             system: "sys".into(),
             max_tokens: 64,
             max_turns: 5,
+            context_window: 200_000,
+            compact_threshold: 0.8,
         },
     );
     let answer = agent.run("run echo", |_| {}).await.unwrap();

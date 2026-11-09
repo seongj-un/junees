@@ -80,18 +80,39 @@ pub enum StopReason {
     Other,
 }
 
+/// Token counts of a model call. `input_tokens` excludes the prompt tokens
+/// written to or read from the prompt cache, which are counted apart.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read_input_tokens: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Usage {
     pub fn add(&mut self, other: Usage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens;
+        self.cache_read_input_tokens += other.cache_read_input_tokens;
+    }
+
+    /// Size of the conversation after this call: everything it read plus
+    /// what it wrote, which the next request sends back.
+    pub fn context_tokens(&self) -> u64 {
+        self.input_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+            + self.output_tokens
     }
 }
 
@@ -167,17 +188,57 @@ mod tests {
         total.add(Usage {
             input_tokens: 10,
             output_tokens: 2,
+            ..Default::default()
         });
         total.add(Usage {
             input_tokens: 5,
             output_tokens: 1,
+            cache_creation_input_tokens: 7,
+            cache_read_input_tokens: 9,
+        });
+        total.add(Usage {
+            cache_read_input_tokens: 1,
+            ..Default::default()
         });
         assert_eq!(
             total,
             Usage {
                 input_tokens: 15,
-                output_tokens: 3
+                output_tokens: 3,
+                cache_creation_input_tokens: 7,
+                cache_read_input_tokens: 10,
             }
         );
+    }
+
+    #[test]
+    fn context_size_counts_cached_input_and_output() {
+        let usage = Usage {
+            input_tokens: 5,
+            output_tokens: 40,
+            cache_creation_input_tokens: 300,
+            cache_read_input_tokens: 9000,
+        };
+        assert_eq!(usage.context_tokens(), 9345);
+    }
+
+    #[test]
+    fn usage_writes_cache_counts_only_when_set() {
+        let plain = Usage {
+            input_tokens: 3,
+            output_tokens: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(plain).unwrap(),
+            json!({"input_tokens": 3, "output_tokens": 1})
+        );
+        let cached = Usage {
+            cache_read_input_tokens: 50,
+            ..plain
+        };
+        let value = serde_json::to_value(cached).unwrap();
+        assert_eq!(value["cache_read_input_tokens"], 50);
+        assert_eq!(serde_json::from_value::<Usage>(value).unwrap(), cached);
     }
 }

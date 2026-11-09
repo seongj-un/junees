@@ -21,11 +21,28 @@ use serde::{Deserialize, Serialize};
 use crate::message::{ContentBlock, Message, Role, Usage};
 
 /// The journal format this version writes and the newest it can read.
-/// Raise it when old binaries could misread new journals.
-pub const FORMAT: u32 = 1;
+/// Raise it when old binaries could misread new journals. Format 2 added
+/// `clear_tool_results` and `compact`; format 1 journals still load.
+pub const FORMAT: u32 = 2;
 
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
+
+/// What a tool result says once its output was cleared to save context.
+pub const CLEARED: &str = "[tool output cleared to save context]";
+
+/// Tool result messages whose output is never cleared: the most recent ones.
+pub const KEEP_TOOL_RESULTS: usize = 3;
+
+/// Starts the text block that carries a compacted conversation's summary.
+pub const SUMMARY_HEADER: &str = "[Summary of the earlier conversation]\n";
+
+/// User inputs a compaction keeps whole when it can.
+const KEEP_INPUTS: usize = 2;
+
+/// Tool rounds (a model reply and the results of its calls) a compaction
+/// inside a single turn keeps whole when it can.
+const KEEP_ROUNDS: usize = 2;
 
 /// The first line of every journal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +62,17 @@ fn first_format() -> u32 {
     1
 }
 
+/// The `type` tags of [`Entry`]; keep in step with its variants.
+const ENTRY_TYPES: [&str; 7] = [
+    "meta",
+    "message",
+    "append_text",
+    "usage",
+    "clear_tool_results",
+    "summary_usage",
+    "compact",
+];
+
 /// One line of a journal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -58,6 +86,23 @@ pub enum Entry {
     },
     /// Token usage of one model call.
     Usage(Usage),
+    /// The output of every tool result in the messages before index `upto`
+    /// was replaced with [`CLEARED`].
+    ClearToolResults {
+        upto: usize,
+    },
+    /// Token usage of a call that summarized the conversation. It counts
+    /// toward the session's usage but says nothing about the context size.
+    SummaryUsage(Usage),
+    /// The messages before index `keep_from` were replaced by `summary`.
+    /// It leads the first kept message when that is a user input; when the
+    /// tail starts with a model reply (a cut inside one turn), it goes into
+    /// a new user message, followed by the text of the input that started
+    /// the turn, word for word.
+    Compact {
+        summary: String,
+        keep_from: usize,
+    },
 }
 
 /// An entry as a journal line stores it: stamped with when it was written.
@@ -89,6 +134,9 @@ pub trait Journal: Send {
 pub struct Transcript {
     pub messages: Vec<Message>,
     pub usage: Usage,
+    /// Size of the conversation as of the last model call (see
+    /// [`Usage::context_tokens`]); 0 until one is measured.
+    pub context_tokens: u64,
 }
 
 impl Transcript {
@@ -103,8 +151,142 @@ impl Transcript {
                 }
                 _ => self.messages.push(Message::user_text(text)),
             },
-            Entry::Usage(usage) => self.usage.add(usage),
+            Entry::Usage(usage) => {
+                self.usage.add(usage);
+                self.context_tokens = usage.context_tokens();
+            }
+            Entry::ClearToolResults { upto } => {
+                for message in self.messages.iter_mut().take(upto) {
+                    for block in &mut message.content {
+                        if let ContentBlock::ToolResult { content, .. } = block {
+                            *content = CLEARED.to_string();
+                        }
+                    }
+                }
+            }
+            Entry::SummaryUsage(usage) => self.usage.add(usage),
+            Entry::Compact { summary, keep_from } => {
+                let dropped: Vec<Message> = self
+                    .messages
+                    .drain(..keep_from.min(self.messages.len()))
+                    .collect();
+                let block = ContentBlock::Text {
+                    text: format!("{SUMMARY_HEADER}{summary}"),
+                };
+                match self.messages.first_mut() {
+                    Some(first) if first.role == Role::User => first.content.insert(0, block),
+                    _ => {
+                        // The cut was inside the turn of the first message's
+                        // input. That input is the task the turn works on,
+                        // so it stays as typed rather than only summarized.
+                        let mut content = vec![block];
+                        if let Some(input) = dropped.first() {
+                            content.extend(
+                                input
+                                    .content
+                                    .iter()
+                                    .filter(|block| {
+                                        matches!(block, ContentBlock::Text { text }
+                                            if !text.starts_with(SUMMARY_HEADER))
+                                    })
+                                    .cloned(),
+                            );
+                        }
+                        self.messages.insert(
+                            0,
+                            Message {
+                                role: Role::User,
+                                content,
+                            },
+                        );
+                    }
+                }
+                // Unknown until the next model call measures it.
+                self.context_tokens = 0;
+            }
         }
+    }
+
+    /// Where a compaction should cut the history: the index of the first
+    /// kept message, or `None` when there is nowhere to cut.
+    ///
+    /// Cuts before a user input come first: the tail starts at a user
+    /// message that carries typed input and no tool results, right after a
+    /// message without tool calls, so no tool call is cut off from its
+    /// result. It keeps the last two inputs and everything after them when
+    /// it can, else the last one.
+    ///
+    /// When the first message is the only input (one long turn, as in a
+    /// one-shot task), the cut goes inside that turn instead: at a model
+    /// reply that directly follows a message holding nothing but tool
+    /// results, so every earlier tool call has its result. It keeps the
+    /// last two such rounds when it can, else the last one.
+    pub fn compact_point(&self) -> Option<usize> {
+        let inputs: Vec<usize> = (1..self.messages.len())
+            .filter(|&i| {
+                let message = &self.messages[i];
+                message.role == Role::User
+                    && message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::Text { .. }))
+                    && !has_tool_result(message)
+                    && !self.messages[i - 1]
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+            })
+            .collect();
+        if !inputs.is_empty() {
+            return inputs
+                .iter()
+                .rev()
+                .nth(KEEP_INPUTS - 1)
+                .or(inputs.last())
+                .copied();
+        }
+        let rounds: Vec<usize> = (2..self.messages.len())
+            .filter(|&i| {
+                self.messages[i].role == Role::Assistant && only_tool_results(&self.messages[i - 1])
+            })
+            .collect();
+        rounds
+            .iter()
+            .rev()
+            .nth(KEEP_ROUNDS - 1)
+            .or(rounds.last())
+            .copied()
+    }
+
+    /// The entry that clears the output of every tool result except those
+    /// in the last [`KEEP_TOOL_RESULTS`] messages that carry tool results,
+    /// or `None` when there is nothing left to clear. The blocks stay, with
+    /// their `tool_use_id` and `is_error`, so every tool call keeps its
+    /// result.
+    pub fn clear_entry(&self) -> Option<Entry> {
+        self.clear_entry_keeping(KEEP_TOOL_RESULTS)
+    }
+
+    /// Like [`Transcript::clear_entry`], but keeps the output of the last
+    /// `keep` messages with tool results; 0 clears every tool result.
+    pub fn clear_entry_keeping(&self, keep: usize) -> Option<Entry> {
+        let upto = match keep.checked_sub(1) {
+            None => self.messages.len(),
+            Some(skip) => self
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| has_tool_result(message))
+                .map(|(i, _)| i)
+                .rev()
+                .nth(skip)?,
+        };
+        let uncleared = self.messages[..upto].iter().any(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::ToolResult { content, .. } if content != CLEARED),
+            )
+        });
+        uncleared.then_some(Entry::ClearToolResults { upto })
     }
 
     /// The entry that adds user input: it joins a trailing user message (left
@@ -143,6 +325,23 @@ impl Transcript {
             content: results,
         })
     }
+}
+
+fn has_tool_result(message: &Message) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+}
+
+/// A user message that answers tool calls and says nothing else.
+fn only_tool_results(message: &Message) -> bool {
+    message.role == Role::User
+        && !message.content.is_empty()
+        && message
+            .content
+            .iter()
+            .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
 /// Appends entries to a journal file, one JSON line per entry, each written
@@ -315,7 +514,17 @@ impl Session {
                     ));
                     break;
                 }
-                Err(err) => bail!("{}: line {line_no} is corrupt: {err}", path.display()),
+                Err(err) => match unknown_type(line) {
+                    // A later Junees may have continued an older session
+                    // without changing its meta line.
+                    Some(kind) => bail!(
+                        "{}: line {line_no} is a `{kind}` entry, which this version \
+                         does not know: the session was probably continued by a newer \
+                         Junees; update Junees to open it",
+                        path.display()
+                    ),
+                    None => bail!("{}: line {line_no} is corrupt: {err}", path.display()),
+                },
             }
             pos = next;
         }
@@ -372,6 +581,13 @@ impl Session {
         }
         Ok((session, writer))
     }
+}
+
+/// The `type` of a JSON object line, if it is not one this version knows.
+fn unknown_type(line: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+    let kind = value.get("type")?.as_str()?;
+    (!ENTRY_TYPES.contains(&kind)).then(|| kind.to_string())
 }
 
 pub fn sessions_dir(home: &Path) -> PathBuf {
@@ -618,7 +834,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Entry::Usage(Usage {
                 input_tokens: 3,
-                output_tokens: 1
+                output_tokens: 1,
+                ..Default::default()
             }))
             .unwrap(),
             json!({"type": "usage", "input_tokens": 3, "output_tokens": 1})
@@ -649,6 +866,7 @@ mod tests {
             Entry::Usage(Usage {
                 input_tokens: 5,
                 output_tokens: 2,
+                ..Default::default()
             }),
             Entry::Message(tool_call("toolu_1")),
         ];
@@ -750,20 +968,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         let user = line(&Entry::Message(Message::user_text("hi")));
-        let compact = r#"{"type":"compact","summary":"so far","keep_from":0}"#;
-        write_lines(&path, &[line(&meta()), user, compact.into()], "");
+        let future = r#"{"type":"from_the_future","x":1}"#;
+        write_lines(&path, &[line(&meta()), user, future.into()], "");
         let before = fs::read(&path).unwrap();
 
-        let err = Session::load(&path).unwrap_err();
-        assert!(err.to_string().contains("line 3 is corrupt"), "{err}");
+        let err = Session::load(&path).unwrap_err().to_string();
+        assert!(err.contains("line 3 is a `from_the_future` entry"), "{err}");
+        assert!(err.contains("continued by a newer Junees"), "{err}");
         assert!(Session::resume(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+
+        // A known entry type that does not parse is plain corrupt.
+        let broken = r#"{"type":"usage","input_tokens":"many"}"#;
+        write_lines(&path, &[line(&meta()), broken.into()], "");
+        let err = Session::load(&path).unwrap_err().to_string();
+        assert!(err.contains("line 2 is corrupt"), "{err}");
+    }
+
+    #[test]
+    fn every_entry_type_is_known() {
+        let samples = [
+            meta(),
+            Entry::Message(Message::user_text("hi")),
+            Entry::AppendText { text: "x".into() },
+            Entry::Usage(Usage::default()),
+            Entry::ClearToolResults { upto: 1 },
+            Entry::SummaryUsage(Usage::default()),
+            Entry::Compact {
+                summary: "s".into(),
+                keep_from: 1,
+            },
+        ];
+        let kinds: Vec<String> = samples
+            .iter()
+            .map(|entry| serde_json::to_value(entry).unwrap()["type"].to_string())
+            .collect();
+        let known: Vec<String> = ENTRY_TYPES
+            .iter()
+            .map(|kind| format!("\"{kind}\""))
+            .collect();
+        assert_eq!(kinds, known);
     }
 
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 1);
+        assert_eq!(value["format"], 2);
         // Journals written before the field existed are format 1.
         let old =
             r#"{"type":"meta","id":"a","created_at":1,"cwd":"/w","model":"m","version":"0.1.0"}"#;
@@ -779,15 +1029,331 @@ mod tests {
         let path = dir.path().join("s.jsonl");
         let mut newer = serde_json::to_value(meta()).unwrap();
         newer["format"] = json!(FORMAT + 1);
-        let compact = r#"{"type":"compact","summary":"so far","keep_from":0}"#;
-        write_lines(&path, &[newer.to_string(), compact.into()], "");
+        let future = r#"{"type":"from_the_future","x":1}"#;
+        write_lines(&path, &[newer.to_string(), future.into()], "");
         let before = fs::read(&path).unwrap();
 
         let err = Session::load(&path).unwrap_err().to_string();
         assert!(err.contains("written by a newer Junees"), "{err}");
-        assert!(err.contains("session format 2"), "{err}");
+        assert!(err.contains("session format 3"), "{err}");
         assert!(Session::resume(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn loads_a_format_1_session() {
+        // As L1 wrote them: format 1, no cache counts, no `ts`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let lines = [
+            r#"{"type":"meta","id":"a","format":1,"created_at":1,"cwd":"/w","model":"m","version":"0.1.0"}"#,
+            r#"{"type":"message","role":"user","content":[{"type":"text","text":"hi"}]}"#,
+            r#"{"type":"usage","input_tokens":30,"output_tokens":4}"#,
+            r#"{"type":"message","role":"assistant","content":[{"type":"text","text":"yo"}]}"#,
+        ]
+        .map(String::from);
+        write_lines(&path, &lines, "");
+        let (session, mut writer) = Session::resume(&path).unwrap();
+        assert_eq!(session.meta.format, 1);
+        assert_eq!(session.transcript.messages.len(), 2);
+        assert_eq!(session.transcript.context_tokens, 34);
+        // New entries are appended to it as they are.
+        writer.record(&Entry::ClearToolResults { upto: 0 }).unwrap();
+        drop(writer);
+        assert_eq!(Session::load(&path).unwrap().transcript, session.transcript);
+    }
+
+    fn tool_results(id: &str, output: &str, is_error: bool) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: output.into(),
+                is_error,
+            }],
+        }
+    }
+
+    /// `n` rounds of a tool call and its result after one user input.
+    fn tool_rounds(n: usize) -> Transcript {
+        let mut transcript = Transcript::default();
+        transcript.apply(Entry::Message(Message::user_text("go")));
+        for i in 0..n {
+            let id = format!("toolu_{i}");
+            transcript.apply(Entry::Message(tool_call(&id)));
+            let output = format!("output {i}");
+            transcript.apply(Entry::Message(tool_results(&id, &output, i == 0)));
+        }
+        transcript
+    }
+
+    #[test]
+    fn clearing_keeps_the_last_three_tool_results() {
+        assert_eq!(tool_rounds(3).clear_entry(), None);
+        let mut transcript = tool_rounds(5);
+        let before = transcript.clone();
+        let entry = transcript.clear_entry().unwrap();
+        // Results sit at 2, 4, 6, 8, 10; the last three start at 6.
+        assert_eq!(entry, Entry::ClearToolResults { upto: 6 });
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap(),
+            json!({"type": "clear_tool_results", "upto": 6})
+        );
+        transcript.apply(entry);
+
+        assert_eq!(transcript.messages.len(), before.messages.len());
+        assert_eq!(
+            transcript.messages[2],
+            tool_results("toolu_0", CLEARED, true)
+        );
+        assert_eq!(
+            transcript.messages[4],
+            tool_results("toolu_1", CLEARED, false)
+        );
+        assert_eq!(transcript.messages[6..], before.messages[6..]);
+        // Everything but tool output is untouched.
+        for (now, then) in transcript.messages.iter().zip(&before.messages).take(6) {
+            if !has_tool_result(then) {
+                assert_eq!(now, then);
+            }
+        }
+        // Already cleared: nothing to do until another result comes in.
+        assert_eq!(transcript.clear_entry(), None);
+        transcript.apply(Entry::Message(tool_call("toolu_5")));
+        transcript.apply(Entry::Message(tool_results("toolu_5", "more", false)));
+        assert_eq!(
+            transcript.clear_entry(),
+            Some(Entry::ClearToolResults { upto: 8 })
+        );
+    }
+
+    #[test]
+    fn clearing_can_take_the_latest_tool_results_too() {
+        let mut transcript = tool_rounds(2);
+        let entry = transcript.clear_entry_keeping(0).unwrap();
+        assert_eq!(entry, Entry::ClearToolResults { upto: 5 });
+        transcript.apply(entry);
+        assert_eq!(
+            transcript.messages[4],
+            tool_results("toolu_1", CLEARED, false)
+        );
+        assert_eq!(transcript.clear_entry_keeping(0), None);
+        assert_eq!(Transcript::default().clear_entry_keeping(0), None);
+    }
+
+    fn assistant(text: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    fn transcript_of(messages: Vec<Message>) -> Transcript {
+        let mut transcript = Transcript::default();
+        for message in messages {
+            transcript.apply(Entry::Message(message));
+        }
+        transcript
+    }
+
+    #[test]
+    fn a_single_turn_is_cut_after_a_closed_tool_round() {
+        assert_eq!(Transcript::default().compact_point(), None);
+        // The first reply answers the input itself: nothing to cut yet.
+        assert_eq!(tool_rounds(1).compact_point(), None);
+        // Replies sit at 1, 3, 5, ...; each after the first follows a
+        // message of tool results only. The last two rounds stay.
+        assert_eq!(tool_rounds(2).compact_point(), Some(3));
+        assert_eq!(tool_rounds(6).compact_point(), Some(9));
+
+        // Results that carry typed input too (a failed turn) are no round
+        // boundary.
+        let mut with_input = tool_results("toolu_1", "out", false);
+        with_input.content.push(ContentBlock::Text {
+            text: "and now?".into(),
+        });
+        let transcript = transcript_of(vec![
+            Message::user_text("first"),
+            tool_call("toolu_1"),
+            with_input,
+            tool_call("toolu_2"),
+            tool_results("toolu_2", "out", false),
+            tool_call("toolu_3"),
+            tool_results("toolu_3", "out", false),
+        ]);
+        assert_eq!(transcript.compact_point(), Some(5));
+    }
+
+    #[test]
+    fn compacting_inside_a_turn_keeps_its_input_word_for_word() {
+        let mut transcript = tool_rounds(4);
+        let before = transcript.clone();
+        let keep_from = transcript.compact_point().unwrap();
+        assert_eq!(keep_from, 5);
+        transcript.apply(Entry::Compact {
+            summary: "did 0 to 1".into(),
+            keep_from,
+        });
+
+        let head = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: format!("{SUMMARY_HEADER}did 0 to 1"),
+                },
+                ContentBlock::Text { text: "go".into() },
+            ],
+        };
+        assert_eq!(transcript.messages[0], head);
+        assert_eq!(transcript.messages[1..], before.messages[5..]);
+        for (i, message) in transcript.messages.iter().enumerate() {
+            let expected = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            assert_eq!(message.role, expected, "{:#?}", transcript.messages);
+        }
+
+        // A later cut in the same turn replaces the old summary and keeps
+        // the input once.
+        for i in 4..6 {
+            let id = format!("toolu_{i}");
+            transcript.apply(Entry::Message(tool_call(&id)));
+            transcript.apply(Entry::Message(tool_results(&id, "more", false)));
+        }
+        let keep_from = transcript.compact_point().unwrap();
+        assert_eq!(keep_from, 5);
+        transcript.apply(Entry::Compact {
+            summary: "did 0 to 3".into(),
+            keep_from,
+        });
+        assert_eq!(
+            transcript.messages[0].content,
+            [
+                ContentBlock::Text {
+                    text: format!("{SUMMARY_HEADER}did 0 to 3"),
+                },
+                ContentBlock::Text { text: "go".into() },
+            ]
+        );
+        assert_eq!(transcript.messages[1], tool_call("toolu_4"));
+        assert_eq!(transcript.messages.len(), 5);
+    }
+
+    #[test]
+    fn compaction_keeps_the_last_two_inputs_when_it_can() {
+        let mut transcript = tool_rounds(2); // input at 0, results at 2 and 4
+        transcript.apply(Entry::Message(assistant("done")));
+        transcript.apply(Entry::Message(Message::user_text("second")));
+        assert_eq!(transcript.compact_point(), Some(6));
+        transcript.apply(Entry::Message(assistant("ok")));
+        transcript.apply(Entry::Message(Message::user_text("third")));
+        assert_eq!(transcript.compact_point(), Some(6));
+        transcript.apply(Entry::Message(tool_call("toolu_8")));
+        transcript.apply(Entry::Message(tool_results("toolu_8", "x", false)));
+        transcript.apply(Entry::Message(assistant("ok")));
+        transcript.apply(Entry::Message(Message::user_text("fourth")));
+        assert_eq!(transcript.compact_point(), Some(8));
+    }
+
+    #[test]
+    fn compaction_never_starts_the_tail_at_a_tool_result() {
+        // Input typed after a failed turn joins the tool results; that
+        // message cannot lead the tail, since its calls are before it.
+        let mut with_results = tool_results("toolu_1", "out", false);
+        with_results.content.push(ContentBlock::Text {
+            text: "and now?".into(),
+        });
+        let transcript = transcript_of(vec![
+            Message::user_text("first"),
+            tool_call("toolu_1"),
+            with_results,
+            assistant("hm"),
+            Message::user_text("second"),
+            tool_call("toolu_2"),
+            tool_results("toolu_2", "out", false),
+        ]);
+        assert_eq!(transcript.compact_point(), Some(4));
+
+        // Nor right after a message with tool calls, should one show up.
+        let odd = transcript_of(vec![
+            Message::user_text("first"),
+            tool_call("toolu_1"),
+            Message::user_text("no result"),
+        ]);
+        assert_eq!(odd.compact_point(), None);
+        // A message with tool results never leads, even after one without
+        // calls.
+        let mut orphan = tool_results("toolu_7", "out", false);
+        orphan
+            .content
+            .push(ContentBlock::Text { text: "hi".into() });
+        let odd = transcript_of(vec![Message::user_text("first"), assistant("hm"), orphan]);
+        assert_eq!(odd.compact_point(), None);
+    }
+
+    #[test]
+    fn compact_puts_the_summary_in_front_of_the_kept_input() {
+        let mut transcript = tool_rounds(1);
+        transcript.apply(Entry::Message(assistant("done")));
+        transcript.apply(Entry::Message(Message::user_text("second")));
+        transcript.apply(Entry::Message(tool_call("toolu_9")));
+        transcript.apply(Entry::Message(tool_results("toolu_9", "x", false)));
+        transcript.apply(Entry::Usage(Usage {
+            input_tokens: 900,
+            ..Default::default()
+        }));
+        let keep_from = transcript.compact_point().unwrap();
+        assert_eq!(keep_from, 4);
+        let tail = transcript.messages[4..].to_vec();
+        let entry = Entry::Compact {
+            summary: "did things".into(),
+            keep_from,
+        };
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap(),
+            json!({"type": "compact", "summary": "did things", "keep_from": 4})
+        );
+        transcript.apply(entry);
+
+        assert_eq!(transcript.messages.len(), 3);
+        assert_eq!(transcript.messages[0].role, Role::User);
+        assert_eq!(
+            transcript.messages[0].content,
+            [
+                ContentBlock::Text {
+                    text: "[Summary of the earlier conversation]\ndid things".into()
+                },
+                ContentBlock::Text {
+                    text: "second".into()
+                },
+            ]
+        );
+        assert_eq!(transcript.messages[1..], tail[1..]);
+        assert_eq!(transcript.context_tokens, 0);
+        assert_eq!(transcript.usage.input_tokens, 900);
+    }
+
+    #[test]
+    fn summary_usage_counts_but_does_not_size_the_context() {
+        let mut transcript = Transcript::default();
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            ..Default::default()
+        };
+        transcript.apply(Entry::Usage(usage));
+        transcript.apply(Entry::SummaryUsage(Usage {
+            input_tokens: 500,
+            ..Default::default()
+        }));
+        assert_eq!(transcript.usage.input_tokens, 510);
+        assert_eq!(transcript.context_tokens, 12);
+        assert_eq!(
+            serde_json::to_value(Entry::SummaryUsage(usage)).unwrap()["type"],
+            "summary_usage"
+        );
     }
 
     #[test]
