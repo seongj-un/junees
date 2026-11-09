@@ -110,8 +110,13 @@ const DRAIN_GRACE: Duration = Duration::from_secs(2);
 const BUDGET_TICK: Duration = Duration::from_secs(1);
 const STDERR_TAIL_CHARS: usize = 2000;
 const ERROR_CHARS: usize = 500;
-/// Error codes of Claude Code's stream that mean its login was refused.
-const AUTH_ERRORS: &[&str] = &["authentication_failed"];
+/// Error codes of Claude Code's stream that mean its login or account was
+/// refused (<https://code.claude.com/docs/en/headless>, `api_retry`).
+const AUTH_ERRORS: &[&str] = &[
+    "authentication_failed",
+    "oauth_org_not_allowed",
+    "account_on_hold",
+];
 /// Texts of Claude Code's login failures (lowercase), for output without
 /// an error code.
 const LOGIN_TEXTS: &[&str] = &[
@@ -813,8 +818,10 @@ struct Stream {
     /// Usage of responses without an id.
     unnamed: Usage,
     session_id: Option<String>,
-    /// What a refused login said.
+    /// What a refused login said, if the latest model call failed so.
     auth: Option<String>,
+    /// Whether a response's usage could not be read (warned once).
+    bad_usage: bool,
     result: Option<Finished>,
     /// The last lines that were not JSON.
     plain: Vec<String>,
@@ -861,27 +868,43 @@ impl Stream {
     fn assistant(&mut self, event: &Value, report: &mut Reporter<'_>) -> bool {
         let message = &event["message"];
         let main = event["parent_tool_use_id"].is_null();
-        if let Some(error) = event["error"].as_str()
-            && AUTH_ERRORS.contains(&error)
-        {
-            let text = content_text(&message["content"]);
-            self.auth = Some(if text.is_empty() {
-                error.to_string()
-            } else {
-                text
-            });
-        }
-        let mut changed = false;
-        if message.get("usage").is_some_and(Value::is_object)
-            && let Ok(usage) = serde_json::from_value::<Usage>(message["usage"].clone())
-        {
-            match message["id"].as_str() {
-                Some(id) => {
-                    self.usage.insert(id.to_string(), usage);
-                }
-                None => self.unnamed.add(usage),
+        // Only the latest model call counts: a refused login that a later
+        // response or another error followed is not why the session ended.
+        self.auth = match event["error"].as_str() {
+            Some(error) if AUTH_ERRORS.contains(&error) => {
+                let text = content_text(&message["content"]);
+                Some(if text.is_empty() {
+                    error.to_string()
+                } else {
+                    text
+                })
             }
-            changed = true;
+            _ => None,
+        };
+        let mut changed = false;
+        if let Some(usage) = message.get("usage").filter(|usage| usage.is_object()) {
+            match serde_json::from_value::<Usage>(usage.clone()) {
+                Ok(usage) => {
+                    match message["id"].as_str() {
+                        Some(id) => {
+                            self.usage.insert(id.to_string(), usage);
+                        }
+                        None => self.unnamed.add(usage),
+                    }
+                    changed = true;
+                }
+                Err(err) if !self.bad_usage => {
+                    self.bad_usage = true;
+                    warn(
+                        report,
+                        &format!(
+                            "cannot read the token usage of a Claude Code response ({err}); \
+                             the budget does not count such responses"
+                        ),
+                    );
+                }
+                Err(_) => {}
+            }
         }
         for block in message["content"].as_array().into_iter().flatten() {
             match block["type"].as_str() {
@@ -936,9 +959,7 @@ impl Stream {
         match event["subtype"].as_str() {
             Some("api_retry") => {
                 let error = event["error"].as_str().unwrap_or("unknown");
-                if AUTH_ERRORS.contains(&error) {
-                    self.auth = Some(error.to_string());
-                }
+                self.auth = AUTH_ERRORS.contains(&error).then(|| error.to_string());
                 warn(
                     report,
                     &format!(
@@ -1501,6 +1522,25 @@ mod tests {
         assert_eq!(outcome.end.unwrap(), End::Answered);
     }
 
+    #[test]
+    fn warns_once_about_usage_it_cannot_read() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut report = collector(&seen);
+        let mut stream = Stream::default();
+        for id in ["msg_1", "msg_2"] {
+            let event = json!({"type": "assistant", "parent_tool_use_id": null,
+                "message": {"id": id, "content": [],
+                "usage": {"input_tokens": null, "output_tokens": 3}}});
+            assert!(!stream.handle(&event.to_string(), &mut report));
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(
+            seen[0].starts_with("warn cannot read the token usage of a Claude Code response"),
+            "{seen:?}"
+        );
+    }
+
     fn end_of(lines: &[Value], stderr: &str) -> Result<End> {
         let mut stream = Stream::default();
         for line in lines {
@@ -1541,9 +1581,33 @@ mod tests {
         let err = end_of(&[], "Invalid API key · Fix external API key").unwrap_err();
         assert!(err.downcast_ref::<NotLoggedIn>().is_some(), "{err:#}");
 
+        // Only the latest failure counts: a refused login, then another
+        // error or a response, is no login failure.
+        let retry = |error: &str| {
+            json!({"type": "system", "subtype": "api_retry", "attempt": 1,
+                "max_retries": 10, "error": error})
+        };
+        let answer = json!({"type": "assistant", "parent_tool_use_id": null,
+            "message": {"content": [{"type": "text", "text": "hi"}]}});
+        for later in [retry("overloaded"), answer] {
+            let err = end_of(
+                &[
+                    retry("authentication_failed"),
+                    later.clone(),
+                    failed.clone(),
+                ],
+                "",
+            )
+            .unwrap_err();
+            assert!(err.downcast_ref::<NotLoggedIn>().is_none(), "{later}");
+        }
+        for error in ["oauth_org_not_allowed", "account_on_hold"] {
+            let err = end_of(&[retry("overloaded"), retry(error), failed.clone()], "").unwrap_err();
+            assert!(err.downcast_ref::<NotLoggedIn>().is_some(), "{error}");
+        }
+
         // Retries that end in success are no failure.
-        let retry = json!({"type": "system", "subtype": "api_retry", "attempt": 1,
-            "max_retries": 10, "error": "authentication_failed"});
+        let retry = retry("authentication_failed");
         let success =
             json!({"type": "result", "subtype": "success", "is_error": false, "result": "ok"});
         assert_eq!(end_of(&[retry, success], "").unwrap(), End::Answered);
