@@ -442,13 +442,14 @@ impl ClaudeCode {
             };
             let _ = tokio::time::timeout(DRAIN_GRACE, drain).await;
         }
-        // What a stopped session left running goes with it; a session that
-        // ended on its own keeps its background processes, like bash.
+        // What a stopped session left running in Claude Code's group goes
+        // with it (its commands were killed before the stop); a session
+        // that ended on its own keeps its background processes, like bash.
+        // `claude` has been waited for, so only the group is signalled.
         if stopped.is_some() {
-            group.kill();
-        } else {
-            group.disarm();
+            group.signal(libc::SIGKILL);
         }
+        group.disarm();
         let stderr = match tokio::time::timeout(DRAIN_GRACE, &mut stderr).await {
             Ok(Ok(text)) => text,
             _ => {
@@ -473,8 +474,15 @@ struct Exit {
     stderr: String,
 }
 
-/// Claude Code's process group (it runs in its own), killed when dropped
-/// unless disarmed.
+/// Claude Code's process group (it runs in its own), killed with every
+/// process Claude Code started when dropped, unless disarmed.
+///
+/// Claude Code's Bash tool starts each command detached, in a session of
+/// its own, so a signal to the group does not reach the commands. Stopping
+/// a session therefore kills Claude Code's descendants first, found by
+/// their parent links in `/proc`. That only works while `claude` has not
+/// been waited for: after that its pid may belong to another process, and
+/// the commands it left are children of init, out of reach.
 struct Group(Option<i32>);
 
 impl Group {
@@ -487,13 +495,26 @@ impl Group {
         }
     }
 
-    /// Asks Claude Code to end its turn; returns when to kill it instead.
+    /// Kills every process Claude Code started, in any session or group.
+    /// Only while `claude` has not been waited for.
+    fn kill_commands(&self) {
+        if let Some(id) = self.0 {
+            kill_descendants(id);
+        }
+    }
+
+    /// Kills the commands of the session, then asks Claude Code to end its
+    /// turn; returns when to kill Claude Code instead.
     fn interrupt(&self, grace: Duration) -> Instant {
+        self.kill_commands();
         self.signal(libc::SIGINT);
         Instant::now() + grace
     }
 
+    /// Kills Claude Code and everything it started. Only while `claude`
+    /// has not been waited for.
     fn kill(&self) {
+        self.kill_commands();
         self.signal(libc::SIGKILL);
     }
 
@@ -506,6 +527,73 @@ impl Drop for Group {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// How often [`kill_descendants`] looks for processes started while it
+/// was stopping the others.
+const FREEZE_ROUNDS: usize = 16;
+
+/// Kills every descendant of `root` (not `root` itself). They are stopped
+/// (SIGSTOP) first, until a look at `/proc` finds no new one, so none can
+/// start another process in between or die and leave its children to
+/// init; then all of them get SIGKILL. Without `/proc` it does nothing.
+fn kill_descendants(root: i32) {
+    let mut found = std::collections::HashSet::new();
+    for _ in 0..FREEZE_ROUNDS {
+        let new: Vec<i32> = descendants(root)
+            .into_iter()
+            .filter(|pid| found.insert(*pid))
+            .collect();
+        if new.is_empty() {
+            break;
+        }
+        for pid in new {
+            // SAFETY: kill only sends a signal.
+            unsafe {
+                libc::kill(pid, libc::SIGSTOP);
+            }
+        }
+    }
+    for pid in found {
+        // SAFETY: kill only sends a signal.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+}
+
+/// The processes below `root` in the process tree, from the parent pid in
+/// each `/proc/<pid>/stat`.
+fn descendants(root: i32) -> Vec<i32> {
+    let Ok(dir) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut children: HashMap<i32, Vec<i32>> = HashMap::new();
+    for entry in dir.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        if let Some(parent) = parent_of(pid) {
+            children.entry(parent).or_default().push(pid);
+        }
+    }
+    let mut found = Vec::new();
+    let mut queue = vec![root];
+    while let Some(pid) = queue.pop() {
+        for &child in children.get(&pid).into_iter().flatten() {
+            found.push(child);
+            queue.push(child);
+        }
+    }
+    found
+}
+
+/// The parent pid in `/proc/<pid>/stat`: the field after the state, which
+/// follows the parenthesized command name (which may hold spaces and `)`).
+fn parent_of(pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Reads a pipe to its end and returns the last [`STDERR_TAIL_CHARS`]
@@ -1388,14 +1476,28 @@ mod tests {
         panic!("process {pid} is still there");
     }
 
-    /// A session that starts a long command (its pid in the file `pid`),
-    /// prints its first response (then creates `printed`) and waits; `trap`
-    /// runs first.
+    /// A session that starts long commands, prints its first response (then
+    /// creates `printed`) and waits; `trap` runs first. Like Claude Code's
+    /// Bash tool, it starts one command detached, in a session of its own
+    /// (`setsid`), and that command starts another. Their pids are in the
+    /// files [`COMMANDS`]: in Claude Code's group, detached, its child.
     fn hanging(trap: &str) -> String {
         format!(
-            "{trap}\nsleep 30 &\necho $! > pid\n{}\ntouch printed\nwait\nsleep 30\n",
+            "{trap}\nsleep 30 &\necho $! > pid\n\
+             setsid bash -c 'sleep 30 & echo $! > gpid; wait' &\necho $! > dpid\n\
+             until [ -s gpid ]; do sleep 0.01; done\n\
+             {}\ntouch printed\nwait\nsleep 30\n",
             print(&SESSION.lines().take(2).collect::<Vec<_>>().join("\n"))
         )
+    }
+
+    /// The pid files of [`hanging`].
+    const COMMANDS: [&str; 3] = ["pid", "dpid", "gpid"];
+
+    async fn commands_gone(dir: &Path) {
+        for name in COMMANDS {
+            until_gone(&wait_for(&dir.join(name)).await).await;
+        }
     }
 
     async fn wait_for(path: &Path) -> String {
@@ -1422,17 +1524,16 @@ mod tests {
             let stop = async {
                 wait_for(&dir.path().join("printed")).await;
                 cancel.cancel();
-                std::fs::read_to_string(dir.path().join("pid")).unwrap()
             };
             let mut report = |_: Report<'_>| {};
-            let (outcome, pid) = tokio::time::timeout(Duration::from_secs(10), async {
+            let (outcome, ()) = tokio::time::timeout(Duration::from_secs(10), async {
                 tokio::join!(claude.run(&request, &cancel, None, &mut report), stop)
             })
             .await
             .expect("the session did not stop");
             assert_eq!(outcome.end.unwrap(), End::Interrupted, "trap `{trap}`");
             assert_eq!(tokens(outcome.usage), 115);
-            until_gone(&pid).await;
+            commands_gone(dir.path()).await;
         }
     }
 
@@ -1471,7 +1572,7 @@ mod tests {
                 .unwrap()
                 .contains(&"warn token budget used up; stopping Claude Code".to_string())
         );
-        until_gone(&wait_for(&dir.path().join("pid")).await).await;
+        commands_gone(dir.path()).await;
     }
 
     #[tokio::test]

@@ -289,8 +289,10 @@ async fn sigterm_stops_claude_code_and_the_run() {
     let home = tempfile::tempdir().unwrap();
     let fake = tempfile::tempdir().unwrap();
     let pid_file = fake.path().join("pid");
+    // Like Claude Code's Bash tool, the fake starts its command in a
+    // session of its own, out of reach of a signal to its group.
     let slow = format!(
-        "echo wip > wip.txt\nsleep 30 &\necho $! > '{}'\nwait\n",
+        "echo wip > wip.txt\nsetsid sleep 30 &\necho $! > '{}'\nwait\n",
         pid_file.display()
     );
     let bin = fake_claude(fake.path(), &[plan(), slow]);
