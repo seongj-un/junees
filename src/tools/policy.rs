@@ -154,6 +154,11 @@ impl CommandPolicy {
                 continue;
             }
             let name = basename(word);
+            if name == "function" {
+                // `function name { body; }`: the body follows the name.
+                i += 2;
+                continue;
+            }
             let takes_value: &[&str] = match name {
                 "sudo" | "doas" | "pkexec" | "su" | "runuser" if !self.allow_dangerous => {
                     return Err(format!("`{name}` is not allowed"));
@@ -207,6 +212,18 @@ impl CommandPolicy {
                 if name == "command" && matches!(option.as_str(), "-v" | "-V") {
                     // Only looks the program up.
                     return Ok(&[]);
+                }
+                if name == "env"
+                    && let Some((value, rest)) = env_split_string(option, &words[i + 1..])
+                {
+                    // `env -S 'cmd args'` runs its value as a command line.
+                    let script = std::iter::once(value)
+                        .chain(rest.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    return self
+                        .violation(&script, depth + 1, None)
+                        .map_or(Ok(&[]), Err);
                 }
                 i += if takes_value.contains(&option.as_str()) {
                     2
@@ -441,6 +458,21 @@ fn shell_script(args: &[String]) -> Option<&str> {
         }
     }
     None
+}
+
+/// The value of `env -S value` (also `-Svalue`, `--split-string=value`)
+/// and the words after it, given the option and the words after it.
+fn env_split_string<'a>(option: &'a str, after: &'a [String]) -> Option<(&'a str, &'a [String])> {
+    match option {
+        "-S" | "--split-string" => after
+            .split_first()
+            .map(|(value, rest)| (value.as_str(), rest)),
+        _ => option
+            .strip_prefix("--split-string=")
+            .or_else(|| option.strip_prefix("-S"))
+            .filter(|value| !value.is_empty())
+            .map(|value| (value, after)),
+    }
 }
 
 /// The command of `su -c 'command'` or `runuser --command=command`.
@@ -1225,6 +1257,13 @@ mod tests {
             "taskset 0x1 reboot",
             "busybox rm -rf ~",
             "nohup setsid nice -n 5 reboot",
+            "env -S 'rm -rf ~'",
+            "env -S'reboot now'",
+            "env --split-string='sudo ls'",
+            "/usr/bin/env -S 'bash -c reboot'",
+            "env -S 'rm -rf' ~",
+            "function f { rm -rf ~; }; f",
+            "function cleanup() { reboot; }",
         ] {
             denied(command);
         }
@@ -1235,6 +1274,8 @@ mod tests {
         allowed("taskset -c 0 cargo build");
         allowed("ionice -p 123");
         allowed("busybox --list");
+        allowed("env -S 'cargo test' --quiet");
+        allowed("function greet { echo hi; }; greet");
         allowed("env | sort");
         allowed("command -v reboot");
         allowed("timeout 5 cargo test");
