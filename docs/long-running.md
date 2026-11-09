@@ -58,7 +58,9 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 ### L5. 상태 보기와 알림
 - `junees task status [--json]`: `.junees/`를 읽기만 한다(실행 중인 run 옆에서도 안전, API 키 불필요). 목표, 통과 수/전체와 진행 막대, 기능별 id/통과 여부/설명 첫 줄, 세션 수, 연속 무진전 수, 누적 토큰(입력/출력/캐시), 마지막 정지 이유와 시각, `progress.md` 마지막 5줄. `--json` 필드는 README에 정리. `.junees/`가 없으면 `task init`을 먼저 하라는 오류
 - 이를 위해 `state.json`에 `goal`(init 때 기록)과 `stopped_at`(정지 기록 시각, unix 초)을 추가했다. 둘 다 선택 필드라 예전 파일도 읽힌다. 실행 중 표시는 L4b가 `state.json`에 넣으면 `running` 필드로 보여 주도록 자리만 두었다(없으면 JSON에서 빠짐)
-- 알림: `JUNEES_NOTIFY_WEBHOOK`(디스코드 웹훅 URL)이 있으면 `task run`이 정지를 기록한 뒤 한 번 POST(저장소 이름, 정지 이유 키와 문장, 통과 수/전체, 세션 수, 토큰). 정지 이유는 `state.json`의 값을 그대로 쓰므로 L4b의 `budget`/`interrupted`도 따로 손대지 않고 알림에 나온다. `JUNEES_NOTIFY_EACH_SESSION=1`이면 세션마다 한 줄. `allowed_mentions: {"parse": []}`, 2000자 제한, 타임아웃 10초, 리다이렉트 안 따라감. 실패는 경고만 하고 종료 코드는 그대로. URL은 출력하지 않고 호스트만 보여 주며, 세션의 bash와 하네스 git에도 넘기지 않는다
+- 알림: `JUNEES_NOTIFY_WEBHOOK`(디스코드 웹훅 URL)이 있으면 `task run`이 정지를 기록한 뒤 한 번 POST(저장소 이름, 정지 이유 키와 문장, 통과 수/전체, 세션 수, 토큰). 정지 이유는 `state.json`의 값을 그대로 쓰므로 L4b의 `budget`/`interrupted`도 따로 손대지 않고 알림에 나온다. `JUNEES_NOTIFY_EACH_SESSION=1`이면 세션마다 한 줄. `allowed_mentions: {"parse": []}`, 2000자 제한, 타임아웃 10초, 리다이렉트 안 따라감. 실패는 경고만 하고 종료 코드는 그대로. URL은 출력하지 않고 호스트만 보여 주며, 세션의 bash와 하네스 git에도 넘기지 않는다. 정지를 기록하기 전에 실패한 run(더러운 작업 트리 등)도 `run failed: <오류>` 한 번을 보낸다. 세션 알림은 상태(그 세션의 토큰, 마지막 세션이면 정지 기록)를 저장한 뒤에 보낸다. 웹훅은 https만 받고(평문 http는 루프백만), 바뀌는 텍스트는 인라인 코드로 감싸 마크다운이 적용되지 않게 한다
+- 보안: junees는 시작할 때 `prctl(PR_SET_DUMPABLE, 0)`으로 dump 불가 프로세스가 되어, bash가 `/proc/$PPID/environ`(또는 더 위 조상)에서 숨긴 API 키와 웹훅 URL을 읽지 못한다(PR #1부터 있던 우회로)
+- 남은 일(L4b merge 후): status의 `running`을 `state.json`의 실행 중 표시에서 읽기. 그 전까지 세션이 도는 동안의 status는 디스크의 `features.json`을 그대로 보여 주므로, 세션이 직접 고친 `passes`가 verify 없이 보일 수 있다(하네스는 세션이 끝나면 자기 사본으로 되돌린다)
 
 ## 상태
 
