@@ -97,7 +97,11 @@ impl Tool for MarkFeaturePassing {
         };
 
         // A newline, not `&&`, so the cd applies to the whole command.
-        let command = format!("cd {} || exit 1\n{verify}", shell_quote(&self.root));
+        // With pipefail, `cargo test 2>&1 | tail` fails when the tests do.
+        let command = format!(
+            "cd {} || exit 1\nset -o pipefail\n{verify}",
+            shell_quote(&self.root)
+        );
         let output = self
             .bash
             .run(json!({"command": command, "timeout_secs": VERIFY_TIMEOUT_SECS}))
@@ -183,6 +187,20 @@ mod tests {
         assert!(output.content.contains("not yet\n[exit code 1]"));
         assert!(!ledger.lock().unwrap().get("F2").unwrap().passes);
         assert!(!features::load(root.path()).unwrap()[1].passes);
+    }
+
+    #[tokio::test]
+    async fn a_failure_inside_a_pipeline_fails_the_verify_command() {
+        let (_root, ledger, tool) =
+            setup(&["(echo 'test result: FAILED'; exit 101) 2>&1 | tail -5"]);
+        let output = tool.run(json!({"id": "F1"})).await;
+        assert!(output.is_error, "{}", output.content);
+        assert!(
+            output.content.contains("[exit code 101]"),
+            "{}",
+            output.content
+        );
+        assert!(!ledger.lock().unwrap().all_pass());
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ pub fn init_system(root: &Path) -> String {
          later one.\n\
          3. Write .junees/features.json: a JSON array of objects \
          {{\"id\": \"F1\", \"description\": \"...\", \"verify\": \"<shell command>\", \
-         \"passes\": false}}. Ids are unique. `verify` runs with bash from the \
+         \"passes\": false}}. Ids are unique. `verify` runs with bash (and `set -o pipefail`) from the \
          repository root and must exit 0 exactly when the feature works (for example \
          a test command). Every feature starts with \"passes\": false.\n\
          4. Write .junees/progress.md: the goal, the plan, and what the first work \
