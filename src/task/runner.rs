@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use super::features::{self, Ledger};
 use super::state::{State, Stop, StopReason};
 use super::tools::{MarkFeaturePassing, Verifier, session_tools};
-use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt};
+use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt, rejected_features_path};
 use crate::agent::{Agent, AgentOptions, Event};
 use crate::cli::preview;
 use crate::message::Usage;
@@ -115,12 +115,36 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     if path.exists() {
         bail!(
             "{} already exists: this repository already has a task \
-             (continue it with `junees task run`)",
+             (continue it with `junees task run`, or delete .junees/ if an \
+             earlier `junees task init` did not finish)",
             path.display()
         );
     }
     prepare_dir(root)?;
 
+    let (count, usage) = match plan(env, goal, report).await {
+        Ok(planned) => planned,
+        Err(err) => return Err(set_aside_rejected_list(root, err)),
+    };
+    let mut state = State::load(root)?;
+    state.usage.add(usage);
+    state.save(root)?;
+    append_progress(
+        root,
+        &format!("init: {count} features planned, {}", tokens(usage)),
+    )?;
+    git::commit_all(root, INIT_COMMIT).context("cannot commit the new task")?;
+    line(
+        report,
+        &format!("== init done: {count} features, committed; start with `junees task run` =="),
+    );
+    Ok(())
+}
+
+/// The init session: writes the feature list and gets one chance to fix
+/// it. Returns the number of features and the tokens used.
+async fn plan(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> Result<(usize, Usage)> {
+    let root = &env.root;
     let (mut agent, journal) = env.agent(prompt::init_system(root), env.tools(), report)?;
     line(
         report,
@@ -154,21 +178,31 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     };
     // Writes the list in the harness's own formatting.
     Ledger::load(root)?;
+    Ok((count, agent.usage()))
+}
 
-    let usage = agent.usage();
-    let mut state = State::load(root)?;
-    state.usage.add(usage);
-    state.save(root)?;
-    append_progress(
-        root,
-        &format!("init: {count} features planned, {}", tokens(usage)),
-    )?;
-    git::commit_all(root, INIT_COMMIT).context("cannot commit the new task")?;
-    line(
-        report,
-        &format!("== init done: {count} features, committed; start with `junees task run` =="),
-    );
-    Ok(())
+/// After a failed init, moves the list the session wrote out of the way:
+/// `task run` must not start from a list the harness rejected, and the
+/// next `task init` must not find a task already there. The file is kept
+/// (and ignored by git) for the user to look at.
+fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
+    let path = features_path(root);
+    if !path.exists() {
+        return err;
+    }
+    let rejected = rejected_features_path(root);
+    match fs::rename(&path, &rejected) {
+        Ok(()) => err.context(format!(
+            "task init failed; its feature list was moved to {}, so you can run \
+             `junees task init` again",
+            rejected.display()
+        )),
+        Err(rename) => err.context(format!(
+            "task init failed, and its feature list could not be moved out of the way \
+             ({rename}); delete {} before running `junees task init` again",
+            path.display()
+        )),
+    }
 }
 
 /// Runs work sessions on the task in `env.root` until every feature passes,
@@ -418,7 +452,7 @@ fn prepare_dir(root: &Path) -> Result<()> {
     fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let ignore = dir.join(".gitignore");
     if !ignore.exists() {
-        fs::write(&ignore, "state.json\n.*.tmp\n")
+        fs::write(&ignore, "state.json\n.*.tmp\n*.rejected.json\n")
             .with_context(|| format!("cannot write {}", ignore.display()))?;
     }
     Ok(())
@@ -755,6 +789,35 @@ mod tests {
         );
         assert!(format!("{err:#}").contains("these are true: F1"), "{err:#}");
         assert!(subjects(root).is_empty());
+
+        // The rejected list is out of the way: no run starts from it, and
+        // init can start over.
+        assert!(
+            format!("{err:#}").contains("feature list was moved to"),
+            "{err:#}"
+        );
+        assert!(!features_path(root).exists());
+        assert!(super::super::rejected_features_path(root).exists());
+        let none = Scripted::new(vec![]);
+        let none_factory = self::factory(&none);
+        let err = run(&env(root, home.path(), &none_factory), 5, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot load the feature list"),
+            "{err:#}"
+        );
+        let again = Scripted::new(vec![
+            calls(&[write(&features_path(root), &feature_list(&["test -f a"]))]),
+            text("planned"),
+        ]);
+        let again_factory = self::factory(&again);
+        init(&env(root, home.path(), &again_factory), "goal", &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(subjects(root), [INIT_COMMIT]);
+        // The rejected list stays out of git.
+        assert!(!git::is_dirty(root).unwrap());
     }
 
     #[tokio::test]

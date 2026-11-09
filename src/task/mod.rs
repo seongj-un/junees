@@ -36,6 +36,11 @@ pub fn features_path(root: &Path) -> PathBuf {
     dir(root).join("features.json")
 }
 
+/// Where a failed `task init` leaves the list it rejected.
+pub fn rejected_features_path(root: &Path) -> PathBuf {
+    dir(root).join("features.rejected.json")
+}
+
 pub fn progress_path(root: &Path) -> PathBuf {
     dir(root).join("progress.md")
 }
