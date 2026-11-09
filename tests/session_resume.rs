@@ -9,18 +9,28 @@ use serde_json::{Value, json};
 mod common;
 use common::{body_of, fake_api, text_reply};
 
-async fn junees(home: &Path, cwd: &Path, url: &str, args: &[&str]) -> Output {
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"))
+/// The binary in `cwd`, talking to the fake API, with no state folder set.
+fn command(cwd: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    command
         .args(args)
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", url)
-        .env("JUNEES_HOME", home)
-        .env("HOME", home)
+        .env_remove("JUNEES_HOME")
+        .env_remove("HOME")
         .env_remove("JUNEES_MODEL")
         .env_remove("JUNEES_MAX_TOKENS")
         .env_remove("JUNEES_MAX_TURNS")
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    command
+}
+
+/// Runs the binary with `home` as its state folder and expects success.
+async fn junees(home: &Path, cwd: &Path, url: &str, args: &[&str]) -> Output {
+    let output = command(cwd, url, args)
+        .env("JUNEES_HOME", home)
+        .env("HOME", home)
         .output()
         .await
         .unwrap();
@@ -142,4 +152,34 @@ async fn no_session_saves_nothing_and_continue_starts_fresh_elsewhere() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn without_home_it_runs_unsaved_and_only_continuing_fails() {
+    let (url, server) = fake_api(vec![(200, text_reply("a")), (200, text_reply("b"))]).await;
+    let project = tempfile::tempdir().unwrap();
+    let run = |args: &'static [&'static str]| command(project.path(), &url, args).output();
+
+    let off = run(&["--no-session", "-p", "hi"]).await.unwrap();
+    assert!(off.status.success(), "{}", stderr(&off));
+
+    let unsaved = run(&["-p", "hi"]).await.unwrap();
+    assert!(unsaved.status.success(), "{}", stderr(&unsaved));
+    assert!(
+        stderr(&unsaved).contains("session not saved: neither JUNEES_HOME nor HOME is set"),
+        "{}",
+        stderr(&unsaved)
+    );
+
+    let resumed = run(&["-c", "-p", "hi"]).await.unwrap();
+    assert!(!resumed.status.success());
+    assert!(
+        stderr(&resumed).contains(
+            "error: cannot continue a saved session: neither JUNEES_HOME nor HOME is set"
+        ),
+        "{}",
+        stderr(&resumed)
+    );
+
+    assert_eq!(server.await.unwrap().len(), 2);
 }

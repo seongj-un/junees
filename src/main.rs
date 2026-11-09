@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use junees::agent::{Agent, AgentOptions, Event};
 use junees::cli::{self, Command, SessionMode};
 use junees::config::Config;
@@ -109,7 +109,10 @@ fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opene
         }
         SessionMode::New => None,
         SessionMode::Continue => {
-            let latest = session::find_latest(&config.home, cwd)?;
+            let home = config
+                .require_home()
+                .context("cannot continue a saved session")?;
+            let latest = session::find_latest(home, cwd)?;
             if latest.is_none() {
                 eprintln!(
                     "no earlier session in {}; starting a new one",
@@ -118,7 +121,12 @@ fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opene
             }
             latest
         }
-        SessionMode::Resume(prefix) => Some(session::find_by_prefix(&config.home, prefix)?),
+        SessionMode::Resume(prefix) => {
+            let home = config
+                .require_home()
+                .context("cannot resume a saved session")?;
+            Some(session::find_by_prefix(home, prefix)?)
+        }
     };
 
     let Some(path) = path else {
@@ -140,10 +148,13 @@ fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opene
     })
 }
 
-/// A fresh saved session. If its file cannot be created, Junees still runs,
-/// just without saving.
+/// A fresh saved session. Without a state folder, or if its file cannot be
+/// created, Junees still runs, just without saving.
 fn new_session(config: &Config, cwd: &Path) -> Opened {
-    match SessionWriter::create(&config.home, cwd, &config.model) {
+    let created = config
+        .require_home()
+        .and_then(|home| SessionWriter::create(home, cwd, &config.model));
+    match created {
         Ok((meta, writer)) => Opened {
             transcript: Transcript::default(),
             journal: Some(Box::new(writer)),
@@ -213,7 +224,11 @@ impl Repl<'_> {
     }
 
     fn list_sessions(&self) {
-        match session::list_recent(&self.config.home, SESSIONS_LISTED) {
+        let listed = self
+            .config
+            .require_home()
+            .and_then(|home| session::list_recent(home, SESSIONS_LISTED));
+        match listed {
             Ok(list) if list.is_empty() => println!("(no saved sessions)"),
             Ok(list) => {
                 for summary in &list {
