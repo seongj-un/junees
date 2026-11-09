@@ -732,7 +732,8 @@ async fn status_without_a_task_says_to_run_init() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("has no task (no .junees/ folder); start one with `junees task init"),
+        stderr
+            .contains("has no task (no .junees/ folder); start one with `junees task \"<goal>\"`"),
         "{stderr}"
     );
     assert!(!repo.path().join(".junees").exists());

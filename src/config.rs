@@ -1,4 +1,5 @@
-//! Settings read from environment variables.
+//! Settings read from environment variables (and, through
+//! [`crate::config_file::Settings`], the settings file).
 
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -77,7 +78,12 @@ impl Config {
     /// calls no API, so `ANTHROPIC_API_KEY` is neither needed nor read
     /// (`api_key` stays empty).
     pub fn from_env_without_key() -> Result<Self> {
-        Self::read(|key| std::env::var(key).ok(), false)
+        Self::from_lookup_without_key(|key| std::env::var(key).ok())
+    }
+
+    /// [`Config::from_env_without_key`] with the variables from `lookup`.
+    pub fn from_lookup_without_key(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        Self::read(lookup, false)
     }
 
     fn read(lookup: impl Fn(&str) -> Option<String>, need_key: bool) -> Result<Self> {
@@ -89,7 +95,8 @@ impl Config {
 
         let api_key = if need_key {
             get("ANTHROPIC_API_KEY").context(
-                "ANTHROPIC_API_KEY is not set (get one at https://console.anthropic.com)",
+                "no API key: run `junees setup`, or set ANTHROPIC_API_KEY \
+                 (get a key at https://console.anthropic.com)",
             )?
         } else {
             String::new()
@@ -146,9 +153,7 @@ impl Config {
                  and the answer needs room too"
             );
         }
-        let home = get("JUNEES_HOME")
-            .map(PathBuf::from)
-            .or_else(|| get("HOME").map(|home| PathBuf::from(home).join(".junees")));
+        let home = crate::config_file::home_dir(get);
         let tools = ToolSettings {
             hidden_env: comma_list(get("JUNEES_HIDDEN_ENV")),
             deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),

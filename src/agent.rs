@@ -223,6 +223,20 @@ impl Agent {
         self.cleared = false;
     }
 
+    /// Switches to an earlier session: its conversation and token usage,
+    /// recorded from now on to `journal`.
+    pub fn resume(&mut self, transcript: Transcript, journal: Option<Box<dyn Journal>>) {
+        self.transcript = transcript;
+        self.journal = journal;
+        self.cleared = false;
+    }
+
+    /// Makes the next model calls through `provider` (another model); the
+    /// conversation stays.
+    pub fn set_provider(&mut self, provider: Box<dyn Provider>) {
+        self.provider = provider;
+    }
+
     /// Handles one user input and returns the model's final text.
     ///
     /// If the loop fails midway, the history still ends with a user message,
@@ -913,6 +927,30 @@ mod tests {
         agent.reset(None);
         assert!(agent.messages().is_empty());
         assert_eq!(agent.usage(), Usage::default());
+    }
+
+    #[tokio::test]
+    async fn resume_and_set_provider_switch_session_and_model() {
+        let mut agent = agent(Scripted::new(vec![text("first answer")]), 5);
+        agent.run("first", |_| {}).await.unwrap();
+        let earlier = Transcript {
+            messages: agent.messages().to_vec(),
+            usage: agent.usage(),
+            ..Transcript::default()
+        };
+        agent.reset(None);
+
+        // Back to the earlier conversation, with a provider for another model.
+        agent.resume(earlier, None);
+        assert_eq!(agent.messages().len(), 2);
+        assert_eq!(agent.usage().input_tokens, 10);
+        let other = Scripted::new(vec![text("second answer")]);
+        let seen = other.seen.clone();
+        agent.set_provider(Box::new(other));
+        assert_eq!(agent.run("second", |_| {}).await.unwrap(), "second answer");
+        // The new provider got the whole conversation.
+        assert_eq!(seen.lock().unwrap()[0].len(), 3);
+        assert_eq!(agent.usage().input_tokens, 20);
     }
 
     /// Counts how often it runs.

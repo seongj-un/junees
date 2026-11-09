@@ -76,6 +76,13 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - stream-json의 응답별 usage로 세션 중 예산을 확인하고(넘으면 SIGINT, 유예 뒤 SIGKILL), 끝나면 `result`의 `modelUsage`/`usage`를 누적. 취소도 같은 방식이고 `interrupted`. 정지할 때는 SIGINT 전에, 그리고 SIGKILL 전에 한 번 더 `claude`의 자손 프로세스(별도 세션으로 뜬 Bash 명령 포함)를 SIGSTOP으로 멈춘 뒤 SIGKILL한다. 원본 출력은 `.junees/sessions/<이름>.jsonl`(git 제외), 비용 추정과 Claude Code 세션 id는 run.log
 - 한계: Claude Code 권한 규칙은 쓰인 단어만 맞추므로 Junees bash 정책보다 약하다(`/usr/bin/sudo`, `git -C . push --force`, `bash -c`, fork bomb 등). 구독 사용 한도는 알 수 없다(한도에 걸리면 `error` 정지, 별도 정지 이유는 다음 PR). 정지 전에 `claude`가 스스로 죽으면 그 명령은 남는다. 실제 `claude`로는 테스트하지 않았다(가짜 실행 파일로 검증)
 
+### 사용법 단순화 (Hermes처럼)
+- `junees` 하나만 외우면 되게: `junees`(대화), `junees "질문"`(한 번만, `-p`와 같음), `junees -c`, `junees task "목표"`(init + run을 한 프로세스에서), `junees task`(이어서 run), `junees status`, `junees setup`. 예전 플래그와 `task init/run/status`는 그대로 동작하고 `--help`의 `Advanced` 절로 옮겼다
+- 설정 파일 `$JUNEES_HOME/config.toml`(0600, 폴더 0700): 평평한 TOML 부분집합을 직접 파싱(의존성 없음). 키마다 환경 변수 하나에 대응하고, `Settings`가 실행 중 변경(`/model`, `/backend`) -> 환경 변수 -> 파일 순서로 찾아 기존 `from_lookup` 이음새에 넘긴다. 설정 파일 키는 표(`KEYS`)에 있는 것만 받아서 Junees가 원래 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 생기지 않는다
+- 처음 실행 마법사(파일도 `ANTHROPIC_API_KEY`도 없고 stdin/stderr가 터미널일 때, 또는 `junees setup`): 구독(claude-code) 또는 API 키, 구독이면 task 백엔드의 `claude --version`/`auth status` 검사를 그대로 써서 로그인 방법(Linux면 bubblewrap)을 안내하고, 대화 모드는 API 키가 필요하다고 알린다. 키는 termios echo를 끄고 입력받고 다시 출력하지 않는다. 모델, 작업 기본 예산(2h, 토큰 상한 선택). 마법사 입력은 대화와 같은 `SharedLines`로 읽고 Ctrl-C는 echo를 되돌린 뒤 취소한다
+- 대화 안 슬래시 명령: `/task [목표]`(같은 프로세스에서 init + run, 끝나면 원래 폴더로 돌아옴, Ctrl-C는 `junees task`처럼 세션을 마무리하고 멈춤), `/status`, `/sessions`(번호로 골라 이어 가기), `/new`(`/reset`), `/model [이름]`, `/backend [api|claude-code]`. `/model`과 `/backend`는 이 실행에만 적용(파일은 `junees setup`만 바꿈)
+- 남은 것: 대화 모드를 구독(claude-code)으로 돌리기, 모델이 bash로 설정 파일의 키를 읽는 것을 막기
+
 ## 상태
 
 - [x] 1단계 에이전트 루프 (PR #1)
