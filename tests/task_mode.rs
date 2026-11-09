@@ -425,16 +425,16 @@ async fn task_run_notifies_the_webhook_of_each_session_and_the_stop() {
     let content = |i: usize| body_of(&posts[i])["content"].as_str().unwrap().to_string();
     assert_eq!(
         content(0),
-        format!("junees: task in {name} session 1 done: 1/2 passing, new: F1")
+        format!("junees: task in `{name}` session 1 done: `1/2 passing, new: F1`")
     );
     assert_eq!(
         content(1),
-        format!("junees: task in {name} session 2 done: 2/2 passing, new: F2")
+        format!("junees: task in `{name}` session 2 done: `2/2 passing, new: F2`")
     );
     assert_eq!(
         content(2),
         format!(
-            "junees: task in {name} stopped (complete): every feature passes\n\
+            "junees: task in `{name}` stopped (complete): `every feature passes`\n\
              features: 2/2 passing\n\
              sessions: 2\n\
              tokens: input 39, output 18, cache write 0, cache read 0"
@@ -556,7 +556,7 @@ async fn a_run_that_cannot_start_notifies_the_webhook() {
     let content = body_of(&posts[0])["content"].as_str().unwrap().to_string();
     assert!(
         content.starts_with(&format!(
-            "junees: task in {name} run failed: the work tree has uncommitted changes"
+            "junees: task in `{name}` run failed: `the work tree has uncommitted changes"
         )),
         "{content}"
     );

@@ -22,6 +22,9 @@ pub const EACH_SESSION_ENV: &str = "JUNEES_NOTIFY_EACH_SESSION";
 /// Discord's limit on the length of a message.
 pub const CONTENT_LIMIT: usize = 2000;
 
+/// Longest text, in UTF-16 units, one code span of a message holds.
+const SPAN_LIMIT: usize = 1500;
+
 /// How long one post may take.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -167,11 +170,12 @@ impl Notifier {
             .unwrap_or_default();
         let usage = state.usage;
         let content = format!(
-            "junees: task in {} stopped ({reason}): {stop}\n\
+            "junees: task in {} stopped ({reason}): {}\n\
              features: {passing}/{total} passing\n\
              sessions: {}\n\
              tokens: input {}, output {}, cache write {}, cache read {}",
-            repo_name(root),
+            code(&repo_name(root)),
+            code(&stop.to_string()),
             state.sessions,
             usage.input_tokens,
             usage.output_tokens,
@@ -187,7 +191,11 @@ impl Notifier {
         if self.webhook.is_none() {
             return Ok(());
         }
-        let content = format!("junees: task in {} run failed: {err:#}", repo_name(root));
+        let content = format!(
+            "junees: task in {} run failed: {}",
+            code(&repo_name(root)),
+            code(&format!("{err:#}"))
+        );
         self.send(&content).await
     }
 
@@ -203,8 +211,9 @@ impl Notifier {
             return Ok(());
         }
         let content = format!(
-            "junees: task in {} session {session} done: {summary}",
-            repo_name(root)
+            "junees: task in {} session {session} done: {}",
+            code(&repo_name(root)),
+            code(summary)
         );
         self.send(&content).await
     }
@@ -217,6 +226,22 @@ fn is_loopback(host: &str) -> bool {
         || ip
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `text` as an inline code span, so Discord shows it as it is: no links,
+/// no formatting. Backticks become `'` and line breaks spaces, which a span
+/// cannot hold, and long text is cut to [`SPAN_LIMIT`] so the span still
+/// closes when the message is cut to [`CONTENT_LIMIT`].
+fn code(text: &str) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| match c {
+            '`' => '\'',
+            '\n' | '\r' => ' ',
+            c => c,
+        })
+        .collect();
+    format!("`{}`", cut(&flat, SPAN_LIMIT))
 }
 
 /// The name of the repository folder.
@@ -436,8 +461,8 @@ mod tests {
         assert_eq!(body["allowed_mentions"], json!({"parse": []}));
         assert_eq!(
             body["content"],
-            "junees: task in todo-app stopped (stalled): stalled: no new feature \
-             passed in 3 sessions in a row\n\
+            "junees: task in `todo-app` stopped (stalled): `stalled: no new feature \
+             passed in 3 sessions in a row`\n\
              features: 2/5 passing\n\
              sessions: 4\n\
              tokens: input 1000, output 200, cache write 30, cache read 400"
@@ -468,12 +493,56 @@ mod tests {
 
         let requests = server.await.unwrap();
         let content = body(&requests[0])["content"].as_str().unwrap().to_string();
-        assert_eq!(content.chars().count(), CONTENT_LIMIT);
-        assert!(content.ends_with("가가..."), "{content}");
+        assert!(content.chars().count() <= CONTENT_LIMIT);
+        // The detail is cut inside its code span, which still closes.
+        assert!(
+            content.contains("가가...`\nfeatures: 0/3 passing"),
+            "{content}"
+        );
         assert!(content.contains("@everyone"));
         assert_eq!(body(&requests[0])["allowed_mentions"]["parse"], json!([]));
         let emoji = body(&requests[1])["content"].as_str().unwrap().to_string();
         assert_eq!(emoji, format!("{}...", "😀".repeat(998)));
+    }
+
+    #[tokio::test]
+    async fn variable_text_cannot_carry_markdown() {
+        let (url, server) = server(vec![Some(204), Some(204)]).await;
+        let notifier = notifier(&[(WEBHOOK_ENV, &url)]).unwrap();
+        notifier
+            .task_stopped(
+                Path::new("/work/**app**"),
+                &Stop {
+                    reason: StopReason::Error,
+                    session: 2,
+                    detail: Some("see [this](https://evil.example) `x`\n# big".into()),
+                },
+                0,
+                1,
+                &State::default(),
+            )
+            .await
+            .unwrap();
+        notifier
+            .run_failed(
+                Path::new("/work/app"),
+                &anyhow::anyhow!("[x](https://evil.example)"),
+            )
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+        let content = body(&requests[0])["content"].as_str().unwrap().to_string();
+        assert!(
+            content.starts_with(
+                "junees: task in `**app**` stopped (error): `session 2 failed: \
+                 see [this](https://evil.example) 'x' # big`\n"
+            ),
+            "{content}"
+        );
+        assert_eq!(
+            body(&requests[1])["content"],
+            "junees: task in `app` run failed: `[x](https://evil.example)`"
+        );
     }
 
     #[test]
@@ -500,7 +569,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(
             body(&requests[0])["content"],
-            "junees: task in app session 2 done: 2/3 passing, new: F2"
+            "junees: task in `app` session 2 done: `2/3 passing, new: F2`"
         );
     }
 
