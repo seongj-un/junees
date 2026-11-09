@@ -7,7 +7,7 @@ use junees::agent::{Agent, AgentOptions};
 use junees::context::SUMMARY_SYSTEM;
 use junees::provider::anthropic::AnthropicProvider;
 use junees::session::{CLEARED, Session, SessionWriter};
-use junees::tools::ToolRegistry;
+use junees::tools::{ToolRegistry, ToolSettings};
 use serde_json::{Value, json};
 
 mod common;
@@ -73,7 +73,7 @@ async fn clears_then_compacts_over_the_threshold_and_replays() {
     let provider = AnthropicProvider::new("sk-test".into(), url, "test-model".into()).unwrap();
     let mut agent = Agent::new(
         Box::new(provider),
-        ToolRegistry::with_defaults(),
+        ToolRegistry::with_defaults(&ToolSettings::default()),
         AgentOptions {
             system: "sys".into(),
             max_tokens: 64,

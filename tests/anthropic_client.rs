@@ -6,7 +6,7 @@ use junees::agent::{Agent, AgentOptions};
 use junees::message::{ContentBlock, Message};
 use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use junees::tools::ToolRegistry;
+use junees::tools::{ToolRegistry, ToolSettings};
 use serde_json::{Value, json};
 
 mod common;
@@ -170,7 +170,7 @@ async fn agent_runs_bash_through_the_real_client() {
 
     let mut agent = Agent::new(
         Box::new(provider(url)),
-        ToolRegistry::with_defaults(),
+        ToolRegistry::with_defaults(&ToolSettings::default()),
         AgentOptions {
             system: "sys".into(),
             max_tokens: 64,
