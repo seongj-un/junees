@@ -37,6 +37,11 @@ pub const RECOVER_COMMIT: &str = "junees: recover after crash";
 /// older task up to date before a run.
 pub const IGNORE_COMMIT: &str = "junees: keep the run log out of git";
 
+/// Commit message of the commit that keeps what the start of a run changed
+/// before any session: passes the recheck took back, the feature list in
+/// the harness's formatting, files the verify commands left behind.
+pub const RECHECK_COMMIT: &str = "junees: recheck passing features at run start";
+
 /// What `.junees/.gitignore` keeps out of git: harness files that change
 /// on every run.
 const IGNORED: &[&str] = &["state.json", ".*.tmp", "*.rejected.json", "run.log"];
@@ -332,6 +337,10 @@ async fn run_until_stop(
     }
     let unchecked =
         recheck_passing(env, &ledger, budget::tokens(state.usage), started, report).await?;
+    // The tree was clean before the list was loaded, so whatever changed
+    // since is the harness's doing. Committed now, the run leaves a clean
+    // tree even when it stops before any session (see `recheck_commit`).
+    recheck_commit(root, report)?;
     // A run that stopped on its own does not hold its stall streak against
     // the next one; after a crash (no stop recorded) the streak carries on.
     if state.stop.take().is_some() {
@@ -492,6 +501,26 @@ async fn run_until_stop(
         warn(report, &err.to_string());
     }
     Ok(stop)
+}
+
+/// Commits what the start of a run changed in the work tree, if anything:
+/// [`Ledger::load`] writes the list in the harness's formatting, the
+/// recheck takes passes back in features.json and notes it in progress.md,
+/// and verify commands may leave files behind. Without this commit, a run
+/// that stops before any session (a budget already used up, a signal,
+/// nothing left to do) would leave them uncommitted, and the next run would
+/// refuse the dirty tree.
+fn recheck_commit(root: &Path, report: &mut Reporter<'_>) -> Result<()> {
+    if !git::is_dirty(root)? {
+        return Ok(());
+    }
+    let commit = git::commit_all(root, RECHECK_COMMIT)
+        .context("cannot commit the changes of the start-of-run recheck")?;
+    warn_left_out(report, &commit.left_out);
+    if commit.made {
+        line(report, &format!("recheck commit: {RECHECK_COMMIT}"));
+    }
+    Ok(())
 }
 
 /// The task's tokens and this run's time, with their budgets.
@@ -2035,9 +2064,10 @@ mod tests {
         assert_eq!(stop.session, 3);
         assert_eq!(provider.left(), 0);
         assert_eq!(
-            subjects(root)[..3],
+            subjects(root)[..4],
             [
                 checkpoint_message(3),
+                RECHECK_COMMIT.to_string(),
                 RECOVER_COMMIT.to_string(),
                 checkpoint_message(1)
             ]
@@ -2118,6 +2148,7 @@ mod tests {
         let list = features::load(root).unwrap();
         assert_eq!(list[0].verify, "false");
         assert!(!list[0].passes);
+        assert!(!git::is_dirty(root).unwrap());
         assert!(
             out.warnings
                 .iter()
@@ -2144,7 +2175,9 @@ mod tests {
 
         assert_eq!(stop.reason, StopReason::MaxSessions);
         assert_eq!(features::load(root).unwrap()[0].verify, "false");
-        assert_eq!(subjects(root)[0], RECOVER_COMMIT);
+        // The recheck took the restored pass back in a commit of its own.
+        assert_eq!(subjects(root)[..2], [RECHECK_COMMIT, RECOVER_COMMIT]);
+        assert!(!git::is_dirty(root).unwrap());
     }
 
     #[tokio::test]
@@ -2297,6 +2330,133 @@ mod tests {
         assert_eq!(passes, [true, true]);
         assert!(!git::is_dirty(root).unwrap());
         assert_eq!(State::load(root).unwrap().stop, Some(stop));
+    }
+
+    /// After a run that stopped before any session: the work tree is clean,
+    /// the start of the run is in its own commit, and the next run starts
+    /// a session.
+    async fn clean_and_next_run_starts(root: &Path) {
+        assert!(!git::is_dirty(root).unwrap());
+        assert_eq!(subjects(root)[0], RECHECK_COMMIT);
+        assert_eq!(State::load(root).unwrap().sessions, 0);
+        let provider = Scripted::new(vec![text("next")]);
+        let stop = run_task(root, &provider, 1, &mut Collected::default()).await;
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(stop.session, 1);
+        assert_eq!(provider.left(), 0);
+    }
+
+    /// A reporter that runs `then` once the recheck takes a pass back.
+    fn on_taken_back(mut then: impl FnMut()) -> impl FnMut(Report<'_>) {
+        move |report| {
+            if let Report::Event(Event::Warning(text)) = report
+                && text.starts_with("marked as passing, but")
+            {
+                then();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recheck_without_sessions_is_committed() {
+        // F1's verify fails and leaves a file behind, as a build might.
+        let repo = task_repo_marked(&[("touch built.txt && false", true), ("false", false)]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![]);
+        let stop = run_task(root, &provider, 0, &mut Collected::default()).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(stop.session, 0);
+        let passes: Vec<bool> = features::load(root)
+            .unwrap()
+            .iter()
+            .map(|f| f.passes)
+            .collect();
+        assert_eq!(passes, [false, false]);
+        assert!(root.join("built.txt").exists());
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(progress.contains("- [junees] run start: marked as passing, but"));
+        clean_and_next_run_starts(root).await;
+    }
+
+    #[tokio::test]
+    async fn a_signal_right_after_the_recheck_leaves_a_clean_tree() {
+        let repo = task_repo_marked(&[("false", true)]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let env = env(root, home.path(), &factory);
+        let cancel = env.cancel.clone();
+        let stop = run(&env, 5, &mut on_taken_back(|| cancel.cancel()))
+            .await
+            .unwrap();
+
+        assert_eq!(stop.reason, StopReason::Interrupted);
+        assert_eq!(stop.session, 0);
+        assert!(!features::load(root).unwrap()[0].passes);
+        clean_and_next_run_starts(root).await;
+    }
+
+    #[tokio::test]
+    async fn a_time_budget_used_up_by_the_recheck_leaves_a_clean_tree() {
+        let repo = task_repo_marked(&[("false", true)]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        let secs = Arc::new(AtomicU64::new(0));
+        env.budget.clock = budget::testing::fake_clock(secs.clone());
+        env.budget.max_time = Some(Duration::from_secs(60));
+        // The last verify command takes the run past its minute.
+        let stop = run(
+            &env,
+            5,
+            &mut on_taken_back(|| secs.store(120, Ordering::SeqCst)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stop.reason, StopReason::Budget);
+        assert_eq!(stop.session, 0);
+        assert_eq!(
+            stop.detail.as_deref(),
+            Some("time budget used up: 2m of 1m")
+        );
+        assert!(!features::load(root).unwrap()[0].passes);
+        clean_and_next_run_starts(root).await;
+    }
+
+    #[tokio::test]
+    async fn a_token_budget_already_used_up_leaves_a_clean_tree() {
+        // A list committed by hand in its own formatting, which the harness
+        // rewrites in its own.
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let by_hand = feature_list(&["false"]).replace("\"passes\":false", "\"passes\":true");
+        fs::write(features_path(root), &by_hand).unwrap();
+        git::commit_all(root, "mark by hand").unwrap();
+        let mut state = State::load(root).unwrap();
+        state.usage.input_tokens = 50;
+        state.save(root).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        env.budget.max_tokens = Some(20);
+        let stop = run(&env, 5, &mut |_| {}).await.unwrap();
+
+        assert_eq!(stop.reason, StopReason::Budget);
+        assert_eq!(stop.session, 0);
+        assert_eq!(
+            stop.detail.as_deref(),
+            Some("token budget used up: 50 of 20 tokens")
+        );
+        // Not rechecked, so the pass stays as it was, unconfirmed.
+        assert_ne!(fs::read_to_string(features_path(root)).unwrap(), by_hand);
+        assert!(features::load(root).unwrap()[0].passes);
+        clean_and_next_run_starts(root).await;
     }
 
     #[tokio::test]
