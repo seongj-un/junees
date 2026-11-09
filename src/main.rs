@@ -2,14 +2,15 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use junees::agent::{Agent, AgentOptions, Event};
-use junees::cli::{self, Command, SessionMode};
+use junees::cli::{self, Command, SessionMode, TaskCommand};
 use junees::config::Config;
 use junees::prompt;
-use junees::provider::ProviderError;
 use junees::provider::anthropic::AnthropicProvider;
+use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
+use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -39,6 +40,7 @@ async fn run() -> Result<()> {
             return Ok(());
         }
         Command::Run(args) => args,
+        Command::Task(command) => return run_task(command).await,
     };
 
     let config = Config::from_env()?;
@@ -84,6 +86,46 @@ async fn run() -> Result<()> {
                 session_id: opened.id,
             };
             repl.run().await
+        }
+    }
+}
+
+/// `junees task init|run`, in the root of the git repository the current
+/// folder is in.
+async fn run_task(command: TaskCommand) -> Result<()> {
+    let config = Config::from_env()?;
+    let root = task::git::toplevel(&std::env::current_dir()?)?;
+    // The tools resolve relative paths from the process's folder.
+    std::env::set_current_dir(&root)
+        .with_context(|| format!("cannot change to {}", root.display()))?;
+    let provider = || -> Result<Box<dyn Provider>> {
+        Ok(Box::new(AnthropicProvider::new(
+            config.api_key.clone(),
+            config.base_url.clone(),
+            config.model.clone(),
+        )?))
+    };
+    let env = TaskEnv {
+        root,
+        home: config.home.clone(),
+        model: config.model.clone(),
+        max_tokens: config.max_tokens,
+        max_turns: config.max_turns,
+        provider: &provider,
+    };
+    let mut report = |report: Report<'_>| match report {
+        Report::Line(line) => println!("{line}"),
+        Report::Event(event) => print_event(event),
+    };
+    match command {
+        TaskCommand::Init { goal } => task::init(&env, &goal, &mut report).await,
+        TaskCommand::Run { max_sessions } => {
+            let stop = task::run(&env, max_sessions, &mut report).await?;
+            if stop.reason.is_failure() {
+                bail!("task stopped: {stop}");
+            }
+            println!("task stopped: {stop}");
+            Ok(())
         }
     }
 }

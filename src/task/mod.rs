@@ -14,6 +14,8 @@ pub mod runner;
 pub mod state;
 pub mod tools;
 
+pub use runner::{Report, TaskEnv, init, run};
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};

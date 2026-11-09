@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::session::{Summary, format_utc};
+use crate::task::DEFAULT_MAX_SESSIONS;
 
 pub const HELP: &str = "\
 junees - an AI agent in your terminal
@@ -10,6 +11,9 @@ junees - an AI agent in your terminal
 Usage:
   junees [OPTIONS]              start an interactive session
   junees [OPTIONS] -p <PROMPT>  run one prompt and exit
+  junees task init \"<GOAL>\"     plan a long-running task in this git repository
+  junees task run [--max-sessions <N>]
+                                work on the task, one feature per session
 
 Options:
   -p, --prompt <PROMPT>  run a single prompt non-interactively
@@ -20,6 +24,11 @@ Options:
   -V, --version          print the version
 
 Sessions are saved as they happen to $JUNEES_HOME/sessions/<id>.jsonl.
+
+Task mode keeps the feature list, progress notes and state in .junees/ of
+the repository. `task run` stops when every feature passes, after
+--max-sessions sessions (default 20), after 3 sessions in a row without a
+newly passing feature, or when a session fails.
 
 Environment:
   ANTHROPIC_API_KEY   required
@@ -40,9 +49,21 @@ pub const REPL_HELP: &str = "\
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Run(RunArgs),
+    Task(TaskCommand),
     Help,
     Version,
 }
+
+/// `junees task ...`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TaskCommand {
+    /// Plan a new task for this goal.
+    Init { goal: String },
+    /// Work on the task for at most this many sessions.
+    Run { max_sessions: usize },
+}
+
+const TASK_USAGE: &str = "usage: junees task init \"<goal>\" | junees task run [--max-sessions N]";
 
 /// What to do when not printing help or the version.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -66,7 +87,11 @@ pub enum SessionMode {
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|arg| arg == "task") {
+        args.next();
+        return parse_task(args);
+    }
     let mut run = RunArgs::default();
     let mut set_session = |mode: SessionMode| {
         if run.session != SessionMode::New && run.session != mode {
@@ -94,6 +119,53 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
     }
     run.prompt = prompt;
     Ok(Command::Run(run))
+}
+
+fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
+    let command = match args.next().as_deref() {
+        Some("-h" | "--help") => return Ok(Command::Help),
+        Some("init") => {
+            let mut goal = None;
+            for arg in args {
+                match arg.as_str() {
+                    "-h" | "--help" => return Ok(Command::Help),
+                    _ if goal.is_some() => {
+                        bail!("task init takes one goal; quote it (\"{arg}\" is extra)")
+                    }
+                    _ => goal = Some(arg),
+                }
+            }
+            let goal = goal.filter(|goal| !goal.trim().is_empty());
+            TaskCommand::Init {
+                goal: goal.context(TASK_USAGE)?,
+            }
+        }
+        Some("run") => {
+            let mut max_sessions = DEFAULT_MAX_SESSIONS;
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-h" | "--help" => return Ok(Command::Help),
+                    "--max-sessions" => {
+                        let value = args.next().context("--max-sessions needs a number")?;
+                        max_sessions =
+                            value
+                                .parse()
+                                .ok()
+                                .filter(|&n: &usize| n > 0)
+                                .with_context(|| {
+                                    format!(
+                                        "--max-sessions must be a positive integer, got `{value}`"
+                                    )
+                                })?;
+                    }
+                    other => bail!("unknown argument `{other}` for task run ({TASK_USAGE})"),
+                }
+            }
+            TaskCommand::Run { max_sessions }
+        }
+        _ => bail!(TASK_USAGE),
+    };
+    Ok(Command::Task(command))
 }
 
 /// One `/sessions` line: id, last write (UTC), first input.
@@ -199,6 +271,49 @@ mod tests {
         ] {
             let err = parse(bad).unwrap_err();
             assert!(err.to_string().contains("cannot be combined"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn parses_task_commands() {
+        assert_eq!(
+            parse(&["task", "init", "웹 서버를 만들어"]).unwrap(),
+            Command::Task(TaskCommand::Init {
+                goal: "웹 서버를 만들어".into()
+            })
+        );
+        assert_eq!(
+            parse(&["task", "run"]).unwrap(),
+            Command::Task(TaskCommand::Run {
+                max_sessions: DEFAULT_MAX_SESSIONS
+            })
+        );
+        assert_eq!(
+            parse(&["task", "run", "--max-sessions", "3"]).unwrap(),
+            Command::Task(TaskCommand::Run { max_sessions: 3 })
+        );
+        assert_eq!(parse(&["task", "--help"]).unwrap(), Command::Help);
+        // Only a leading `task` is the subcommand.
+        assert_eq!(
+            parse(&["-p", "task"]).unwrap(),
+            run(Some("task"), SessionMode::New)
+        );
+    }
+
+    #[test]
+    fn rejects_bad_task_args() {
+        for bad in [
+            &["task"][..],
+            &["task", "go"],
+            &["task", "init"],
+            &["task", "init", " "],
+            &["task", "init", "a", "b"],
+            &["task", "run", "--max-sessions"],
+            &["task", "run", "--max-sessions", "0"],
+            &["task", "run", "--max-sessions", "many"],
+            &["task", "run", "-p", "x"],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
         }
     }
 
