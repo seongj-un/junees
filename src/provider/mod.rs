@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 mod error;
+mod stream;
 
 pub use error::ProviderError;
 
@@ -41,12 +42,49 @@ pub struct CompletionResponse {
     pub usage: Usage,
 }
 
+/// Progress of a model call made with [`Provider::complete_streaming`],
+/// reported while the response arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    /// The next piece of a text block.
+    TextDelta(String),
+    /// The text block the last deltas belong to is complete.
+    TextEnd,
+    /// A `thinking` or `redacted_thinking` block started. Its content is
+    /// not reported.
+    Thinking,
+    /// The response broke off after part of it was reported. It is asked
+    /// for again from the start, and what was reported since the last
+    /// `Retrying` (or the start) is not part of the response.
+    Retrying,
+}
+
+/// Where [`Provider::complete_streaming`] reports its progress. A channel
+/// rather than a callback, so the call stays `Send` whatever the receiver
+/// does with the events.
+pub type StreamSender = tokio::sync::mpsc::UnboundedSender<StreamEvent>;
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn complete(
         &self,
         request: CompletionRequest<'_>,
     ) -> Result<CompletionResponse, ProviderError>;
+
+    /// Like [`Provider::complete`], reporting the response to `events` as
+    /// it arrives: every text and thinking block of the returned response
+    /// is reported, in order, after the last [`StreamEvent::Retrying`].
+    /// Providers that cannot stream report the whole response at the end,
+    /// which is what this default does.
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest<'_>,
+        events: &StreamSender,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let response = self.complete(request).await?;
+        report_blocks(&response.content, events);
+        Ok(response)
+    }
 
     /// Whether requests that allow thinking ask for manual extended thinking
     /// (a fixed token budget). The API then wants the turn in progress to
@@ -55,5 +93,22 @@ pub trait Provider: Send + Sync {
     /// it, so the history keeps its thinking blocks when it is shrunk.
     fn manual_thinking(&self) -> bool {
         false
+    }
+}
+
+/// Reports the text and thinking blocks of a whole response, as a stream
+/// would have. A receiver that is gone has nothing left to show.
+pub fn report_blocks(content: &[ContentBlock], events: &StreamSender) {
+    for block in content {
+        match block {
+            ContentBlock::Text { text } => {
+                let _ = events.send(StreamEvent::TextDelta(text.clone()));
+                let _ = events.send(StreamEvent::TextEnd);
+            }
+            block if block.is_thinking() => {
+                let _ = events.send(StreamEvent::Thinking);
+            }
+            _ => {}
+        }
     }
 }
