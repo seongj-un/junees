@@ -1,9 +1,11 @@
 //! Drives the real Anthropic client against a local fake API server.
 
+use std::time::{Duration, Instant};
+
 use junees::agent::{Agent, AgentOptions};
 use junees::message::{ContentBlock, Message};
 use junees::provider::anthropic::AnthropicProvider;
-use junees::provider::{CompletionRequest, Provider};
+use junees::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use junees::tools::ToolRegistry;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,7 +13,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 /// Serves the given (status, body) pairs to consecutive connections and
-/// returns every raw request it received.
+/// returns every raw request it received. Error responses carry
+/// `retry-after: 0` so retries do not slow the tests down. Status 0 closes
+/// the connection without answering.
 async fn fake_api(responses: Vec<(u16, Value)>) -> (String, JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -20,9 +24,18 @@ async fn fake_api(responses: Vec<(u16, Value)>) -> (String, JoinHandle<Vec<Strin
         for (status, body) in responses {
             let (mut socket, _) = listener.accept().await.unwrap();
             requests.push(read_request(&mut socket).await);
+            if status == 0 {
+                drop(socket);
+                continue;
+            }
             let body = body.to_string();
+            let retry_after = if status >= 400 {
+                "retry-after: 0\r\n"
+            } else {
+                ""
+            };
             let response = format!(
-                "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\n\
+                "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\n{retry_after}\
                  content-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
@@ -144,7 +157,63 @@ async fn does_not_retry_auth_errors() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("authentication_error"), "{err}");
+    assert!(err.is_auth());
     assert_eq!(server.await.unwrap().len(), 1);
+}
+
+async fn complete_hi(url: String) -> Result<CompletionResponse, ProviderError> {
+    let messages = [Message::user_text("hi")];
+    provider(url)
+        .complete(CompletionRequest {
+            system: "",
+            messages: &messages,
+            tools: &[],
+            max_tokens: 64,
+        })
+        .await
+}
+
+#[tokio::test]
+async fn gives_up_after_four_attempts_and_honors_retry_after() {
+    let overloaded =
+        json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}});
+    let (url, server) = fake_api(vec![(529, overloaded); 4]).await;
+    let started = Instant::now();
+    let err = complete_hi(url).await.unwrap_err();
+    // retry-after: 0 replaces the 0.5 + 1 + 2 s default backoff.
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        err.to_string(),
+        "API error 529 (overloaded_error): Overloaded"
+    );
+    assert_eq!(server.await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn context_overflow_is_typed_and_not_retried() {
+    let too_long = json!({"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "prompt is too long: 215000 tokens > 200000 maximum"
+    }});
+    let (url, server) = fake_api(vec![(400, too_long)]).await;
+    let err = complete_hi(url).await.unwrap_err();
+    assert!(err.is_context_overflow(), "{err}");
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn retries_a_connection_closed_before_the_response() {
+    let (url, server) = fake_api(vec![(0, Value::Null), (200, text_reply("ok"))]).await;
+    let response = complete_hi(url).await.unwrap();
+    assert_eq!(
+        response.content,
+        vec![ContentBlock::Text { text: "ok".into() }]
+    );
+    assert_eq!(server.await.unwrap().len(), 2);
 }
 
 #[tokio::test]
