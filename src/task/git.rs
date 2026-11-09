@@ -172,11 +172,30 @@ pub fn untracked_left_out(root: &Path, pathspec: &[&str]) -> Result<Vec<LeftOut>
 /// secrets or are larger than [`MAX_NEW_FILE_BYTES`], and commits it.
 pub fn commit_all(root: &Path, message: &str) -> Result<Commit> {
     git(root, &["add", "-A"])?;
+    // Rename and copy detection would hide a new file filled from a
+    // tracked one (`mv .env.example .env`) from the secret check, so that
+    // check sees every new path. The size check keeps detection: a large
+    // file that was only moved is already in the history.
     let added = git(
         root,
-        &["diff", "--cached", "--name-only", "--diff-filter=A", "-z"],
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "--diff-filter=A",
+            "-z",
+        ],
     )?;
-    let left_out = left_out_of(root, &added);
+    let new_content = git(
+        root,
+        &["diff", "--cached", "--name-only", "--diff-filter=AC", "-z"],
+    )?;
+    let new_content: Vec<&str> = new_content.split('\0').collect();
+    let left_out: Vec<LeftOut> = left_out_of(root, &added)
+        .into_iter()
+        .filter(|file| file.reason == Reason::Secret || new_content.contains(&file.path.as_str()))
+        .collect();
     if !left_out.is_empty() {
         let mut args = vec!["--literal-pathspecs", "rm", "--cached", "-q", "--"];
         args.extend(left_out.iter().map(|file| file.path.as_str()));
@@ -439,6 +458,53 @@ mod tests {
         assert!(commit.made);
         assert_eq!(commit.left_out.len(), 1);
         assert_eq!(subjects(root), ["second", "first"]);
+
+        // A large file that was only moved is already in the history.
+        std::fs::rename(root.join("main.rs"), root.join("moved.rs")).unwrap();
+        let commit = commit_all(root, "third").unwrap();
+        assert!(commit.made);
+        assert_eq!(commit.left_out.len(), 1);
+        assert_eq!(
+            git(root, &["ls-files"]).unwrap(),
+            "at-limit.bin\nmoved.rs\n"
+        );
+
+        // A large new copy is new content, even where the user's config
+        // makes git detect copies.
+        git(root, &["config", "diff.renames", "copies"]).unwrap();
+        let mut text = vec![b'a'; 2_000_000];
+        text.push(b'\n');
+        std::fs::write(root.join("moved.rs"), &text).unwrap();
+        text.push(b'b');
+        std::fs::write(root.join("copy.rs"), &text).unwrap();
+        let commit = commit_all(root, "fourth").unwrap();
+        let paths: Vec<&str> = commit.left_out.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["copy.rs", "target/app.bin"]);
+    }
+
+    #[test]
+    fn leaves_a_secret_out_that_git_sees_as_a_rename() {
+        let repo = repo();
+        let root = repo.path();
+        let example = "DB_HOST=localhost\nDB_PORT=5432\nDB_NAME=app\nDB_USER=app\n";
+        std::fs::write(root.join(".env.example"), example).unwrap();
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        git(root, &["add", "-A"]).unwrap();
+        git(root, &["commit", "-q", "-m", "first"]).unwrap();
+        // Filled from the example: git pairs the two as a rename.
+        std::fs::rename(root.join(".env.example"), root.join(".env")).unwrap();
+        std::fs::write(root.join(".env"), format!("{example}DB_PASSWORD=x\n")).unwrap();
+        let commit = commit_all(root, "second").unwrap();
+        assert!(commit.made);
+        assert_eq!(
+            commit.left_out,
+            [LeftOut {
+                path: ".env".into(),
+                reason: Reason::Secret
+            }]
+        );
+        assert_eq!(git(root, &["ls-files"]).unwrap(), "main.rs\n");
+        assert!(root.join(".env").exists());
     }
 
     #[test]
