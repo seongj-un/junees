@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::context;
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
-use crate::provider::{CompletionRequest, Provider};
+use crate::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError, ToolSpec};
 use crate::session::{Entry, Journal, Transcript};
 use crate::tools::{ToolOutput, ToolRegistry};
 
@@ -131,15 +131,21 @@ impl Agent {
 
         for _ in 0..self.options.max_turns {
             self.manage_context(&mut on_event).await;
-            let response = self
-                .provider
-                .complete(CompletionRequest {
-                    system: &self.options.system,
-                    messages: &self.transcript.messages,
-                    tools: &specs,
-                    max_tokens: self.options.max_tokens,
-                })
-                .await?;
+            let response = match self.call(&specs).await {
+                Ok(response) => response,
+                // Shrink the history as far as it goes and try once more.
+                Err(err) if err.is_context_overflow() => {
+                    if !self.shrink(&mut on_event).await {
+                        return Err(err.into());
+                    }
+                    on_event(Event::Warning(
+                        "the conversation did not fit the context window; \
+                         retrying once with the shrunk history",
+                    ));
+                    self.call(&specs).await?
+                }
+                Err(err) => return Err(err.into()),
+            };
             self.record(Entry::Usage(response.usage), &mut on_event);
 
             let mut tool_calls = Vec::new();
@@ -231,6 +237,27 @@ impl Agent {
             "stopped after {} model calls without a final answer",
             self.options.max_turns
         )
+    }
+
+    async fn call(&self, specs: &[ToolSpec]) -> Result<CompletionResponse, ProviderError> {
+        self.provider
+            .complete(CompletionRequest {
+                system: &self.options.system,
+                messages: &self.transcript.messages,
+                tools: specs,
+                max_tokens: self.options.max_tokens,
+            })
+            .await
+    }
+
+    /// After the API said the conversation does not fit: clears old tool
+    /// output and compacts, whatever the tracked size says. Returns whether
+    /// the history got any smaller.
+    async fn shrink(&mut self, on_event: &mut impl FnMut(Event<'_>)) -> bool {
+        let cleared = self.clear_tool_results(on_event);
+        let compacted = self.summarize(on_event).await;
+        self.cleared = false;
+        cleared || compacted
     }
 
     /// Keeps the conversation under the compaction threshold: once the
@@ -355,7 +382,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::provider::{CompletionResponse, ProviderError};
     use crate::session::{self, Session, SessionWriter};
 
     type Reply = std::result::Result<CompletionResponse, ProviderError>;
@@ -1206,5 +1232,82 @@ mod tests {
             ContentBlock::Text { text: "two".into() }
         );
         assert_eq!(history[1].text(), "b");
+    }
+
+    fn overflow() -> Reply {
+        Err(ProviderError::Api {
+            status: 400,
+            kind: Some("invalid_request_error".into()),
+            message: "prompt is too long: 215000 tokens > 200000 maximum".into(),
+        })
+    }
+
+    /// A first turn with four tool calls, then the given replies.
+    fn after_a_tool_turn(rest: Vec<Reply>) -> Vec<Reply> {
+        let mut script = tool_rounds(4, 100);
+        script.push(sized(text("one"), 100));
+        script.extend(rest);
+        script
+    }
+
+    #[tokio::test]
+    async fn a_context_overflow_compacts_and_retries_once() {
+        let provider = Scripted::new(after_a_tool_turn(vec![
+            overflow(),
+            text("SUMMARY"),
+            text("two"),
+        ]));
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 10).with_journal(Box::new(journal.clone()));
+        agent.run("first", |_| {}).await.unwrap();
+        let mut events = Vec::new();
+        let answer = agent
+            .run("second", |event| events.push(format!("{event:?}")))
+            .await
+            .unwrap();
+        assert_eq!(answer, "two");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 8);
+        assert_eq!(seen[5].len(), 11);
+        // Old tool output went first, then everything before "second".
+        assert!(seen[6][0].text().contains(session::CLEARED));
+        let retried = &seen[7];
+        assert_eq!(retried.len(), 1);
+        assert_eq!(summary_text(&retried[0]).as_deref(), Some("SUMMARY"));
+        assert_eq!(
+            retried[0].content[1],
+            ContentBlock::Text {
+                text: "second".into()
+            }
+        );
+        assert!(events[0].starts_with("Compacted"), "{events:?}");
+        assert!(events[1].contains("retrying once"), "{events:?}");
+        assert_valid(agent.messages());
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
+    #[tokio::test]
+    async fn a_second_overflow_is_an_error() {
+        let provider = Scripted::new(after_a_tool_turn(vec![
+            overflow(),
+            text("SUMMARY"),
+            overflow(),
+        ]));
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 10);
+        agent.run("first", |_| {}).await.unwrap();
+        let err = agent.run("second", |_| {}).await.unwrap_err();
+        assert!(
+            err.downcast_ref::<ProviderError>()
+                .unwrap()
+                .is_context_overflow()
+        );
+        // One retry only; the compacted history stays and ends with the
+        // input, so the next one joins it.
+        assert_eq!(seen.lock().unwrap().len(), 8);
+        assert_eq!(agent.messages().len(), 1);
+        assert_eq!(agent.messages()[0].role, Role::User);
     }
 }

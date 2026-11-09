@@ -270,8 +270,8 @@ fn report(err: &anyhow::Error) {
     if let Some(provider_error) = err.downcast_ref::<ProviderError>() {
         if provider_error.is_context_overflow() {
             eprintln!(
-                "hint: the conversation no longer fits the model's context window. \
-                 /reset starts a new one."
+                "hint: the conversation no longer fits the model's context window, \
+                 even after clearing old tool output and compacting. /reset starts a new one."
             );
         } else if provider_error.is_auth() {
             eprintln!("hint: check ANTHROPIC_API_KEY.");
