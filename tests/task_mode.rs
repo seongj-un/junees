@@ -622,6 +622,65 @@ async fn a_run_killed_during_the_session_notification_keeps_its_stop() {
 }
 
 #[tokio::test]
+async fn status_sees_a_run_that_is_going() {
+    let mut replies = init_replies();
+    replies.extend([
+        (200, tool_calls(&[write_file("a.txt", "a"), mark("F1")])),
+        (200, text_reply("F1 done.")),
+    ]);
+    let (url, _api) = fake_api(replies).await;
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, home.path(), &["init", "-q"]).await;
+    junees(root, home.path(), &url, &["task", "init", "make a and b"]).await;
+
+    // The run waits on the webhook after session 1, with F2 still to do.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook = format!(
+        "http://{}/api/webhooks/7/{HOOK_TOKEN}",
+        listener.local_addr().unwrap()
+    );
+    let mut run = junees_command(
+        root,
+        home.path(),
+        &url,
+        &["task", "run"],
+        &[
+            ("JUNEES_NOTIFY_WEBHOOK", &hook),
+            ("JUNEES_NOTIFY_EACH_SESSION", "1"),
+        ],
+    )
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let pid = run.id().unwrap();
+    let (_held, _) = tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+        .await
+        .expect("no session notification")
+        .unwrap();
+
+    let output = status(root, home.path(), &["--json"]).await;
+    run.kill().await.unwrap();
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["running"], true, "{value}");
+    assert_eq!(value["run"]["pid"], pid, "{value}");
+    assert_eq!(value["features_from"], "harness", "{value}");
+    assert_eq!(value["passing"], 1, "{value}");
+    assert_eq!(value["stop"], Value::Null, "{value}");
+
+    // Killed, the run leaves its mark behind: a crash.
+    let output = status(root, home.path(), &[]).await;
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(&format!("running: no; the run with pid {pid} ")),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn status_without_a_task_says_to_run_init() {
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
