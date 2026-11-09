@@ -87,6 +87,11 @@ impl Notifier {
         let Some(host) = url.host_str().map(str::to_string) else {
             bail!("{WEBHOOK_ENV} has no host");
         };
+        // Over plain http the token would cross the network readable, and
+        // a proxy would see the whole URL.
+        if url.scheme() == "http" && !is_loopback(&host) {
+            bail!("{WEBHOOK_ENV} must be an https URL (plain http only for localhost)");
+        }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -203,6 +208,15 @@ impl Notifier {
         );
         self.send(&content).await
     }
+}
+
+/// Whether `host` (as [`Url::host_str`] shows it) is this machine.
+fn is_loopback(host: &str) -> bool {
+    let ip = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || ip
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The name of the repository folder.
@@ -363,10 +377,22 @@ mod tests {
         assert!(on.each_session);
         assert!(!format!("{on:?}").contains("abc"), "{on:?}");
 
+        for local in [
+            "http://localhost:9/api/webhooks/1/abc",
+            "http://127.0.0.1:9/api/webhooks/1/abc",
+            "http://127.8.0.1/api/webhooks/1/abc",
+            "http://[::1]:9/api/webhooks/1/abc",
+        ] {
+            assert!(notifier(&[(WEBHOOK_ENV, local)]).is_ok(), "{local}");
+        }
         for bad in [
             "discord.com/api/webhooks/1/abc-token",
             "ftp://discord.com/abc-token",
             "https://",
+            "http://discord.com/api/webhooks/1/abc-token",
+            "http://localhost.example.com/api/webhooks/1/abc-token",
+            "http://127.0.0.1.nip.io/api/webhooks/1/abc-token",
+            "http://10.0.0.1/api/webhooks/1/abc-token",
         ] {
             let err = notifier(&[(WEBHOOK_ENV, bad)]).unwrap_err();
             let text = format!("{err:#}");
