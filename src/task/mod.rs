@@ -10,6 +10,7 @@
 pub mod budget;
 pub mod features;
 pub mod git;
+pub mod lock;
 mod prompt;
 pub mod runner;
 pub mod state;

@@ -11,7 +11,8 @@ use anyhow::{Context, Result, bail};
 
 use super::budget::{self, Budget};
 use super::features::{self, Ledger};
-use super::state::{State, Stop, StopReason};
+use super::lock::RunLock;
+use super::state::{Running, State, Stop, StopReason};
 use super::tools::{MarkFeaturePassing, Verifier, session_tools};
 use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt, rejected_features_path};
 use crate::agent::{Agent, AgentOptions, Cancelled, Event, Limit, LimitReached, TurnLimit};
@@ -19,11 +20,16 @@ use crate::cancel::Cancel;
 use crate::cli::preview;
 use crate::message::Usage;
 use crate::provider::Provider;
-use crate::session::SessionWriter;
+use crate::session::{SessionWriter, format_utc};
 use crate::tools::{ToolRegistry, ToolSettings};
 
 /// Commit message of the commit that starts a task.
 pub const INIT_COMMIT: &str = "junees: initialize task";
+
+/// Commit message of the commit that keeps what a crashed run left behind.
+pub const RECOVER_COMMIT: &str = "junees: recover after crash";
+
+const NO_TASK: &str = "cannot load the feature list (start a task with `junees task init`)";
 
 /// Why task mode does not start on a work tree with changes: its commits
 /// take everything a session leaves behind, and would take the user's
@@ -248,6 +254,10 @@ fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
 /// features.json, adds a line to progress.md and commits whatever the
 /// session left uncommitted. Session numbers and counters continue from
 /// state.json, so a run picks up where the last one (or a crash) left off.
+///
+/// A run holds the task's [`RunLock`] and marks itself running in
+/// state.json until it stops. A run that finds the mark of one that no
+/// longer holds the lock recovers from that crash first (see [`recover`]).
 pub async fn run(
     env: &TaskEnv<'_>,
     max_sessions: usize,
@@ -256,8 +266,25 @@ pub async fn run(
     let root = &env.root;
     let started = env.budget.now();
     git::toplevel(root)?;
-    features::load(root)
-        .context("cannot load the feature list (start a task with `junees task init`)")?;
+    if !dir(root).is_dir() {
+        features::load(root).context(NO_TASK)?;
+    }
+    let Some(_lock) = RunLock::acquire(root)? else {
+        let holder = match State::load(root).ok().and_then(|state| state.running) {
+            Some(running) => format!(
+                " (pid {}, started {} UTC)",
+                running.pid,
+                format_utc(running.started)
+            ),
+            None => String::new(),
+        };
+        bail!("another `junees task run`{holder} is working on this task; wait for it to stop");
+    };
+    let mut state = State::load(root)?;
+    if let Some(running) = state.running.take() {
+        recover(env, &mut state, &running, report)?;
+    }
+    features::load(root).context(NO_TASK)?;
     if git::is_dirty(root)? {
         bail!(DIRTY_TREE);
     }
@@ -265,13 +292,16 @@ pub async fn run(
     let ledger = Arc::new(Mutex::new(ledger));
     prepare_dir(root)?;
     let rechecked = recheck_passing(env, &ledger, report).await?;
-    let mut state = State::load(root)?;
     // A run that stopped on its own does not hold its stall streak against
     // the next one; after a crash (no stop recorded) the streak carries on.
     if state.stop.take().is_some() {
         state.stalled = 0;
     }
-    state.save(root)?;
+    state.running = Some(Running {
+        pid: std::process::id(),
+        started: unix_now(),
+    });
+    save_state(root, &mut state, &ledger)?;
 
     let mut ran = 0;
     let stop = loop {
@@ -300,7 +330,7 @@ pub async fn run(
         ran += 1;
         state.sessions += 1;
         let n = state.sessions;
-        state.save(root)?;
+        save_state(root, &mut state, &ledger)?;
         let before = ledger.lock().unwrap().passing_ids();
 
         let limit = env.budget.session_limit(used, started);
@@ -351,11 +381,71 @@ pub async fn run(
         if state.stalled >= STALL_LIMIT {
             break stop(StopReason::Stalled, n);
         }
-        state.save(root)?;
+        save_state(root, &mut state, &ledger)?;
     };
     state.stop = Some(stop.clone());
-    state.save(root)?;
+    state.running = None;
+    save_state(root, &mut state, &ledger)?;
     Ok(stop)
+}
+
+/// Saves state.json with the harness's current copy of the feature list.
+fn save_state(root: &Path, state: &mut State, ledger: &Mutex<Ledger>) -> Result<()> {
+    state.features = Some(ledger.lock().unwrap().features().to_vec());
+    state.save(root)
+}
+
+/// Picks up after a run that crashed (killed, or the machine went down)
+/// while `running` it: puts the harness's copy of the feature list back
+/// into features.json (see [`features::restore_copy`]), notes the crash in
+/// progress.md and commits whatever the crashed session left behind, so
+/// the run can start from a clean tree. The crash's mark is cleared on
+/// disk at once, so a run that then refuses to start does not recover
+/// twice.
+fn recover(
+    env: &TaskEnv<'_>,
+    state: &mut State,
+    running: &Running,
+    report: &mut Reporter<'_>,
+) -> Result<()> {
+    let root = &env.root;
+    warn(
+        report,
+        &format!(
+            "the run started {} UTC (pid {}) did not stop cleanly; recovering",
+            format_utc(running.started),
+            running.pid
+        ),
+    );
+    prepare_dir(root)?;
+    let restored = match &state.features {
+        Some(copy) => features::restore_copy(root, copy)?,
+        None => false,
+    };
+    let mut note = format!(
+        "recovered after a crash: the run started {} UTC stopped without a record \
+         during session {}",
+        format_utc(running.started),
+        state.sessions
+    );
+    if restored {
+        note.push_str("; .junees/features.json was restored from the harness's copy");
+    }
+    append_progress(root, &note)?;
+    if git::is_dirty(root)? {
+        let commit = git::commit_all(root, RECOVER_COMMIT)?;
+        warn_left_out(report, &commit.left_out);
+        if commit.made {
+            line(report, &format!("recovery commit: {RECOVER_COMMIT}"));
+        }
+    }
+    state.save(root)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// The harness's part after a work session: puts its copy of the feature
@@ -1628,6 +1718,134 @@ mod tests {
         let stop = run(&env, 5, &mut |_| {}).await.unwrap();
         assert_eq!(stop.reason, StopReason::Interrupted);
         assert_eq!(stop.session, 1);
+    }
+
+    #[tokio::test]
+    async fn a_run_marks_itself_running_and_refuses_a_second_one() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![
+            calls(&[bash(format!(
+                "cat '{}'",
+                super::super::state_path(root).display()
+            ))]),
+            text("looked"),
+        ]);
+        run_task(root, &provider, 1, &mut Collected::default()).await;
+        // While the session ran, state.json named this process.
+        let result = provider.seen.lock().unwrap()[1].1[2].content[0].clone();
+        let ContentBlock::ToolResult { content, .. } = result else {
+            panic!("expected the tool result: {result:?}");
+        };
+        assert!(
+            content.contains(&format!("\"pid\": {}", std::process::id())),
+            "{content}"
+        );
+        // It is cleared at the stop, and the copy of the list is kept.
+        let state = State::load(root).unwrap();
+        assert_eq!(state.running, None);
+        assert_eq!(state.features, Some(features::load(root).unwrap()));
+
+        // Another run holds the lock: refused, nothing touched.
+        let mut state = State::load(root).unwrap();
+        state.running = Some(Running {
+            pid: 4242,
+            started: 1_794_205_024,
+        });
+        state.save(root).unwrap();
+        let held = RunLock::acquire(root).unwrap().unwrap();
+        let none = Scripted::new(vec![]);
+        let home = tempfile::tempdir().unwrap();
+        let none_factory = factory(&none);
+        let err = run(&env(root, home.path(), &none_factory), 5, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "another `junees task run` (pid 4242, started 2026-11-09 06:17 UTC) is working \
+             on this task; wait for it to stop"
+        );
+        assert_eq!(State::load(root).unwrap(), state);
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_crashed_run_is_recovered_before_the_next_one() {
+        let repo = task_repo(&["false", "test -f b.txt"]);
+        let root = repo.path();
+        let provider = Scripted::new(vec![text("looking"), text("next")]);
+        run_task(root, &provider, 1, &mut Collected::default()).await;
+
+        // Session 2 crashed: its mark is left, the tree has its half-done
+        // work, and features.json its edits (a verify that always passes,
+        // and passes it never got from the harness).
+        let mut state = State::load(root).unwrap();
+        state.sessions = 2;
+        state.stop = None;
+        state.running = Some(Running {
+            pid: 4242,
+            started: 1_794_205_024,
+        });
+        state.save(root).unwrap();
+        fs::write(root.join("b.txt"), "b").unwrap();
+        let forged = features::load(root)
+            .unwrap()
+            .into_iter()
+            .map(|mut feature| {
+                feature.passes = true;
+                if feature.id == "F1" {
+                    feature.verify = "true".into();
+                }
+                feature
+            })
+            .collect::<Vec<_>>();
+        fs::write(features_path(root), features::to_json(&forged)).unwrap();
+
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 1, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(stop.session, 3);
+        assert_eq!(provider.left(), 0);
+        assert_eq!(
+            subjects(root)[..3],
+            [
+                checkpoint_message(3),
+                RECOVER_COMMIT.to_string(),
+                checkpoint_message(1)
+            ]
+        );
+        assert!(!git::is_dirty(root).unwrap());
+        // The verify came back from the copy; F1's forged pass failed it,
+        // F2's claim was checked with its own verify and holds.
+        let list = features::load(root).unwrap();
+        assert_eq!(list[0].verify, "false");
+        let passes: Vec<bool> = list.iter().map(|f| f.passes).collect();
+        assert_eq!(passes, [false, true]);
+        assert!(
+            out.warnings[0].starts_with(
+                "the run started 2026-11-09 06:17 UTC (pid 4242) did not stop cleanly"
+            ),
+            "{:?}",
+            out.warnings
+        );
+        assert!(
+            out.lines
+                .contains(&format!("recovery commit: {RECOVER_COMMIT}"))
+        );
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains(
+                "- [junees] recovered after a crash: the run started 2026-11-09 06:17 UTC \
+                 stopped without a record during session 2; .junees/features.json was \
+                 restored from the harness's copy\n"
+            ),
+            "{progress}"
+        );
+        let state = State::load(root).unwrap();
+        assert_eq!(state.running, None);
+        assert_eq!(state.stop, Some(stop));
     }
 
     #[tokio::test]

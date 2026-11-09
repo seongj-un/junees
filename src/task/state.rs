@@ -10,6 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::features::Feature;
 use super::{state_path, write_atomic};
 use crate::message::Usage;
 
@@ -29,6 +30,24 @@ pub struct State {
     /// `None` at the start of a run means the previous one crashed.
     #[serde(default)]
     pub stop: Option<Stop>,
+    /// Set while a `task run` works and cleared when it stops. Found set by
+    /// a run that got the task's lock, it means the run that set it
+    /// crashed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<Running>,
+    /// The harness's copy of the feature list as of the last save. Crash
+    /// recovery restores features.json from it, since a session that
+    /// crashed may have left its own edits there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<Feature>>,
+}
+
+/// Which process runs the task, and since when.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Running {
+    pub pid: u32,
+    /// Unix seconds.
+    pub started: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,12 +154,27 @@ mod tests {
                 session: 4,
                 detail: Some("network down".into()),
             }),
+            running: Some(Running {
+                pid: 42,
+                started: 1_794_205_024,
+            }),
+            features: Some(
+                crate::task::features::parse(
+                    r#"[{"id": "F1", "description": "d", "verify": "true", "passes": true}]"#,
+                )
+                .unwrap(),
+            ),
         };
         state.save(root.path()).unwrap();
         assert_eq!(State::load(root.path()).unwrap(), state);
         let raw: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(state_path(root.path())).unwrap()).unwrap();
         assert_eq!(raw["stop"]["reason"], "error");
+        assert_eq!(raw["running"]["pid"], 42);
+        assert_eq!(raw["features"][0]["id"], "F1");
+        // An L3 state.json has neither.
+        let old: State = serde_json::from_str(r#"{"sessions": 2}"#).unwrap();
+        assert_eq!((old.running, old.features), (None, None));
         assert_eq!(
             state.stop.unwrap().to_string(),
             "session 4 failed: network down"
