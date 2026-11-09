@@ -23,7 +23,8 @@ pub enum Verdict {
 /// top-level system folder, the home folder or a parent folder, also as
 /// `rm -rf *` after a `cd` into one of them; `mkfs`,
 /// `wipefs`, `dd` or a redirect onto a device; `shutdown` and friends; fork
-/// bombs; `curl`/`wget` piped into a shell; force push; `sudo`. Extra denied
+/// bombs; `curl`/`wget` piped into a shell; force push; `sudo`, `su` and
+/// other privilege escalation. Extra denied
 /// prefixes always apply, even with [`CommandPolicy::allow_dangerous`].
 #[derive(Debug, Clone, Default)]
 pub struct CommandPolicy {
