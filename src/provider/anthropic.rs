@@ -8,7 +8,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use super::{CompletionRequest, CompletionResponse, Provider, ProviderError, ToolSpec};
-use crate::message::{ContentBlock, Message, StopReason, Usage};
+use crate::message::{ContentBlock, Role, StopReason, Usage};
 
 const API_VERSION: &str = "2023-06-01";
 const MAX_ATTEMPTS: u32 = 4;
@@ -97,15 +97,105 @@ struct Failure {
     retry_after: Option<u64>,
 }
 
+/// A request body. Prompt-cache breakpoints go on the last tool, the system
+/// prompt and the last block of the last message, so each call reads the
+/// prefix the previous one wrote. They are added here, while serializing,
+/// so the conversation types stay plain.
 #[derive(Serialize)]
 struct ApiRequest<'a> {
     model: &'a str,
     max_tokens: u32,
-    #[serde(skip_serializing_if = "str::is_empty")]
-    system: &'a str,
-    messages: &'a [Message],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    tools: &'a [ToolSpec],
+    system: Vec<Cached<SystemText<'a>>>,
+    messages: Vec<ApiMessage<'a>>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    tools: Vec<Cached<&'a ToolSpec>>,
+}
+
+impl<'a> ApiRequest<'a> {
+    fn new(model: &'a str, request: CompletionRequest<'a>) -> Self {
+        let system = if request.system.is_empty() {
+            Vec::new()
+        } else {
+            vec![Cached::marked(SystemText {
+                kind: "text",
+                text: request.system,
+            })]
+        };
+        let last_tool = request.tools.len().saturating_sub(1);
+        let tools = request
+            .tools
+            .iter()
+            .enumerate()
+            .map(|(i, tool)| Cached::new(tool, i == last_tool))
+            .collect();
+        let last_message = request.messages.len().saturating_sub(1);
+        let messages = request
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, message)| {
+                let last_block = message.content.len().saturating_sub(1);
+                ApiMessage {
+                    role: message.role,
+                    content: message
+                        .content
+                        .iter()
+                        .enumerate()
+                        .map(|(j, block)| Cached::new(block, i == last_message && j == last_block))
+                        .collect(),
+                }
+            })
+            .collect();
+        Self {
+            model,
+            max_tokens: request.max_tokens,
+            system,
+            messages,
+            tools,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SystemText<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct ApiMessage<'a> {
+    role: Role,
+    content: Vec<Cached<&'a ContentBlock>>,
+}
+
+/// An item with an optional prompt-cache breakpoint after it.
+#[derive(Serialize)]
+struct Cached<T> {
+    #[serde(flatten)]
+    item: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+impl<T> Cached<T> {
+    fn new(item: T, marked: bool) -> Self {
+        Self {
+            item,
+            cache_control: marked.then_some(CacheControl { kind: "ephemeral" }),
+        }
+    }
+
+    fn marked(item: T) -> Self {
+        Self::new(item, true)
+    }
+}
+
+#[derive(Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -148,13 +238,7 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompletionRequest<'_>,
     ) -> Result<CompletionResponse, ProviderError> {
-        let body = ApiRequest {
-            model: &self.model,
-            max_tokens: request.max_tokens,
-            system: request.system,
-            messages: request.messages,
-            tools: request.tools,
-        };
+        let body = ApiRequest::new(&self.model, request);
         let url = self.messages_url();
 
         let mut attempt = 1;
@@ -202,46 +286,120 @@ fn api_error(status: StatusCode, body: &[u8]) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::message::Message;
+    use serde_json::{Value, json};
+
+    fn request(system: &str, messages: &[Message], tools: &[ToolSpec]) -> Value {
+        let body = ApiRequest::new(
+            "m",
+            CompletionRequest {
+                system,
+                messages,
+                tools,
+                max_tokens: 10,
+            },
+        );
+        serde_json::to_value(&body).unwrap()
+    }
 
     #[test]
     fn request_omits_empty_system_and_tools() {
         let messages = [Message::user_text("hi")];
-        let body = ApiRequest {
-            model: "m",
-            max_tokens: 10,
-            system: "",
-            messages: &messages,
-            tools: &[],
-        };
         assert_eq!(
-            serde_json::to_value(&body).unwrap(),
+            request("", &messages, &[]),
             json!({
                 "model": "m",
                 "max_tokens": 10,
-                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}
+                ]}]
             })
         );
+        // No messages at all still serializes.
+        assert_eq!(request("", &[], &[])["messages"], json!([]));
     }
 
     #[test]
-    fn request_includes_system_and_tools() {
-        let tools = [ToolSpec {
-            name: "bash".into(),
+    fn request_marks_tools_system_and_the_last_block_for_caching() {
+        let spec = |name: &str| ToolSpec {
+            name: name.into(),
             description: "run".into(),
             input_schema: json!({"type": "object"}),
-        }];
-        let body = ApiRequest {
-            model: "m",
-            max_tokens: 10,
-            system: "be nice",
-            messages: &[],
-            tools: &tools,
         };
-        let value = serde_json::to_value(&body).unwrap();
-        assert_eq!(value["system"], "be nice");
-        assert_eq!(value["tools"][0]["name"], "bash");
-        assert_eq!(value["tools"][0]["input_schema"]["type"], "object");
+        let tools = [spec("bash"), spec("read_file")];
+        let messages = [
+            Message::user_text("list files"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "sure".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "bash".into(),
+                        input: json!({"command": "ls"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "toolu_1".into(),
+                        content: "a\nb".into(),
+                        is_error: false,
+                    },
+                    ContentBlock::Text {
+                        text: "and then?".into(),
+                    },
+                ],
+            },
+        ];
+        let ephemeral = json!({"type": "ephemeral"});
+        let value = request("be nice", &messages, &tools);
+
+        assert_eq!(
+            value["system"],
+            json!([{"type": "text", "text": "be nice", "cache_control": ephemeral}])
+        );
+        assert_eq!(
+            value["tools"],
+            json!([
+                {"name": "bash", "description": "run", "input_schema": {"type": "object"}},
+                {"name": "read_file", "description": "run", "input_schema": {"type": "object"},
+                 "cache_control": ephemeral}
+            ])
+        );
+        assert_eq!(
+            value["messages"],
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "list files"}]},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "sure"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {"command": "ls"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "a\nb"},
+                    {"type": "text", "text": "and then?", "cache_control": ephemeral}
+                ]}
+            ])
+        );
+        let marks = value.to_string().matches("cache_control").count();
+        assert_eq!(marks, 3);
+    }
+
+    #[test]
+    fn response_reads_cache_usage() {
+        let api: ApiResponse = serde_json::from_value(json!({
+            "content": [],
+            "usage": {"input_tokens": 4, "output_tokens": 2,
+                      "cache_creation_input_tokens": 100, "cache_read_input_tokens": 900}
+        }))
+        .unwrap();
+        let usage = CompletionResponse::from(api).usage;
+        assert_eq!(usage.cache_creation_input_tokens, 100);
+        assert_eq!(usage.cache_read_input_tokens, 900);
     }
 
     #[test]

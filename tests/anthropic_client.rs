@@ -44,7 +44,10 @@ async fn sends_headers_and_body() {
     let body = body_of(&requests[0]);
     assert_eq!(body["model"], "test-model");
     assert_eq!(body["max_tokens"], 64);
-    assert_eq!(body["system"], "sys");
+    assert_eq!(
+        body["system"],
+        json!([{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}])
+    );
     assert_eq!(body["messages"][0]["content"][0]["text"], "hi");
 }
 
