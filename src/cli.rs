@@ -376,9 +376,13 @@ pub fn session_line(summary: &Summary, current: bool) -> String {
         preview(&summary.first_input, SESSION_PREVIEW_CHARS)
     };
     format!(
-        "{marker} {}  {} UTC  {first}",
+        "{marker} {}  {} UTC  {}{first}",
         summary.id,
-        format_utc(summary.updated)
+        format_utc(summary.updated),
+        match summary.backend.as_deref() {
+            Some(backend) => format!("[{backend}] "),
+            None => String::new(),
+        }
     )
 }
 
@@ -680,6 +684,7 @@ mod tests {
             updated: 1_794_205_024,
             cwd: "/work".into(),
             first_input: "이 폴더에\n뭐가 있어? ".repeat(10),
+            backend: None,
         };
         let line = session_line(&summary, true);
         assert!(
@@ -689,9 +694,16 @@ mod tests {
         assert!(line.ends_with("..."));
         let empty = Summary {
             first_input: String::new(),
-            ..summary
+            ..summary.clone()
         };
         assert!(session_line(&empty, false).ends_with("UTC  (empty)"));
+        // A conversation Claude Code runs says so.
+        let claude = Summary {
+            first_input: "hi".into(),
+            backend: Some("claude-code".into()),
+            ..summary
+        };
+        assert!(session_line(&claude, false).ends_with("UTC  [claude-code] hi"));
     }
 
     #[test]

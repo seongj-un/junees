@@ -26,8 +26,15 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// Junees does not handle itself (thinking and the like) as the API sent
 /// them, which older versions would read as placeholders the API rejects.
 /// Format 1 and 2 journals still load; continuing one first writes an
-/// [`Entry::Format`] line. Format 4 added `drop_server_calls`.
-pub const FORMAT: u32 = 4;
+/// [`Entry::Format`] line. Format 4 added `drop_server_calls`. Format 5
+/// added conversations run by Claude Code: the meta line's `backend` and
+/// `claude_turn` entries, which a format 4 Junees would replay as an empty
+/// API conversation.
+pub const FORMAT: u32 = 5;
+
+/// [`Meta::backend`] of a conversation Claude Code runs (the `claude-code`
+/// backend).
+pub const CLAUDE_CODE: &str = "claude-code";
 
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
@@ -60,6 +67,10 @@ pub struct Meta {
     pub cwd: String,
     pub model: String,
     pub version: String,
+    /// What runs the conversation: [`CLAUDE_CODE`], or `None` (the field
+    /// left out) for Junees's own agent on the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 fn first_format() -> u32 {
@@ -67,7 +78,7 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 9] = [
+const ENTRY_TYPES: [&str; 10] = [
     "meta",
     "message",
     "append_text",
@@ -77,6 +88,7 @@ const ENTRY_TYPES: [&str; 9] = [
     "compact",
     "format",
     "drop_server_calls",
+    "claude_turn",
 ];
 
 /// One line of a journal.
@@ -134,6 +146,29 @@ pub enum Entry {
     DropServerCalls {
         ids: Vec<String>,
     },
+    /// Claude Code ran one turn of a [`CLAUDE_CODE`] conversation. Claude
+    /// Code keeps the conversation itself; the journal keeps what is
+    /// needed to continue it and a summary of the turn.
+    ClaudeTurn(ClaudeTurn),
+}
+
+/// One turn of a conversation Claude Code runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeTurn {
+    /// Claude Code's id of the conversation (`claude --resume <id>`), as
+    /// the turn reported it; `None` when it ended before saying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session: Option<String>,
+    /// What the user typed.
+    pub input: String,
+    /// Claude Code's final answer; empty when the turn ended without one.
+    #[serde(default)]
+    pub text: String,
+    /// Tokens the turn used, as Claude Code reported them.
+    pub usage: Usage,
+    /// How the turn ended, in a few words (`answered`, `interrupted`,
+    /// `stopped at the usage limit`, `failed`, ...).
+    pub end: String,
 }
 
 /// An entry as a journal line stores it: stamped with when it was written.
@@ -176,6 +211,11 @@ pub struct Transcript {
     pub unmeasured_tokens: u64,
     /// The last call measured the size, which counts its reply already.
     pub(crate) reply_measured: bool,
+    /// The Claude Code conversation a [`CLAUDE_CODE`] session continues:
+    /// the latest id its turns reported.
+    pub claude_session: Option<String>,
+    /// Turns Claude Code ran in this session.
+    pub claude_turns: usize,
 }
 
 impl Transcript {
@@ -286,6 +326,14 @@ impl Transcript {
                     .map(|message| estimate_tokens(&message.content))
                     .sum();
                 self.reply_measured = false;
+            }
+            // Claude Code manages its own context: nothing to measure.
+            Entry::ClaudeTurn(turn) => {
+                self.usage.add(turn.usage);
+                self.claude_turns += 1;
+                if turn.claude_session.is_some() {
+                    self.claude_session = turn.claude_session;
+                }
             }
             Entry::DropServerCalls { ids } => {
                 let dropped = |block: &ContentBlock| {
@@ -586,6 +634,17 @@ impl SessionWriter {
     /// Picks an id for a new session under `home/sessions`. Nothing is
     /// written until the first entry.
     pub fn create(home: &Path, cwd: &Path, model: &str) -> Result<(Meta, Self)> {
+        Self::create_for(home, cwd, model, None)
+    }
+
+    /// [`SessionWriter::create`] for a conversation run by `backend`
+    /// ([`Meta::backend`]).
+    pub fn create_for(
+        home: &Path,
+        cwd: &Path,
+        model: &str,
+        backend: Option<&str>,
+    ) -> Result<(Meta, Self)> {
         let dir = sessions_dir(home);
         let now = unix_now();
         for _ in 0..16 {
@@ -601,6 +660,7 @@ impl SessionWriter {
                 cwd: cwd.to_string_lossy().into_owned(),
                 model: model.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                backend: backend.map(str::to_string),
             };
             let writer = Self {
                 path,
@@ -840,6 +900,8 @@ pub struct Summary {
     pub cwd: String,
     /// Text of the first user message.
     pub first_input: String,
+    /// [`Meta::backend`].
+    pub backend: Option<String>,
 }
 
 struct SessionFile {
@@ -896,12 +958,16 @@ fn read_meta(path: &Path) -> Option<Meta> {
     read_head(path).map(|(meta, _)| meta)
 }
 
-/// The most recently written session started in `cwd`.
-pub fn find_latest(home: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
+/// The most recently written session started in `cwd` and run by
+/// `backend` ([`Meta::backend`]).
+pub fn find_latest(home: &Path, cwd: &Path, backend: Option<&str>) -> Result<Option<PathBuf>> {
     let cwd = cwd.to_string_lossy();
     Ok(session_files(home)?
         .into_iter()
-        .find(|file| read_meta(&file.path).is_some_and(|meta| meta.cwd == cwd))
+        .find(|file| {
+            read_meta(&file.path)
+                .is_some_and(|meta| meta.cwd == cwd && meta.backend.as_deref() == backend)
+        })
         .map(|file| file.path))
 }
 
@@ -941,6 +1007,7 @@ pub fn list_recent(home: &Path, limit: usize) -> Result<Vec<Summary>> {
             let (meta, mut rest) = read_head(&file.path)?;
             let first_input = match read_entry(&mut rest) {
                 Some(Entry::Message(message)) if message.role == Role::User => message.text(),
+                Some(Entry::ClaudeTurn(turn)) => turn.input,
                 _ => String::new(),
             };
             Some(Summary {
@@ -952,6 +1019,7 @@ pub fn list_recent(home: &Path, limit: usize) -> Result<Vec<Summary>> {
                     .as_secs(),
                 cwd: meta.cwd,
                 first_input,
+                backend: meta.backend,
             })
         })
         .take(limit)
@@ -1059,6 +1127,7 @@ mod tests {
             cwd: "/work".into(),
             model: "m".into(),
             version: "0.1.0".into(),
+            backend: None,
         })
     }
 
@@ -1245,6 +1314,7 @@ mod tests {
             },
             Entry::Format { format: FORMAT },
             Entry::DropServerCalls { ids: vec![] },
+            Entry::ClaudeTurn(claude_turn(Some("c-1"), "hi")),
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -1260,7 +1330,9 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 4);
+        assert_eq!(value["format"], 5);
+        // An API conversation has no backend field.
+        assert!(value.get("backend").is_none(), "{value}");
         // Journals written before the field existed are format 1.
         let old =
             r#"{"type":"meta","id":"a","created_at":1,"cwd":"/w","model":"m","version":"0.1.0"}"#;
@@ -2198,7 +2270,7 @@ mod tests {
     fn continue_picks_the_latest_session_of_the_folder() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
-        assert_eq!(find_latest(home, Path::new("/x")).unwrap(), None);
+        assert_eq!(find_latest(home, Path::new("/x"), None).unwrap(), None);
 
         let _old = new_session(home, "/x", &["old"], 1_000);
         let newer = new_session(home, "/x", &["newer"], 2_000);
@@ -2208,8 +2280,105 @@ mod tests {
         set_mtime(&junk, 4_000);
         fs::write(sessions_dir(home).join("notes.txt"), "").unwrap();
 
-        assert_eq!(find_latest(home, Path::new("/x")).unwrap(), Some(newer));
-        assert_eq!(find_latest(home, Path::new("/z")).unwrap(), None);
+        assert_eq!(
+            find_latest(home, Path::new("/x"), None).unwrap(),
+            Some(newer.clone())
+        );
+        assert_eq!(find_latest(home, Path::new("/z"), None).unwrap(), None);
+
+        // Each backend continues its own conversations.
+        let claude = claude_session(home, "/x", &["asked claude"], 5_000);
+        assert_eq!(
+            find_latest(home, Path::new("/x"), Some(CLAUDE_CODE)).unwrap(),
+            Some(claude)
+        );
+        assert_eq!(
+            find_latest(home, Path::new("/x"), None).unwrap(),
+            Some(newer)
+        );
+        assert_eq!(
+            find_latest(home, Path::new("/y"), Some(CLAUDE_CODE)).unwrap(),
+            None
+        );
+    }
+
+    fn claude_turn(session: Option<&str>, input: &str) -> ClaudeTurn {
+        ClaudeTurn {
+            claude_session: session.map(str::to_string),
+            input: input.into(),
+            text: format!("answer to {input}"),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 2,
+                ..Usage::default()
+            },
+            end: "answered".into(),
+        }
+    }
+
+    /// A Claude Code conversation with one turn per input.
+    fn claude_session(home: &Path, cwd: &str, inputs: &[&str], mtime: u64) -> PathBuf {
+        let (meta, mut writer) =
+            SessionWriter::create_for(home, Path::new(cwd), "", Some(CLAUDE_CODE)).unwrap();
+        for input in inputs {
+            writer
+                .record(&Entry::ClaudeTurn(claude_turn(Some("c-1"), input)))
+                .unwrap();
+        }
+        let path = sessions_dir(home).join(format!("{}.jsonl", meta.id));
+        set_mtime(&path, mtime);
+        path
+    }
+
+    #[test]
+    fn a_claude_code_session_keeps_its_conversation_id_and_turns() {
+        let home = tempfile::tempdir().unwrap();
+        let path = claude_session(home.path(), "/x", &["first"], 1_000);
+        let (meta, mut writer) = {
+            let (session, writer) = Session::resume(&path).unwrap();
+            (session.meta, writer)
+        };
+        assert_eq!(meta.backend.as_deref(), Some(CLAUDE_CODE));
+        // A turn cut off before Claude Code named its conversation keeps
+        // the earlier id; a later id replaces it.
+        let mut cut = claude_turn(None, "second");
+        cut.end = "interrupted".into();
+        cut.text.clear();
+        writer.record(&Entry::ClaudeTurn(cut)).unwrap();
+        drop(writer);
+        let session = Session::load(&path).unwrap();
+        assert_eq!(session.transcript.claude_session.as_deref(), Some("c-1"));
+        assert_eq!(session.transcript.claude_turns, 2);
+        assert_eq!(session.transcript.usage.input_tokens, 20);
+        assert!(session.transcript.messages.is_empty());
+        let (_, mut writer) = Session::resume(&path).unwrap();
+        writer
+            .record(&Entry::ClaudeTurn(claude_turn(Some("c-2"), "third")))
+            .unwrap();
+        drop(writer);
+        let session = Session::load(&path).unwrap();
+        assert_eq!(session.transcript.claude_session.as_deref(), Some("c-2"));
+        assert_eq!(session.transcript.claude_turns, 3);
+
+        // The lines as written.
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["backend"], "claude-code");
+        assert_eq!(lines[0]["format"], FORMAT);
+        assert_eq!(lines[1]["type"], "claude_turn");
+        assert_eq!(lines[1]["claude_session"], "c-1");
+        assert_eq!(lines[1]["input"], "first");
+        assert_eq!(lines[1]["text"], "answer to first");
+        assert_eq!(lines[1]["end"], "answered");
+        assert_eq!(lines[1]["usage"]["input_tokens"], 10);
+        assert!(lines[2].get("claude_session").is_none(), "{}", lines[2]);
+
+        let list = list_recent(home.path(), 10).unwrap();
+        assert_eq!(list[0].first_input, "first");
+        assert_eq!(list[0].backend.as_deref(), Some(CLAUDE_CODE));
     }
 
     #[test]
@@ -2258,6 +2427,7 @@ mod tests {
         assert_eq!(list[1].first_input, "두 번째");
         assert_eq!(list[1].updated, 2_000);
         assert_eq!(list[1].cwd, "/y");
+        assert_eq!(list[1].backend, None);
         let all = list_recent(home, 10).unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(all[2].first_input, "first question");

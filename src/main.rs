@@ -542,7 +542,7 @@ fn open_session(mode: &SessionMode, config: &Config, cwd: &Path) -> Result<Opene
             let home = config
                 .require_home()
                 .context("cannot continue a saved session")?;
-            let latest = session::find_latest(home, cwd)?;
+            let latest = session::find_latest(home, cwd, None)?;
             if latest.is_none() {
                 eprintln!(
                     "no earlier session in {}; starting a new one",
