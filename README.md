@@ -49,7 +49,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 
 그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열). 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
-파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 다만 모델이 bash로 이 파일을 직접 읽는 것은 막지 않는다(`~/.ssh`처럼 같은 사용자의 파일. 아래 실행 전 승인과 명령 정책 참고).
+파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령을 막는다(아래 명령 정책 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽은 차단 목록일 뿐 샌드박스가 아니어서 글롭이나 실행 중에 만든 경로로는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
 
 ## 고급 사용법
 
@@ -251,6 +251,7 @@ junees task --backend claude-code --max-time 2h   # 설정과 상관없이 이�
 - 내려받은 스크립트 바로 실행: `curl`/`wget ... | sh`(bash, zsh 등 셸 포함), `bash <(curl ...)`, `sh -c "$(curl ...)"`
 - 강제 push: `git push --force`, `-f`, `+refspec` (`--force-with-lease`는 허용)
 - 권한 상승: `sudo`, `doas`, `pkexec`, `su`, `runuser`
+- 설정 파일(`$JUNEES_HOME/config.toml`, API 키를 담는다)을 이름으로 가리키는 명령: 단어나 리다이렉트 대상(`<`, `>`, `>>`), `--file=경로`/`if=경로`처럼 `=` 뒤의 값이 그 파일이면 막는다. 절대 경로, `~/.junees/config.toml`, `$HOME`/`${HOME}`, `$JUNEES_HOME`/`${JUNEES_HOME}`으로 시작하는 경로, `..`와 심볼릭 링크를 거친 경로, 현재 폴더(같은 스크립트에서 앞서 `cd`/`pushd`한 곳)에서의 상대 경로(`cd ~/.junees && cat config.toml`)를 알아본다. 따옴표 안 단어도 경로로 본다(`echo "~/.junees/config.toml"`도 막힌다). 이 규칙은 비밀을 지키는 것이라 `JUNEES_ALLOW_DANGEROUS=1`이어도 적용된다. 차단 목록일 뿐 샌드박스가 아니다: 글롭(`cat ~/.junees/*`, `cat ~/.junees/conf*`), 다른 변수에 담은 경로(`d=~/.junees; cat $d/config.toml`), 실행 중에 만든 경로(`cat $(echo ~/.junees)/config.toml`), 파일로 써 둔 스크립트는 막지 못한다
 
 검사 방식:
 
@@ -325,7 +326,7 @@ src/
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
-  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs)
+  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일을 알아보는 판단(settings_file.rs)
   config.rs          설정 값 읽기와 검사 (from_lookup 이음새, 도구 설정 ToolSettings 포함)
   config_file.rs     설정 파일 config.toml (단순 TOML 읽기/쓰기, 0600), Settings: 실행 중 변경 -> 환경 변수 -> 파일 순서로 찾기
   setup.rs           설정 마법사 (Prompter 트레이트, Claude Code 확인 ClaudeProbe, 키 입력 때 터미널 echo 끄기 EchoOff)
