@@ -2,6 +2,9 @@
 //! tests can swap in a scripted provider and new backends can be added later.
 
 pub mod anthropic;
+mod error;
+
+pub use error::ProviderError;
 
 use async_trait::async_trait;
 use serde::Serialize;
@@ -34,5 +37,8 @@ pub struct CompletionResponse {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    async fn complete(&self, request: CompletionRequest<'_>) -> anyhow::Result<CompletionResponse>;
+    async fn complete(
+        &self,
+        request: CompletionRequest<'_>,
+    ) -> Result<CompletionResponse, ProviderError>;
 }

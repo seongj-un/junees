@@ -201,18 +201,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::provider::CompletionResponse;
+    use crate::provider::{CompletionResponse, ProviderError};
+
+    type Reply = std::result::Result<CompletionResponse, ProviderError>;
     use crate::tools::Tool;
 
     /// Replays canned responses and records the history it was sent.
     #[derive(Clone, Default)]
     struct Scripted {
-        responses: Arc<Mutex<VecDeque<Result<CompletionResponse>>>>,
+        responses: Arc<Mutex<VecDeque<Reply>>>,
         seen: Arc<Mutex<Vec<Vec<Message>>>>,
     }
 
     impl Scripted {
-        fn new(responses: Vec<Result<CompletionResponse>>) -> Self {
+        fn new(responses: Vec<Reply>) -> Self {
             Self {
                 responses: Arc::new(Mutex::new(responses.into())),
                 seen: Arc::default(),
@@ -222,7 +224,10 @@ mod tests {
 
     #[async_trait]
     impl Provider for Scripted {
-        async fn complete(&self, request: CompletionRequest<'_>) -> Result<CompletionResponse> {
+        async fn complete(
+            &self,
+            request: CompletionRequest<'_>,
+        ) -> Result<CompletionResponse, ProviderError> {
             self.seen.lock().unwrap().push(request.messages.to_vec());
             self.responses
                 .lock()
@@ -250,7 +255,7 @@ mod tests {
         }
     }
 
-    fn text(text: &str) -> Result<CompletionResponse> {
+    fn text(text: &str) -> Reply {
         Ok(CompletionResponse {
             content: vec![ContentBlock::Text { text: text.into() }],
             stop_reason: StopReason::EndTurn,
@@ -261,7 +266,7 @@ mod tests {
         })
     }
 
-    fn tool_use(id: &str, name: &str, input: Value) -> Result<CompletionResponse> {
+    fn tool_use(id: &str, name: &str, input: Value) -> Reply {
         Ok(CompletionResponse {
             content: vec![
                 ContentBlock::Text {
@@ -373,7 +378,10 @@ mod tests {
 
     #[tokio::test]
     async fn input_after_a_failure_joins_the_trailing_user_message() {
-        let provider = Scripted::new(vec![Err(anyhow::anyhow!("network down")), text("ok")]);
+        let provider = Scripted::new(vec![
+            Err(ProviderError::Transport("network down".into())),
+            text("ok"),
+        ]);
         let seen = provider.seen.clone();
         let mut agent = agent(provider, 5);
 
@@ -383,6 +391,19 @@ mod tests {
         let sent = &seen.lock().unwrap()[1];
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].text(), "first\nsecond");
+    }
+
+    #[tokio::test]
+    async fn provider_errors_stay_typed() {
+        let provider = Scripted::new(vec![Err(ProviderError::Api {
+            status: 400,
+            kind: Some("invalid_request_error".into()),
+            message: "prompt is too long: 300000 tokens > 200000 maximum".into(),
+        })]);
+        let mut agent = agent(provider, 5);
+        let err = agent.run("hi", |_| {}).await.unwrap_err();
+        let provider_error = err.downcast_ref::<ProviderError>().unwrap();
+        assert!(provider_error.is_context_overflow());
     }
 
     #[tokio::test]
@@ -433,10 +454,7 @@ mod tests {
         (agent, calls)
     }
 
-    fn with_stop(
-        response: Result<CompletionResponse>,
-        stop: StopReason,
-    ) -> Result<CompletionResponse> {
+    fn with_stop(response: Reply, stop: StopReason) -> Reply {
         response.map(|mut r| {
             r.stop_reason = stop;
             r

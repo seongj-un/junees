@@ -6,6 +6,7 @@ use junees::agent::{Agent, AgentOptions, Event};
 use junees::cli::{self, Command};
 use junees::config::Config;
 use junees::prompt;
+use junees::provider::ProviderError;
 use junees::provider::anthropic::AnthropicProvider;
 use junees::tools::ToolRegistry;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -18,7 +19,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            report(&err);
             ExitCode::FAILURE
         }
     }
@@ -91,9 +92,23 @@ async fn repl(agent: &mut Agent, model: &str) -> Result<()> {
             }
             input => {
                 if let Err(err) = agent.run(input, print_event).await {
-                    eprintln!("error: {err:#}");
+                    report(&err);
                 }
             }
+        }
+    }
+}
+
+fn report(err: &anyhow::Error) {
+    eprintln!("error: {err:#}");
+    if let Some(provider_error) = err.downcast_ref::<ProviderError>() {
+        if provider_error.is_context_overflow() {
+            eprintln!(
+                "hint: the conversation no longer fits the model's context window. \
+                 /reset starts a new one."
+            );
+        } else if provider_error.is_auth() {
+            eprintln!("hint: check ANTHROPIC_API_KEY.");
         }
     }
 }

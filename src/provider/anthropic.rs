@@ -2,17 +2,18 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Context;
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use super::{CompletionRequest, CompletionResponse, Provider, ToolSpec};
+use super::{CompletionRequest, CompletionResponse, Provider, ProviderError, ToolSpec};
 use crate::message::{ContentBlock, Message, StopReason, Usage};
 
 const API_VERSION: &str = "2023-06-01";
 const MAX_ATTEMPTS: u32 = 4;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// Requests are not streamed, so this bounds one whole model call.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_RETRY_AFTER_SECS: u64 = 60;
 
 pub struct AnthropicProvider {
@@ -23,7 +24,7 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    pub fn new(api_key: String, base_url: String, model: String) -> Result<Self> {
+    pub fn new(api_key: String, base_url: String, model: String) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -39,6 +40,61 @@ impl AnthropicProvider {
     fn messages_url(&self) -> String {
         format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
+
+    async fn send_once(
+        &self,
+        url: &str,
+        body: &ApiRequest<'_>,
+    ) -> Result<CompletionResponse, Failure> {
+        let response = self
+            .client
+            .post(url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", API_VERSION)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| Failure {
+                // is_request covers connections closed before a response.
+                retryable: err.is_timeout() || err.is_connect() || err.is_request(),
+                retry_after: None,
+                error: ProviderError::Transport(Box::new(err)),
+            })?;
+
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        // A body cut off midway is a transport problem worth retrying.
+        let bytes = response.bytes().await.map_err(|err| Failure {
+            retryable: true,
+            retry_after: None,
+            error: ProviderError::Transport(Box::new(err)),
+        })?;
+
+        if !status.is_success() {
+            return Err(Failure {
+                retryable: is_retryable(status),
+                retry_after,
+                error: api_error(status, &bytes),
+            });
+        }
+        let parsed: ApiResponse = serde_json::from_slice(&bytes).map_err(|err| Failure {
+            retryable: false,
+            retry_after: None,
+            error: ProviderError::Decode(err.to_string()),
+        })?;
+        Ok(parsed.into())
+    }
+}
+
+/// One failed attempt and whether another one may help.
+struct Failure {
+    error: ProviderError,
+    retryable: bool,
+    retry_after: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -88,7 +144,10 @@ struct ApiErrorDetail {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
-    async fn complete(&self, request: CompletionRequest<'_>) -> Result<CompletionResponse> {
+    async fn complete(
+        &self,
+        request: CompletionRequest<'_>,
+    ) -> Result<CompletionResponse, ProviderError> {
         let body = ApiRequest {
             model: &self.model,
             max_tokens: request.max_tokens,
@@ -100,43 +159,13 @@ impl Provider for AnthropicProvider {
 
         let mut attempt = 1;
         loop {
-            let result = self
-                .client
-                .post(&url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", API_VERSION)
-                .json(&body)
-                .send()
-                .await;
-
-            match result {
-                Ok(response) if response.status().is_success() => {
-                    let parsed: ApiResponse = response
-                        .json()
-                        .await
-                        .context("failed to parse Anthropic API response")?;
-                    return Ok(parsed.into());
-                }
-                Ok(response) => {
-                    let status = response.status();
-                    let retry_after = response
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| value.trim().parse::<u64>().ok());
-                    let text = response.text().await.unwrap_or_default();
-                    if is_retryable(status) && attempt < MAX_ATTEMPTS {
-                        tokio::time::sleep(backoff(attempt, retry_after)).await;
-                        attempt += 1;
-                        continue;
-                    }
-                    bail!("{}", describe_error(status, &text));
-                }
-                Err(err) if (err.is_timeout() || err.is_connect()) && attempt < MAX_ATTEMPTS => {
-                    tokio::time::sleep(backoff(attempt, None)).await;
+            match self.send_once(&url, &body).await {
+                Ok(response) => return Ok(response),
+                Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
+                    tokio::time::sleep(backoff(attempt, failure.retry_after)).await;
                     attempt += 1;
                 }
-                Err(err) => return Err(err).context("request to Anthropic API failed"),
+                Err(failure) => return Err(failure.error),
             }
         }
     }
@@ -155,14 +184,18 @@ fn backoff(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
     }
 }
 
-fn describe_error(status: StatusCode, body: &str) -> String {
-    match serde_json::from_str::<ApiErrorBody>(body) {
-        Ok(parsed) => format!(
-            "Anthropic API error {status} ({}): {}",
-            parsed.error.kind, parsed.error.message
-        ),
-        Err(_) if body.trim().is_empty() => format!("Anthropic API error {status}"),
-        Err(_) => format!("Anthropic API error {status}: {}", body.trim()),
+fn api_error(status: StatusCode, body: &[u8]) -> ProviderError {
+    match serde_json::from_slice::<ApiErrorBody>(body) {
+        Ok(parsed) => ProviderError::Api {
+            status: status.as_u16(),
+            kind: Some(parsed.error.kind),
+            message: parsed.error.message,
+        },
+        Err(_) => ProviderError::Api {
+            status: status.as_u16(),
+            kind: None,
+            message: String::from_utf8_lossy(body).trim().to_string(),
+        },
     }
 }
 
@@ -265,19 +298,19 @@ mod tests {
     }
 
     #[test]
-    fn describe_error_uses_api_message() {
-        let body = r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+    fn api_error_uses_the_error_body() {
+        let body = br#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
         assert_eq!(
-            describe_error(StatusCode::UNAUTHORIZED, body),
-            "Anthropic API error 401 Unauthorized (authentication_error): invalid x-api-key"
+            api_error(StatusCode::UNAUTHORIZED, body).to_string(),
+            "API error 401 (authentication_error): invalid x-api-key"
         );
         assert_eq!(
-            describe_error(StatusCode::BAD_GATEWAY, "upstream down"),
-            "Anthropic API error 502 Bad Gateway: upstream down"
+            api_error(StatusCode::BAD_GATEWAY, b"upstream down").to_string(),
+            "API error 502: upstream down"
         );
         assert_eq!(
-            describe_error(StatusCode::BAD_GATEWAY, ""),
-            "Anthropic API error 502 Bad Gateway"
+            api_error(StatusCode::BAD_GATEWAY, b"").to_string(),
+            "API error 502"
         );
     }
 
