@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::session::{Summary, format_utc};
 use crate::task::DEFAULT_MAX_SESSIONS;
 use crate::task::budget::parse_duration;
+use crate::task::claude_code::Backend;
 
 pub const HELP: &str = "\
 junees - an AI agent in your terminal
@@ -14,8 +15,9 @@ junees - an AI agent in your terminal
 Usage:
   junees [OPTIONS]              start an interactive session
   junees [OPTIONS] -p <PROMPT>  run one prompt and exit
-  junees task init \"<GOAL>\"     plan a long-running task in this git repository
-  junees task run [--max-sessions <N>] [--max-tokens <N>] [--max-time <DURATION>]
+  junees task init [--backend <B>] \"<GOAL>\"
+                                plan a long-running task in this git repository
+  junees task run [--backend <B>] [--max-sessions <N>] [--max-tokens <N>] [--max-time <DURATION>]
                                 work on the task, one feature per session
   junees task status [--json]   show where the task stands (read-only)
 
@@ -36,8 +38,14 @@ newly passing feature, when a session fails, or when the budget runs out:
 --max-tokens counts the tokens of every session of the task (over all
 runs), --max-time the time of this run (90s, 30m, 2h, 1h30m).
 
+--backend picks what runs the task sessions: `api` (default), Junees's own
+agent on ANTHROPIC_API_KEY, or `claude-code`, the official Claude Code CLI
+signed in with your own Claude subscription. Junees only starts `claude`;
+sign in yourself first (run `claude`, then /login). It needs no
+ANTHROPIC_API_KEY, and removes the API variables from claude's environment.
+
 Environment:
-  ANTHROPIC_API_KEY   required
+  ANTHROPIC_API_KEY   required, except for task init/run with the claude-code backend
   ANTHROPIC_BASE_URL  API base URL (default https://api.anthropic.com)
   JUNEES_MODEL        model id (default claude-sonnet-4-6)
   JUNEES_MAX_TOKENS   max output tokens per model call (default 8192)
@@ -54,6 +62,9 @@ Environment:
   JUNEES_NOTIFY_EACH_SESSION  1 to also post a line after every task session
   JUNEES_TASK_MAX_TOKENS  default --max-tokens of task run
   JUNEES_TASK_MAX_TIME    default --max-time of task run
+  JUNEES_BACKEND       default --backend of task init/run (api or claude-code)
+  JUNEES_CLAUDE_BIN    the claude program of the claude-code backend (default: claude)
+  JUNEES_CLAUDE_MODEL  model passed to claude with --model (default: Claude Code's own)
 ";
 
 pub const REPL_HELP: &str = "\
@@ -78,21 +89,41 @@ pub enum Command {
 #[derive(Debug, PartialEq, Eq)]
 pub enum TaskCommand {
     /// Plan a new task for this goal.
-    Init { goal: String },
+    Init {
+        goal: String,
+        backend: Option<Backend>,
+    },
     /// Work on the task for at most this many sessions, within the budget
     /// (unset parts come from the environment).
     Run {
         max_sessions: usize,
         max_tokens: Option<u64>,
         max_time: Option<Duration>,
+        backend: Option<Backend>,
     },
     /// Show where the task stands, as text or JSON.
     Status { json: bool },
 }
 
-const TASK_USAGE: &str = "usage: junees task init \"<goal>\" | \
-                          junees task run [--max-sessions N] [--max-tokens N] [--max-time 2h] | \
+const TASK_USAGE: &str = "usage: junees task init [--backend api|claude-code] \"<goal>\" | \
+                          junees task run [--backend api|claude-code] [--max-sessions N] \
+                          [--max-tokens N] [--max-time 2h] | \
                           junees task status [--json]";
+
+impl TaskCommand {
+    /// The backend asked for on the command line, if any.
+    pub fn backend(&self) -> Option<Backend> {
+        match self {
+            Self::Init { backend, .. } | Self::Run { backend, .. } => *backend,
+            Self::Status { .. } => None,
+        }
+    }
+}
+
+fn parse_backend(value: Option<String>) -> Result<Backend> {
+    let value = value.context("--backend needs api or claude-code")?;
+    Backend::parse(&value).context("--backend")
+}
 
 /// What to do when not printing help or the version.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -155,9 +186,11 @@ fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
         Some("-h" | "--help") => return Ok(Command::Help),
         Some("init") => {
             let mut goal = None;
-            for arg in args {
+            let mut backend = None;
+            while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "-h" | "--help" => return Ok(Command::Help),
+                    "--backend" => backend = Some(parse_backend(args.next())?),
                     _ if goal.is_some() => {
                         bail!("task init takes one goal; quote it (\"{arg}\" is extra)")
                     }
@@ -167,15 +200,18 @@ fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
             let goal = goal.filter(|goal| !goal.trim().is_empty());
             TaskCommand::Init {
                 goal: goal.context(TASK_USAGE)?,
+                backend,
             }
         }
         Some("run") => {
             let mut max_sessions = DEFAULT_MAX_SESSIONS;
             let mut max_tokens = None;
             let mut max_time = None;
+            let mut backend = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "-h" | "--help" => return Ok(Command::Help),
+                    "--backend" => backend = Some(parse_backend(args.next())?),
                     "--max-sessions" => {
                         let value = args.next().context("--max-sessions needs a number")?;
                         max_sessions =
@@ -208,6 +244,7 @@ fn parse_task(mut args: impl Iterator<Item = String>) -> Result<Command> {
                 max_sessions,
                 max_tokens,
                 max_time,
+                backend,
             }
         }
         Some("status") => {
@@ -338,11 +375,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_task_backend() {
+        let init = parse(&["task", "init", "--backend", "claude-code", "goal"]).unwrap();
+        assert_eq!(
+            init,
+            Command::Task(TaskCommand::Init {
+                goal: "goal".into(),
+                backend: Some(Backend::ClaudeCode),
+            })
+        );
+        let Command::Task(run) =
+            parse(&["task", "run", "--max-sessions", "2", "--backend", "api"]).unwrap()
+        else {
+            panic!("not a task command");
+        };
+        assert_eq!(run.backend(), Some(Backend::Api));
+        let Command::Task(init) =
+            parse(&["task", "init", "goal", "--backend", "claude-code"]).unwrap()
+        else {
+            panic!("not a task command");
+        };
+        assert_eq!(init.backend(), Some(Backend::ClaudeCode));
+        let err = parse(&["task", "run", "--backend", "codex"]).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "--backend: unknown backend `codex`; use `api` or `claude-code`"
+        );
+        assert!(parse(&["task", "init", "goal", "--backend"]).is_err());
+    }
+
+    #[test]
     fn parses_task_commands() {
         assert_eq!(
             parse(&["task", "init", "웹 서버를 만들어"]).unwrap(),
             Command::Task(TaskCommand::Init {
-                goal: "웹 서버를 만들어".into()
+                goal: "웹 서버를 만들어".into(),
+                backend: None,
             })
         );
         assert_eq!(
@@ -351,6 +419,7 @@ mod tests {
                 max_sessions: DEFAULT_MAX_SESSIONS,
                 max_tokens: None,
                 max_time: None,
+                backend: None,
             })
         );
         assert_eq!(
@@ -359,6 +428,7 @@ mod tests {
                 max_sessions: 3,
                 max_tokens: None,
                 max_time: None,
+                backend: None,
             })
         );
         assert_eq!(
@@ -375,6 +445,7 @@ mod tests {
                 max_sessions: DEFAULT_MAX_SESSIONS,
                 max_tokens: Some(2_000_000),
                 max_time: Some(Duration::from_secs(5400)),
+                backend: None,
             })
         );
         assert_eq!(

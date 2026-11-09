@@ -8,7 +8,9 @@ use crate::approval::ToolGate;
 use crate::cancel::Cancel;
 use crate::context;
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
-use crate::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError, ToolSpec};
+use crate::provider::{
+    CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent, ToolSpec,
+};
 use crate::session::{Entry, Journal, Transcript};
 use crate::tools::{ToolOutput, ToolRegistry};
 
@@ -31,14 +33,21 @@ impl AgentOptions {
     }
 }
 
-/// Progress reported while [`Agent::run`] works.
+/// Progress reported while [`Agent::run`] works. The model's reply is
+/// reported as it arrives, before it is recorded.
 #[derive(Debug)]
 pub enum Event<'a> {
-    Text(&'a str),
+    /// The next piece of a text block of the model's reply.
+    TextDelta(&'a str),
+    /// The text block the last deltas belong to is complete.
+    TextEnd,
     /// The model thought before going on (a `thinking` or
     /// `redacted_thinking` block). The block is kept and sent back, but its
     /// content is not shown.
     Thinking,
+    /// The reply broke off after part of it was reported, and is asked for
+    /// again from the start: what was reported of it is void.
+    Retrying,
     /// Something the user should know about, such as a cut-off response.
     Warning(&'a str),
     ToolCall {
@@ -239,17 +248,17 @@ impl Agent {
             };
             self.record(Entry::Usage(response.usage), &mut on_event);
 
-            let mut tool_calls = Vec::new();
-            for block in &response.content {
-                match block {
-                    ContentBlock::Text { text } => on_event(Event::Text(text)),
+            // Its text and thinking were reported while it arrived.
+            let tool_calls: Vec<_> = response
+                .content
+                .iter()
+                .filter_map(|block| match block {
                     ContentBlock::ToolUse { id, name, input } => {
-                        tool_calls.push((id.clone(), name.clone(), input.clone()));
+                        Some((id.clone(), name.clone(), input.clone()))
                     }
-                    block if block.is_thinking() => on_event(Event::Thinking),
-                    _ => {}
-                }
-            }
+                    _ => None,
+                })
+                .collect();
 
             let reply = Message {
                 role: Role::Assistant,
@@ -385,7 +394,7 @@ impl Agent {
         if self.manage_context(on_event).await {
             self.check_limit()?;
         }
-        match self.call(specs).await {
+        match self.call(specs, on_event).await {
             Ok(response) => Ok(response),
             // Shrink the history as far as it goes and try once more.
             Err(err) if err.is_context_overflow() => {
@@ -398,23 +407,42 @@ impl Agent {
                     "the conversation did not fit the context window; \
                      retrying once with the shrunk history",
                 ));
-                Ok(self.call(specs).await?)
+                Ok(self.call(specs, on_event).await?)
             }
             Err(err) => Err(err.into()),
         }
     }
 
-    async fn call(&self, specs: &[ToolSpec]) -> Result<CompletionResponse, ProviderError> {
-        self.provider
-            .complete(CompletionRequest {
+    /// A model call whose reply is reported to `on_event` as it arrives.
+    async fn call(
+        &self,
+        specs: &[ToolSpec],
+        on_event: &mut impl FnMut(Event<'_>),
+    ) -> Result<CompletionResponse, ProviderError> {
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let call = self.provider.complete_streaming(
+            CompletionRequest {
                 system: &self.options.system,
                 messages: &self.transcript.messages,
                 tools: specs,
                 max_tokens: self.options.max_tokens,
                 cache: true,
                 thinking: true,
-            })
-            .await
+            },
+            &events,
+        );
+        tokio::pin!(call);
+        let result = loop {
+            tokio::select! {
+                biased;
+                Some(event) = received.recv() => forward(event, on_event),
+                result = &mut call => break result,
+            }
+        };
+        while let Ok(event) = received.try_recv() {
+            forward(event, on_event);
+        }
+        result
     }
 
     /// After the API said the conversation does not fit: clears old tool
@@ -578,6 +606,15 @@ impl Agent {
     }
 }
 
+fn forward(event: StreamEvent, on_event: &mut impl FnMut(Event<'_>)) {
+    on_event(match &event {
+        StreamEvent::TextDelta(text) => Event::TextDelta(text),
+        StreamEvent::TextEnd => Event::TextEnd,
+        StreamEvent::Thinking => Event::Thinking,
+        StreamEvent::Retrying => Event::Retrying,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -734,9 +771,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(answer, "it is ABC");
-        assert_eq!(events.len(), 4, "{events:?}");
-        assert!(events[1].starts_with("ToolCall"));
-        assert!(events[2].contains("ABC"));
+        assert_eq!(
+            events,
+            [
+                "TextDelta(\"let me check\")",
+                "TextEnd",
+                "ToolCall { name: \"upper\", input: Object {\"text\": String(\"abc\")} }",
+                "ToolResult { name: \"upper\", output: ToolOutput { content: \"ABC\", \
+                 is_error: false } }",
+                "TextDelta(\"it is ABC\")",
+                "TextEnd",
+            ]
+        );
 
         let history = agent.messages();
         assert_eq!(history.len(), 4);
@@ -991,9 +1037,16 @@ mod tests {
             .unwrap();
 
         // Reported in the order they came, ahead of the text and the call.
-        assert_eq!(events[..2], ["Thinking", "Thinking"]);
-        assert!(events[2].starts_with("Text"), "{events:?}");
-        assert!(events[3].starts_with("ToolCall"), "{events:?}");
+        assert_eq!(
+            events[..4],
+            [
+                "Thinking",
+                "Thinking",
+                "TextDelta(\"let me check\")",
+                "TextEnd"
+            ]
+        );
+        assert!(events[4].starts_with("ToolCall"), "{events:?}");
         assert_eq!(agent.messages()[1].content, reply);
         assert_eq!(seen.lock().unwrap()[1][1].content, reply);
         assert_valid(agent.messages());
@@ -2057,6 +2110,110 @@ mod tests {
         let err = agent.run("again", |_| {}).await.unwrap_err();
         assert!(err.downcast_ref::<Cancelled>().is_some(), "{err}");
         assert_eq!(agent.messages()[0].text(), "go\nagain");
+    }
+
+    /// Reports `events` as a stream would, then waits for `release` (if
+    /// any) before it returns `reply`.
+    struct Streaming {
+        events: Vec<StreamEvent>,
+        release: Option<Arc<tokio::sync::Notify>>,
+        reply: Mutex<Option<Reply>>,
+    }
+
+    #[async_trait]
+    impl Provider for Streaming {
+        async fn complete(
+            &self,
+            _request: CompletionRequest<'_>,
+        ) -> Result<CompletionResponse, ProviderError> {
+            unreachable!("the agent streams its model calls")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest<'_>,
+            events: &crate::provider::StreamSender,
+        ) -> Result<CompletionResponse, ProviderError> {
+            for event in &self.events {
+                events.send(event.clone()).unwrap();
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            self.reply.lock().unwrap().take().expect("one call only")
+        }
+    }
+
+    fn streaming_agent(provider: Streaming) -> Agent {
+        let options = agent(Scripted::default(), 5).options.clone();
+        Agent::new(Box::new(provider), ToolRegistry::new(), options)
+    }
+
+    #[tokio::test]
+    async fn stream_events_are_passed_on_while_the_call_runs() {
+        // The call only returns once the agent passed its first delta on.
+        let release = Arc::new(tokio::sync::Notify::new());
+        let provider = Streaming {
+            events: vec![
+                StreamEvent::TextDelta("Hel".into()),
+                StreamEvent::Retrying,
+                StreamEvent::Thinking,
+                StreamEvent::TextDelta("Hello".into()),
+                StreamEvent::TextDelta(", 세계".into()),
+                StreamEvent::TextEnd,
+            ],
+            release: Some(release.clone()),
+            reply: Mutex::new(Some(text("Hello, 세계"))),
+        };
+        let mut agent = streaming_agent(provider);
+        let mut events = Vec::new();
+        let run = agent.run("hi", |event| {
+            if matches!(event, Event::TextDelta(_)) {
+                release.notify_one();
+            }
+            events.push(format!("{event:?}"));
+        });
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+            .await
+            .expect("the deltas were held back until the call ended")
+            .unwrap();
+        assert_eq!(answer, "Hello, 세계");
+        assert_eq!(
+            events,
+            [
+                "TextDelta(\"Hel\")",
+                "Retrying",
+                "Thinking",
+                "TextDelta(\"Hello\")",
+                "TextDelta(\", 세계\")",
+                "TextEnd",
+            ]
+        );
+        // Only the reply the call returned is recorded.
+        assert_eq!(agent.messages().len(), 2);
+        assert_eq!(agent.messages()[1].text(), "Hello, 세계");
+    }
+
+    #[tokio::test]
+    async fn cancelling_mid_stream_records_nothing_of_the_reply() {
+        let cancel = Cancel::new();
+        let provider = Streaming {
+            events: vec![StreamEvent::TextDelta("half a".into())],
+            // Never released: the stream stalls after the delta.
+            release: Some(Arc::new(tokio::sync::Notify::new())),
+            reply: Mutex::new(Some(text("half an answer"))),
+        };
+        let mut agent = streaming_agent(provider).with_cancel(cancel.clone());
+        let err = agent
+            .run("go", |event| {
+                if matches!(event, Event::TextDelta(_)) {
+                    cancel.cancel();
+                }
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.downcast_ref::<Cancelled>(), Some(&Cancelled));
+        assert_eq!(agent.messages(), [Message::user_text("go")]);
     }
 
     #[tokio::test]

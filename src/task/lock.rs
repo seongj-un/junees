@@ -7,6 +7,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+/// How often, and how far apart, [`RunLock::acquire`] tries a taken lock.
+const RETRIES: usize = 20;
+const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// An exclusive `flock` on the root folder of the repository a task works
 /// in, held for as long as this value lives. The kernel drops it when the
 /// process dies, so a lock that is held means the run holding it is still
@@ -21,19 +25,26 @@ pub struct RunLock {
 }
 
 impl RunLock {
-    /// Takes the lock of the task in `root` without waiting; `None` if
-    /// another process holds it.
+    /// Takes the lock of the task in `root`; `None` if another process
+    /// holds it.
+    ///
+    /// A lock that looks taken is tried again for a moment: a child that
+    /// another thread of this process forks shares every descriptor, and
+    /// with it a lock this process just released, until the child execs.
     pub fn acquire(root: &Path) -> Result<Option<Self>> {
         let file = File::open(root).with_context(|| format!("cannot open {}", root.display()))?;
-        // SAFETY: `file` owns the descriptor and outlives the call.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(Some(Self { _dir: file }));
+        for _ in 0..RETRIES {
+            // SAFETY: `file` owns the descriptor and outlives the call.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Some(Self { _dir: file }));
+            }
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::WouldBlock {
+                return Err(err).with_context(|| format!("cannot lock {}", root.display()));
+            }
+            std::thread::sleep(RETRY_PAUSE);
         }
-        let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::WouldBlock {
-            return Ok(None);
-        }
-        Err(err).with_context(|| format!("cannot lock {}", root.display()))
+        Ok(None)
     }
 }
 

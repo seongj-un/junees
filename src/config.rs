@@ -52,6 +52,9 @@ pub struct Config {
     pub task_max_tokens: Option<u64>,
     /// Default time budget of `task run` (`JUNEES_TASK_MAX_TIME`).
     pub task_max_time: Option<Duration>,
+    /// Stream model replies, showing text as it is written
+    /// (`JUNEES_STREAM`, on by default).
+    pub stream: bool,
 }
 
 impl Config {
@@ -59,21 +62,38 @@ impl Config {
     /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_CONTEXT_WINDOW`,
     /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_THINKING_BUDGET`, `JUNEES_HOME`, `HOME`,
     /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
-    /// `JUNEES_HIDDEN_ENV`, `JUNEES_APPROVAL`, `JUNEES_TASK_MAX_TOKENS` and
-    /// `JUNEES_TASK_MAX_TIME`.
+    /// `JUNEES_HIDDEN_ENV`, `JUNEES_APPROVAL`, `JUNEES_TASK_MAX_TOKENS`,
+    /// `JUNEES_TASK_MAX_TIME` and `JUNEES_STREAM`.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        Self::read(lookup, true)
+    }
+
+    /// [`Config::from_env`] for `task init`/`task run` with the
+    /// `claude-code` backend: Claude Code signs in on its own and Junees
+    /// calls no API, so `ANTHROPIC_API_KEY` is neither needed nor read
+    /// (`api_key` stays empty).
+    pub fn from_env_without_key() -> Result<Self> {
+        Self::read(|key| std::env::var(key).ok(), false)
+    }
+
+    fn read(lookup: impl Fn(&str) -> Option<String>, need_key: bool) -> Result<Self> {
         let get = |key: &str| {
             lookup(key)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         };
 
-        let api_key = get("ANTHROPIC_API_KEY")
-            .context("ANTHROPIC_API_KEY is not set (get one at https://console.anthropic.com)")?;
+        let api_key = if need_key {
+            get("ANTHROPIC_API_KEY").context(
+                "ANTHROPIC_API_KEY is not set (get one at https://console.anthropic.com)",
+            )?
+        } else {
+            String::new()
+        };
         let max_tokens = parse_or(
             get("JUNEES_MAX_TOKENS"),
             "JUNEES_MAX_TOKENS",
@@ -145,6 +165,10 @@ impl Config {
         let task_max_time = get("JUNEES_TASK_MAX_TIME")
             .map(|raw| parse_duration(&raw).context("JUNEES_TASK_MAX_TIME"))
             .transpose()?;
+        let stream = match get("JUNEES_STREAM") {
+            None => true,
+            raw => parse_flag(raw, "JUNEES_STREAM")?,
+        };
 
         Ok(Self {
             api_key,
@@ -160,6 +184,7 @@ impl Config {
             approval,
             task_max_tokens,
             task_max_time,
+            stream,
         })
     }
 
@@ -234,6 +259,21 @@ mod tests {
     }
 
     #[test]
+    fn the_claude_code_backend_needs_no_api_key() {
+        let config =
+            Config::read(|key| (key == "JUNEES_MAX_TURNS").then(|| "7".into()), false).unwrap();
+        assert_eq!(config.api_key, "");
+        assert_eq!(config.max_turns, 7);
+        // Not even read when it is there.
+        let config = Config::read(
+            |key| (key == "ANTHROPIC_API_KEY").then(|| "sk-ant-x".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.api_key, "");
+    }
+
+    #[test]
     fn uses_defaults() {
         let config = config(&[("ANTHROPIC_API_KEY", "sk-test")]).unwrap();
         assert_eq!(config.api_key, "sk-test");
@@ -249,6 +289,19 @@ mod tests {
         assert_eq!(config.approval, ApprovalMode::Risky);
         assert_eq!(config.task_max_tokens, None);
         assert_eq!(config.task_max_time, None);
+        assert!(config.stream);
+    }
+
+    #[test]
+    fn streaming_can_be_turned_off() {
+        for (raw, expected) in [("0", false), ("off", false), ("1", true), (" ", true)] {
+            let parsed = config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_STREAM", raw)]);
+            assert_eq!(parsed.unwrap().stream, expected, "{raw}");
+        }
+        let err = config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_STREAM", "maybe")])
+            .err()
+            .unwrap();
+        assert_eq!(err.to_string(), "JUNEES_STREAM must be 1 or 0, got `maybe`");
     }
 
     #[test]
