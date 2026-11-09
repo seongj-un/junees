@@ -477,7 +477,8 @@ async fn slash_commands_run_tasks_switch_backends_and_sessions() {
         stdin
             .write_all(
                 b"/backend\n/backend claude-code\n/task make done.txt\n/status\n\
-                  /sessions\n7\n1\n/model\n/model claude-haiku-4-5\n/new\n/wat\n/exit\n",
+                  /sessions\n7\n1\n/model\n/model claude-haiku-4-5\n/new\n\
+                  /backend api\n/sessions\n1\n/model\n/wat\n/exit\n",
             )
             .await
             .unwrap();
@@ -491,21 +492,30 @@ async fn slash_commands_run_tasks_switch_backends_and_sessions() {
     assert!(out.status.success(), "{stdout}\n{stderr}");
 
     let order = [
-        "/task runs on api; the conversation always uses the API\n",
-        "/task now runs on claude-code (this session; `junees setup` changes the default)\n",
+        "the conversation and /task run on api\n",
+        // The conversation moves to Claude Code, in a new session.
+        "Claude Code 2.1.319 (Claude Code)\n",
+        "(new conversation) session ",
+        "the conversation and /task now run on claude-code (this session; \
+         `junees setup` changes the default)\n",
         "Planned.\n",
         "Built F1.\n",
         "task stopped: every feature passes\n",
         "features: 1/1 passing",
         &format!("  1   {id}  "),
         "pick a number from 1 to 1\n",
+        "model: of Claude Code's choice (Claude Code runs the conversation)\n",
+        "model: claude-haiku-4-5 (this session, passed to Claude Code with --model",
+        "(new conversation) session ",
+        // Back on the API, the API conversation can be continued.
+        "(new conversation) session ",
+        "the conversation and /task now run on api",
+        &format!("  1   {id}  "),
         &format!(
             "resumed {id} (2 messages, started in {})\n",
             elsewhere.path().display()
         ),
         "model: claude-sonnet-4-6\n",
-        "model: claude-haiku-4-5 (this session; `junees setup` changes the default)\n",
-        "(new conversation) session ",
     ];
     let mut at = 0;
     for text in order {
@@ -516,6 +526,14 @@ async fn slash_commands_run_tasks_switch_backends_and_sessions() {
     }
     assert!(
         stderr.contains("unknown command /wat; /help lists the commands"),
+        "{stderr}"
+    );
+    // Claude Code cannot continue a conversation Junees's agent held.
+    assert!(
+        stderr.contains(&format!(
+            "error: session {id} was run on the API, and this conversation runs on \
+             claude-code; continue it with `/backend api`"
+        )),
         "{stderr}"
     );
     // The task ran in the repository, on the backend /backend picked.

@@ -13,7 +13,8 @@ pub enum Slash {
     New,
     /// `/model` shows the model, `/model <name>` switches to it.
     Model(Option<String>),
-    /// `/backend` shows what runs `/task`, `/backend <name>` switches it.
+    /// `/backend` shows what runs the conversation and `/task`,
+    /// `/backend <name>` switches both.
     Backend(Option<Backend>),
     Compact,
     Context,

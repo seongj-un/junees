@@ -52,7 +52,8 @@ use stream::Stream;
 /// Where a session's events go: shown to the user like an agent's.
 pub type Sink<'a> = dyn FnMut(Event<'_>) + 'a;
 
-/// Picks the backend of `task init` and `task run`: `api` or `claude-code`.
+/// Picks the backend of the conversation, `task init` and `task run`:
+/// `api` or `claude-code`.
 pub const BACKEND_ENV: &str = "JUNEES_BACKEND";
 /// The `claude` program to run (default: `claude` from `PATH`).
 pub const BIN_ENV: &str = "JUNEES_CLAUDE_BIN";
@@ -145,7 +146,8 @@ const LOGIN_TEXTS: &[&str] = &[
     "invalid api key",
 ];
 
-/// Which program runs the sessions of `task init` and `task run`.
+/// Which program runs the conversation and the sessions of `task init`
+/// and `task run`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Backend {
     /// Junees's own agent on the Anthropic API (`ANTHROPIC_API_KEY`).

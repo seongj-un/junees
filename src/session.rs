@@ -954,7 +954,8 @@ fn read_head(path: &Path) -> Option<(Meta, io::BufReader<File>)> {
     }
 }
 
-fn read_meta(path: &Path) -> Option<Meta> {
+/// The meta line of a journal, if its first line is one.
+pub fn read_meta(path: &Path) -> Option<Meta> {
     read_head(path).map(|(meta, _)| meta)
 }
 
