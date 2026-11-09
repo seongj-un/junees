@@ -62,14 +62,31 @@ impl Config {
     }
 
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        Self::read(lookup, true)
+    }
+
+    /// [`Config::from_env`] for `task init`/`task run` with the
+    /// `claude-code` backend: Claude Code signs in on its own and Junees
+    /// calls no API, so `ANTHROPIC_API_KEY` is neither needed nor read
+    /// (`api_key` stays empty).
+    pub fn from_env_without_key() -> Result<Self> {
+        Self::read(|key| std::env::var(key).ok(), false)
+    }
+
+    fn read(lookup: impl Fn(&str) -> Option<String>, need_key: bool) -> Result<Self> {
         let get = |key: &str| {
             lookup(key)
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         };
 
-        let api_key = get("ANTHROPIC_API_KEY")
-            .context("ANTHROPIC_API_KEY is not set (get one at https://console.anthropic.com)")?;
+        let api_key = if need_key {
+            get("ANTHROPIC_API_KEY").context(
+                "ANTHROPIC_API_KEY is not set (get one at https://console.anthropic.com)",
+            )?
+        } else {
+            String::new()
+        };
         let max_tokens = parse_or(
             get("JUNEES_MAX_TOKENS"),
             "JUNEES_MAX_TOKENS",
@@ -225,6 +242,21 @@ mod tests {
         let err = config(&[]).err().unwrap();
         assert!(err.to_string().contains("ANTHROPIC_API_KEY"));
         assert!(config(&[("ANTHROPIC_API_KEY", "  ")]).is_err());
+    }
+
+    #[test]
+    fn the_claude_code_backend_needs_no_api_key() {
+        let config =
+            Config::read(|key| (key == "JUNEES_MAX_TURNS").then(|| "7".into()), false).unwrap();
+        assert_eq!(config.api_key, "");
+        assert_eq!(config.max_turns, 7);
+        // Not even read when it is there.
+        let config = Config::read(
+            |key| (key == "ANTHROPIC_API_KEY").then(|| "sk-ant-x".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.api_key, "");
     }
 
     #[test]

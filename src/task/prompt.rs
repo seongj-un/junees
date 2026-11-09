@@ -12,9 +12,8 @@ pub const WORK_INPUT: &str = "Pick one feature that does not pass yet, implement
 /// Characters of progress.md a work session sees in its system prompt.
 const PROGRESS_TAIL_CHARS: usize = 4000;
 
-pub fn init_system(root: &Path) -> String {
-    format!(
-        "{}\n\
+/// What the init session must do, after the system prompt of its backend.
+const INIT_RULES: &str = "\
          You are the initializer of a long-running task. Later work sessions, each \
          starting with a fresh context, will build it one feature at a time from the \
          files you write now.\n\
@@ -25,8 +24,8 @@ pub fn init_system(root: &Path) -> String {
          and checkable by a shell command. Order them so that no feature depends on a \
          later one.\n\
          3. Write .junees/features.json: a JSON array of objects \
-         {{\"id\": \"F1\", \"description\": \"...\", \"verify\": \"<shell command>\", \
-         \"passes\": false}}. Ids are unique. `verify` runs with bash (and `set -o pipefail`) from the \
+         {\"id\": \"F1\", \"description\": \"...\", \"verify\": \"<shell command>\", \
+         \"passes\": false}. Ids are unique. `verify` runs with bash (and `set -o pipefail`) from the \
          repository root and must exit 0 exactly when the feature works (for example \
          a test command). Every feature starts with \"passes\": false. The harness \
          runs every verify command before it accepts the list and rejects the ones \
@@ -38,9 +37,16 @@ pub fn init_system(root: &Path) -> String {
          server), write them to .junees/init.sh.\n\
          \n\
          Do not implement any feature yet and do not commit: the harness checks the \
-         feature list and commits it.\n",
-        system_prompt(root)
-    )
+         feature list and commits it.\n";
+
+pub fn init_system(root: &Path) -> String {
+    format!("{}\n{INIT_RULES}", system_prompt(root))
+}
+
+/// The system prompt Junees appends to Claude Code's own for the init
+/// session (the `claude-code` backend).
+pub fn claude_init_system() -> String {
+    format!("{CLAUDE_HARNESS}\n{INIT_RULES}")
 }
 
 pub fn init_input(goal: &str) -> String {
@@ -65,6 +71,58 @@ pub fn work_system(
     progress: &str,
     git_log: &str,
 ) -> String {
+    format!(
+        "{}\n{}",
+        system_prompt(root),
+        work_rules(session, features, progress, git_log, MARK_RULE)
+    )
+}
+
+/// What Junees appends to Claude Code's own system prompt for work
+/// session `session` (the `claude-code` backend). Claude Code has no
+/// `mark_feature_passing`: the harness runs the verify commands itself
+/// after the session.
+pub fn claude_work_system(
+    session: u64,
+    features: &[Feature],
+    progress: &str,
+    git_log: &str,
+) -> String {
+    format!(
+        "{CLAUDE_HARNESS}\n{}",
+        work_rules(session, features, progress, git_log, HARNESS_VERIFY_RULE)
+    )
+}
+
+/// How a session with `mark_feature_passing` gets a feature passed.
+const MARK_RULE: &str = "- When the feature is done, run its verify command yourself, then call \
+                         mark_feature_passing with its id. Only the harness marks a feature as \
+                         passing, and only when the verify command exits 0. Never edit \
+                         .junees/features.json: the harness reverts every edit.\n";
+
+/// How a Claude Code session gets a feature passed.
+const HARNESS_VERIFY_RULE: &str = "- When the feature is done, run its verify command yourself \
+     and make sure it exits 0. You cannot mark a feature as passing: when this session \
+     ends, the harness runs the verify command of every feature that does not pass yet \
+     and records the ones that exit 0. Never edit .junees/features.json: the harness \
+     reverts every edit.\n";
+
+/// Opens what Junees appends to Claude Code's system prompt.
+const CLAUDE_HARNESS: &str = "You are running inside Junees, a harness for long-running \
+     tasks. It started this Claude Code session without a person watching: nobody can \
+     answer questions or approve anything, so work on your own and stop when you are \
+     done. Some shell commands (sudo, force push, recursive removal of / or the home \
+     folder, among others) are denied.\n";
+
+/// The rules of a work session and where the task stands; `pass_rule`
+/// says how a feature gets marked as passing.
+fn work_rules(
+    session: u64,
+    features: &[Feature],
+    progress: &str,
+    git_log: &str,
+    pass_rule: &str,
+) -> String {
     let passing = features.iter().filter(|feature| feature.passes).count();
     let mut list = String::new();
     for feature in features {
@@ -75,8 +133,7 @@ pub fn work_system(
         ));
     }
     format!(
-        "{}\n\
-         You are working on a long-running task, in work session {session}. Every \
+        "You are working on a long-running task, in work session {session}. Every \
          session starts with a fresh context: what earlier sessions did is in git and \
          in .junees/progress.md.\n\
          \n\
@@ -85,10 +142,7 @@ pub fn work_system(
          Leave the others to later sessions.\n\
          - If .junees/init.sh exists, run it first. Check that the features that \
          already pass still work before you change anything.\n\
-         - When the feature is done, run its verify command yourself, then call \
-         mark_feature_passing with its id. Only the harness marks a feature as \
-         passing, and only when the verify command exits 0. Never edit \
-         .junees/features.json: the harness reverts every edit.\n\
+         {pass_rule}\
          - Commit your work with git, with a message that says what changed. Append to \
          .junees/progress.md what you did, what is left and what the next session \
          should know.\n\
@@ -98,7 +152,6 @@ pub fn work_system(
          Features ({passing}/{} pass):\n{list}\n\
          .junees/progress.md (last part):\n{}\n\n\
          git log --oneline -20:\n{git_log}",
-        system_prompt(root),
         features.len(),
         tail(progress, PROGRESS_TAIL_CHARS)
     )
@@ -142,6 +195,41 @@ mod tests {
         assert!(prompt.contains("(last part):\nnotes\n\n"));
         assert!(prompt.ends_with("git log --oneline -20:\nabc123 first\n"));
         assert!(prompt.contains("Working directory: /repo"));
+    }
+
+    #[test]
+    fn init_prompts_share_the_rules() {
+        let api = init_system(Path::new("/repo"));
+        assert!(api.starts_with("You are Junees"));
+        assert!(api.contains("Working directory: /repo\n"));
+        let claude = claude_init_system();
+        assert!(claude.starts_with("You are running inside Junees, a harness"));
+        assert!(!claude.contains("You are Junees"));
+        for prompt in [&api, &claude] {
+            assert!(prompt.contains("You are the initializer of a long-running task."));
+            assert!(prompt.contains("objects {\"id\": \"F1\", \"description\""));
+            assert!(prompt.ends_with("the harness checks the feature list and commits it.\n"));
+        }
+    }
+
+    #[test]
+    fn claude_work_prompt_leaves_the_passes_to_the_harness() {
+        let features: Vec<Feature> = serde_json::from_value(serde_json::json!([
+            {"id": "F1", "description": "parse", "verify": "cargo test parse", "passes": false}
+        ]))
+        .unwrap();
+        let prompt = claude_work_system(3, &features, "", "abc first\n");
+        assert!(prompt.starts_with("You are running inside Junees, a harness"));
+        assert!(prompt.contains("in work session 3."));
+        assert!(!prompt.contains("mark_feature_passing"));
+        assert!(prompt.contains(
+            "when this session ends, the harness runs the verify command of every feature \
+             that does not pass yet and records the ones that exit 0."
+        ));
+        assert!(prompt.contains("Features (0/1 pass):\n- [ ] F1: parse\n"));
+        assert!(prompt.ends_with("git log --oneline -20:\nabc first\n"));
+        let api = work_system(Path::new("/repo"), 3, &features, "", "abc first\n");
+        assert!(api.contains("then call mark_feature_passing with its id."));
     }
 
     #[test]
