@@ -21,6 +21,7 @@ const SESSIONS_LISTED: usize = 10;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    protect_environment();
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -29,6 +30,28 @@ async fn main() -> ExitCode {
         }
     }
 }
+
+/// Makes this process non-dumpable. Hiding the API key and the webhook
+/// from bash's environment is not enough while the environment of junees
+/// itself is readable at `/proc/<pid>/environ` (bash's `$PPID`) by every
+/// process of the same user. A non-dumpable process's `/proc` files belong
+/// to root, so its `environ` and `mem` cannot be read, nor can it be
+/// traced. Children get a dumpable process again when they exec, so the
+/// tools work as before; only junees's own core dumps are lost.
+#[cfg(target_os = "linux")]
+fn protect_environment() {
+    // SAFETY: PR_SET_DUMPABLE only changes a flag of this process and
+    // touches no memory of ours.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        eprintln!(
+            "  !! cannot hide the environment of junees from other processes: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn protect_environment() {}
 
 async fn run() -> Result<()> {
     let args = match cli::parse_args(std::env::args().skip(1))? {
