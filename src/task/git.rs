@@ -159,6 +159,15 @@ fn left_out_of(root: &Path, paths: &str) -> Vec<LeftOut> {
         .collect()
 }
 
+/// Untracked files (not ignored) the harness would leave out of its
+/// commits, limited to `pathspec` like [`is_dirty`]. They keep a work tree
+/// dirty after a harness commit.
+pub fn untracked_left_out(root: &Path, pathspec: &[&str]) -> Result<Vec<LeftOut>> {
+    let mut args = vec!["ls-files", "--others", "--exclude-standard", "-z"];
+    args.extend(pathspec);
+    Ok(left_out_of(root, &git(root, &args)?))
+}
+
 /// Stages everything (`git add -A`) except new files that look like
 /// secrets or are larger than [`MAX_NEW_FILE_BYTES`], and commits it.
 pub fn commit_all(root: &Path, message: &str) -> Result<Commit> {
@@ -398,6 +407,7 @@ mod tests {
             "target/app.bin (1.9 MiB, over the 1 MiB limit for new files)"
         );
         assert_eq!(git(root, &["ls-files"]).unwrap(), "at-limit.bin\nmain.rs\n");
+        assert_eq!(untracked_left_out(root, &[]).unwrap(), commit.left_out);
 
         // A tracked file may grow past the limit.
         std::fs::write(root.join("main.rs"), vec![b'a'; 2_000_000]).unwrap();

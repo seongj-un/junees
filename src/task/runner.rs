@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::budget::{self, Budget, format_duration};
 use super::claude_code::{ClaudeCode, End, NotLoggedIn, Request};
@@ -52,6 +52,9 @@ const IGNORED: &[&str] = &[
     "run.log",
     "sessions/",
 ];
+
+/// Files [`dirty_tree`] names before it only counts the rest.
+const NAMED_LEFT_OUT: usize = 3;
 
 const NO_TASK: &str = "cannot load the feature list (start a task with `junees task \"<goal>\"`)";
 
@@ -210,7 +213,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     }
     // A failed init may have left .junees/ behind; the next one rewrites it.
     if git::is_dirty_outside_task(root)? {
-        bail!(DIRTY_TREE);
+        return Err(dirty_tree(root, &["--", ".", ":(exclude).junees"]));
     }
     prepare_dir(root)?;
     env.check_claude(report).await?;
@@ -446,7 +449,7 @@ async fn run_until_stop(
     }
     features::load(root).context(NO_TASK)?;
     if git::is_dirty(root)? {
-        bail!(DIRTY_TREE);
+        return Err(dirty_tree(root, &[]));
     }
     env.check_claude(report).await?;
     let ledger = Ledger::load(root)?;
@@ -1191,6 +1194,31 @@ fn prepare_dir(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// The error of a run or init that finds the work tree dirty. When new
+/// files the harness does not commit are among the changes (it left them
+/// out of an earlier commit, or would leave them out), it names a few and
+/// says why, since committing everything would not clean the tree.
+fn dirty_tree(root: &Path, pathspec: &[&str]) -> anyhow::Error {
+    let left_out = git::untracked_left_out(root, pathspec).unwrap_or_default();
+    if left_out.is_empty() {
+        return anyhow!(DIRTY_TREE);
+    }
+    let mut named: Vec<String> = left_out
+        .iter()
+        .take(NAMED_LEFT_OUT)
+        .map(ToString::to_string)
+        .collect();
+    if left_out.len() > NAMED_LEFT_OUT {
+        named.push(format!("and {} more", left_out.len() - NAMED_LEFT_OUT));
+    }
+    anyhow!(
+        "{DIRTY_TREE}. Task mode does not commit new files whose names look like \
+         secrets or that are larger than 1 MiB, so these stay uncommitted: {}; \
+         commit them yourself, add them to .gitignore, or move them away",
+        named.join(", ")
+    )
+}
+
 /// Adds one harness line to progress.md.
 fn append_progress(root: &Path, text: &str) -> Result<()> {
     let path = progress_path(root);
@@ -1634,6 +1662,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("uncommitted changes"), "{err}");
+        assert!(!err.to_string().contains("stay uncommitted"), "{err}");
         assert!(!dir(fresh.path()).exists());
 
         let task = task_repo(&["false"]);
@@ -1643,9 +1672,79 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("git stash -u"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("stay uncommitted: .env (the name looks like a secret); "),
+            "{err}"
+        );
         assert_eq!(subjects(root), [INIT_COMMIT]);
         assert_eq!(provider.seen.lock().unwrap().len(), 0);
         assert_eq!(State::load(root).unwrap().sessions, 0);
+    }
+
+    #[test]
+    fn dirty_tree_names_a_few_left_out_files_and_counts_the_rest() {
+        let repo = repo();
+        let root = repo.path();
+        for name in [
+            ".env.a",
+            ".env.b",
+            ".env.c",
+            ".env.d",
+            ".env.e",
+            "notes.txt",
+        ] {
+            fs::write(root.join(name), "x").unwrap();
+        }
+        let err = dirty_tree(root, &[]).to_string();
+        assert!(
+            err.contains(
+                "stay uncommitted: .env.a (the name looks like a secret), \
+                 .env.b (the name looks like a secret), \
+                 .env.c (the name looks like a secret), and 2 more; "
+            ),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn large_files_a_verify_leaves_stay_out_and_the_next_run_says_why() {
+        let repo = task_repo_marked(&[(
+            "echo log > small.txt && head -c 2000000 /dev/zero > big.bin",
+            true,
+        )]);
+        let root = repo.path();
+        let mut out = Collected::default();
+        run_task(root, &Scripted::new(vec![]), 0, &mut out).await;
+
+        // The recheck commit takes the small file and leaves the large one.
+        assert_eq!(subjects(root)[0], RECHECK_COMMIT);
+        assert_eq!(git::show(root, "HEAD", "small.txt").unwrap(), "log\n");
+        assert!(git::show(root, "HEAD", "big.bin").is_err());
+        assert!(root.join("big.bin").exists());
+        assert!(
+            out.warnings.iter().any(|warning| warning.starts_with(
+                "not committed: big.bin (1.9 MiB, over the 1 MiB limit for new files)"
+            )),
+            "{:?}",
+            out.warnings
+        );
+
+        // The next run refuses the tree and names the file and the reason.
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let home = tempfile::tempdir().unwrap();
+        let err = run(&env(root, home.path(), &factory), 1, &mut |_| {})
+            .await
+            .unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("uncommitted changes"), "{err}");
+        assert!(
+            err.contains(
+                "stay uncommitted: big.bin (1.9 MiB, over the 1 MiB limit for new files); "
+            ),
+            "{err}"
+        );
     }
 
     fn mark(id: &str) -> (&'static str, Value) {
