@@ -154,6 +154,27 @@ pub fn recent_log(root: &Path, count: usize) -> String {
     }
 }
 
+/// The oldest commit before HEAD whose subject is `subject`, if any.
+/// Replacement refs (`git replace`) are ignored here and in [`show`]: a
+/// session could plant one to swap the content of an old commit.
+pub fn oldest_with_subject(root: &Path, subject: &str) -> Result<Option<String>> {
+    let log = git(root, &["--no-replace-objects", "log", "--format=%H %s"])?;
+    Ok(log
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(_, line_subject)| *line_subject == subject)
+        .map(|(commit, _)| commit.to_string())
+        .next_back())
+}
+
+/// The content of `path`, relative to the root, in `commit`.
+pub fn show(root: &Path, commit: &str, path: &str) -> Result<String> {
+    git(
+        root,
+        &["--no-replace-objects", "show", &format!("{commit}:{path}")],
+    )
+}
+
 /// Test helpers shared by the task tests.
 #[cfg(test)]
 pub(crate) mod testing {
@@ -267,6 +288,33 @@ mod tests {
         let commit = commit_all(root, "third").unwrap();
         assert!(commit.made);
         assert_eq!(commit.left_out.len(), 3);
+    }
+
+    #[test]
+    fn finds_the_oldest_commit_with_a_subject_and_ignores_replacements() {
+        let repo = repo();
+        let root = repo.path();
+        assert!(oldest_with_subject(root, "init").is_err());
+        std::fs::write(root.join("a.txt"), "first").unwrap();
+        commit_all(root, "init").unwrap();
+        let first = git(root, &["rev-parse", "HEAD"]).unwrap();
+        let first = first.trim();
+        std::fs::write(root.join("a.txt"), "second").unwrap();
+        commit_all(root, "init").unwrap();
+        std::fs::write(root.join("a.txt"), "third").unwrap();
+        commit_all(root, "init again").unwrap();
+        assert_eq!(
+            oldest_with_subject(root, "init").unwrap().as_deref(),
+            Some(first)
+        );
+        assert_eq!(oldest_with_subject(root, "other").unwrap(), None);
+        assert_eq!(show(root, first, "a.txt").unwrap(), "first");
+
+        // A replacement ref does not swap the content read from it.
+        let head = git(root, &["rev-parse", "HEAD"]).unwrap();
+        git(root, &["replace", first, head.trim()]).unwrap();
+        assert_eq!(show(root, first, "a.txt").unwrap(), "first");
+        assert!(show(root, first, "missing.txt").is_err());
     }
 
     #[test]

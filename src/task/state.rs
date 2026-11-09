@@ -36,8 +36,9 @@ pub struct State {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running: Option<Running>,
     /// The harness's copy of the feature list as of the last save. Crash
-    /// recovery restores features.json from it, since a session that
-    /// crashed may have left its own edits there.
+    /// recovery takes from it which features passed, as claims the recheck
+    /// confirms; the definitions come from the task's init commit, since a
+    /// session can rewrite this file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<Vec<Feature>>,
 }

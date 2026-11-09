@@ -92,13 +92,14 @@ pub fn to_json(features: &[Feature]) -> String {
     text
 }
 
-/// After a crash, writes the harness's copy of the list back to
-/// features.json. Of the file it keeps only the features it marks passing
-/// (passes the crashed session may have earned through
-/// `mark_feature_passing`): those are marked passing in the copy, and the
-/// run's recheck then runs the copy's verify commands for them. Returns
-/// whether the file said anything else, or could not be read.
-pub fn restore_copy(root: &Path, copy: &[Feature]) -> Result<bool> {
+/// After a crash, writes the feature list back to features.json: the
+/// features as `defined` (the task's init commit), each marked passing
+/// where the harness's `copy` from state.json or the file itself says so.
+/// Both are files a session can write, so only their passes are taken,
+/// and only as claims: the run's recheck runs the defined verify command
+/// of every one. Returns whether the file said anything else, or could not
+/// be read.
+pub fn restore_defined(root: &Path, defined: &[Feature], copy: Option<&[Feature]>) -> Result<bool> {
     let path = features_path(root);
     let file: Option<Vec<Feature>> = fs::read_to_string(&path)
         .ok()
@@ -106,17 +107,27 @@ pub fn restore_copy(root: &Path, copy: &[Feature]) -> Result<bool> {
     let claimed: HashSet<&str> = file
         .iter()
         .flatten()
+        .chain(copy.into_iter().flatten())
         .filter(|feature| feature.passes)
         .map(|feature| feature.id.as_str())
         .collect();
-    let mut list = copy.to_vec();
+    let mut list = defined.to_vec();
     for feature in &mut list {
-        feature.passes |= claimed.contains(feature.id.as_str());
+        feature.passes = claimed.contains(feature.id.as_str());
     }
     let differs = file.as_deref() != Some(list.as_slice());
     write_atomic(&path, to_json(&list).as_bytes())
         .with_context(|| format!("cannot write {}", path.display()))?;
     Ok(differs)
+}
+
+/// Whether two lists define the same features, passes aside.
+pub fn same_definitions(a: &[Feature], b: &[Feature]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            (&a.id, &a.description, &a.verify, &a.extra)
+                == (&b.id, &b.description, &b.verify, &b.extra)
+        })
 }
 
 /// The harness's own copy of the feature list, the only one that counts.
@@ -407,31 +418,39 @@ mod tests {
     }
 
     #[test]
-    fn restore_copy_keeps_only_the_passes_of_the_file() {
-        let copy = parse_value(serde_json::json!([
+    fn restore_defined_takes_only_passes_from_the_file_and_the_copy() {
+        let defined = parse_value(serde_json::json!([
             feature("F1", "test -f a", false),
             feature("F2", "test -f b", false),
+            feature("F3", "test -f c", false)
+        ]))
+        .unwrap();
+        // The copy changed a verify and marks F3 passing.
+        let copy = parse_value(serde_json::json!([
+            feature("F1", "test -f a", false),
+            feature("F2", "true", false),
             feature("F3", "test -f c", true)
         ]))
         .unwrap();
+        assert!(!same_definitions(&defined, &copy));
+        assert!(same_definitions(&defined, &defined));
         // The file changed a verify, dropped a feature and marks F1 passing.
         let root = task_root(serde_json::json!([
             feature("F1", "true", true),
-            feature("F3", "test -f c", true)
+            feature("F3", "test -f c", false)
         ]));
-        assert!(restore_copy(root.path(), &copy).unwrap());
+        assert!(restore_defined(root.path(), &defined, Some(&copy)).unwrap());
         let restored = load(root.path()).unwrap();
-        assert_eq!(restored.len(), 3);
-        assert_eq!(restored[0].verify, "test -f a");
+        assert!(same_definitions(&restored, &defined));
         let passes: Vec<bool> = restored.iter().map(|f| f.passes).collect();
         assert_eq!(passes, [true, false, true]);
 
-        // Nothing but legitimate passes: not an edit.
-        assert!(!restore_copy(root.path(), &copy).unwrap());
+        // Nothing but claimed passes: not an edit.
+        assert!(!restore_defined(root.path(), &defined, Some(&copy)).unwrap());
         // A file that is not a list at all is replaced.
         fs::write(features_path(root.path()), "{oops").unwrap();
-        assert!(restore_copy(root.path(), &copy).unwrap());
-        assert_eq!(load(root.path()).unwrap(), copy);
+        assert!(restore_defined(root.path(), &defined, None).unwrap());
+        assert_eq!(load(root.path()).unwrap(), defined);
     }
 
     #[test]

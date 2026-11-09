@@ -474,12 +474,19 @@ fn save_state(root: &Path, state: &mut State, ledger: &Mutex<Ledger>) -> Result<
 }
 
 /// Picks up after a run that crashed (killed, or the machine went down)
-/// while `running` it: puts the harness's copy of the feature list back
-/// into features.json (see [`features::restore_copy`]), notes the crash in
-/// progress.md and commits whatever the crashed session left behind, so
-/// the run can start from a clean tree. The crash's mark is cleared on
-/// disk at once, so a run that then refuses to start does not recover
-/// twice.
+/// while `running` it: puts the feature list back into features.json as
+/// the task's init commit defined it (see [`features::restore_defined`]),
+/// notes the crash in progress.md and commits whatever the crashed session
+/// left behind, so the run can start from a clean tree. The crash's mark
+/// is cleared on disk at once, so a run that then refuses to start does
+/// not recover twice.
+///
+/// The definitions (ids, descriptions, verify commands) do not come from
+/// the copy in state.json: a session can rewrite that file and kill the
+/// run before the harness writes it again, and the recheck would then run
+/// verify commands the session chose. Rewriting the init commit takes
+/// rewriting the history, which the harness cannot stop either, but which
+/// one edited file does not do.
 fn recover(
     env: &TaskEnv<'_>,
     state: &mut State,
@@ -495,19 +502,33 @@ fn recover(
             running.pid
         ),
     );
+    let (init, defined) = init_list(root).context("cannot recover after the crash")?;
     prepare_dir(root)?;
-    let restored = match &state.features {
-        Some(copy) => features::restore_copy(root, copy)?,
-        None => false,
-    };
+    let copy = state.features.as_deref();
+    let restored = features::restore_defined(root, &defined, copy)?;
     let mut note = format!(
         "recovered after a crash: the run started {} UTC stopped without a record \
          during session {}",
         format_utc(running.started),
         state.sessions
     );
+    if copy.is_some_and(|copy| !features::same_definitions(copy, &defined)) {
+        warn(
+            report,
+            &format!(
+                "the copy of the feature list in state.json does not match the task's init \
+                 commit {init}; the init commit's definitions are used"
+            ),
+        );
+        note.push_str(&format!(
+            "; the copy in state.json did not match the task's init commit {init}, so its \
+             definitions were not used"
+        ));
+    }
     if restored {
-        note.push_str("; .junees/features.json was restored from the harness's copy");
+        note.push_str(&format!(
+            "; .junees/features.json was restored from the init commit {init}"
+        ));
     }
     append_progress(root, &note)?;
     if git::is_dirty(root)? {
@@ -529,6 +550,27 @@ fn recover(
         ),
     );
     Ok(())
+}
+
+/// The oldest [`INIT_COMMIT`] in the history (shortened) and the feature
+/// list it committed, with every feature not passing.
+fn init_list(root: &Path) -> Result<(String, Vec<features::Feature>)> {
+    let Some(commit) = git::oldest_with_subject(root, INIT_COMMIT)? else {
+        bail!(
+            "there is no `{INIT_COMMIT}` commit in the history to take the feature \
+             definitions from; put .junees/features.json right yourself, commit it, and \
+             remove \"running\" from .junees/state.json"
+        );
+    };
+    let short: String = commit.chars().take(12).collect();
+    let text = git::show(root, &commit, ".junees/features.json")
+        .with_context(|| format!("cannot read the feature list of {short}"))?;
+    let mut list =
+        features::parse(&text).with_context(|| format!("the feature list of {short}"))?;
+    for feature in &mut list {
+        feature.passes = false;
+    }
+    Ok((short, list))
 }
 
 fn unix_now() -> u64 {
@@ -1928,7 +1970,7 @@ mod tests {
             ]
         );
         assert!(!git::is_dirty(root).unwrap());
-        // The verify came back from the copy; F1's forged pass failed it,
+        // The verify came back from the init commit; F1's forged pass failed it,
         // F2's claim was checked with its own verify and holds.
         let list = features::load(root).unwrap();
         assert_eq!(list[0].verify, "false");
@@ -1950,13 +1992,110 @@ mod tests {
             progress.contains(
                 "- [junees] recovered after a crash: the run started 2026-11-09 06:17 UTC \
                  stopped without a record during session 2; .junees/features.json was \
-                 restored from the harness's copy\n"
+                 restored from the init commit "
             ),
             "{progress}"
         );
         let state = State::load(root).unwrap();
         assert_eq!(state.running, None);
         assert_eq!(state.stop, Some(stop));
+    }
+
+    /// Leaves the task in `root` as a crashed run would, with `copy` as the
+    /// list copy in state.json.
+    fn crash(root: &Path, copy: Option<Vec<features::Feature>>) {
+        let state = State {
+            running: Some(Running {
+                pid: 4242,
+                started: 1_794_205_024,
+            }),
+            features: copy,
+            ..State::default()
+        };
+        state.save(root).unwrap();
+    }
+
+    /// The task's list with F1's verify replaced by one that always passes
+    /// and every feature marked passing.
+    fn forged_list(root: &Path) -> Vec<features::Feature> {
+        features::load(root)
+            .unwrap()
+            .into_iter()
+            .map(|mut feature| {
+                feature.passes = true;
+                if feature.id == "F1" {
+                    feature.verify = "true".into();
+                }
+                feature
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_forged_copy_in_state_json_does_not_complete_the_task() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        // The session rewrote the copy in state.json, then killed the run.
+        crash(root, Some(forged_list(root)));
+        let provider = Scripted::new(vec![]);
+        let mut out = Collected::default();
+        let stop = run_task(root, &provider, 0, &mut out).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        let list = features::load(root).unwrap();
+        assert_eq!(list[0].verify, "false");
+        assert!(!list[0].passes);
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("does not match the task's init commit")),
+            "{:?}",
+            out.warnings
+        );
+        let progress = fs::read_to_string(progress_path(root)).unwrap();
+        assert!(
+            progress.contains("did not match the task's init commit"),
+            "{progress}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crash_without_a_copy_still_restores_the_init_definitions() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        // The session forged features.json and dropped the copy.
+        fs::write(features_path(root), features::to_json(&forged_list(root))).unwrap();
+        crash(root, None);
+        let provider = Scripted::new(vec![]);
+        let stop = run_task(root, &provider, 0, &mut Collected::default()).await;
+
+        assert_eq!(stop.reason, StopReason::MaxSessions);
+        assert_eq!(features::load(root).unwrap()[0].verify, "false");
+        assert_eq!(subjects(root)[0], RECOVER_COMMIT);
+    }
+
+    #[tokio::test]
+    async fn recovery_needs_the_init_commit() {
+        // A task whose history lost the init commit (squashed, say).
+        let repo = repo();
+        let root = repo.path();
+        prepare_dir(root).unwrap();
+        let list = features::parse(&feature_list(&["false"])).unwrap();
+        fs::write(features_path(root), features::to_json(&list)).unwrap();
+        git::commit_all(root, "squashed").unwrap();
+        crash(root, Some(list));
+        let none = Scripted::new(vec![]);
+        let home = tempfile::tempdir().unwrap();
+        let factory = factory(&none);
+        let err = run(&env(root, home.path(), &factory), 0, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no `junees: initialize task` commit"),
+            "{err:#}"
+        );
+        // Nothing was recovered, so the next try recovers again.
+        assert!(State::load(root).unwrap().running.is_some());
     }
 
     #[tokio::test]
