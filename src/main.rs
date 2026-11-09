@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result, bail};
 use junees::agent::{Agent, AgentOptions, Cancelled, Event};
+use junees::approval::{self, SharedLines};
 use junees::cancel::Cancel;
 use junees::cli::{self, Command, SessionMode, TaskCommand};
 use junees::config::Config;
@@ -19,7 +20,6 @@ use junees::task::claude_code::{Backend, ClaudeCode};
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
 use junees::tools::ToolRegistry;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -139,6 +139,11 @@ async fn run() -> Result<ExitCode> {
             }
         }
         None => {
+            // Shared by the prompt and the approval questions.
+            let input = SharedLines::stdin();
+            if let Some(gate) = approval::for_conversation(&config, &cwd, &input) {
+                agent = agent.with_gate(Box::new(gate));
+            }
             println!(
                 "junees {VERSION} ({}). /help for commands, /exit to quit.",
                 config.model
@@ -152,6 +157,7 @@ async fn run() -> Result<ExitCode> {
                 session_id: opened.id,
                 cancel,
                 signals,
+                input,
             };
             repl.run().await
         }
@@ -424,6 +430,7 @@ struct Repl<'a> {
     /// Set to cancel the turn that is running.
     cancel: Cancel,
     signals: Signals,
+    input: SharedLines,
 }
 
 impl Repl<'_> {
@@ -431,13 +438,12 @@ impl Repl<'_> {
     /// at the prompt. Ctrl-C during a turn cancels just that turn; SIGTERM
     /// cancels it and quits.
     async fn run(&mut self) -> Result<ExitCode> {
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
         let mut interrupted = false;
         loop {
             print!("> ");
             std::io::stdout().flush()?;
             let line = tokio::select! {
-                line = lines.next_line() => line?,
+                line = self.input.next_line() => line?,
                 signal = self.signals.next() => {
                     println!();
                     if signal == libc::SIGTERM {
