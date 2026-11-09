@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::budget::{self, Budget, format_duration};
 use super::claude_code::{ClaudeCode, End, NotLoggedIn, Request};
@@ -52,6 +52,24 @@ const IGNORED: &[&str] = &[
     "run.log",
     "sessions/",
 ];
+
+/// Build-output folders `task init` adds to the repository's `.gitignore`
+/// when git does not ignore them yet: verify commands build, and the
+/// harness commits everything new that is not ignored. Folders that build
+/// tools make at the project root are anchored there (`/build/`), since a
+/// source folder deeper down may share the name (a Java package `build`);
+/// the others appear at any depth.
+const BUILD_OUTPUT: &[&str] = &[
+    "/target/",
+    "node_modules/",
+    "/dist/",
+    "/build/",
+    ".venv/",
+    "__pycache__/",
+];
+
+/// Files [`dirty_tree`] names before it only counts the rest.
+const NAMED_LEFT_OUT: usize = 3;
 
 const NO_TASK: &str = "cannot load the feature list (start a task with `junees task \"<goal>\"`)";
 
@@ -210,7 +228,7 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
     }
     // A failed init may have left .junees/ behind; the next one rewrites it.
     if git::is_dirty_outside_task(root)? {
-        bail!(DIRTY_TREE);
+        return Err(dirty_tree(root, &["--", ".", ":(exclude).junees"]));
     }
     prepare_dir(root)?;
     env.check_claude(report).await?;
@@ -227,6 +245,8 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
         root,
         &format!("init: {count} features planned, {}", tokens(usage)),
     )?;
+    // Only now: a failed init must leave the user's files as they were.
+    ignore_build_output(root, report)?;
     let commit = git::commit_all(root, INIT_COMMIT).context("cannot commit the new task")?;
     warn_left_out(report, &commit.left_out);
     line(
@@ -445,9 +465,15 @@ async fn run_until_stop(
         recover(env, &mut state, &running, report)?;
     }
     features::load(root).context(NO_TASK)?;
-    if git::is_dirty(root)? {
-        bail!(DIRTY_TREE);
+    // New files the harness leaves out of its commits (a lock file over
+    // 1 MiB, a `.env`) stay out of every later commit too, so they cannot
+    // sweep the user's work into one: name them, but do not stop an
+    // unattended run on them.
+    let left_out = git::untracked_left_out(root, &[])?;
+    if git::is_dirty_besides(root, &left_out)? {
+        return Err(dirty_tree(root, &[]));
     }
+    warn_left_out(report, &left_out);
     env.check_claude(report).await?;
     let ledger = Ledger::load(root)?;
     let ledger = Arc::new(Mutex::new(ledger));
@@ -1196,6 +1222,73 @@ fn prepare_dir(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Adds the [`BUILD_OUTPUT`] folders git does not ignore yet to the
+/// repository's `.gitignore`, so the init commit carries them. A folder
+/// that already holds tracked files is the project's own and stays as it
+/// is.
+fn ignore_build_output(root: &Path, report: &mut Reporter<'_>) -> Result<()> {
+    let mut missing = Vec::new();
+    for pattern in BUILD_OUTPUT {
+        // Checked at the root, where the anchored ones apply.
+        let folder = pattern.trim_start_matches('/');
+        if !git::is_ignored(root, folder)? && !git::tracks_any(root, folder)? {
+            missing.push(*pattern);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let ignore = root.join(".gitignore");
+    let mut text = match fs::read_to_string(&ignore) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("cannot read {}", ignore.display()));
+        }
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for folder in &missing {
+        text.push_str(folder);
+        text.push('\n');
+    }
+    fs::write(&ignore, text).with_context(|| format!("cannot write {}", ignore.display()))?;
+    line(
+        report,
+        &format!(
+            "build output kept out of git (.gitignore): {}",
+            missing.join(" ")
+        ),
+    );
+    Ok(())
+}
+
+/// The error of a run or init that finds the work tree dirty. When new
+/// files the harness does not commit are among the changes (it left them
+/// out of an earlier commit, or would leave them out), it names a few and
+/// says why, since committing everything would not clean the tree.
+fn dirty_tree(root: &Path, pathspec: &[&str]) -> anyhow::Error {
+    let left_out = git::untracked_left_out(root, pathspec).unwrap_or_default();
+    if left_out.is_empty() {
+        return anyhow!(DIRTY_TREE);
+    }
+    let mut named: Vec<String> = left_out
+        .iter()
+        .take(NAMED_LEFT_OUT)
+        .map(ToString::to_string)
+        .collect();
+    if left_out.len() > NAMED_LEFT_OUT {
+        named.push(format!("and {} more", left_out.len() - NAMED_LEFT_OUT));
+    }
+    anyhow!(
+        "{DIRTY_TREE}. Task mode does not commit new files whose names look like \
+         secrets or that are larger than 1 MiB, so these stay uncommitted: {}; \
+         commit them yourself, add them to .gitignore, or move them away",
+        named.join(", ")
+    )
+}
+
 /// Adds one harness line to progress.md.
 fn append_progress(root: &Path, text: &str) -> Result<()> {
     let path = progress_path(root);
@@ -1224,14 +1317,15 @@ fn journal_note(journal: &Option<String>) -> String {
     }
 }
 
-fn warn_left_out(report: &mut Reporter<'_>, left_out: &[String]) {
+fn warn_left_out(report: &mut Reporter<'_>, left_out: &[git::LeftOut]) {
     if !left_out.is_empty() {
+        let files: Vec<String> = left_out.iter().map(ToString::to_string).collect();
         warn(
             report,
             &format!(
-                "not committed, because the names look like secrets: {} \
-                 (commit them yourself if they belong in git)",
-                left_out.join(", ")
+                "not committed: {} (commit them yourself if they belong in git, \
+                 or add them to .gitignore)",
+                files.join(", ")
             ),
         );
     }
@@ -1444,6 +1538,16 @@ mod tests {
         assert_eq!(state.usage.input_tokens, 15);
         assert_eq!(state.goal.as_deref(), Some("build it"));
         assert!(super::super::state_path(root).exists());
+        // Build output stays out of the harness's commits from the start.
+        assert_eq!(
+            git::show(root, "HEAD", ".gitignore").unwrap(),
+            "/target/\nnode_modules/\n/dist/\n/build/\n.venv/\n__pycache__/\n"
+        );
+        assert_eq!(
+            out.lines[2],
+            "build output kept out of git (.gitignore): /target/ node_modules/ \
+             /dist/ /build/ .venv/ __pycache__/"
+        );
         assert!(
             out.lines[0].starts_with("== init session, journal "),
             "{:?}",
@@ -1638,18 +1742,152 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("uncommitted changes"), "{err}");
+        assert!(!err.to_string().contains("stay uncommitted"), "{err}");
         assert!(!dir(fresh.path()).exists());
 
         let task = task_repo(&["false"]);
         let root = task.path();
         fs::write(root.join(".env"), "DB_PASSWORD=hunter2\n").unwrap();
+        fs::write(root.join("wip.txt"), "unfinished").unwrap();
         let err = run(&env(root, home.path(), &factory), 5, &mut |_| {})
             .await
             .unwrap_err();
         assert!(err.to_string().contains("git stash -u"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("stay uncommitted: .env (the name looks like a secret); "),
+            "{err}"
+        );
         assert_eq!(subjects(root), [INIT_COMMIT]);
         assert_eq!(provider.seen.lock().unwrap().len(), 0);
         assert_eq!(State::load(root).unwrap().sessions, 0);
+    }
+
+    #[test]
+    fn init_ignores_only_build_output_git_does_not_ignore_yet() {
+        let repo = repo();
+        let root = repo.path();
+        fs::write(root.join(".gitignore"), "/target\n*.log").unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/gen.sh"), "true").unwrap();
+        git::commit_all(root, "project").unwrap();
+        let mut out = Collected::default();
+        ignore_build_output(root, &mut out.reporter()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(".gitignore")).unwrap(),
+            "/target\n*.log\nnode_modules/\n/dist/\n.venv/\n__pycache__/\n"
+        );
+        // Nothing left to add: the file stays as it is.
+        let mut out = Collected::default();
+        ignore_build_output(root, &mut out.reporter()).unwrap();
+        assert!(out.lines.is_empty(), "{:?}", out.lines);
+    }
+
+    #[test]
+    fn init_ignores_root_build_output_but_not_source_folders_named_alike() {
+        let repo = repo();
+        let root = repo.path();
+        let mut out = Collected::default();
+        ignore_build_output(root, &mut out.reporter()).unwrap();
+        for path in [
+            "target/debug/app",
+            "build/out.o",
+            "dist/app.js",
+            "web/node_modules/x/index.js",
+            "py/pkg/__pycache__/m.pyc",
+        ] {
+            assert!(git::is_ignored(root, path).unwrap(), "{path}");
+        }
+        for path in [
+            "src/main/java/com/acme/build/Release.java",
+            "web/dist/keep.js",
+            "crates/target/lib.rs",
+        ] {
+            assert!(!git::is_ignored(root, path).unwrap(), "{path}");
+        }
+    }
+
+    #[test]
+    fn dirty_tree_names_a_few_left_out_files_and_counts_the_rest() {
+        let repo = repo();
+        let root = repo.path();
+        for name in [
+            ".env.a",
+            ".env.b",
+            ".env.c",
+            ".env.d",
+            ".env.e",
+            "notes.txt",
+        ] {
+            fs::write(root.join(name), "x").unwrap();
+        }
+        let err = dirty_tree(root, &[]).to_string();
+        assert!(
+            err.contains(
+                "stay uncommitted: .env.a (the name looks like a secret), \
+                 .env.b (the name looks like a secret), \
+                 .env.c (the name looks like a secret), and 2 more; "
+            ),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn large_files_a_verify_leaves_stay_out_without_stopping_the_next_run() {
+        let repo = task_repo_marked(&[(
+            "echo log > small.txt && head -c 2000000 /dev/zero > big.bin",
+            true,
+        )]);
+        let root = repo.path();
+        let mut out = Collected::default();
+        run_task(root, &Scripted::new(vec![]), 0, &mut out).await;
+
+        // The recheck commit takes the small file and leaves the large one.
+        assert_eq!(subjects(root)[0], RECHECK_COMMIT);
+        assert_eq!(git::show(root, "HEAD", "small.txt").unwrap(), "log\n");
+        assert!(git::show(root, "HEAD", "big.bin").is_err());
+        assert!(root.join("big.bin").exists());
+        assert!(
+            out.warnings.iter().any(|warning| warning.starts_with(
+                "not committed: big.bin (1.9 MiB, over the 1 MiB limit for new files)"
+            )),
+            "{:?}",
+            out.warnings
+        );
+
+        // The next run starts anyway and names the file again: it stays
+        // out of every commit, so it cannot take the user's work along.
+        let head = subjects(root).len();
+        let mut out = Collected::default();
+        run_task(root, &Scripted::new(vec![]), 0, &mut out).await;
+        assert!(
+            out.warnings
+                .first()
+                .is_some_and(|warning| warning.starts_with(
+                    "not committed: big.bin (1.9 MiB, over the 1 MiB limit for new files)"
+                )),
+            "{:?}",
+            out.warnings
+        );
+        assert_eq!(subjects(root).len(), head);
+        assert!(git::show(root, "HEAD", "big.bin").is_err());
+
+        // Other changes still stop it, and it names the file and the reason.
+        fs::write(root.join("notes.txt"), "mine").unwrap();
+        let provider = Scripted::new(vec![]);
+        let factory = factory(&provider);
+        let home = tempfile::tempdir().unwrap();
+        let err = run(&env(root, home.path(), &factory), 1, &mut |_| {})
+            .await
+            .unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("uncommitted changes"), "{err}");
+        assert!(
+            err.contains(
+                "stay uncommitted: big.bin (1.9 MiB, over the 1 MiB limit for new files); "
+            ),
+            "{err}"
+        );
     }
 
     fn mark(id: &str) -> (&'static str, Value) {
@@ -1892,7 +2130,7 @@ mod tests {
         assert!(root.join(".env").exists());
         assert_eq!(out.warnings.len(), 2, "{:?}", out.warnings);
         assert!(
-            out.warnings[0].contains("look like secrets: .env "),
+            out.warnings[0].contains("not committed: .env (the name looks like a secret) "),
             "{:?}",
             out.warnings
         );
