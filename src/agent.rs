@@ -273,6 +273,7 @@ impl Agent {
         input: &str,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
+        self.drop_open_server_calls(&mut on_event);
         let entry = self.transcript.user_text_entry(input);
         self.record(entry, &mut on_event);
         let specs = self.tools.specs();
@@ -428,6 +429,22 @@ impl Agent {
         }
 
         Err(TurnLimit(self.options.max_turns).into())
+    }
+
+    /// Drops the server tool calls the last turn left without a result
+    /// (see [`Transcript::open_server_calls`]), before a new input ends
+    /// that turn for good: the API would reject the history otherwise.
+    fn drop_open_server_calls(&mut self, on_event: &mut impl FnMut(Event<'_>)) {
+        let ids = self.transcript.open_server_calls();
+        if ids.is_empty() {
+            return;
+        }
+        let count = ids.len();
+        self.record(Entry::DropServerCalls { ids }, on_event);
+        on_event(Event::Warning(&format!(
+            "dropped {count} web search call(s) the last turn stopped before running; \
+             the model goes on from your new message"
+        )));
     }
 
     /// Runs one tool call, unless the gate turns it down.
@@ -975,6 +992,69 @@ mod tests {
             !log.iter().any(|line| line.contains("did not fit")),
             "{log:?}"
         );
+    }
+
+    /// A reply the API paused right after it called a search, the result of
+    /// the call `prev` before it first.
+    fn paused_on_search(prev: Option<usize>, id: usize) -> Reply {
+        let mut content = Vec::new();
+        if let Some(prev) = prev {
+            content.push(ContentBlock::Other(
+                json!({"type": "web_search_tool_result",
+                "tool_use_id": format!("srvtoolu_{prev}"), "content": []}),
+            ));
+        }
+        content.push(ContentBlock::text(format!("searching {id}")));
+        content.push(ContentBlock::Other(json!({"type": "server_tool_use",
+            "id": format!("srvtoolu_{id}"), "name": "web_search", "input": {"query": "q"}})));
+        Ok(CompletionResponse {
+            content,
+            stop_reason: StopReason::PauseTurn,
+            usage: Usage::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_new_input_drops_the_search_a_stopped_turn_left_open() {
+        let mut script: Vec<Reply> = (0..=MAX_PAUSES)
+            .map(|i| paused_on_search(i.checked_sub(1), i))
+            .collect();
+        script.push(text("ok"));
+        let provider = Scripted::new(script);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 50).with_journal(Box::new(journal.clone()));
+        agent.run("go", |_| {}).await.unwrap();
+        let open = format!("srvtoolu_{MAX_PAUSES}");
+        assert_eq!(
+            agent.transcript.open_server_calls(),
+            std::slice::from_ref(&open)
+        );
+
+        let mut log = Vec::new();
+        agent.run("go on", notable(&mut log)).await.unwrap();
+        assert_eq!(
+            log,
+            [
+                "warning dropped 1 web search call(s) the last turn stopped before running; \
+              the model goes on from your new message"
+            ]
+        );
+        let seen = seen.lock().unwrap();
+        let sent = seen.last().unwrap();
+        // Every search went with its result; the open one is gone and the
+        // reply that held it kept its text.
+        assert!(
+            !serde_json::to_string(sent)
+                .unwrap()
+                .contains(&format!("\"{open}\""))
+        );
+        assert_eq!(sent.len(), MAX_PAUSES + 3);
+        assert_eq!(sent[MAX_PAUSES + 1].content.len(), 2);
+        assert_eq!(sent[MAX_PAUSES + 2], Message::user_text("go on"));
+        assert!(agent.transcript.open_server_calls().is_empty());
+        // Recorded, so a replayed journal drops it too.
+        assert_eq!(replay(entries_of(&journal)), agent.transcript);
     }
 
     #[tokio::test]

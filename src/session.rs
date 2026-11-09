@@ -26,8 +26,8 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// Junees does not handle itself (thinking and the like) as the API sent
 /// them, which older versions would read as placeholders the API rejects.
 /// Format 1 and 2 journals still load; continuing one first writes an
-/// [`Entry::Format`] line.
-pub const FORMAT: u32 = 3;
+/// [`Entry::Format`] line. Format 4 added `drop_server_calls`.
+pub const FORMAT: u32 = 4;
 
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
@@ -67,7 +67,7 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 8] = [
+const ENTRY_TYPES: [&str; 9] = [
     "meta",
     "message",
     "append_text",
@@ -76,6 +76,7 @@ const ENTRY_TYPES: [&str; 8] = [
     "summary_usage",
     "compact",
     "format",
+    "drop_server_calls",
 ];
 
 /// One line of a journal.
@@ -124,6 +125,14 @@ pub enum Entry {
     /// of misreading what follows.
     Format {
         format: u32,
+    },
+    /// The server tool calls (`server_tool_use`) with these ids were
+    /// removed: they never got a result and the turn they were in ended,
+    /// so the API would reject the history (see
+    /// [`Transcript::open_server_calls`]). A model reply left with nothing
+    /// but thinking goes with them.
+    DropServerCalls {
+        ids: Vec<String>,
     },
 }
 
@@ -278,7 +287,71 @@ impl Transcript {
                     .sum();
                 self.reply_measured = false;
             }
+            Entry::DropServerCalls { ids } => {
+                let dropped = |block: &ContentBlock| {
+                    matches!(block.other_type(), Some(kind) if SERVER_CALL_TYPES.contains(&kind))
+                        && matches!(block, ContentBlock::Other(value)
+                            if value["id"].as_str().is_some_and(|id| ids.iter().any(|d| d == id)))
+                };
+                let mut i = 0;
+                while i < self.messages.len() {
+                    let message = &mut self.messages[i];
+                    if !message.content.iter().any(dropped) {
+                        i += 1;
+                        continue;
+                    }
+                    message.content.retain(|block| !dropped(block));
+                    if message.content.iter().any(|block| !block.is_thinking()) {
+                        i += 1;
+                        continue;
+                    }
+                    // Nothing left worth sending: the reply goes, and the
+                    // user messages around it become one.
+                    self.messages.remove(i);
+                    if i > 0
+                        && i < self.messages.len()
+                        && self.messages[i - 1].role == Role::User
+                        && self.messages[i].role == Role::User
+                    {
+                        let next = self.messages.remove(i);
+                        self.messages[i - 1].content.extend(next.content);
+                    }
+                }
+            }
         }
+    }
+
+    /// The ids of the server tool calls that have no result anywhere in
+    /// the history. A reply paused by the API (`pause_turn`) can end with
+    /// one, and so can a reply that also called client tools: the API runs
+    /// the search on the next request, when it carries nothing but those
+    /// tools' results. Once a turn ends there instead (the pause limit, a
+    /// cancel, an error), a new user input after it makes the API reject
+    /// the request ("`web_search` tool use with id ... was found without a
+    /// corresponding `web_search_tool_result` block"; handling stop
+    /// reasons docs, "tool_use"), so these calls are dropped first.
+    pub fn open_server_calls(&self) -> Vec<String> {
+        let blocks = || self.messages.iter().flat_map(|message| &message.content);
+        let answered: Vec<&str> = blocks()
+            .filter_map(|block| match block {
+                ContentBlock::Other(value) => value["tool_use_id"].as_str(),
+                _ => None,
+            })
+            .collect();
+        blocks()
+            .filter_map(|block| match block {
+                ContentBlock::Other(value)
+                    if block
+                        .other_type()
+                        .is_some_and(|kind| SERVER_CALL_TYPES.contains(&kind)) =>
+                {
+                    value["id"].as_str()
+                }
+                _ => None,
+            })
+            .filter(|id| !answered.contains(id))
+            .map(str::to_string)
+            .collect()
     }
 
     /// Estimated size of the conversation: the last measured size plus the
@@ -438,6 +511,9 @@ impl Transcript {
         })
     }
 }
+
+/// Block types of calls to tools the API runs itself.
+const SERVER_CALL_TYPES: [&str; 2] = ["server_tool_use", "mcp_tool_use"];
 
 /// A rough token count of content blocks: a token per 4 bytes of their
 /// JSON. Keys and quotes make it err high for plain text, and so do the
@@ -1168,6 +1244,7 @@ mod tests {
                 keep_thinking: false,
             },
             Entry::Format { format: FORMAT },
+            Entry::DropServerCalls { ids: vec![] },
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -1183,7 +1260,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 3);
+        assert_eq!(value["format"], 4);
         // Journals written before the field existed are format 1.
         let old =
             r#"{"type":"meta","id":"a","created_at":1,"cwd":"/w","model":"m","version":"0.1.0"}"#;
@@ -1888,6 +1965,61 @@ mod tests {
         // The next measurement replaces the estimate.
         transcript.apply(Entry::Usage(plain));
         assert_eq!(transcript.context_size(), 100);
+    }
+
+    fn server_call(id: &str) -> ContentBlock {
+        ContentBlock::Other(json!({"type": "server_tool_use", "id": id,
+            "name": "web_search", "input": {"query": "q"}}))
+    }
+
+    #[test]
+    fn drops_the_server_calls_left_without_a_result() {
+        let thinking = ContentBlock::Other(json!({"type": "thinking", "thinking": "t",
+            "signature": "s"}));
+        let answered = Message {
+            role: Role::Assistant,
+            content: vec![server_call("srvtoolu_a"), ContentBlock::text("paused")],
+        };
+        let result = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Other(json!({"type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_a", "content": []})),
+                ContentBlock::text("more"),
+                server_call("srvtoolu_b"),
+            ],
+        };
+        // A reply of nothing but thinking and a search, which a later input
+        // was already appended after (an older Junees).
+        let bare = Message {
+            role: Role::Assistant,
+            content: vec![thinking, server_call("srvtoolu_c")],
+        };
+        let mut transcript = transcript_of(vec![
+            Message::user_text("q"),
+            answered.clone(),
+            result,
+            Message::user_text("next"),
+            bare,
+            Message::user_text("again"),
+        ]);
+        assert_eq!(transcript.open_server_calls(), ["srvtoolu_b", "srvtoolu_c"]);
+
+        let entry = Entry::DropServerCalls {
+            ids: transcript.open_server_calls(),
+        };
+        let line = serde_json::to_value(&entry).unwrap();
+        assert_eq!(line["type"], "drop_server_calls");
+        assert_eq!(serde_json::from_value::<Entry>(line).unwrap(), entry);
+        transcript.apply(entry);
+        assert!(transcript.open_server_calls().is_empty());
+        assert_eq!(transcript.messages.len(), 4);
+        assert_eq!(transcript.messages[1], answered);
+        assert_eq!(transcript.messages[2].content.len(), 2);
+        assert_eq!(transcript.messages[2].text(), "more");
+        // The emptied reply went, and the inputs around it became one.
+        assert_eq!(transcript.messages[3].role, Role::User);
+        assert_eq!(transcript.messages[3].text(), "next\nagain");
     }
 
     #[test]
