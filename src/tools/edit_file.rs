@@ -153,9 +153,10 @@ impl Edit {
 /// Works out the edit, or why it cannot be made.
 fn plan_edit(text: &str, old: &str, new: &str, replace_all: bool) -> Result<Edit, String> {
     let crlf = uses_crlf(text);
-    // read_file shows lines without `\r`, so in a CRLF file the model's
-    // `\n` usually stands for `\r\n`. An exact match still wins.
-    let old = if crlf && find_all(text, old).is_empty() && has_bare_lf(old) {
+    // read_file shows lines without `\r`, so where the file has `\r\n` the
+    // model's `\n` usually stands for it, also in the few CRLF lines of a
+    // mostly LF file. An exact match still wins.
+    let old = if find_all(text, old).is_empty() && has_bare_lf(old) {
         to_crlf(old)
     } else {
         old.to_string()
@@ -295,6 +296,12 @@ fn not_found(text: &str, old: &str) -> String {
         "old_string was not found in the file. It must match exactly, \
          whitespace and indentation included.",
     );
+    if text.contains("\r\n") && has_bare_lf(text) {
+        out.push_str(
+            " Some lines in the file end in \\r\\n and others in \\n (read_file \
+             shows neither); old_string must spell out each one it spans.",
+        );
+    }
     let Some(needle) = old.lines().map(str::trim).find(|line| !line.is_empty()) else {
         return out;
     };
@@ -904,6 +911,29 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "p\r\nK\r\nK\r\nq\r\nr\nK\nK\ns\n"
         );
+    }
+
+    #[tokio::test]
+    async fn finds_crlf_lines_in_mostly_lf_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_file(&dir, "a\nb\r\nc\nd\ne\n");
+        // As read_file shows it: without the `\r`.
+        let output = run(&path, "b\nc", "B\nC").await;
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nB\r\nC\nd\ne\n");
+        // A match across both kinds of line end still fails, and says why.
+        let output = run(&path, "a\nB\nC", "x").await;
+        assert!(output.is_error);
+        assert!(
+            output
+                .content
+                .contains("Some lines in the file end in \\r\\n"),
+            "{}",
+            output.content
+        );
+        let path = temp_file(&dir, "a\nb\n");
+        let output = run(&path, "zz", "x").await;
+        assert!(!output.content.contains("\\r\\n"), "{}", output.content);
     }
 
     #[test]
