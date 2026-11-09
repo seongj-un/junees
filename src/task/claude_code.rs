@@ -120,6 +120,12 @@ const AUTH_ERRORS: &[&str] = &[
     "oauth_org_not_allowed",
     "account_on_hold",
 ];
+/// The error code of Claude Code's stream for a 429 against the account's
+/// quota: the usage limit of the subscription
+/// (<https://code.claude.com/docs/en/agent-sdk/typescript>,
+/// `SDKAssistantMessageError`; also an `api_retry` category,
+/// <https://code.claude.com/docs/en/headless>).
+const RATE_LIMIT_ERROR: &str = "rate_limit";
 /// Texts of Claude Code's login failures (lowercase), for output without
 /// an error code.
 const LOGIN_TEXTS: &[&str] = &[
@@ -198,6 +204,31 @@ pub enum End {
     Budget(String),
     /// The cancel flag was set; the harness stopped Claude Code.
     Interrupted,
+    /// Claude Code hit the usage limit of the subscription and could not
+    /// go on.
+    UsageLimit(UsageLimit),
+}
+
+/// What Claude Code said when it hit the usage limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageLimit {
+    /// When the limit resets, in unix seconds: the `resetsAt` of the
+    /// `rate_limit_event` that refused the session. `None` when there was
+    /// none; Claude Code's message may still name the time, in its own
+    /// words (`resets 3:45pm`).
+    pub resets_at: Option<u64>,
+    /// Claude Code's message.
+    pub message: String,
+}
+
+impl std::fmt::Display for UsageLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Claude Code hit the usage limit")?;
+        if let Some(at) = self.resets_at {
+            write!(f, " (resets {} UTC)", crate::session::format_utc(at))?;
+        }
+        write!(f, ": {}", self.message)
+    }
 }
 
 /// What a session did.
@@ -220,6 +251,7 @@ impl Outcome {
             Ok(End::TurnLimit) => "stopped at --max-turns".to_string(),
             Ok(End::Budget(_)) => "stopped by the budget".to_string(),
             Ok(End::Interrupted) => "interrupted".to_string(),
+            Ok(End::UsageLimit(_)) => "stopped at the usage limit".to_string(),
             Err(_) => "failed".to_string(),
         }];
         if let Some(turns) = self.turns {
@@ -823,6 +855,11 @@ struct Stream {
     session_id: Option<String>,
     /// What a refused login said, if the latest model call failed so.
     auth: Option<String>,
+    /// What Claude Code said, if the latest model call failed with
+    /// [`RATE_LIMIT_ERROR`].
+    rate_limited: Option<String>,
+    /// The latest `rate_limit_event`.
+    rate_limit: Option<RateLimit>,
     /// Whether a response's usage could not be read (warned once).
     bad_usage: bool,
     result: Option<Finished>,
@@ -830,10 +867,28 @@ struct Stream {
     plain: Vec<String>,
 }
 
+/// The `rate_limit_info` of a `rate_limit_event`
+/// (<https://code.claude.com/docs/en/agent-sdk/typescript>,
+/// `SDKRateLimitEvent`).
+struct RateLimit {
+    /// `status` is `rejected`: requests are refused.
+    rejected: bool,
+    /// `resetsAt`, in unix seconds (the docs give no unit; the 2.1.319
+    /// binary documents it as "unix epoch seconds", the unit of the
+    /// status line's `rate_limits.*.resets_at`).
+    resets_at: Option<u64>,
+    /// `errorCode` is `credits_required`: the included usage is used up and
+    /// only bought usage credits let the session go on.
+    credits_required: bool,
+}
+
 /// The `result` event.
 struct Finished {
     subtype: String,
     is_error: bool,
+    /// `api_error_status`: the HTTP status of the API error that ended the
+    /// session.
+    api_error_status: Option<u64>,
     text: String,
     usage: Option<Usage>,
     cost_usd: Option<f64>,
@@ -863,6 +918,7 @@ impl Stream {
             Some("user") => self.user(&event, report),
             Some("system") => self.system(&event, line, report),
             Some("result") => self.result = Some(Finished::parse(&event)),
+            Some("rate_limit_event") => self.rate_limit_event(&event, report),
             _ => {}
         }
         false
@@ -884,6 +940,18 @@ impl Stream {
             }
             _ => None,
         };
+        // A response that came through means requests are not refused.
+        if event["error"].is_null() {
+            self.rate_limit = None;
+        }
+        self.rate_limited = (event["error"] == RATE_LIMIT_ERROR).then(|| {
+            let text = content_text(&message["content"]);
+            if text.trim().is_empty() {
+                RATE_LIMIT_ERROR.to_string()
+            } else {
+                text
+            }
+        });
         let mut changed = false;
         if let Some(usage) = message.get("usage").filter(|usage| usage.is_object()) {
             match serde_json::from_value::<Usage>(usage.clone()) {
@@ -965,6 +1033,7 @@ impl Stream {
             Some("api_retry") => {
                 let error = event["error"].as_str().unwrap_or("unknown");
                 self.auth = AUTH_ERRORS.contains(&error).then(|| error.to_string());
+                self.rate_limited = (error == RATE_LIMIT_ERROR).then(|| error.to_string());
                 warn(
                     report,
                     &format!(
@@ -982,6 +1051,31 @@ impl Stream {
             ),
             _ => {}
         }
+    }
+
+    fn rate_limit_event(&mut self, event: &Value, report: &mut Reporter<'_>) {
+        let info = &event["rate_limit_info"];
+        let limit = RateLimit {
+            rejected: info["status"] == "rejected",
+            resets_at: info["resetsAt"]
+                .as_f64()
+                .filter(|at| at.is_finite() && *at > 0.0)
+                .map(|at| at as u64),
+            credits_required: info["errorCode"] == "credits_required",
+        };
+        if !limit.rejected {
+            // The limit let a request through.
+            self.rate_limited = None;
+        } else {
+            let when = limit.resets_at.map_or_else(String::new, |at| {
+                format!(" until {} UTC", crate::session::format_utc(at))
+            });
+            warn(
+                report,
+                &format!("Claude Code reports the usage limit reached; requests are refused{when}"),
+            );
+        }
+        self.rate_limit = Some(limit);
     }
 
     /// Tokens of the model responses seen so far.
@@ -1029,6 +1123,9 @@ impl Stream {
         if let Some(said) = self.login_failure(&exit.stderr) {
             return Err(NotLoggedIn(said).into());
         }
+        if let Some(limit) = self.usage_limit() {
+            return Ok(End::UsageLimit(limit));
+        }
         let stderr = if exit.stderr.is_empty() {
             String::new()
         } else {
@@ -1046,6 +1143,40 @@ impl Stream {
                 exit.status
             )),
         }
+    }
+
+    /// The usage limit, if that is why a session that did not finish
+    /// ended: the latest model call failed with [`RATE_LIMIT_ERROR`], the
+    /// result names a 429, or the latest `rate_limit_event` refuses
+    /// requests.
+    fn usage_limit(&self) -> Option<UsageLimit> {
+        let refused = self.rate_limit.as_ref().filter(|limit| limit.rejected);
+        let status_429 = self
+            .result
+            .as_ref()
+            .is_some_and(|result| result.api_error_status == Some(429));
+        if self.rate_limited.is_none() && refused.is_none() && !status_429 {
+            return None;
+        }
+        let said = self
+            .result
+            .as_ref()
+            .map(|result| result.text.trim())
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.rate_limited.clone())
+            .unwrap_or_else(|| "requests refused by the usage limit".to_string());
+        let mut message = preview(&said, ERROR_CHARS);
+        if refused.is_some_and(|limit| limit.credits_required) {
+            message.push_str(
+                " (Claude Code says usage credits are required to go on: \
+                 `credits_required`, which does not lift by itself)",
+            );
+        }
+        Some(UsageLimit {
+            resets_at: refused.and_then(|limit| limit.resets_at),
+            message,
+        })
     }
 
     /// What Claude Code said when its login was missing or refused.
@@ -1082,6 +1213,7 @@ impl Finished {
         Self {
             subtype: event["subtype"].as_str().unwrap_or("?").to_string(),
             is_error: event["is_error"].as_bool().unwrap_or(false),
+            api_error_status: event["api_error_status"].as_u64(),
             text,
             usage: result_usage(event),
             cost_usd: event["total_cost_usd"].as_f64(),
@@ -1633,6 +1765,165 @@ mod tests {
         assert!(
             format!("{err:#}").contains("without a result; stderr: segfault"),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn tells_the_usage_limit_from_other_failures() {
+        // As Claude Code reports a refused request: the event with the
+        // reset time, the model call's error, then the result.
+        let refused = |resets_at: Value| {
+            json!({"type": "rate_limit_event", "session_id": "s",
+                "rate_limit_info": {"status": "rejected", "resetsAt": resets_at}})
+        };
+        let call = json!({"type": "assistant", "error": "rate_limit",
+            "parent_tool_use_id": null, "message": {"content": [{"type": "text",
+            "text": "You've hit your session limit · resets 3:45pm"}]}});
+        let result = json!({"type": "result", "subtype": "success", "is_error": true,
+            "api_error_status": 429, "result": "You've hit your session limit · resets 3:45pm"});
+        let limit = |resets_at| {
+            End::UsageLimit(UsageLimit {
+                resets_at,
+                message: "You've hit your session limit · resets 3:45pm".into(),
+            })
+        };
+        assert_eq!(
+            end_of(
+                &[refused(json!(1_794_205_024)), call.clone(), result.clone()],
+                ""
+            )
+            .unwrap(),
+            limit(Some(1_794_205_024))
+        );
+        // Each signal alone is enough; only the event has the reset time.
+        assert_eq!(
+            end_of(
+                &[
+                    call.clone(),
+                    json!({"type": "result", "subtype": "error_during_execution",
+                "is_error": true})
+                ],
+                ""
+            )
+            .unwrap(),
+            limit(None)
+        );
+        assert_eq!(
+            end_of(std::slice::from_ref(&result), "").unwrap(),
+            limit(None)
+        );
+        let End::UsageLimit(alone) = end_of(&[refused(json!(1_794_205_024))], "").unwrap() else {
+            panic!("not a usage limit");
+        };
+        assert_eq!(alone.resets_at, Some(1_794_205_024));
+        assert_eq!(alone.message, "requests refused by the usage limit");
+        let End::UsageLimit(retried) = end_of(
+            &[
+                json!({"type": "system", "subtype": "api_retry", "attempt": 3,
+                "max_retries": 10, "error": "rate_limit"}),
+            ],
+            "",
+        )
+        .unwrap() else {
+            panic!("not a usage limit");
+        };
+        assert_eq!(retried.message, "rate_limit");
+        // A reset time Junees cannot read is none.
+        let End::UsageLimit(odd) = end_of(&[refused(json!("3:45pm")), result.clone()], "").unwrap()
+        else {
+            panic!("not a usage limit");
+        };
+        assert_eq!(odd.resets_at, None);
+        // Only bought credits help.
+        let credits = json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected",
+            "errorCode": "credits_required", "canUserPurchaseCredits": true}});
+        let End::UsageLimit(credits) = end_of(&[credits, result.clone()], "").unwrap() else {
+            panic!("not a usage limit");
+        };
+        assert!(
+            credits.message.contains("`credits_required`"),
+            "{}",
+            credits.message
+        );
+
+        // A session that got past the limit, or a limit that lifted, is no
+        // usage limit; neither is an overloaded server.
+        let success =
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": "ok"});
+        assert_eq!(
+            end_of(&[refused(json!(1)), call.clone(), success], "").unwrap(),
+            End::Answered
+        );
+        let answer = json!({"type": "assistant", "parent_tool_use_id": null,
+            "message": {"content": [{"type": "text", "text": "hi"}]}});
+        let failed =
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true});
+        let allowed = json!({"type": "rate_limit_event",
+            "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1_794_205_024}});
+        for later in [answer, allowed] {
+            let err = end_of(
+                &[
+                    call.clone(),
+                    refused(json!(1)),
+                    later.clone(),
+                    failed.clone(),
+                ],
+                "",
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("error_during_execution"),
+                "{later}"
+            );
+        }
+        let overloaded = json!({"type": "assistant", "error": "overloaded",
+            "parent_tool_use_id": null, "message": {"content": []}});
+        assert!(end_of(&[overloaded, failed], "").is_err());
+    }
+
+    #[test]
+    fn the_stream_warns_when_the_limit_refuses_requests() {
+        let mut stream = Stream::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut report = collector(&seen);
+        for status in ["allowed", "rejected"] {
+            let event = json!({"type": "rate_limit_event", "rate_limit_info":
+                {"status": status, "resetsAt": 1_794_205_024}});
+            stream.handle(&event.to_string(), &mut report);
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                "warn Claude Code reports the usage limit reached; requests are refused \
+                 until 2026-11-09 06:17 UTC"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_usage_limit_names_the_reset() {
+        let outcome = Outcome {
+            end: Ok(End::UsageLimit(UsageLimit {
+                resets_at: Some(1_794_205_024),
+                message: "You've hit your session limit · resets 6:17am".into(),
+            })),
+            usage: Usage::default(),
+            cost_usd: None,
+            turns: None,
+            session_id: None,
+        };
+        assert!(
+            outcome
+                .summary()
+                .starts_with("stopped at the usage limit, ")
+        );
+        let Ok(End::UsageLimit(limit)) = outcome.end else {
+            unreachable!()
+        };
+        assert_eq!(
+            limit.to_string(),
+            "Claude Code hit the usage limit (resets 2026-11-09 06:17 UTC): \
+             You've hit your session limit · resets 6:17am"
         );
     }
 
