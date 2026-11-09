@@ -3,10 +3,11 @@
 //! turn the command rules off for the next run (`allow_dangerous`).
 //!
 //! read_file, write_file and edit_file refuse it; the command policy refuses
-//! bash commands that name it. The bash part is a deny list, not a sandbox:
-//! globs (`~/.junees/*`), paths built from other variables or at run time
-//! (`cat $(echo ~/.junees/conf*)`) and scripts written to a file first still
-//! reach it.
+//! bash commands that name it (also through a glob or braces) or that use
+//! its whole folder other than to list it. The bash part is a deny list, not
+//! a sandbox: paths built from other variables or at run time
+//! (`cat $(echo ~/.junees)/config.toml`), commands on a folder above it
+//! (`grep -r api_key ~`) and scripts written to a file first still reach it.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,19 @@ use super::policy::resolve;
 
 /// How many symbolic links a dangling chain may have before giving up.
 const MAX_LINKS: usize = 40;
+
+/// How many words brace expansion of one shell word may give before the
+/// rest are not checked.
+const MAX_BRACE_WORDS: usize = 256;
+
+/// What a shell word points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Named {
+    /// The settings file (or a glob that can match it).
+    File,
+    /// The folder holding it, `$JUNEES_HOME` itself.
+    Folder,
+}
 
 /// The settings file the tools must leave alone. The rest of
 /// `$JUNEES_HOME` (sessions, journals) stays readable.
@@ -46,16 +60,23 @@ impl SettingsFile {
         std::env::current_dir().is_ok_and(|cwd| self.same(&cwd.join(path)))
     }
 
-    /// Whether the shell word `word` names the settings file, relative
-    /// paths taken from `cwd` (`None`: unknown, not checked). `~`, `$HOME`,
-    /// `${HOME}`, `$JUNEES_HOME` and `${JUNEES_HOME}` at the start are
-    /// expanded; the part after the first `=` counts too (`--file=PATH`,
-    /// `if=PATH`). Other variables and globs are not expanded.
-    pub fn named_by(&self, word: &str, cwd: Option<&Path>) -> bool {
-        std::iter::once(word)
-            .chain(word.split_once('=').map(|(_, value)| value))
+    /// Whether the shell word `word` names the settings file or its folder
+    /// (the file wins), relative paths taken from `cwd` (`None`: unknown,
+    /// not checked). `~`, `$HOME`, `${HOME}`, `$JUNEES_HOME` and
+    /// `${JUNEES_HOME}` at the start and `/proc/self/cwd` are expanded, so
+    /// are braces (`{a,b}`); a glob (`*`, `?`, `[...]`) counts when it can
+    /// match. The part after the first `=` counts too (`--file=PATH`,
+    /// `if=PATH`). Other variables are not expanded.
+    pub fn names(&self, word: &str, cwd: Option<&Path>) -> Option<Named> {
+        let mut words = Vec::new();
+        for word in std::iter::once(word).chain(word.split_once('=').map(|(_, value)| value)) {
+            expand_braces(word, &mut words);
+        }
+        words
+            .iter()
             .filter_map(|word| self.locate(word, cwd))
-            .any(|path| self.same(&path))
+            .filter_map(|path| self.points_at(&path))
+            .min()
     }
 
     /// Where `cd args` (or `pushd args`) from `cwd` goes, `None` when that
@@ -94,6 +115,49 @@ impl SettingsFile {
         )
     }
 
+    /// Why the command policy refuses a command that uses the whole folder
+    /// as `word`.
+    pub fn folder_reason(&self, word: &str) -> String {
+        format!(
+            "`{word}` is the folder of the user's private Junees settings file (it holds \
+             the API key); commands may list it or `cd` into it but not read, copy, move \
+             or change it as a whole. Use the paths inside it (such as `sessions/`) instead."
+        )
+    }
+
+    /// Whether the absolute `path` (possibly holding glob patterns) leads
+    /// to the settings file or its folder.
+    fn points_at(&self, path: &Path) -> Option<Named> {
+        let folder = self.path.parent()?;
+        let Some(first_glob) = path
+            .components()
+            .position(|c| is_glob(&c.as_os_str().to_string_lossy()))
+        else {
+            if self.same(path) {
+                return Some(Named::File);
+            }
+            let target = resolve(folder).unwrap_or_else(|| folder.to_path_buf());
+            return (resolve(path) == Some(target)).then_some(Named::Folder);
+        };
+        let prefix: PathBuf = path.components().take(first_glob).collect();
+        let prefix = resolve(&prefix)?;
+        let patterns: Vec<_> = path.components().skip(first_glob).collect();
+        [(&*self.path, Named::File), (folder, Named::Folder)]
+            .into_iter()
+            .find_map(|(target, named)| {
+                let target = resolve(target).unwrap_or_else(|| target.to_path_buf());
+                let rest: Vec<_> = target.strip_prefix(&prefix).ok()?.components().collect();
+                (rest.len() == patterns.len()
+                    && rest.iter().zip(&patterns).all(|(name, pattern)| {
+                        glob_match(
+                            &pattern.as_os_str().to_string_lossy(),
+                            &name.as_os_str().to_string_lossy(),
+                        )
+                    }))
+                .then_some(named)
+            })
+    }
+
     /// The absolute path `word` names from `cwd`, without resolving it.
     fn locate(&self, word: &str, cwd: Option<&Path>) -> Option<PathBuf> {
         let junees_home = self.path.parent();
@@ -110,6 +174,14 @@ impl SettingsFile {
                 && (rest.is_empty() || rest.starts_with('/'))
             {
                 return Some(base?.join(rest.trim_start_matches('/')));
+            }
+        }
+        // `/proc/self` is the shell there, not Junees.
+        for var in ["/proc/self/cwd", "/proc/thread-self/cwd"] {
+            if let Some(rest) = word.strip_prefix(var)
+                && (rest.is_empty() || rest.starts_with('/'))
+            {
+                return Some(cwd?.join(rest.trim_start_matches('/')));
             }
         }
         if word.is_empty() || word.starts_with('~') || word.contains(['$', '`']) {
@@ -142,6 +214,140 @@ impl SettingsFile {
             _ => false,
         }
     }
+}
+
+/// Whether a path component holds a glob pattern.
+fn is_glob(name: &str) -> bool {
+    name.contains(['*', '?', '['])
+}
+
+/// One part of a glob pattern.
+enum Glob {
+    /// `*`: any run of characters.
+    Star,
+    /// `?`: any one character.
+    Any,
+    /// `[...]`: one character of the set (or not of it).
+    Set {
+        negate: bool,
+        items: Vec<char>,
+    },
+    Literal(char),
+}
+
+impl Glob {
+    /// Whether this part (not `*`) matches the one character `c`.
+    fn matches(&self, c: char) -> bool {
+        match self {
+            Glob::Star | Glob::Any => true,
+            Glob::Literal(literal) => *literal == c,
+            Glob::Set { negate, items } => {
+                let mut hit = false;
+                let mut i = 0;
+                while i < items.len() {
+                    if i + 2 < items.len() && items[i + 1] == '-' {
+                        hit |= (items[i]..=items[i + 2]).contains(&c);
+                        i += 3;
+                    } else {
+                        hit |= items[i] == c;
+                        i += 1;
+                    }
+                }
+                hit != *negate
+            }
+        }
+    }
+}
+
+/// Whether the glob `pattern` (`*`, `?`, `[...]`) matches `name`. A `*`
+/// also matches a leading `.` (as with `dotglob`), to err on the safe side.
+/// Runs in time `pattern` times `name`, however many `*` there are.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while let Some(&c) = pattern.get(i) {
+        i += 1;
+        parts.push(match c {
+            '*' => Glob::Star,
+            '?' => Glob::Any,
+            '[' => {
+                let negate = matches!(pattern.get(i), Some('!' | '^'));
+                let body = i + usize::from(negate);
+                // A `]` right after the opening is part of the set.
+                match pattern.iter().skip(body + 1).position(|&c| c == ']') {
+                    Some(end) => {
+                        let end = body + 1 + end;
+                        i = end + 1;
+                        Glob::Set {
+                            negate,
+                            items: pattern[body..end].to_vec(),
+                        }
+                    }
+                    // No closing `]`: a plain `[`.
+                    None => Glob::Literal('['),
+                }
+            }
+            c => Glob::Literal(c),
+        });
+    }
+    let name: Vec<char> = name.chars().collect();
+    // `row[j]`: whether the parts so far match the first `j` characters.
+    let mut row = vec![false; name.len() + 1];
+    row[0] = true;
+    for part in &parts {
+        let mut next = vec![false; name.len() + 1];
+        for j in 0..=name.len() {
+            next[j] = match part {
+                Glob::Star => row[j] || (j > 0 && next[j - 1]),
+                part => j > 0 && row[j - 1] && part.matches(name[j - 1]),
+            };
+        }
+        row = next;
+    }
+    row[name.len()]
+}
+
+/// Appends the words bash brace expansion makes of `word` (`a{b,c}d` gives
+/// `abd` and `acd`) to `out`, at most [`MAX_BRACE_WORDS`] of them. Braces
+/// without a top-level comma (`${HOME}`) stay as they are.
+fn expand_braces(word: &str, out: &mut Vec<String>) {
+    if out.len() >= MAX_BRACE_WORDS {
+        return;
+    }
+    let mut search = 0;
+    while let Some(open) = word[search..].find('{').map(|i| i + search) {
+        let mut depth = 0;
+        let mut commas = Vec::new();
+        let mut close = None;
+        for (i, c) in word[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                ',' if depth == 1 => commas.push(open + i),
+                _ => {}
+            }
+        }
+        match close {
+            Some(close) if !commas.is_empty() => {
+                let (head, tail) = (&word[..open], &word[close + 1..]);
+                let mut start = open + 1;
+                for end in commas.into_iter().chain([close]) {
+                    expand_braces(&format!("{head}{}{tail}", &word[start..end]), out);
+                    start = end + 1;
+                }
+                return;
+            }
+            _ => search = open + 1,
+        }
+    }
+    out.push(word.to_string());
 }
 
 /// Fixtures for the tests of the tools and the command policy.
@@ -183,6 +389,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::testing::{home, relative};
+    use super::{Named, expand_braces};
 
     #[test]
     fn knows_the_file_by_any_path() {
@@ -234,12 +441,42 @@ mod tests {
             "if=$JUNEES_HOME/config.toml",
             "config.toml",
             "sessions/../config.toml",
+            "/proc/self/cwd/config.toml",
+            // Globs and braces that can reach it.
+            "~/.junees/*",
+            "~/.junees/conf*.toml",
+            "$JUNEES_HOME/c?nfig.[st]oml",
+            "~/.jun*/config.toml",
+            "~/*/config.toml",
+            "~/.junees/{config.toml,x}",
+            "~/.junees/{con{f,x}ig,y}.toml",
         ] {
-            assert!(file.named_by(word, Some(&junees)), "{word}");
+            assert_eq!(file.names(word, Some(&junees)), Some(Named::File), "{word}");
         }
         for word in [
-            "~/.junees/*",
+            "~/.junees",
+            "$JUNEES_HOME/",
+            "${HOME}/.junees/.",
+            "~/.junees/sessions/..",
+            ".",
+            "/proc/self/cwd",
+            "--dir=~/.junees",
+            "~/.jun*",
+            "~/.junees{,}",
+        ] {
+            assert_eq!(
+                file.names(word, Some(&junees)),
+                Some(Named::Folder),
+                "{word}"
+            );
+        }
+        for word in [
             "~/.junees/sessions/s.jsonl",
+            "~/.junees/sessions/*",
+            "~/.junees/x*",
+            "~/.junees/[!c]onfig.toml",
+            "~/.junees/{x,y}",
+            "~",
             "$JUNEES_HOMEX/config.toml",
             "$DIR/config.toml",
             "~other/.junees/config.toml",
@@ -247,10 +484,54 @@ mod tests {
             "cat",
             "",
         ] {
-            assert!(!file.named_by(word, Some(&junees)), "{word}");
+            assert_eq!(file.names(word, Some(&junees)), None, "{word}");
         }
         // A relative word needs a known folder.
-        assert!(!file.named_by("config.toml", None));
+        assert_eq!(file.names("config.toml", None), None);
+        assert_eq!(file.names("/proc/self/cwd/config.toml", None), None);
+    }
+
+    #[test]
+    fn matches_globs_like_bash() {
+        use super::glob_match;
+        for (pattern, name) in [
+            ("*", "config.toml"),
+            ("*", ".junees"),
+            ("c*g.t*l", "config.toml"),
+            ("c?nfig.[st]oml", "config.toml"),
+            ("[]c]onfig", "config"),
+            ("[a-d]onfig", "config"),
+            ("[!x]onfig", "config"),
+            ("[c", "[c"),
+            ("**", ""),
+        ] {
+            assert!(glob_match(pattern, name), "{pattern} {name}");
+        }
+        for (pattern, name) in [
+            ("[!c]onfig", "config"),
+            ("?", ""),
+            ("config", "config.toml"),
+            ("[c", "c"),
+        ] {
+            assert!(!glob_match(pattern, name), "{pattern} {name}");
+        }
+        // Many stars must not take exponential time.
+        assert!(!glob_match(&"*a".repeat(5000), &"a".repeat(200)));
+    }
+
+    #[test]
+    fn expands_braces_like_bash() {
+        let expand = |word: &str| {
+            let mut out = Vec::new();
+            expand_braces(word, &mut out);
+            out
+        };
+        assert_eq!(expand("a{b,c}d"), ["abd", "acd"]);
+        assert_eq!(expand("{a,b{c,d}}"), ["a", "bc", "bd"]);
+        assert_eq!(expand("${HOME}/{x,y}"), ["${HOME}/x", "${HOME}/y"]);
+        assert_eq!(expand("{a}b"), ["{a}b"]);
+        assert_eq!(expand("{a,b"), ["{a,b"]);
+        assert_eq!(expand(&"{a,b}".repeat(20)).len(), super::MAX_BRACE_WORDS);
     }
 
     #[test]

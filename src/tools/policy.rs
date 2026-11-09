@@ -11,6 +11,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use super::settings_file::Named;
 use super::{SettingsFile, ToolSettings};
 
 /// Whether a command may run.
@@ -43,6 +44,12 @@ pub struct CommandPolicy {
 const MAX_DEPTH: usize = 8;
 
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
+/// Programs that may name the settings folder (`$JUNEES_HOME`) itself: they
+/// look at names and metadata, never at file contents.
+const LISTS_FOLDER: &[&str] = &[
+    "cd", "pushd", "ls", "stat", "du", "test", "[", "realpath", "readlink", "echo",
+];
 
 /// Top-level folders whose recursive removal breaks the machine.
 const SYSTEM_DIRS: &[&str] = &[
@@ -81,10 +88,13 @@ impl CommandPolicy {
     }
 
     /// Also refuses commands that name the settings file as an argument or
-    /// redirect target ([`SettingsFile::named_by`]), relative paths taken
-    /// from the current folder and the `cd`/`pushd` targets before them in
-    /// the same script. A deny list: a glob (`cat ~/.junees/*`) or a path
-    /// built at run time still reaches the file.
+    /// redirect target, directly or through a glob or braces, and commands
+    /// other than [`LISTS_FOLDER`] that name its folder
+    /// ([`SettingsFile::names`]), relative paths taken from the current
+    /// folder and the `cd`/`pushd` targets before them in the same script.
+    /// A deny list: a path built at run time (`cat $(echo ~/.junees)/x`) or
+    /// a command on a folder above it (`grep -r key ~`) still reaches the
+    /// file.
     pub fn protect_settings_file(mut self, file: Option<SettingsFile>) -> Self {
         self.settings_file = file;
         self
@@ -124,15 +134,30 @@ impl CommandPolicy {
             let mut piped: Option<String> = None;
             for command in pipeline {
                 if let Some(file) = &self.settings_file {
-                    let mut named = command.words.iter().chain(
-                        command
-                            .redirects
-                            .iter()
-                            .filter(|(op, _)| !op.starts_with("<<"))
-                            .map(|(_, target)| target),
-                    );
-                    if let Some(word) = named.find(|word| file.named_by(word, cwd.as_deref())) {
-                        return Some(file.named_reason(word));
+                    // Only these may use the settings folder as a whole:
+                    // they look at names, not contents.
+                    let lists_folder = self
+                        .command_words(&command.words, depth)
+                        .ok()
+                        .and_then(|words| words.first())
+                        .is_some_and(|program| LISTS_FOLDER.contains(&basename(program)));
+                    let reason = command
+                        .words
+                        .iter()
+                        .chain(
+                            command
+                                .redirects
+                                .iter()
+                                .filter(|(op, _)| !op.starts_with("<<"))
+                                .map(|(_, target)| target),
+                        )
+                        .find_map(|word| match file.names(word, cwd.as_deref())? {
+                            Named::File => Some(file.named_reason(word)),
+                            Named::Folder if !lists_folder => Some(file.folder_reason(word)),
+                            Named::Folder => None,
+                        });
+                    if reason.is_some() {
+                        return reason;
                     }
                 }
                 if !self.allow_dangerous
@@ -2579,6 +2604,32 @@ mod tests {
             "bash -c 'cat ~/.junees/config.toml'".into(),
             "echo $(cat ~/.junees/config.toml)".into(),
             "KEY=$(< ~/.junees/config.toml) true".into(),
+            // The whole folder: copies, archives and swaps reach the file
+            // without naming it.
+            "grep -r api_key ~/.junees".into(),
+            "cp -r ~/.junees /tmp/j".into(),
+            "tar -cf - ~/.junees".into(),
+            "find ~/.junees -name 'config*' -exec cat {} +".into(),
+            "mv ~/.junees /tmp/old && mv /tmp/evil ~/.junees".into(),
+            "mv /tmp/evil $JUNEES_HOME".into(),
+            "rsync -a ~/.junees/ /tmp/j".into(),
+            "ln -s ~/.junees /tmp/j".into(),
+            "rm -r ~/.junees/sessions/..".into(),
+            "tar -C ~/.junees -cf - config.toml".into(),
+            "git -C ~/.junees status".into(),
+            "cd ~/.junees && tar -cf - .".into(),
+            "cd; zip -r /tmp/j.zip .junees".into(),
+            "env grep -r key ~/.junees".into(),
+            // Keeping the folder in a variable is the first step of most
+            // ways around the rule.
+            "dir=~/.junees; cat $dir/config.toml".into(),
+            // Globs and braces that can match the file.
+            "cat ~/.junees/*".into(),
+            "cat ~/.junees/conf*.toml".into(),
+            "cat ~/.junees/{config.toml,x}".into(),
+            "cat ~/.jun*/config.toml".into(),
+            "cat ~/.jun*".into(),
+            "cd ~/.junees && cat /proc/self/cwd/config.toml".into(),
         ] {
             match policy.check(&command) {
                 Verdict::Deny(reason) => assert!(
@@ -2591,15 +2642,19 @@ mod tests {
         for command in [
             "cat ~/.junees/sessions/s.jsonl",
             "ls -la ~/.junees",
+            "cd ~/.junees && ls -la . && stat ~/.junees && du -sh .",
+            "test -d $JUNEES_HOME && echo ~/.junees",
+            "cp -r ~/.junees/sessions /tmp/s",
+            "cat ~/.junees/sessions/*",
             "cat config.toml",
             "cd ~/.junees/sessions && cat s.jsonl",
             "cat <<config.toml\nx\nconfig.toml",
-            // Not caught: this is a deny list, not a sandbox. A glob, a
-            // variable or a path built at run time still reaches the file.
-            "cat ~/.junees/*",
-            "cat ~/.junees/conf*.toml",
-            "dir=~/.junees; cat $dir/config.toml",
+            // Not caught: this is a deny list, not a sandbox. A variable,
+            // a path built at run time or a folder above it still reaches
+            // the file.
+            "dir=~; cat $dir/.junees/config.toml",
             "cat $(echo ~/.junees)/config.toml",
+            "grep -r api_key ~",
         ] {
             assert_eq!(policy.check(command), Verdict::Allow, "{command}");
         }
