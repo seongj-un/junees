@@ -5,6 +5,7 @@ pub mod approval;
 pub mod cancel;
 pub mod cli;
 pub mod config;
+pub mod config_file;
 pub mod context;
 pub mod message;
 pub mod notify;

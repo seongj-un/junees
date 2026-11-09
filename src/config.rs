@@ -1,4 +1,5 @@
-//! Settings read from environment variables.
+//! Settings read from environment variables (and, through
+//! [`crate::config_file::Settings`], the settings file).
 
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -89,7 +90,8 @@ impl Config {
 
         let api_key = if need_key {
             get("ANTHROPIC_API_KEY").context(
-                "ANTHROPIC_API_KEY is not set (get one at https://console.anthropic.com)",
+                "no API key: run `junees setup`, or set ANTHROPIC_API_KEY \
+                 (get a key at https://console.anthropic.com)",
             )?
         } else {
             String::new()
@@ -146,9 +148,7 @@ impl Config {
                  and the answer needs room too"
             );
         }
-        let home = get("JUNEES_HOME")
-            .map(PathBuf::from)
-            .or_else(|| get("HOME").map(|home| PathBuf::from(home).join(".junees")));
+        let home = crate::config_file::home_dir(get);
         let tools = ToolSettings {
             hidden_env: comma_list(get("JUNEES_HIDDEN_ENV")),
             deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),
