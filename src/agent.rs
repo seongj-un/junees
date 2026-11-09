@@ -246,6 +246,7 @@ impl Agent {
                 messages: &self.transcript.messages,
                 tools: specs,
                 max_tokens: self.options.max_tokens,
+                cache: true,
             })
             .await
     }
@@ -307,6 +308,9 @@ impl Agent {
                 messages: &request,
                 tools: &[],
                 max_tokens: context::SUMMARY_MAX_TOKENS,
+                // The summarized prefix is sent once; caching it would only
+                // add the cost of a cache write.
+                cache: false,
             })
             .await;
         let response = match result {
@@ -396,13 +400,15 @@ mod tests {
     type Reply = std::result::Result<CompletionResponse, ProviderError>;
     use crate::tools::Tool;
 
+    /// System prompt, tool count, max_tokens and caching of a request.
+    type Settings = (String, usize, u32, bool);
+
     /// Replays canned responses and records the history it was sent.
     #[derive(Clone, Default)]
     struct Scripted {
         responses: Arc<Mutex<VecDeque<Reply>>>,
         seen: Arc<Mutex<Vec<Vec<Message>>>>,
-        /// System prompt, tool count and max_tokens of each request.
-        settings: Arc<Mutex<Vec<(String, usize, u32)>>>,
+        settings: Arc<Mutex<Vec<Settings>>>,
     }
 
     impl Scripted {
@@ -425,6 +431,7 @@ mod tests {
                 request.system.to_string(),
                 request.tools.len(),
                 request.max_tokens,
+                request.cache,
             ));
             self.responses
                 .lock()
@@ -1135,10 +1142,10 @@ mod tests {
         let settings = settings.lock().unwrap();
         assert_eq!(seen.len(), 9);
         assert_eq!(tool_output(&seen[6][2])[0].1, session::CLEARED);
-        let (system, tools, max_tokens) = &settings[7];
+        let (system, tools, max_tokens, cache) = &settings[7];
         assert_eq!(system, context::SUMMARY_SYSTEM);
-        assert_eq!((*tools, *max_tokens), (0, 4096));
-        assert_eq!(settings[8].1, 1);
+        assert_eq!((*tools, *max_tokens, *cache), (0, 4096, false));
+        assert_eq!((settings[8].1, settings[8].3), (1, true));
         // The summary call saw the history before the second-last input
         // ("third", at 12) as text in one message.
         assert_eq!(seen[7].len(), 1);

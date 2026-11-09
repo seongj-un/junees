@@ -112,6 +112,8 @@ async fn clears_then_compacts_over_the_threshold_and_replays() {
     assert_eq!(summary["system"][0]["text"], SUMMARY_SYSTEM);
     assert_eq!(summary["max_tokens"], 4096);
     assert_eq!(summary["messages"].as_array().unwrap().len(), 1);
+    // It is sent once, so nothing in it is marked for caching.
+    assert!(!summary.to_string().contains("cache_control"), "{summary}");
     let asked = summary["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap();

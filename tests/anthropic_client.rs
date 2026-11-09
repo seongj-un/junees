@@ -26,6 +26,7 @@ async fn sends_headers_and_body() {
             messages: &messages,
             tools: &[],
             max_tokens: 64,
+            cache: true,
         })
         .await
         .unwrap();
@@ -63,6 +64,7 @@ async fn retries_when_overloaded() {
             messages: &messages,
             tools: &[],
             max_tokens: 64,
+            cache: true,
         })
         .await
         .unwrap();
@@ -84,6 +86,7 @@ async fn does_not_retry_auth_errors() {
             messages: &messages,
             tools: &[],
             max_tokens: 64,
+            cache: true,
         })
         .await
         .unwrap_err();
@@ -100,6 +103,7 @@ async fn complete_hi(url: String) -> Result<CompletionResponse, ProviderError> {
             messages: &messages,
             tools: &[],
             max_tokens: 64,
+            cache: true,
         })
         .await
 }

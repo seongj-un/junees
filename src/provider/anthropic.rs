@@ -100,7 +100,8 @@ struct Failure {
 /// A request body. Prompt-cache breakpoints go on the last tool, the system
 /// prompt and the last block of the last message, so each call reads the
 /// prefix the previous one wrote. They are added here, while serializing,
-/// so the conversation types stay plain.
+/// so the conversation types stay plain, and only when the request asks
+/// for caching: a cache write costs more than plain input.
 #[derive(Serialize)]
 struct ApiRequest<'a> {
     model: &'a str,
@@ -117,17 +118,20 @@ impl<'a> ApiRequest<'a> {
         let system = if request.system.is_empty() {
             Vec::new()
         } else {
-            vec![Cached::marked(SystemText {
-                kind: "text",
-                text: request.system,
-            })]
+            vec![Cached::new(
+                SystemText {
+                    kind: "text",
+                    text: request.system,
+                },
+                request.cache,
+            )]
         };
         let last_tool = request.tools.len().saturating_sub(1);
         let tools = request
             .tools
             .iter()
             .enumerate()
-            .map(|(i, tool)| Cached::new(tool, i == last_tool))
+            .map(|(i, tool)| Cached::new(tool, request.cache && i == last_tool))
             .collect();
         let last_message = request.messages.len().saturating_sub(1);
         let messages = request
@@ -142,7 +146,12 @@ impl<'a> ApiRequest<'a> {
                         .content
                         .iter()
                         .enumerate()
-                        .map(|(j, block)| Cached::new(block, i == last_message && j == last_block))
+                        .map(|(j, block)| {
+                            Cached::new(
+                                block,
+                                request.cache && i == last_message && j == last_block,
+                            )
+                        })
                         .collect(),
                 }
             })
@@ -185,10 +194,6 @@ impl<T> Cached<T> {
             item,
             cache_control: marked.then_some(CacheControl { kind: "ephemeral" }),
         }
-    }
-
-    fn marked(item: T) -> Self {
-        Self::new(item, true)
     }
 }
 
@@ -290,6 +295,10 @@ mod tests {
     use serde_json::{Value, json};
 
     fn request(system: &str, messages: &[Message], tools: &[ToolSpec]) -> Value {
+        request_with(system, messages, tools, true)
+    }
+
+    fn request_with(system: &str, messages: &[Message], tools: &[ToolSpec], cache: bool) -> Value {
         let body = ApiRequest::new(
             "m",
             CompletionRequest {
@@ -297,9 +306,30 @@ mod tests {
                 messages,
                 tools,
                 max_tokens: 10,
+                cache,
             },
         );
         serde_json::to_value(&body).unwrap()
+    }
+
+    #[test]
+    fn a_request_without_caching_has_no_cache_marks() {
+        let tools = [ToolSpec {
+            name: "bash".into(),
+            description: "runs".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+        let messages = [Message::user_text("summarize this")];
+        let value = request_with("be brief", &messages, &tools, false);
+        assert!(!value.to_string().contains("cache_control"), "{value}");
+        assert_eq!(
+            value["system"],
+            json!([{"type": "text", "text": "be brief"}])
+        );
+        assert_eq!(
+            value["messages"][0]["content"],
+            json!([{"type": "text", "text": "summarize this"}])
+        );
     }
 
     #[test]
