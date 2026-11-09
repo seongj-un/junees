@@ -211,6 +211,30 @@ pub fn looks_secret(path: &str) -> bool {
             .any(|key| name.starts_with(key))
 }
 
+/// Whether git ignores `path` (relative to the root; a trailing `/` for a
+/// folder), through any `.gitignore`, `.git/info/exclude` or the user's
+/// global excludes, whether or not it exists.
+pub fn is_ignored(root: &Path, path: &str) -> Result<bool> {
+    let mut command = Command::new("git");
+    command
+        .args(SAFE_CONFIG)
+        .args(["check-ignore", "-q", "--no-index", "--", path])
+        .current_dir(root);
+    for name in REPO_ENV_VARS.iter().chain(SECRET_ENV_VARS) {
+        command.env_remove(name);
+    }
+    match command.status().context("cannot run git")?.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("`git check-ignore {path}` failed"),
+    }
+}
+
+/// Whether git tracks any file under `path`.
+pub fn tracks_any(root: &Path, path: &str) -> Result<bool> {
+    Ok(!git(root, &["--literal-pathspecs", "ls-files", "-z", "--", path])?.is_empty())
+}
+
 /// `git log --oneline -<count>`, or a note when there is nothing to show.
 pub fn recent_log(root: &Path, count: usize) -> String {
     match git(root, &["log", "--oneline", &format!("-{count}")]) {
@@ -415,6 +439,20 @@ mod tests {
         assert!(commit.made);
         assert_eq!(commit.left_out.len(), 1);
         assert_eq!(subjects(root), ["second", "first"]);
+    }
+
+    #[test]
+    fn tells_ignored_and_tracked_folders() {
+        let repo = repo();
+        let root = repo.path();
+        std::fs::write(root.join(".gitignore"), "/target\n").unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("build/gen.sh"), "true").unwrap();
+        commit_all(root, "first").unwrap();
+        assert!(is_ignored(root, "target/").unwrap());
+        assert!(!is_ignored(root, "dist/").unwrap());
+        assert!(tracks_any(root, "build/").unwrap());
+        assert!(!tracks_any(root, "dist/").unwrap());
     }
 
     #[test]

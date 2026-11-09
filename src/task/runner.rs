@@ -53,6 +53,18 @@ const IGNORED: &[&str] = &[
     "sessions/",
 ];
 
+/// Build-output folders `task init` adds to the repository's `.gitignore`
+/// when git does not ignore them yet: verify commands build, and the
+/// harness commits everything new that is not ignored.
+const BUILD_OUTPUT: &[&str] = &[
+    "target/",
+    "node_modules/",
+    "dist/",
+    "build/",
+    ".venv/",
+    "__pycache__/",
+];
+
 /// Files [`dirty_tree`] names before it only counts the rest.
 const NAMED_LEFT_OUT: usize = 3;
 
@@ -230,6 +242,8 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
         root,
         &format!("init: {count} features planned, {}", tokens(usage)),
     )?;
+    // Only now: a failed init must leave the user's files as they were.
+    ignore_build_output(root, report)?;
     let commit = git::commit_all(root, INIT_COMMIT).context("cannot commit the new task")?;
     warn_left_out(report, &commit.left_out);
     line(
@@ -1194,6 +1208,46 @@ fn prepare_dir(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Adds the [`BUILD_OUTPUT`] folders git does not ignore yet to the
+/// repository's `.gitignore`, so the init commit carries them. A folder
+/// that already holds tracked files is the project's own and stays as it
+/// is.
+fn ignore_build_output(root: &Path, report: &mut Reporter<'_>) -> Result<()> {
+    let mut missing = Vec::new();
+    for folder in BUILD_OUTPUT {
+        if !git::is_ignored(root, folder)? && !git::tracks_any(root, folder)? {
+            missing.push(*folder);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let ignore = root.join(".gitignore");
+    let mut text = match fs::read_to_string(&ignore) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("cannot read {}", ignore.display()));
+        }
+    };
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for folder in &missing {
+        text.push_str(folder);
+        text.push('\n');
+    }
+    fs::write(&ignore, text).with_context(|| format!("cannot write {}", ignore.display()))?;
+    line(
+        report,
+        &format!(
+            "build output kept out of git (.gitignore): {}",
+            missing.join(" ")
+        ),
+    );
+    Ok(())
+}
+
 /// The error of a run or init that finds the work tree dirty. When new
 /// files the harness does not commit are among the changes (it left them
 /// out of an earlier commit, or would leave them out), it names a few and
@@ -1468,6 +1522,16 @@ mod tests {
         assert_eq!(state.usage.input_tokens, 15);
         assert_eq!(state.goal.as_deref(), Some("build it"));
         assert!(super::super::state_path(root).exists());
+        // Build output stays out of the harness's commits from the start.
+        assert_eq!(
+            git::show(root, "HEAD", ".gitignore").unwrap(),
+            "target/\nnode_modules/\ndist/\nbuild/\n.venv/\n__pycache__/\n"
+        );
+        assert_eq!(
+            out.lines[2],
+            "build output kept out of git (.gitignore): target/ node_modules/ \
+             dist/ build/ .venv/ __pycache__/"
+        );
         assert!(
             out.lines[0].starts_with("== init session, journal "),
             "{:?}",
@@ -1680,6 +1744,26 @@ mod tests {
         assert_eq!(subjects(root), [INIT_COMMIT]);
         assert_eq!(provider.seen.lock().unwrap().len(), 0);
         assert_eq!(State::load(root).unwrap().sessions, 0);
+    }
+
+    #[test]
+    fn init_ignores_only_build_output_git_does_not_ignore_yet() {
+        let repo = repo();
+        let root = repo.path();
+        fs::write(root.join(".gitignore"), "/target\n*.log").unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/gen.sh"), "true").unwrap();
+        git::commit_all(root, "project").unwrap();
+        let mut out = Collected::default();
+        ignore_build_output(root, &mut out.reporter()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(".gitignore")).unwrap(),
+            "/target\n*.log\nnode_modules/\ndist/\n.venv/\n__pycache__/\n"
+        );
+        // Nothing left to add: the file stays as it is.
+        let mut out = Collected::default();
+        ignore_build_output(root, &mut out.reporter()).unwrap();
+        assert!(out.lines.is_empty(), "{:?}", out.lines);
     }
 
     #[test]
