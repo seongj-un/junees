@@ -1219,14 +1219,15 @@ fn journal_note(journal: &Option<String>) -> String {
     }
 }
 
-fn warn_left_out(report: &mut Reporter<'_>, left_out: &[String]) {
+fn warn_left_out(report: &mut Reporter<'_>, left_out: &[git::LeftOut]) {
     if !left_out.is_empty() {
+        let files: Vec<String> = left_out.iter().map(ToString::to_string).collect();
         warn(
             report,
             &format!(
-                "not committed, because the names look like secrets: {} \
-                 (commit them yourself if they belong in git)",
-                left_out.join(", ")
+                "not committed: {} (commit them yourself if they belong in git, \
+                 or add them to .gitignore)",
+                files.join(", ")
             ),
         );
     }
@@ -1887,7 +1888,7 @@ mod tests {
         assert!(root.join(".env").exists());
         assert_eq!(out.warnings.len(), 2, "{:?}", out.warnings);
         assert!(
-            out.warnings[0].contains("look like secrets: .env "),
+            out.warnings[0].contains("not committed: .env (the name looks like a secret) "),
             "{:?}",
             out.warnings
         );

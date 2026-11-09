@@ -90,31 +90,87 @@ fn dirty(root: &Path, pathspec: &[&str]) -> Result<bool> {
     Ok(!git(root, &args)?.trim().is_empty())
 }
 
+/// New files larger than this (1 MiB) stay out of harness commits: build
+/// output, downloads and data files a session or a verify command left
+/// behind, which would bloat the history for good.
+pub const MAX_NEW_FILE_BYTES: u64 = 1024 * 1024;
+
 /// What [`commit_all`] did.
 #[derive(Debug, Default, PartialEq)]
 pub struct Commit {
     /// Whether a commit was made; not when everything new was left out.
     pub made: bool,
-    /// New files left out because their names say they may hold secrets.
-    pub left_out: Vec<String>,
+    /// New files left out (see [`left_out_reason`]).
+    pub left_out: Vec<LeftOut>,
+}
+
+/// A new file the harness does not commit, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeftOut {
+    /// Relative to the root of the work tree.
+    pub path: String,
+    pub reason: Reason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reason {
+    /// Its name says it may hold a secret (see [`looks_secret`]).
+    Secret,
+    /// It is larger than [`MAX_NEW_FILE_BYTES`]; the size in bytes.
+    TooLarge(u64),
+}
+
+impl std::fmt::Display for LeftOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.reason {
+            Reason::Secret => write!(f, "{} (the name looks like a secret)", self.path),
+            Reason::TooLarge(bytes) => write!(
+                f,
+                "{} ({:.1} MiB, over the 1 MiB limit for new files)",
+                self.path,
+                bytes as f64 / (1024.0 * 1024.0)
+            ),
+        }
+    }
+}
+
+/// Why the harness would not commit the new file at `path` (relative to
+/// `root`), if it would not.
+pub fn left_out_reason(root: &Path, path: &str) -> Option<Reason> {
+    if looks_secret(path) {
+        return Some(Reason::Secret);
+    }
+    let size = std::fs::symlink_metadata(root.join(path)).ok()?.len();
+    (size > MAX_NEW_FILE_BYTES).then_some(Reason::TooLarge(size))
+}
+
+/// Splits git's `-z` output into paths and keeps the ones the harness would
+/// leave out.
+fn left_out_of(root: &Path, paths: &str) -> Vec<LeftOut> {
+    paths
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| {
+            left_out_reason(root, path).map(|reason| LeftOut {
+                path: path.to_string(),
+                reason,
+            })
+        })
+        .collect()
 }
 
 /// Stages everything (`git add -A`) except new files that look like
-/// secrets (see [`looks_secret`]), and commits it.
+/// secrets or are larger than [`MAX_NEW_FILE_BYTES`], and commits it.
 pub fn commit_all(root: &Path, message: &str) -> Result<Commit> {
     git(root, &["add", "-A"])?;
     let added = git(
         root,
         &["diff", "--cached", "--name-only", "--diff-filter=A", "-z"],
     )?;
-    let left_out: Vec<String> = added
-        .split('\0')
-        .filter(|path| !path.is_empty() && looks_secret(path))
-        .map(String::from)
-        .collect();
+    let left_out = left_out_of(root, &added);
     if !left_out.is_empty() {
         let mut args = vec!["--literal-pathspecs", "rm", "--cached", "-q", "--"];
-        args.extend(left_out.iter().map(String::as_str));
+        args.extend(left_out.iter().map(|file| file.path.as_str()));
         git(root, &args)?;
     }
     let staged = git(root, &["diff", "--cached", "--name-only", "-z"])?;
@@ -267,10 +323,12 @@ mod tests {
         }
         let commit = commit_all(root, "first").unwrap();
         assert!(commit.made);
+        let paths: Vec<&str> = commit.left_out.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
-            commit.left_out,
+            paths,
             [".env", "conf/.env.local", "conf/server.pem", "id_ed25519"]
         );
+        assert!(commit.left_out.iter().all(|f| f.reason == Reason::Secret));
         let tracked = git(root, &["ls-files"]).unwrap();
         assert_eq!(tracked, "main.rs\n");
 
@@ -315,6 +373,38 @@ mod tests {
         git(root, &["replace", first, head.trim()]).unwrap();
         assert_eq!(show(root, first, "a.txt").unwrap(), "first");
         assert!(show(root, first, "missing.txt").is_err());
+    }
+
+    #[test]
+    fn leaves_large_new_files_out() {
+        let repo = repo();
+        let root = repo.path();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/app.bin"), vec![0u8; 2_000_000]).unwrap();
+        let limit = MAX_NEW_FILE_BYTES as usize;
+        std::fs::write(root.join("at-limit.bin"), vec![0u8; limit]).unwrap();
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        let commit = commit_all(root, "first").unwrap();
+        assert!(commit.made);
+        assert_eq!(
+            commit.left_out,
+            [LeftOut {
+                path: "target/app.bin".into(),
+                reason: Reason::TooLarge(2_000_000)
+            }]
+        );
+        assert_eq!(
+            commit.left_out[0].to_string(),
+            "target/app.bin (1.9 MiB, over the 1 MiB limit for new files)"
+        );
+        assert_eq!(git(root, &["ls-files"]).unwrap(), "at-limit.bin\nmain.rs\n");
+
+        // A tracked file may grow past the limit.
+        std::fs::write(root.join("main.rs"), vec![b'a'; 2_000_000]).unwrap();
+        let commit = commit_all(root, "second").unwrap();
+        assert!(commit.made);
+        assert_eq!(commit.left_out.len(), 1);
+        assert_eq!(subjects(root), ["second", "first"]);
     }
 
     #[test]
