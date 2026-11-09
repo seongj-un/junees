@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use junees::agent::{Agent, AgentOptions, Event};
 use junees::cli::{self, Command, SessionMode, TaskCommand};
 use junees::config::Config;
+use junees::notify::Notifier;
 use junees::prompt;
 use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
@@ -131,6 +132,7 @@ async fn run_task(command: TaskCommand) -> Result<()> {
         context_window: config.context_window,
         compact_threshold: config.compact_threshold,
         provider: &provider,
+        notify: Notifier::from_env()?,
     };
     let mut report = |report: Report<'_>| match report {
         Report::Line(line) => println!("{line}"),

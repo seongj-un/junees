@@ -16,6 +16,7 @@ use super::{STALL_LIMIT, dir, features_path, git, progress_path, prompt, rejecte
 use crate::agent::{Agent, AgentOptions, Event, TurnLimit};
 use crate::cli::preview;
 use crate::message::Usage;
+use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::session::SessionWriter;
 use crate::tools::{ToolRegistry, ToolSettings};
@@ -61,6 +62,8 @@ pub struct TaskEnv<'a> {
     pub context_window: u64,
     pub compact_threshold: f64,
     pub provider: &'a ProviderFactory<'a>,
+    /// Where `run` reports its stop (and sessions, if asked).
+    pub notify: Notifier,
 }
 
 /// What the runner tells the user: its own status lines and the events of
@@ -229,7 +232,7 @@ fn set_aside_rejected_list(root: &Path, err: anyhow::Error) -> anyhow::Error {
 /// Runs work sessions on the task in `env.root` until every feature passes,
 /// `max_sessions` sessions have run, [`STALL_LIMIT`] sessions in a row
 /// passed no new feature, or a session fails. Returns why it stopped, which
-/// is also recorded in state.json.
+/// is also recorded in state.json and posted through `env.notify`.
 ///
 /// Every session is a new agent with a fresh context and its own journal.
 /// After each one the harness puts its copy of the feature list back into
@@ -299,6 +302,9 @@ pub async fn run(
             };
         state.stalled = if progressed { 0 } else { state.stalled + 1 };
         line(report, &format!("== session {n} done: {summary} =="));
+        if let Err(err) = env.notify.session_done(root, n, &summary).await {
+            warn(report, &err.to_string());
+        }
 
         if let Err(err) = result {
             break Stop {
@@ -317,6 +323,18 @@ pub async fn run(
     };
     state.record_stop(stop.clone());
     state.save(root)?;
+    let (passing, total) = {
+        let ledger = ledger.lock().unwrap();
+        (ledger.passing(), ledger.total())
+    };
+    // A failed notification does not change how the run ended.
+    if let Err(err) = env
+        .notify
+        .task_stopped(root, &stop, passing, total, &state)
+        .await
+    {
+        warn(report, &err.to_string());
+    }
     Ok(stop)
 }
 
@@ -708,6 +726,7 @@ mod tests {
             context_window: 200_000,
             compact_threshold: 0.8,
             provider: factory,
+            notify: Notifier::default(),
         }
     }
 

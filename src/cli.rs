@@ -42,6 +42,8 @@ Environment:
                             cleared and the conversation compacted (default 0.8)
   JUNEES_HOME         where Junees keeps sessions (default ~/.junees;
                       with neither it nor HOME set, sessions are not saved)
+  JUNEES_NOTIFY_WEBHOOK       Discord webhook URL `task run` posts to when it stops
+  JUNEES_NOTIFY_EACH_SESSION  1 to also post a line after every task session
 ";
 
 pub const REPL_HELP: &str = "\
