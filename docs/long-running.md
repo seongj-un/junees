@@ -36,10 +36,14 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 컨텍스트 초과 400을 받으면 압축 후 한 번 재시도
 
 ### L3. 장기 작업 모드
-- `junees task init "<목표>"`: 초기화 세션이 `.junees/features.json`(기능 목록, 각 항목의 검증 방법, `passes: false`), `.junees/progress.md`, `.junees/init.sh`를 만들고 첫 커밋
-- `junees task run`: 새 컨텍스트의 작업 세션을 반복. 각 세션은 진행 기록과 `git log`를 읽고, 안 끝난 기능 하나를 골라 구현하고, 검증하고, 커밋하고, 진행 기록을 남긴다
-- 하네스가 강제하는 규칙: 작업 세션은 기능 목록의 `passes`만 바꿀 수 있다(설명 수정이나 항목 삭제 거부). `passes: true`는 그 기능의 검증 명령이 하네스 쪽에서 성공해야 인정. 세션이 끝났는데 작업 트리가 더러우면 하네스가 체크포인트 커밋
-- 정지 조건: 모든 기능 통과, 예산 소진, 연속 N세션 진전 없음
+- 작업 파일은 대상 저장소의 `.junees/`에 둔다. `features.json`(기능 목록: `id`, `description`, `verify` 셸 명령, `passes`), `progress.md`(사람이 읽는 진행 기록, 세션과 하네스가 함께 덧붙임), `state.json`(하네스 상태, `.junees/.gitignore`로 git에서 제외)
+- `junees task init "<목표>"`: git 저장소가 아니면 오류(자동 `git init` 없음), 이미 `features.json`이 있으면 오류. 초기화 세션(목표를 검증 가능한 기능 5~50개로 쪼개고 verify 명령을 정하고 `progress.md`를 쓰라, 필요하면 `init.sh`, 아직 구현하지 말라)이 끝나면 하네스가 목록을 검증(JSON 배열, 비어 있지 않음, id 유일, verify 존재, 전부 `passes: false`, 문제를 모두 나열)하고, 틀리면 오류 내용을 같은 세션에 보내 한 번 더 고치게 한다. 통과하면 하네스 서식으로 다시 쓰고 `git add -A && git commit -m "junees: initialize task"`
+- `junees task run [--max-sessions N]`(기본 20): 세션마다 새 `Agent`(새 컨텍스트, L1 세션 기록). system 프롬프트에 규칙, 기능 목록과 통과 여부, `progress.md` 마지막 4000자, `git log --oneline -20`. 첫 입력은 "안 끝난 기능 하나를 골라 구현, 검증, 커밋하고 progress.md를 갱신하라"
+- 하네스가 강제하는 규칙: `passes`는 전용 도구 `mark_feature_passing {id}`로만 바뀐다. 하네스가 verify 명령을 저장소 루트에서 bash 도구와 같은 방식(출력 제한, API 키 변수 제거, 타임아웃 600초)으로 실행하고 exit 0일 때만 저장, 실패하면 출력과 함께 오류 결과. 하네스는 기능 목록의 권위 있는 사본을 들고 있다가 세션이 끝나면 파일을 그 사본으로 되돌려 쓴다(내용이 바뀌었으면 경고와 progress 한 줄, 서식만 다르면 조용히)
+- 세션이 끝나면 progress에 하네스 한 줄(세션 번호, 통과 수/전체, 새로 통과한 기능, 토큰)을 붙이고, 작업 트리가 더러우면 `junees: checkpoint after session N`으로 커밋
+- 정지 조건: 모든 기능 통과, 세션 수 상한, 연속 3세션 새 통과 없음(stalled), 세션 오류(오류를 progress에 남기고 체크포인트 후 정지). 이유를 출력하고 `state.json`에 기록, stalled와 오류는 종료 코드 1
+- `state.json`: 실행한 세션 수, 연속 무진전 세션 수, 누적 usage, 마지막 정지 이유. 다음 `task run`은 세션 번호를 이어 간다. 이전 실행이 스스로 멈췄으면 무진전 횟수를 초기화, 정지 기록 없이 끝났으면(크래시) 이어서 센다
+- 예산(토큰/시간), 시그널 처리, 무인 명령 정책은 L4, `task status`와 알림은 L5
 
 ### L4. 무인 실행 안정성
 - 예산: 작업 전체 토큰 상한, 시간 상한, 세션 수 상한
