@@ -9,6 +9,7 @@
 
 pub mod features;
 pub mod git;
+pub mod tools;
 
 use std::fs;
 use std::io;
