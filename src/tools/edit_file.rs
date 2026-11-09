@@ -496,17 +496,29 @@ impl Drop for RemoveOnDrop<'_> {
     }
 }
 
+/// A hidden, recognisable name next to `path` for the temporary file,
+/// `.<name>.junees-edit-<pid>-<n>.tmp`, with `<name>` cut short (on a char
+/// boundary) so the whole stays within the 255-byte limit on file names.
 fn temp_path(path: &Path) -> PathBuf {
+    const NAME_MAX: usize = 255;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    path.with_file_name(format!(
-        ".{name}.junees-edit-{}-{}.tmp",
+    let suffix = format!(
+        ".junees-edit-{}-{}.tmp",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
-    ))
+    );
+    let room = NAME_MAX - 1 - suffix.len();
+    let cut = name
+        .char_indices()
+        .map(|(i, ch)| i + ch.len_utf8())
+        .take_while(|&end| end <= room)
+        .last()
+        .unwrap_or(0);
+    path.with_file_name(format!(".{}{suffix}", &name[..cut]))
 }
 
 #[cfg(test)]
@@ -1008,6 +1020,41 @@ mod tests {
         );
         assert!(output.content.contains("write_file"), "{}", output.content);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
+    }
+
+    #[tokio::test]
+    async fn edits_files_with_long_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a".repeat(255), "한".repeat(85)] {
+            let path = dir.path().join(&name);
+            std::fs::write(&path, "old\n").unwrap();
+            let output = run(&path, "old", "new").await;
+            assert!(!output.is_error, "{}", output.content);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert!(entries(&dir).is_empty());
+    }
+
+    #[test]
+    fn temporary_names_are_recognisable_and_short_enough() {
+        let name = |path: &Path| {
+            temp_path(path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let short = name(Path::new("/w/notes.md"));
+        assert!(short.starts_with(".notes.md.junees-edit-"), "{short}");
+        assert!(short.ends_with(".tmp"), "{short}");
+        for long in ["a".repeat(255), "한".repeat(85)] {
+            let temp = name(&Path::new("/w").join(&long));
+            assert!(temp.len() <= 255, "{}", temp.len());
+            assert!(temp.len() > 250, "{}", temp.len());
+            assert!(temp.contains(".junees-edit-"), "{temp}");
+        }
     }
 
     #[test]
