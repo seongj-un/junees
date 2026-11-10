@@ -246,7 +246,14 @@ impl Engine for ApiEngine {
         };
         let mut session = None;
         if let Some(home) = config.home.as_deref() {
-            match SessionWriter::create(home, &job.dir, &config.model) {
+            match SessionWriter::create_for_channel(
+                home,
+                &job.dir,
+                &config.model,
+                None,
+                session::CRON,
+                &job.id,
+            ) {
                 Ok((meta, writer)) => {
                     session = Some(meta.id);
                     agent = agent.with_journal(Box::new(writer));
@@ -317,7 +324,14 @@ impl Engine for ClaudeEngine {
         let mut session = None;
         if let Some(home) = home {
             let model = self.claude.model.clone().unwrap_or_default();
-            match SessionWriter::create_for(home, &job.dir, &model, Some(session::CLAUDE_CODE)) {
+            match SessionWriter::create_for_channel(
+                home,
+                &job.dir,
+                &model,
+                Some(session::CLAUDE_CODE),
+                session::CRON,
+                &job.id,
+            ) {
                 Ok((meta, writer)) => {
                     session = Some(meta.id);
                     chat.reset(Some(Box::new(writer)));
@@ -448,11 +462,19 @@ mod tests {
         assert_eq!(outcome.answer, "오늘의 요약");
         assert_eq!(outcome.tokens, 110);
         let session = outcome.session.unwrap();
-        assert!(
-            session::sessions_dir(home.path())
-                .join(format!("{session}.jsonl"))
-                .exists()
+        let path = session::sessions_dir(home.path()).join(format!("{session}.jsonl"));
+        let meta = session::read_meta(&path).unwrap();
+        // Marked like a channel session, so `-c` and `/sessions` skip it.
+        assert_eq!(meta.source.as_deref(), Some(session::CRON));
+        assert_eq!(meta.channel.as_deref(), Some("0123abcd"));
+        assert_eq!(
+            session::find_latest(home.path(), &job.dir, None).unwrap(),
+            None
         );
+        assert!(session::list_recent(home.path(), 10).unwrap().is_empty());
+        let shown = session::list_channel_sessions(home.path(), 10).unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].id, session);
         let seen = seen.lock().unwrap();
         let (system, tools) = &seen[0];
         assert!(system.contains("scheduled job"), "{system}");

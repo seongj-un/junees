@@ -1370,8 +1370,9 @@ impl Repl {
     }
 
     /// `/sessions`: lists recent sessions and continues the one picked by
-    /// number. Sessions of the Discord gateway's channels are only shown:
-    /// the gateway continues them. Returns whether SIGTERM came while it
+    /// number. Sessions of the Discord gateway's channels and of scheduled
+    /// job runs are only shown: the gateway continues its own, and a job
+    /// starts a new session each run. Returns whether SIGTERM came while it
     /// asked.
     async fn sessions(&mut self) -> bool {
         let listed = self.config.require_home().and_then(|home| {
@@ -1388,7 +1389,7 @@ impl Repl {
             }
         };
         if !channels.is_empty() {
-            println!("channel sessions (the Discord gateway continues them):");
+            println!("channel and scheduled-job sessions (shown only, not continued here):");
             for summary in &channels {
                 let current = self.session_id.as_deref() == Some(summary.id.as_str());
                 println!("    {}", cli::session_line(summary, current));
