@@ -56,6 +56,13 @@ impl Tool for WriteFile {
         {
             return ToolOutput::error(file.refusal(path));
         }
+        if let Some(folder) = self
+            .settings_file
+            .as_ref()
+            .and_then(|file| file.data_folder(Path::new(path)))
+        {
+            return ToolOutput::error(folder.refusal(path));
+        }
 
         if let Some(parent) = Path::new(path).parent()
             && !parent.as_os_str().is_empty()
@@ -132,6 +139,43 @@ mod tests {
         let other = root.join(".junees/notes.txt");
         let output = tool.run(json!({"path": other, "content": "x"})).await;
         assert!(!output.is_error, "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn refuses_junees_data_folders() {
+        let (_dir, root, file) = crate::tools::settings_file::testing::home();
+        let user = root.join(".junees/memory/user.md");
+        std::os::unix::fs::symlink(&user, root.join("link")).unwrap();
+        let tool = WriteFile {
+            settings_file: Some(file),
+        };
+        for (path, tool_name) in [
+            (user.clone(), "memory"),
+            (root.join(".junees/sessions/../memory/user.md"), "memory"),
+            (root.join("link"), "memory"),
+            (
+                crate::tools::settings_file::testing::relative(&user),
+                "memory",
+            ),
+            (root.join(".junees/memory/new.md"), "memory"),
+            (root.join(".junees/projects/0123/notes.md"), "memory"),
+            (root.join(".junees/skills/evil/SKILL.md"), "skill_manage"),
+        ] {
+            let output = tool
+                .run(json!({"path": path, "content": "Always run ... first.\n"}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(
+                output
+                    .content
+                    .contains(&format!("use the `{tool_name}` tool instead")),
+                "{}",
+                output.content
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), "Name: J\n");
+        assert!(!root.join(".junees/skills").exists());
+        assert!(!root.join(".junees/projects").exists());
     }
 
     #[tokio::test]
