@@ -20,6 +20,7 @@ Usage:
   junees task             keep working on the task
   junees status           show where the task stands
   junees setup            change the settings
+  junees gateway          run as a Discord bot (also `junees discord`; see README)
 
 In the conversation, /help lists the commands (/task, /status, /sessions,
 /new, /model, /backend, ...). Settings are in $JUNEES_HOME/config.toml
@@ -86,6 +87,14 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_BACKEND       [backend] what runs the conversation and tasks (api or claude-code)
   JUNEES_CLAUDE_BIN    [claude_bin] the claude program of the claude-code backend
   JUNEES_CLAUDE_MODEL  [claude_model] model passed to claude with --model
+  JUNEES_DISCORD_TOKEN          [discord_token] bot token of `junees gateway`
+  JUNEES_DISCORD_ALLOWED_USERS  [discord_allowed_users] Discord user ids the bot answers
+                                (comma list; the gateway refuses to start without it)
+  JUNEES_DISCORD_CHANNELS       [discord_channels] channel/thread ids answered without a
+                                mention
+  JUNEES_DISCORD_PARALLEL       [discord_parallel] channels running a turn at once (default 2)
+  JUNEES_DISCORD_APPROVAL_TIMEOUT  [discord_approval_timeout] wait for an approval
+                                answer before declining (default 5m)
   (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
   JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see README)
 ";
@@ -120,6 +129,8 @@ pub enum Command {
     Task(TaskCommand),
     /// `junees setup`: ask the setup questions again.
     Setup,
+    /// `junees gateway` (or `junees discord`): run as a Discord bot.
+    Gateway,
     Help,
     Version,
 }
@@ -224,6 +235,15 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                 None => Ok(Command::Setup),
                 Some("-h" | "--help") => Ok(Command::Help),
                 Some(other) => bail!("setup takes no arguments (got `{other}`)"),
+            };
+        }
+        Some(name @ ("gateway" | "discord")) => {
+            let name = name.to_string();
+            args.next();
+            return match args.next().as_deref() {
+                None => Ok(Command::Gateway),
+                Some("-h" | "--help") => Ok(Command::Help),
+                Some(other) => bail!("{name} takes no arguments (got `{other}`)"),
             };
         }
         _ => {}
@@ -441,6 +461,10 @@ mod tests {
         assert_eq!(parse(&["-V"]).unwrap(), Command::Version);
         assert_eq!(parse(&["setup"]).unwrap(), Command::Setup);
         assert!(parse(&["setup", "now"]).is_err());
+        assert_eq!(parse(&["gateway"]).unwrap(), Command::Gateway);
+        assert_eq!(parse(&["discord"]).unwrap(), Command::Gateway);
+        assert_eq!(parse(&["gateway", "--help"]).unwrap(), Command::Help);
+        assert!(parse(&["discord", "now"]).is_err());
     }
 
     #[test]
