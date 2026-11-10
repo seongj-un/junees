@@ -3,12 +3,15 @@
 
 use std::path::Path;
 
+use crate::tools::self_command::STATE_CHANGING;
 use crate::tools::{SettingsFile, ToolSettings};
 
 /// Command rules Claude Code refuses (`--disallowedTools`), in its
 /// permission rule syntax: the core of the bash command policy, unless
 /// `JUNEES_ALLOW_DANGEROUS` turned it off, and every
-/// `JUNEES_DENY_COMMANDS` prefix. Claude Code checks each command of a
+/// `JUNEES_DENY_COMMANDS` prefix, and Junees's own state-changing
+/// subcommands (`junees cron add`; Claude Code asks no one about them, so
+/// they are refused like in `-p`). Claude Code checks each command of a
 /// compound line (`a && b`, pipes, `$(...)`) against them, but the rules
 /// only match words as written: `/usr/bin/sudo`, `git -C . push --force`
 /// or a command a script builds at run time get past them, like they get
@@ -53,6 +56,11 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
             rules.push(format!("Bash({shell} -)"));
             rules.push(format!("Bash({shell} -s *)"));
         }
+    }
+    for command in STATE_CHANGING {
+        let command = command.command();
+        rules.push(format!("Bash({command})"));
+        rules.push(format!("Bash({command} *)"));
     }
     for prefix in &settings.deny_commands {
         rules.push(format!("Bash({prefix} *)"));
@@ -160,6 +168,9 @@ mod tests {
             "Bash(git push * +*)",
             "Bash(sh)",
             "Bash(bash -s *)",
+            "Bash(junees cron add *)",
+            "Bash(junees cron rm *)",
+            "Bash(junees cron daemon)",
         ] {
             assert!(rules.iter().any(|r| r == rule), "{rule} missing");
         }
@@ -176,7 +187,12 @@ mod tests {
             allow_dangerous: true,
             ..ToolSettings::default()
         };
-        assert_eq!(deny_rules(&settings), ["Bash(docker rm *)"]);
+        let rules = deny_rules(&settings);
+        assert_eq!(rules.last().unwrap(), "Bash(docker rm *)");
+        // These hold with the built-in rules off.
+        assert!(rules.iter().any(|rule| rule == "Bash(junees cron add *)"));
+        assert!(!rules.iter().any(|rule| rule.contains("sudo")));
+        assert!(!rules.iter().any(|rule| rule.contains("cron list")));
         let mut settings = settings;
         settings.allow_dangerous = false;
         assert_eq!(deny_rules(&settings).last().unwrap(), "Bash(docker rm *)");
