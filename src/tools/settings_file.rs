@@ -50,7 +50,8 @@ pub struct DataFolder {
     pub name: &'static str,
     /// What it holds, for messages.
     pub holds: &'static str,
-    /// The tool that changes it.
+    /// The tool that changes it, or the `junees` command the user changes
+    /// it with (a name with a space: no tool of the model does).
     pub tool: &'static str,
 }
 
@@ -71,6 +72,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
         holds: "the saved skills",
         tool: "skill_manage",
     },
+    DataFolder {
+        name: "plugins",
+        holds: "the installed plugins",
+        tool: "junees plugin",
+    },
 ];
 
 impl DataFolder {
@@ -78,8 +84,10 @@ impl DataFolder {
     pub fn refusal(&self, path: &str) -> String {
         format!(
             "{path} is in `$JUNEES_HOME/{}/`, {} of Junees. The file tools may read it \
-             but not change it; use the `{}` tool instead.",
-            self.name, self.holds, self.tool
+             but not change it; {}.",
+            self.name,
+            self.holds,
+            self.instead()
         )
     }
 
@@ -87,10 +95,19 @@ impl DataFolder {
     pub fn reason(&self, word: &str) -> String {
         format!(
             "`{word}` is in `$JUNEES_HOME/{}/`, {} of Junees. Commands may read it (cat, \
-             grep, ls and the like) but not change, move or copy it; use the `{}` tool \
-             instead.",
-            self.name, self.holds, self.tool
+             grep, ls and the like) but not change, move or copy it; {}.",
+            self.name,
+            self.holds,
+            self.instead()
         )
+    }
+
+    fn instead(&self) -> String {
+        if self.tool.contains(' ') {
+            format!("only the user changes it, with `{}`", self.tool)
+        } else {
+            format!("use the `{}` tool instead", self.tool)
+        }
     }
 }
 

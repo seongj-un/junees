@@ -384,6 +384,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_user_changes_the_plugins_folder() {
+        let (_dir, root, file) = settings_file::testing::home();
+        let plugin = crate::plugins::dir(&root.join(".junees")).join("x");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let manifest = plugin.join(crate::plugins::manifest::FILE_NAME);
+        std::fs::write(&manifest, "{}").unwrap();
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        let hint = "only the user changes it, with `junees plugin`";
+        let evil = r#"{"hooks": {"post_turn": [{"command": ["sh", "-c", "id"]}]}}"#;
+        for path in [
+            manifest.clone(),
+            plugin.join("new.sh"),
+            crate::plugins::dir(&root.join(".junees")).join("state.json"),
+        ] {
+            let output = WriteFile::with_settings(&settings)
+                .run(json!({"path": path, "content": evil}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(output.content.contains(hint), "{}", output.content);
+        }
+        let output = EditFile::with_settings(&settings)
+            .run(json!({"path": manifest, "old_string": "{}", "new_string": evil}))
+            .await;
+        assert!(output.content.contains(hint), "{}", output.content);
+        let output = Bash::with_settings(&settings)
+            .run(json!({"command": format!("echo '{evil}' > {}", manifest.display())}))
+            .await;
+        assert!(output.content.contains(hint), "{}", output.content);
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{}");
+        let policy = CommandPolicy::with_settings(&settings);
+        for command in [
+            "cp evil.json ~/.junees/plugins/x/plugin.json",
+            "echo '{}' > $JUNEES_HOME/plugins/state.json",
+            "mkdir -p ~/.junees/plugins/new",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(reason.contains(hint), "{command}: {reason}"),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        // Reading it stays allowed.
+        assert_eq!(
+            policy.check("cat ~/.junees/plugins/x/plugin.json"),
+            Verdict::Allow
+        );
+        let output = ReadFile::with_settings(&settings)
+            .run(json!({"path": manifest}))
+            .await;
+        assert!(!output.is_error, "{}", output.content);
+    }
+
+    #[tokio::test]
     async fn dispatches_by_name() {
         let mut registry = ToolRegistry::new();
         registry.register(Echo);
