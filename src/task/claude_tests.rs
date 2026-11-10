@@ -54,6 +54,7 @@ fn env<'a>(root: &Path, factory: &'a ProviderFactory<'a>, bin: &Path) -> TaskEnv
             scrub: true,
         }),
         memory: None,
+        subagents: None,
     }
 }
 

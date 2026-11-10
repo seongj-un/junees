@@ -130,6 +130,9 @@ pub struct TaskEnv<'a> {
     /// into its system prompt when it starts; the API sessions' memory tool
     /// changes only the project notes.
     pub memory: Option<Memory>,
+    /// Offers the API sessions `delegate` with these settings; their
+    /// subagents' tokens count toward the budget.
+    pub subagents: Option<crate::subagent::Settings>,
 }
 
 /// What the runner tells the user: its own status lines and the events of
@@ -211,9 +214,10 @@ impl TaskEnv<'_> {
         };
         // Read now: a session sees the memory and the skills as they were
         // when it started.
-        let system =
-            system + &crate::prompt::data_sections(self.memory.as_ref(), Mode::Task, home, mode);
-        let agent = Agent::new(
+        let system = system
+            + crate::subagent::prompt_note(self.subagents)
+            + &crate::prompt::data_sections(self.memory.as_ref(), Mode::Task, home, mode);
+        let mut agent = Agent::new(
             (self.provider)()?,
             tools,
             AgentOptions {
@@ -225,6 +229,9 @@ impl TaskEnv<'_> {
             },
         )
         .with_cancel(self.cancel.clone());
+        if let Some(settings) = self.subagents {
+            agent = agent.with_delegate(settings);
+        }
         let Some(home) = &self.home else {
             return Ok((agent, None));
         };
@@ -1523,6 +1530,7 @@ mod tests {
             cancel: Cancel::new(),
             claude: None,
             memory: None,
+            subagents: None,
         }
     }
 
@@ -2556,6 +2564,39 @@ mod tests {
         assert_eq!(stop.session, 1);
         assert_eq!(provider.left(), 1);
         assert_eq!(State::load(root).unwrap().sessions, 1);
+    }
+
+    #[tokio::test]
+    async fn subagent_tokens_count_toward_the_token_budget() {
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        // The session delegates (7 tokens), its subagent answers (11).
+        let provider = Scripted::new(vec![
+            calls(&[(
+                crate::subagent::NAME,
+                json!({"tasks": [{"goal": "look around"}]}),
+            )]),
+            text("nothing here"),
+            text("unused"),
+        ]);
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        env.subagents = Some(crate::subagent::Settings::default());
+        env.budget.max_tokens = Some(15);
+        let stop = run(&env, 5, &mut |_| {}).await.unwrap();
+
+        assert_eq!(stop.reason, StopReason::Budget);
+        assert_eq!(
+            stop.detail.as_deref(),
+            Some("token budget used up: 18 of 15 tokens")
+        );
+        assert_eq!(provider.left(), 1);
+        let state = State::load(root).unwrap();
+        assert_eq!(state.usage.input_tokens + state.usage.output_tokens, 18);
+        let seen = provider.seen.lock().unwrap();
+        assert!(seen[0].0.contains(crate::subagent::PROMPT_NOTE));
+        assert_eq!(seen[1].1, [Message::user_text("look around")]);
     }
 
     #[tokio::test]

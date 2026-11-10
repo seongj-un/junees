@@ -28,6 +28,7 @@ use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::setup::{self, EchoOff, Prompter};
 use junees::skills;
 use junees::slash::{self, Slash};
+use junees::subagent;
 use junees::task::budget::Budget;
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
@@ -344,6 +345,9 @@ fn api_agent(
         },
     )
     .with_cancel(cancel.clone());
+    if let Some(settings) = config.subagents {
+        agent = agent.with_delegate(settings);
+    }
     if let Some(gate) = input.and_then(|input| approval::for_conversation(config, cwd, input)) {
         agent = agent.with_gate(Box::new(gate.with_external_tools(mcp.external_tools())));
     }
@@ -372,6 +376,7 @@ fn conversation_memory(config: &Config, cwd: &Path) -> Option<Memory> {
 /// holds.
 fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>) -> String {
     prompt::system_prompt(cwd)
+        + subagent::prompt_note(config.subagents)
         + &prompt::data_sections(
             memory,
             Mode::Conversation,
@@ -706,6 +711,7 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         budget,
         cancel,
         notify: Notifier::from_lookup(lookup)?,
+        subagents: config.subagents,
         claude,
         skill_manage: config.task_skill_manage,
         memory,
@@ -1533,6 +1539,7 @@ fn print_event(event: Event<'_>) {
                 cli::preview(&input.to_string(), PREVIEW_CHARS)
             );
         }
+        Event::Subagent { index, line } => eprintln!("  [{index}] {line}"),
         // Part of the answer, after its text.
         Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),
         Event::Compacted {

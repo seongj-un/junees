@@ -322,7 +322,8 @@ async fn init_then_run_builds_the_features_and_commits() {
             "edit_file",
             "memory",
             "mark_feature_passing",
-            "skill_view"
+            "skill_view",
+            "delegate"
         ]
     );
     let results = tool_results(&requests[4]);
