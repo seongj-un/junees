@@ -13,6 +13,8 @@ use crate::claude_code::{ClaudeCode, NotLoggedIn};
 use crate::cli::positive;
 use crate::config::DEFAULT_MODEL;
 use crate::config_file::ConfigFile;
+use crate::gateway::config::{Token, snowflakes};
+use crate::secrets::secret_kind;
 use crate::task::budget::parse_duration;
 use crate::tools::ToolSettings;
 
@@ -229,7 +231,124 @@ pub async fn wizard(
             None => io.say("  give a whole number such as 2000000, or none"),
         }
     }
+    ask_discord(io, &mut file).await?;
     Ok(file)
+}
+
+/// The optional Discord step (`junees gateway`): the bot token (hidden),
+/// the users it answers, and the channels where it needs no mention. The
+/// end of input at its first question skips it; inside it, cancels.
+async fn ask_discord(io: &mut dyn Prompter, file: &mut ConfigFile) -> Result<()> {
+    let configured = file.get("discord_token").is_some();
+    let question = if configured {
+        "Change the Discord bot settings (junees gateway)? [y/N] > "
+    } else {
+        "Set up the Discord bot too (junees gateway, optional)? [y/N] > "
+    };
+    let Some(answer) = io.line(question).await? else {
+        return Ok(());
+    };
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Ok(());
+    }
+    io.say(
+        "Create the bot at https://discord.com/developers/applications (Bot page: Reset Token, \
+         and turn on MESSAGE CONTENT INTENT), then invite it; README, \"디스코드 게이트웨이\", has \
+         the steps.",
+    );
+    let keep = if configured {
+        "Enter keeps the current one"
+    } else {
+        "from the Bot page"
+    };
+    loop {
+        let Some(answer) = io
+            .secret(&format!(
+                "Discord bot token (not shown as you type; {keep}) > "
+            ))
+            .await?
+        else {
+            bail!(CANCELLED);
+        };
+        let token = answer.trim();
+        if token.is_empty() {
+            if configured {
+                break;
+            }
+            io.say("  the bot needs its token");
+            continue;
+        }
+        // Never repeat what was typed: it may be some other secret.
+        if secret_kind(token) != Some("a Discord bot token") || Token::new(token).is_err() {
+            io.say(
+                "  that does not look like a Discord bot token (three parts joined by dots); \
+                 try again",
+            );
+            continue;
+        }
+        file.set("discord_token", token);
+        io.say("  token saved.");
+        break;
+    }
+    let current = file.get("discord_allowed_users").map(str::to_string);
+    loop {
+        let shown = current
+            .as_deref()
+            .map_or_else(String::new, |users| format!(" [{users}]"));
+        let answer = ask(
+            io,
+            &format!("Discord user ids the bot answers, separated by commas{shown} > "),
+        )
+        .await?;
+        let value = match (answer.is_empty(), &current) {
+            (true, Some(users)) => users.clone(),
+            _ => answer,
+        };
+        match snowflakes(Some(value), "discord_allowed_users") {
+            Ok(ids) if !ids.is_empty() => {
+                let mut ids: Vec<String> = ids.into_iter().collect();
+                ids.sort();
+                file.set("discord_allowed_users", ids.join(","));
+                break;
+            }
+            Ok(_) => io.say(
+                "  give at least one: in Discord turn on Developer Mode, then Copy User ID on \
+                 yourself",
+            ),
+            Err(err) => io.say(&format!("  {err}")),
+        }
+    }
+    let current = file.get("discord_channels").map(str::to_string);
+    loop {
+        let shown = current.as_deref().unwrap_or("none");
+        let answer = ask(
+            io,
+            &format!("Channel ids where the bot answers without a mention, or none [{shown}] > "),
+        )
+        .await?;
+        if answer.is_empty() {
+            break;
+        }
+        if answer.eq_ignore_ascii_case("none") {
+            file.remove("discord_channels");
+            break;
+        }
+        match snowflakes(Some(answer), "discord_channels") {
+            Ok(ids) => {
+                let mut ids: Vec<String> = ids.into_iter().collect();
+                ids.sort();
+                if ids.is_empty() {
+                    file.remove("discord_channels");
+                } else {
+                    file.set("discord_channels", ids.join(","));
+                }
+                break;
+            }
+            Err(err) => io.say(&format!("  {err}")),
+        }
+    }
+    io.say("Start the bot with `junees gateway`.");
+    Ok(())
 }
 
 /// One trimmed answer; the end of input cancels the setup.
@@ -537,6 +656,70 @@ mod tests {
         // `none` drops the token limit.
         let (file, _) = run(&["", "", "", "", "none"], &ready(), file).await;
         assert_eq!(file.unwrap().get("task_max_tokens"), None);
+    }
+
+    /// A token of the Discord shape, made at run time.
+    fn discord_token() -> &'static str {
+        // The first part is base64 of the id 1234567890123456789.
+        let token = format!(
+            "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.Gx1234.{}",
+            "h7Kq_2-Lm".repeat(4)
+        );
+        Box::leak(token.into_boxed_str())
+    }
+
+    #[tokio::test]
+    async fn the_discord_step_is_optional_and_hides_the_token() {
+        let token = discord_token();
+        let (file, io) = run(
+            &[
+                "2",
+                KEY,
+                "",
+                "",
+                "",
+                "y",
+                "not a token",
+                token,
+                "",
+                "me",
+                "111, 222",
+                "333",
+            ],
+            &ready(),
+            ConfigFile::default(),
+        )
+        .await;
+        let file = file.unwrap();
+        assert_eq!(file.get("discord_token"), Some(token));
+        assert_eq!(file.get("discord_allowed_users"), Some("111,222"));
+        assert_eq!(file.get("discord_channels"), Some("333"));
+        // The key and both token answers were hidden.
+        assert_eq!(io.secret_questions, 3);
+        assert!(!io.shown.contains("h7Kq"), "{}", io.shown);
+        assert!(io.shown.contains("at least one"), "{}", io.shown);
+        assert!(io.shown.contains("Discord ids"), "{}", io.shown);
+
+        // Again: Enter keeps everything; `none` drops the channels.
+        let (again, _) = run(
+            &["", "", "", "", "", "y", "", "", "none"],
+            &ready(),
+            file.clone(),
+        )
+        .await;
+        let again = again.unwrap();
+        assert_eq!(again.get("discord_token"), Some(token));
+        assert_eq!(again.get("discord_allowed_users"), Some("111,222"));
+        assert_eq!(again.get("discord_channels"), None);
+
+        // No, or the end of input, skips the step.
+        let (skipped, _) = run(
+            &["2", KEY, "", "", "", "n"],
+            &ready(),
+            ConfigFile::default(),
+        )
+        .await;
+        assert_eq!(skipped.unwrap().get("discord_token"), None);
     }
 
     #[tokio::test]

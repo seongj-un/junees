@@ -27,11 +27,13 @@ use crate::provider::ToolSpec;
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Credentials Junees reads that the model's shell commands must not see.
-/// The notification webhook URL carries its own token.
+/// The notification webhook URL carries its own token; the Discord bot
+/// token lets anyone act as the gateway's bot.
 pub const SECRET_ENV_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "JUNEES_NOTIFY_WEBHOOK",
+    "JUNEES_DISCORD_TOKEN",
 ];
 
 /// User settings for the default tools, read by [`crate::config::Config`].

@@ -1,5 +1,5 @@
-//! The default bash tool must not leak the API key or the notification
-//! webhook. This file holds a single test because it changes the process
+//! The default bash tool must not leak the API key, the notification
+//! webhook or the Discord bot token. This file holds a single test because it changes the process
 //! environment.
 
 use junees::tools::{ToolRegistry, ToolSettings};
@@ -15,6 +15,7 @@ async fn default_bash_cannot_read_the_api_key() {
             "JUNEES_NOTIFY_WEBHOOK",
             "https://discord.example/api/webhooks/1/hook-should-not-leak",
         );
+        std::env::set_var("JUNEES_DISCORD_TOKEN", "bot-token-should-not-leak");
     }
     let registry = ToolRegistry::with_defaults(&ToolSettings::default());
 
@@ -35,6 +36,14 @@ async fn default_bash_cannot_read_the_api_key() {
         .dispatch(
             "bash",
             json!({"command": "printenv JUNEES_NOTIFY_WEBHOOK; env | grep -c hook-should-not-leak"}),
+        )
+        .await;
+    assert!(output.content.starts_with("0\n"), "{}", output.content);
+
+    let output = registry
+        .dispatch(
+            "bash",
+            json!({"command": "printenv JUNEES_DISCORD_TOKEN; env | grep -c bot-token-should-not-leak"}),
         )
         .await;
     assert!(output.content.starts_with("0\n"), "{}", output.content);

@@ -97,6 +97,9 @@ fn line_secret(text: &str, start: usize, line: &str) -> Option<&'static str> {
     if has_aws_key_id(line) {
         return Some("an AWS access key id");
     }
+    if has_discord_token(line) {
+        return Some("a Discord bot token");
+    }
     for (at, run) in runs(line) {
         if has_hex_token(text, start + at, run) {
             return Some("a long hex token");
@@ -211,9 +214,126 @@ fn has_aws_key_id(text: &str) -> bool {
     })
 }
 
+/// The lengths a Discord bot token's first part (the bot's user id, a
+/// snowflake of 17 to 20 digits, in unpadded base64) can have.
+const DISCORD_ID_PART: std::ops::RangeInclusive<usize> = 23..=28;
+/// The length of its second part (a timestamp).
+const DISCORD_TIME_PART: std::ops::RangeInclusive<usize> = 6..=7;
+/// The shortest third part (an HMAC; 27 characters in old tokens, 38 now).
+const DISCORD_HMAC_PART: usize = 27;
+
+/// Whether `text` holds a Discord bot token: three base64 parts joined by
+/// dots, the first of which decodes to the bot's numeric user id. The id
+/// check keeps dotted names (`a.b.c`) and JWT-like strings out.
+fn has_discord_token(text: &str) -> bool {
+    let is_token = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    text.split(|c: char| !is_token(c)).any(|run| {
+        let parts: Vec<&str> = run.split('.').collect();
+        parts.windows(3).any(|window| {
+            let [id, time, hmac] = window else {
+                return false;
+            };
+            DISCORD_ID_PART.contains(&id.len())
+                && DISCORD_TIME_PART.contains(&time.len())
+                && hmac.len() >= DISCORD_HMAC_PART
+                && base64_digits(id)
+        })
+    })
+}
+
+/// Whether `text` is unpadded base64 (standard or URL alphabet) of a
+/// string of ASCII digits.
+fn base64_digits(text: &str) -> bool {
+    let value = |b: u8| -> Option<u32> {
+        Some(match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let mut decoded = Vec::with_capacity(text.len());
+    for chunk in text.as_bytes().chunks(4) {
+        let mut bits = 0u32;
+        for (index, &b) in chunk.iter().enumerate() {
+            let Some(v) = value(b) else {
+                return false;
+            };
+            bits |= v << (18 - 6 * index);
+        }
+        let bytes = bits.to_be_bytes();
+        // 2, 3 or 4 characters carry 1, 2 or 3 bytes.
+        let count = match chunk.len() {
+            2 => 1,
+            3 => 2,
+            4 => 3,
+            _ => return false,
+        };
+        decoded.extend_from_slice(&bytes[1..1 + count]);
+    }
+    !decoded.is_empty() && decoded.iter().all(u8::is_ascii_digit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A token of the Discord shape, built at run time so no complete fake
+    /// token sits in the source: the id `id` in base64, then a timestamp
+    /// and an HMAC part.
+    fn discord_token(id: &str) -> String {
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut encoded = String::new();
+        for chunk in id.as_bytes().chunks(3) {
+            let mut bits = 0u32;
+            for (index, &b) in chunk.iter().enumerate() {
+                bits |= u32::from(b) << (16 - 8 * index);
+            }
+            for index in 0..=chunk.len() {
+                encoded.push(alphabet[(bits >> (18 - 6 * index) & 63) as usize] as char);
+            }
+        }
+        format!("{encoded}.Gx{}.{}", "Ab1x", "h7Kq_2-Lm".repeat(4))
+    }
+
+    #[test]
+    fn finds_discord_bot_tokens() {
+        for id in [
+            "81384788765712384",
+            "1234567890123456789",
+            "12345678901234567890",
+        ] {
+            let token = discord_token(id);
+            for text in [
+                token.clone(),
+                format!("JUNEES_DISCORD_TOKEN={token}"),
+                format!("discord_token = \"{token}\""),
+                format!("Authorization: Bot {token}"),
+            ] {
+                assert_eq!(secret_kind(&text), Some("a Discord bot token"), "{text}");
+            }
+        }
+        assert!(base64_digits("MTIzNDU2Nzg5MDEyMzQ1Njc4OQ"));
+        assert!(!base64_digits("aGVsbG8gd29ybGQgaGVsbG8"));
+    }
+
+    #[test]
+    fn dotted_names_are_no_discord_token() {
+        let hmac = "h7Kq_2-Lm".repeat(4);
+        for text in [
+            "com.example.service.module".to_string(),
+            "README.md and src/gateway/mod.rs".to_string(),
+            // Base64 of letters, not of a user id.
+            format!("aGVsbG8gd29ybGQgaGVsbG8gd29y.Gx1234.{hmac}"),
+            // Parts of the wrong length.
+            format!("MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.G.{hmac}"),
+            "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.Gx1234.short".to_string(),
+        ] {
+            assert_ne!(secret_kind(&text), Some("a Discord bot token"), "{text}");
+        }
+    }
 
     #[test]
     fn finds_credentials() {

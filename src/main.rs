@@ -14,6 +14,9 @@ use junees::claude_code::{BACKEND_ENV, Backend, ClaudeCode, MODEL_ENV, UsageLimi
 use junees::cli::{self, Command, SessionMode, TaskCommand, TaskRun};
 use junees::config::Config;
 use junees::config_file::Settings;
+use junees::gateway::Gateway;
+use junees::gateway::config::DiscordConfig;
+use junees::gateway::engine::{ApiEngines, ClaudeEngines, Engines};
 use junees::memory::{Memory, MemoryTool, Mode, Target};
 use junees::notify::Notifier;
 use junees::prompt;
@@ -138,6 +141,7 @@ async fn run() -> Result<ExitCode> {
     match command {
         Command::Run(args) => conversation(args, settings, input).await,
         Command::Task(command) => run_task(command, &settings).await,
+        Command::Gateway => discord_gateway(&settings).await,
         Command::Setup | Command::Help | Command::Version => unreachable!("handled above"),
     }
 }
@@ -151,7 +155,9 @@ fn on_terminal() -> bool {
 /// `ANTHROPIC_API_KEY`, a terminal to ask on, and a command that needs a
 /// key (nothing on the claude-code backend does).
 fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
-    if settings.file_exists()
+    // The gateway usually runs as a service, with no one to answer.
+    if *command == Command::Gateway
+        || settings.file_exists()
         || settings.path().is_none()
         || settings.env("ANTHROPIC_API_KEY").is_some()
     {
@@ -483,6 +489,45 @@ async fn conversation(
             repl.run().await
         }
     }
+}
+
+/// `junees gateway`: Junees as a Discord bot, on the backend the settings
+/// name, working in the current folder. SIGINT/SIGTERM cancel the running
+/// turns (recorded in their sessions) and close the connection; a second
+/// one quits at once.
+async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
+    let lookup = |key: &str| settings.get(key);
+    let discord = DiscordConfig::from_lookup(lookup)?;
+    let backend = Backend::from_lookup(lookup)?;
+    let config = conversation_config(settings, backend)?;
+    let cwd = std::env::current_dir()?;
+    let engines: Arc<dyn Engines> = match backend {
+        Backend::Api => Arc::new(ApiEngines::new(config.clone(), cwd.clone())),
+        Backend::ClaudeCode => {
+            let claude = ClaudeCode::from_lookup(lookup);
+            let version = claude.check(&cwd, &config.tools).await?;
+            for notice in claude.notices() {
+                eprintln!("  !! {notice}");
+            }
+            eprintln!(
+                "Claude Code {version}; it runs commands without approval questions (only the \
+                 command policy deny rules apply)"
+            );
+            Arc::new(ClaudeEngines::new(claude, config.clone(), cwd.clone()))
+        }
+    };
+    let cancel = Cancel::new();
+    cancel_on_signals(Signals::install()?, cancel.clone());
+    eprintln!(
+        "junees {VERSION} gateway, working in {}; SIGINT or SIGTERM stops it",
+        cwd.display()
+    );
+    let memory = conversation_memory(&config, &cwd);
+    Gateway::new(discord, engines, config.home.clone(), cwd, memory)
+        .run(cancel)
+        .await?;
+    eprintln!("gateway stopped");
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `junees status`, for the git repository the current folder is in.

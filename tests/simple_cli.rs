@@ -269,6 +269,9 @@ async fn the_first_run_on_a_terminal_sets_up_without_showing_the_key() {
     type_line("");
     let at = wait_for(&screen, "or none [none] > ", at).await;
     type_line("");
+    // The optional Discord step; Enter skips it.
+    let at = wait_for(&screen, "(junees gateway, optional)? [y/N] > ", at).await;
+    type_line("");
     wait_for(&screen, "Hi from the fake API.", at).await;
 
     let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
