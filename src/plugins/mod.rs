@@ -167,12 +167,25 @@ impl Plugins {
                     crate::mcp::tool::prefixed_name("plugin", &plugin.name, &def.name, &mut taken);
                 self.tools.push((name, index, tool));
             }
-            let hook = |command: &manifest::Command| hooks::Hook {
+            let hook = |command: &manifest::Command, refuse_on_error: bool| hooks::Hook {
                 plugin: Arc::clone(plugin),
                 command: command.clone(),
+                refuse_on_error,
             };
-            pre_tool.extend(plugin.manifest.pre_tool.iter().map(hook));
-            post_turn.extend(plugin.manifest.post_turn.iter().map(hook));
+            pre_tool.extend(
+                plugin
+                    .manifest
+                    .pre_tool
+                    .iter()
+                    .map(|pre| hook(&pre.command, pre.refuse_on_error)),
+            );
+            post_turn.extend(
+                plugin
+                    .manifest
+                    .post_turn
+                    .iter()
+                    .map(|command| hook(command, false)),
+            );
             match prompt_fragment(plugin) {
                 Ok(Some(text)) => notes.push((plugin.name.clone(), text)),
                 Ok(None) => {}

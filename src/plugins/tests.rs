@@ -459,6 +459,76 @@ async fn pre_tool_hooks_refuse_calls_and_failures_only_warn() {
     );
 }
 
+/// A policy hook with `"on_error": "refuse"`: its failures refuse the
+/// call instead of letting it run (PR #40 review, note 4: a huge input
+/// could time the hook out).
+#[tokio::test]
+async fn a_failing_pre_tool_hook_refuses_the_call_with_on_error_refuse() {
+    let home = Home::new();
+    let strict = r#"case "$(cat)" in *slow*) sleep 30;; *crash*) echo bad >&2; exit 1;; esac"#;
+    home.plugin(
+        "strict",
+        json!({"hooks": {"pre_tool": [
+            {"command": ["sh", "-c", strict], "timeout_secs": 1, "on_error": "refuse"},
+        ]}}),
+        &[],
+    );
+    home.enable(&["strict"], &[]);
+    let (warn, warnings) = collect();
+    let plugins = home.load().with_warn(warn);
+    let mut registry = ToolRegistry::new();
+    registry.register(Echo);
+    plugins.register(&mut registry);
+
+    let started = Instant::now();
+    let output = registry.dispatch("echo", json!({"text": "slow"})).await;
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(
+        output,
+        ToolOutput::error(
+            "not run: the pre_tool hook of the plugin `strict` failed (it did not finish \
+             within 1 s and was killed), and it refuses calls when it fails"
+        )
+    );
+    let output = registry.dispatch("echo", json!({"text": "crash"})).await;
+    assert_eq!(
+        output,
+        ToolOutput::error(
+            "not run: the pre_tool hook of the plugin `strict` failed (exit code 1; its \
+             stderr: bad), and it refuses calls when it fails"
+        )
+    );
+    assert_eq!(
+        warnings.lock().unwrap()[1],
+        "plugin strict: pre_tool hook `sh` failed (exit code 1; its stderr: bad); the call is \
+         refused (\"on_error\": \"refuse\")"
+    );
+    let output = registry.dispatch("echo", json!({"text": "fine"})).await;
+    assert_eq!(output, ToolOutput::ok(r#"ran {"text":"fine"}"#));
+
+    // A program that does not start refuses too.
+    home.plugin(
+        "gone",
+        json!({"hooks": {"pre_tool": [
+            {"command": ["/nonexistent/hook"], "on_error": "refuse"},
+        ]}}),
+        &[],
+    );
+    home.enable(&["gone"], &[]);
+    let mut registry = ToolRegistry::new();
+    registry.register(Echo);
+    home.load().register(&mut registry);
+    let output = registry.dispatch("echo", json!({"text": "fine"})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output
+            .content
+            .starts_with("not run: the pre_tool hook of the plugin `gone` failed (cannot run"),
+        "{}",
+        output.content
+    );
+}
+
 /// Answers each conversation from its own replies, picked by the first
 /// line of its first message (the parent's input or a subagent's goal),
 /// and keeps the tool results each was sent.

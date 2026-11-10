@@ -224,7 +224,12 @@ fn runs(folder: &Path, manifest: &Manifest) -> String {
         line(format!("tool {}", tool.name), &tool.command);
     }
     for hook in &manifest.pre_tool {
-        line("pre_tool hook".into(), hook);
+        let what = if hook.refuse_on_error {
+            "pre_tool hook (on_error: refuse)"
+        } else {
+            "pre_tool hook"
+        };
+        line(what.into(), &hook.command);
     }
     for hook in &manifest.post_turn {
         line("post_turn hook".into(), hook);

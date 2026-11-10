@@ -5,8 +5,10 @@
 //! on stdin before a tool runs (after an approval question, if one is
 //! asked). Exit code 0 lets the call run, 2 refuses it with the hook's
 //! stdout as the reason the model reads; anything else, a time-out or a
-//! program that does not start is a warning, and the call runs. The first
-//! hook that refuses decides.
+//! program that does not start is a warning, and the call runs, unless
+//! the hook sets `"on_error": "refuse"` (a policy hook the model could
+//! otherwise get past by making it time out with a huge input): then the
+//! failure refuses the call too. The first hook that refuses decides.
 //!
 //! A `post_turn` hook gets `{"event": "post_turn", "input", "outcome",
 //! "answer", "error", "cwd"}` once a turn ended (`outcome` is `answered`,
@@ -39,6 +41,8 @@ pub type Warn = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct Hook {
     pub plugin: Arc<Plugin>,
     pub command: Command,
+    /// A failure of this (`pre_tool`) hook refuses the call.
+    pub refuse_on_error: bool,
 }
 
 /// The hooks of the enabled plugins, in plugin name order and then in
@@ -71,30 +75,35 @@ impl Hooks {
         &self.shared.workdir
     }
 
-    /// Warns that `hook` (of kind `kind`) failed, and what happens instead.
-    fn failed(&self, kind: &str, hook: &Hook, result: &Result<Ran, String>, then: &str) {
-        let what = match result {
-            Err(err) => err.clone(),
-            Ok(ran) => {
-                let mut what = match &ran.exit {
-                    Exit::Code(code) => format!("exit code {code}"),
-                    Exit::Signal => "terminated by a signal".into(),
-                    Exit::TimedOut(limit) => format!(
-                        "it did not finish within {} and was killed",
-                        crate::mcp::server::seconds(*limit)
-                    ),
-                };
-                if let Some(line) = ran.stderr_line() {
-                    what.push_str(&format!("; its stderr: {line}"));
-                }
-                what
-            }
-        };
+    /// Warns that `hook` (of kind `kind`) failed (`what`, from
+    /// [`failure`]), and what happens instead.
+    fn failed(&self, kind: &str, hook: &Hook, what: &str, then: &str) {
         (self.warn)(&format!(
             "plugin {}: {kind} hook `{}` failed ({what}){then}",
             hook.plugin.name,
             hook.command.shown()
         ));
+    }
+}
+
+/// How a hook that did not exit with 0 (or 2, for `pre_tool`) failed.
+fn failure(result: &Result<Ran, String>) -> String {
+    match result {
+        Err(err) => err.clone(),
+        Ok(ran) => {
+            let mut what = match &ran.exit {
+                Exit::Code(code) => format!("exit code {code}"),
+                Exit::Signal => "terminated by a signal".into(),
+                Exit::TimedOut(limit) => format!(
+                    "it did not finish within {} and was killed",
+                    crate::mcp::server::seconds(*limit)
+                ),
+            };
+            if let Some(line) = ran.stderr_line() {
+                what.push_str(&format!("; its stderr: {line}"));
+            }
+            what
+        }
     }
 }
 
@@ -130,7 +139,26 @@ impl PreTool for Hooks {
                         hook.plugin.name
                     )));
                 }
-                _ => self.failed("pre_tool", hook, &result, "; the call runs anyway"),
+                _ if hook.refuse_on_error => {
+                    let what = failure(&result);
+                    self.failed(
+                        "pre_tool",
+                        hook,
+                        &what,
+                        "; the call is refused (\"on_error\": \"refuse\")",
+                    );
+                    return Some(ToolOutput::error(format!(
+                        "not run: the pre_tool hook of the plugin `{}` failed ({what}), and it \
+                         refuses calls when it fails",
+                        hook.plugin.name
+                    )));
+                }
+                _ => self.failed(
+                    "pre_tool",
+                    hook,
+                    &failure(&result),
+                    "; the call runs anyway",
+                ),
             }
         }
         None
@@ -165,7 +193,7 @@ impl AfterTurn for Hooks {
                     ..
                 })
             ) {
-                self.failed("post_turn", hook, &result, "");
+                self.failed("post_turn", hook, &failure(&result), "");
             }
         }
     }

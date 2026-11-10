@@ -6,7 +6,8 @@
 //!   "tools": [{ "name": "search", "description": "Searches the issues",
 //!               "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
 //!               "command": ["python3", "search.py"], "timeout_secs": 60 }],
-//!   "hooks": { "pre_tool": [{ "command": ["./check.sh"], "timeout_secs": 10 }],
+//!   "hooks": { "pre_tool": [{ "command": ["./check.sh"], "timeout_secs": 10,
+//!                             "on_error": "refuse" }],
 //!              "post_turn": [{ "command": ["./notify.sh"] }] },
 //!   "prompt": "PROMPT.md" }
 //! ```
@@ -72,6 +73,17 @@ impl Command {
     }
 }
 
+/// A `pre_tool` hook of the manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreToolHook {
+    pub command: Command,
+    /// `"on_error": "refuse"`: when the hook fails (an exit code other
+    /// than 0 and 2, a time-out, a program that does not start) the call
+    /// is refused instead of run, for hooks that enforce a policy. The
+    /// default, `"allow"`, only warns.
+    pub refuse_on_error: bool,
+}
+
 /// A tool of the manifest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolDef {
@@ -89,7 +101,7 @@ pub struct Manifest {
     /// enable; only `junees plugin enable --trust` trusts a plugin.
     pub trust: bool,
     pub tools: Vec<ToolDef>,
-    pub pre_tool: Vec<Command>,
+    pub pre_tool: Vec<PreToolHook>,
     pub post_turn: Vec<Command>,
     /// The prompt fragment's file, relative to the plugin's folder.
     pub prompt: Option<String>,
@@ -133,6 +145,8 @@ struct RawHooks {
 struct RawHook {
     command: Vec<String>,
     timeout_secs: Option<u64>,
+    /// `allow` (the default) or `refuse`; `pre_tool` hooks only.
+    on_error: Option<String>,
 }
 
 /// A plugin name: 1 to [`MAX_NAME_CHARS`] ASCII letters, digits, `_` and
@@ -246,22 +260,47 @@ pub fn parse(text: &str) -> Result<Manifest> {
         }
         tools.push(tool);
     }
-    let hooks = |list: Vec<RawHook>, kind: &str| -> Result<Vec<Command>> {
+    let hooks = |list: Vec<RawHook>, kind: &str| -> Result<Vec<(Command, bool)>> {
         list.into_iter()
             .enumerate()
             .map(|(i, hook)| {
-                command(
+                let refuse_on_error = match hook.on_error.as_deref() {
+                    None | Some("allow") => false,
+                    Some("refuse") if kind == "pre_tool" => true,
+                    Some("refuse") => {
+                        bail!(
+                            "{kind} hook {}: `on_error` is for pre_tool hooks only",
+                            i + 1
+                        )
+                    }
+                    // The value is not quoted, like serde's type errors.
+                    Some(_) => bail!(
+                        "{kind} hook {}: `on_error` must be \"allow\" or \"refuse\"",
+                        i + 1
+                    ),
+                };
+                let command = command(
                     hook.command,
                     hook.timeout_secs,
                     DEFAULT_HOOK_TIMEOUT,
                     MAX_HOOK_TIMEOUT_SECS,
                 )
-                .with_context(|| format!("{kind} hook {}", i + 1))
+                .with_context(|| format!("{kind} hook {}", i + 1))?;
+                Ok((command, refuse_on_error))
             })
             .collect()
     };
-    let pre_tool = hooks(raw.hooks.pre_tool, "pre_tool")?;
-    let post_turn = hooks(raw.hooks.post_turn, "post_turn")?;
+    let pre_tool = hooks(raw.hooks.pre_tool, "pre_tool")?
+        .into_iter()
+        .map(|(command, refuse_on_error)| PreToolHook {
+            command,
+            refuse_on_error,
+        })
+        .collect();
+    let post_turn = hooks(raw.hooks.post_turn, "post_turn")?
+        .into_iter()
+        .map(|(command, _)| command)
+        .collect();
     if let Some(prompt) = &raw.prompt {
         check_relative(prompt).context("`prompt`")?;
     }
@@ -376,7 +415,24 @@ mod tests {
         let dir = Path::new("/plugins/p");
         assert_eq!(get.command.program(dir), dir.join("./bin/get"));
         assert_eq!(search.command.program(dir), Path::new("python3"));
-        assert_eq!(manifest.pre_tool[0].timeout, Duration::from_secs(3));
+        assert_eq!(manifest.pre_tool[0].command.timeout, Duration::from_secs(3));
+        assert!(!manifest.pre_tool[0].refuse_on_error);
+        let strict = parse(
+            r#"{"hooks": {"pre_tool": [{"command": ["a"], "on_error": "refuse"},
+                                     {"command": ["b"], "on_error": "allow"}]}}"#,
+        )
+        .unwrap();
+        assert!(strict.pre_tool[0].refuse_on_error);
+        assert!(!strict.pre_tool[1].refuse_on_error);
+        let message = |text: &str| format!("{:#}", parse(text).unwrap_err());
+        assert_eq!(
+            message(r#"{"hooks": {"pre_tool": [{"command": ["a"], "on_error": "ghp_secret"}]}}"#),
+            "pre_tool hook 1: `on_error` must be \"allow\" or \"refuse\""
+        );
+        assert_eq!(
+            message(r#"{"hooks": {"post_turn": [{"command": ["a"], "on_error": "refuse"}]}}"#),
+            "post_turn hook 1: `on_error` is for pre_tool hooks only"
+        );
         assert_eq!(manifest.post_turn[0].timeout, DEFAULT_HOOK_TIMEOUT);
         assert_eq!(
             manifest.post_turn[0].program(dir),
