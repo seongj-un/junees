@@ -14,6 +14,14 @@
 //!   session is gone: wait 1 to 5 seconds and identify again.
 //! - Close codes 4004 and 4010 to 4014 must not be retried; 4007 and 4009
 //!   need a new session.
+//! - Only those codes and Invalid Session with `d: false` end the session
+//!   here. A connection that cannot be made (refused, timed out, a failed
+//!   handshake) says nothing about the session, so the next try resumes
+//!   too; Discord answers op 9 if it is gone. After a few failed tries on
+//!   `resume_gateway_url` the resume goes to the first URL instead ("If
+//!   your app doesn't use the `resume_gateway_url` when reconnecting, it
+//!   will experience disconnects at a higher rate than normal"), so an
+//!   unreachable resume host cannot keep the bot away for good.
 //! - Reconnecting waits longer after every failed try (exponential, capped)
 //!   so a broken network or token does not burn the 1000 identifies a day.
 
@@ -46,6 +54,10 @@ const QUERY: &str = "v=10&encoding=json";
 /// Close code for leaving while keeping the session resumable: anything
 /// but 1000 and 1001, which end the session.
 const CLOSE_RESUMABLE: u16 = 4000;
+
+/// Failed connects to `resume_gateway_url` in a row before resuming on the
+/// first URL instead.
+const RESUME_URL_TRIES: u32 = 3;
 
 /// Waits of the connection, so tests can make them short.
 #[derive(Debug, Clone)]
@@ -92,6 +104,8 @@ pub struct Shard {
     seq: Option<u64>,
     /// A Ready or Resumed came on the current connection.
     connected: bool,
+    /// Connects to the resume URL that failed in a row.
+    resume_url_failures: u32,
 }
 
 /// How one connection ended.
@@ -114,6 +128,7 @@ impl Shard {
             session: None,
             seq: None,
             connected: false,
+            resume_url_failures: 0,
         }
     }
 
@@ -167,9 +182,10 @@ impl Shard {
         events: &mpsc::UnboundedSender<Dispatch>,
         shutdown: &Cancel,
     ) -> End {
+        let on_resume_url = self.session.is_some() && self.resume_url_failures < RESUME_URL_TRIES;
         let base = match &self.session {
-            Some((_, resume_url)) => resume_url.clone(),
-            None => self.url.clone(),
+            Some((_, resume_url)) if on_resume_url => resume_url.clone(),
+            _ => self.url.clone(),
         };
         if let Err(err) = check_url(&base, "wss", "ws") {
             return End::Fatal(err.context("the Discord gateway URL"));
@@ -183,19 +199,24 @@ impl Shard {
             _ = shutdown.cancelled() => return End::Shutdown,
             result = connect => match result {
                 Ok(Ok((socket, _))) => socket,
+                // The session stays: not reaching Discord does not end it.
                 Ok(Err(err)) => {
                     (self.log)(&format!("gateway: cannot connect: {err}"));
-                    // Docs: when resuming fails, start over on the first URL.
-                    self.forget_session();
+                    if on_resume_url {
+                        self.resume_url_failures += 1;
+                    }
                     return End::Reconnect;
                 }
                 Err(_) => {
                     (self.log)("gateway: connecting timed out");
-                    self.forget_session();
+                    if on_resume_url {
+                        self.resume_url_failures += 1;
+                    }
                     return End::Reconnect;
                 }
             },
         };
+        self.resume_url_failures = 0;
 
         let hello = tokio::select! {
             _ = shutdown.cancelled() => return End::Shutdown,
@@ -389,6 +410,7 @@ impl Shard {
     fn forget_session(&mut self) {
         self.session = None;
         self.seq = None;
+        self.resume_url_failures = 0;
     }
 }
 

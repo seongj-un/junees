@@ -675,6 +675,55 @@ async fn identifies_heartbeats_resumes_and_starts_over() {
 }
 
 #[tokio::test]
+async fn a_failed_connect_keeps_the_session_to_resume() {
+    let gateway = FakeGateway::bind().await;
+    let resume = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(
+        discord(&rest.url, &[]),
+        fake(Duration::ZERO),
+        None,
+        dir.path(),
+    );
+    // Takes a connection to `listener` and drops it before the WebSocket
+    // handshake: the client's connect fails.
+    async fn refuse(listener: &FakeGateway) {
+        let (socket, _) = tokio::time::timeout(WAIT, listener.listener.accept())
+            .await
+            .expect("the gateway client did not connect")
+            .unwrap();
+        drop(socket);
+    }
+
+    let mut conn = gateway.accept().await;
+    conn.start(&resume.url).await;
+    conn.dispatch("TYPING_START", json!({})).await;
+    // The connection drops; the first reconnect fails.
+    drop(conn);
+    refuse(&resume).await;
+    // The next try still resumes the session, on the resume URL.
+    let mut conn = resume.accept().await;
+    conn.hello(SLOW_BEAT).await;
+    let resumed = conn.expect(6).await;
+    assert_eq!(resumed["d"]["session_id"], "session-1");
+    assert_eq!(resumed["d"]["seq"], 2);
+
+    // A resume URL that keeps failing: the resume goes to the first URL.
+    drop(conn);
+    for _ in 0..3 {
+        refuse(&resume).await;
+    }
+    let mut conn = gateway.accept().await;
+    conn.hello(SLOW_BEAT).await;
+    let resumed = conn.expect(6).await;
+    assert_eq!(resumed["d"]["session_id"], "session-1");
+    assert_eq!(resumed["d"]["seq"], 2);
+    let log = running.stop().await.join("\n");
+    assert!(log.contains("cannot connect"), "{log}");
+}
+
+#[tokio::test]
 async fn a_refused_token_stops_without_showing_it() {
     let gateway = FakeGateway::bind().await;
     let rest = FakeRest::start(&gateway.url).await;
