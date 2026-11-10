@@ -9,4 +9,21 @@
 //! `discord_allowed_users` are listened to.
 
 pub mod config;
+pub mod rest;
 pub mod split;
+
+use std::sync::Arc;
+
+/// Where the gateway writes what it does (one line each). Lines never hold
+/// the bot token or message text.
+pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// A [`Log`] to stderr, each line after the UTC time.
+pub fn stderr_log() -> Log {
+    Arc::new(|line: &str| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |time| time.as_secs());
+        eprintln!("{} {line}", crate::session::format_utc_seconds(now));
+    })
+}
