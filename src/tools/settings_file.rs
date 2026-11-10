@@ -71,6 +71,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
         holds: "the saved skills",
         tool: "skill_manage",
     },
+    DataFolder {
+        name: "cron",
+        holds: "the scheduled jobs and their output",
+        tool: "junees cron",
+    },
 ];
 
 impl DataFolder {
@@ -710,6 +715,7 @@ mod tests {
             (".junees/sessions/../memory/./user.md", "memory"),
             (".junees/projects/0123/notes.md", "projects"),
             (".junees/skills/new/SKILL.md", "skills"),
+            (".junees/cron/jobs.json", "cron"),
             ("link", "memory"),
             ("dirlink/notes.md", "memory"),
             ("dangling", "skills"),

@@ -144,6 +144,7 @@ async fn run() -> Result<ExitCode> {
         Command::Run(args) => conversation(args, settings, input).await,
         Command::Task(command) => run_task(command, &settings).await,
         Command::Gateway => discord_gateway(&settings).await,
+        Command::Cron(command) => junees::cron::command::main(command, settings).await,
         Command::Setup | Command::Help | Command::Version => unreachable!("handled above"),
     }
 }
@@ -158,7 +159,7 @@ fn on_terminal() -> bool {
 /// key (nothing on the claude-code backend does).
 fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     // The gateway usually runs as a service, with no one to answer.
-    if *command == Command::Gateway
+    if matches!(command, Command::Gateway | Command::Cron(_))
         || settings.file_exists()
         || settings.path().is_none()
         || settings.env("ANTHROPIC_API_KEY").is_some()
@@ -1028,6 +1029,14 @@ impl Repl {
             },
             Slash::MemoryClear(target) => return self.clear_memory(target).await,
             Slash::Skills => self.skills(),
+            Slash::Cron => print!(
+                "{}",
+                junees::cron::listing(
+                    self.config.home.as_deref(),
+                    &|key| self.settings.get(key),
+                    true
+                )
+            ),
             Slash::Skill(name) => self.skill(&name),
             Slash::Mcp => match &self.engine {
                 Engine::Api(_) => print!("{}", self.mcp.overview()),

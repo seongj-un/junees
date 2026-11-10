@@ -21,6 +21,7 @@ Usage:
   junees status           show where the task stands
   junees setup            change the settings
   junees gateway          run as a Discord bot (also `junees discord`; see README)
+  junees cron             prompts that run on a schedule (`junees cron --help`)
 
 In the conversation, /help lists the commands (/task, /status, /sessions,
 /new, /model, /backend, ...). Settings are in $JUNEES_HOME/config.toml
@@ -95,6 +96,9 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_DISCORD_PARALLEL       [discord_parallel] channels running a turn at once (default 2)
   JUNEES_DISCORD_APPROVAL_TIMEOUT  [discord_approval_timeout] wait for an approval
                                 answer before declining (default 5m)
+  JUNEES_TIMEZONE         [timezone] zone of `junees cron` schedules (default the system's)
+  JUNEES_CRON_MAX_TIME    [cron_max_time] time one scheduled run may take (default 30m)
+  JUNEES_CRON_MAX_TOKENS  [cron_max_tokens] tokens one scheduled run may use (default 1000000)
   (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
   JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see README)
 ";
@@ -119,6 +123,7 @@ pub const REPL_HELP: &str = "\
 /skills            list the skills ($JUNEES_HOME/skills)
 /skill <name>      show a skill
 /mcp               show the MCP servers ($JUNEES_HOME/mcp.json) and their tools
+/cron              list the scheduled jobs (`junees cron` manages them)
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
 approval question it skips the call and cancels the turn. During /task it
@@ -132,6 +137,8 @@ pub enum Command {
     Setup,
     /// `junees gateway` (or `junees discord`): run as a Discord bot.
     Gateway,
+    /// `junees cron ...`: scheduled jobs.
+    Cron(crate::cron::cli::CronCommand),
     Help,
     Version,
 }
@@ -229,6 +236,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Some("status") => {
             args.next();
             return parse_status(args);
+        }
+        Some("cron") => {
+            args.next();
+            return crate::cron::cli::parse(args).map(Command::Cron);
         }
         Some("setup") => {
             args.next();
@@ -466,6 +477,10 @@ mod tests {
         assert_eq!(parse(&["discord"]).unwrap(), Command::Gateway);
         assert_eq!(parse(&["gateway", "--help"]).unwrap(), Command::Help);
         assert!(parse(&["discord", "now"]).is_err());
+        assert_eq!(
+            parse(&["cron", "rm", "ab"]).unwrap(),
+            Command::Cron(crate::cron::cli::CronCommand::Remove("ab".into()))
+        );
     }
 
     #[test]

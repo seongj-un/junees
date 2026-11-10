@@ -11,6 +11,8 @@
 //! - [`deliver`], [`output`]: where results go.
 //! - [`cli`], [`command`]: the `junees cron` commands.
 
+pub mod cli;
+pub mod command;
 pub mod daemon;
 pub mod deliver;
 pub mod output;

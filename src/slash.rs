@@ -30,6 +30,8 @@ pub enum Slash {
     Skill(String),
     /// `/mcp` shows the MCP servers and their tools.
     Mcp,
+    /// `/cron` lists the scheduled jobs.
+    Cron,
     Help,
     Exit,
     /// A command typed wrong: what to tell the user.
@@ -79,6 +81,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "memory" => memory(arg.as_deref()),
         "skills" => plain(Slash::Skills),
         "mcp" => plain(Slash::Mcp),
+        "cron" => plain(Slash::Cron),
         "skill" => match arg {
             None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
             Some(name) => match crate::skills::check_name(&name) {
@@ -168,6 +171,7 @@ mod tests {
             ("/memory  clear   notes ", Slash::MemoryClear(Target::Notes)),
             ("/memory clear project", Slash::MemoryClear(Target::Project)),
             ("/skills", Slash::Skills),
+            ("/cron", Slash::Cron),
             ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),
             ("/exit", Slash::Exit),

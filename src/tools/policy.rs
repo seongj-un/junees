@@ -2744,6 +2744,8 @@ mod tests {
             ("mkdir -p ~/.junees/skills/evil".into(), "skill_manage"),
             ("cp -r /tmp/evil ~/.junees/skills/".into(), "skill_manage"),
             ("rm -r ~/.junees/skills/deploy".into(), "skill_manage"),
+            ("echo '{}' > ~/.junees/cron/jobs.json".into(), "junees cron"),
+            ("rm -r ~/.junees/cron/output".into(), "junees cron"),
             ("mv ~/.junees/memory /tmp/old".into(), "memory"),
             ("ln -s ~/.junees/memory/user.md /tmp/l".into(), "memory"),
             ("touch ~/.junees/mem*/user.md".into(), "memory"),
