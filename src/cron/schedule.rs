@@ -24,6 +24,10 @@ use crate::task::budget::{format_duration, parse_duration};
 /// Shortest interval of `every`: the daemon looks once a minute.
 pub const MIN_INTERVAL: u64 = 60;
 
+/// Longest interval of `every` and delay of `in`: 10 years. Larger values
+/// would overflow the run time arithmetic.
+pub const MAX_SPAN: u64 = 10 * 366 * 86_400;
+
 /// How far ahead a cron expression is searched for its next match: a
 /// February 29 can be eight years away (2096 to 2104).
 const SEARCH_DAYS: i64 = 366 * 9;
@@ -65,7 +69,7 @@ impl Schedule {
         };
         match first.as_str() {
             "every" => {
-                let secs = parse_duration(one("every")?)?.as_secs();
+                let secs = span(one("every")?, "every")?;
                 if secs < MIN_INTERVAL {
                     bail!(
                         "`every` needs at least a minute (the schedule is checked once a minute)"
@@ -74,10 +78,12 @@ impl Schedule {
                 Ok(Self::Every { secs, anchor: now })
             }
             "in" => {
-                let secs = parse_duration(one("in")?)?.as_secs();
-                Ok(Self::Once {
-                    at: now + secs as i64,
-                })
+                let secs = span(one("in")?, "in")?;
+                let at = i64::try_from(secs)
+                    .ok()
+                    .and_then(|secs| now.checked_add(secs))
+                    .context("the time is out of range")?;
+                Ok(Self::Once { at })
             }
             "daily" | "weekdays" => {
                 let (hour, minute) = clock_time(one(&first)?)?;
@@ -111,12 +117,14 @@ impl Schedule {
     pub fn next_after(&self, after: i64, tz: &TimeZone) -> Option<i64> {
         match self {
             Self::Every { secs, anchor } => {
-                let secs = (*secs).max(MIN_INTERVAL) as i64;
+                // jobs.json may hold any number: a time out of range is no
+                // next run, not one in the past.
+                let secs = i64::try_from((*secs).max(MIN_INTERVAL)).ok()?;
                 if after < *anchor {
-                    return Some(*anchor + secs);
+                    return anchor.checked_add(secs);
                 }
-                let periods = (after - anchor) / secs + 1;
-                Some(anchor + periods * secs)
+                let periods = after.checked_sub(*anchor)? / secs + 1;
+                anchor.checked_add(periods.checked_mul(secs)?)
             }
             Self::Once { at } => (*at > after).then_some(*at),
             Self::Daily { hour, minute } => daily(after, tz, *hour, *minute, |_| true),
@@ -171,6 +179,15 @@ fn daily(
         }
     }
     None
+}
+
+/// The duration of `every` or `in`, at most [`MAX_SPAN`].
+fn span(text: &str, what: &str) -> Result<u64> {
+    let secs = parse_duration(text)?.as_secs();
+    if secs > MAX_SPAN {
+        bail!("`{what}` takes at most 10 years (got `{text}`)");
+    }
+    Ok(secs)
 }
 
 /// `HH:MM`, 00:00 to 23:59.
@@ -421,6 +438,44 @@ mod tests {
         assert_eq!(once.next_after(now, &tz), Some(now + 1200));
         assert_eq!(once.next_after(now + 1200, &tz), None);
         assert!(!once.repeats() && every.repeats());
+    }
+
+    #[test]
+    fn huge_durations_are_refused_and_never_overflow() {
+        let tz = TimeZone::utc();
+        let now = utc(2026, 11, 10, 8, 7);
+        // The review's probe: these were accepted, and `every` then ran
+        // every minute (a next run in the past) while `in` never ran.
+        for text in [
+            "every 10000000000000000000s",
+            "in 10000000000000000000s",
+            "every 9223372036854775807s",
+            "in 9223372036854775807s",
+            "every 87841h",
+            "in 87841h",
+        ] {
+            let err = Schedule::parse(text, now, &tz).unwrap_err().to_string();
+            assert!(err.contains("at most 10 years"), "{text}: {err}");
+        }
+        let ten_years = Schedule::parse("every 87840h", now, &tz).unwrap();
+        assert_eq!(ten_years.next_after(now, &tz), Some(now + 87_840 * 3600));
+        assert_eq!(
+            Schedule::parse("in 87840h", now, &tz).unwrap(),
+            Schedule::Once {
+                at: now + 87_840 * 3600
+            }
+        );
+        // A hand-edited jobs.json: no panic, and never a time in the past.
+        for secs in [u64::MAX, 10_000_000_000_000_000_000, i64::MAX as u64] {
+            for anchor in [now, i64::MAX - 10, i64::MIN + 10] {
+                let every = Schedule::Every { secs, anchor };
+                for after in [now, i64::MAX, i64::MIN] {
+                    if let Some(next) = every.next_after(after, &tz) {
+                        assert!(next > after, "{secs} {anchor} {after}: {next}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
