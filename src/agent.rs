@@ -1,6 +1,8 @@
 //! The agent loop: ask the model, run the tools it calls, feed the results
 //! back, and repeat until it answers without calling a tool.
 
+use std::sync::{Arc, PoisonError};
+
 use anyhow::Result;
 use serde_json::Value;
 
@@ -12,6 +14,7 @@ use crate::provider::{
     CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent, ToolSpec,
 };
 use crate::session::{self, Entry, Journal, Transcript};
+use crate::subagent;
 use crate::tools::{ToolOutput, ToolRegistry};
 use crate::web_search;
 
@@ -59,6 +62,12 @@ pub enum Event<'a> {
     ToolCall {
         name: &'a str,
         input: &'a Value,
+    },
+    /// One line about what subagent `index` (from 1, in the order of the
+    /// `delegate` call's tasks) does; their text is not shown.
+    Subagent {
+        index: usize,
+        line: &'a str,
     },
     /// The API ran one of its own tools (such as a web search) with this
     /// input, while the reply arrived. Junees does not run it.
@@ -120,6 +129,13 @@ impl std::error::Error for Cancelled {}
 /// stop ends the run there. See [`Agent::with_limit`].
 pub type Limit = Box<dyn FnMut(Usage) -> Option<String> + Send>;
 
+/// A [`Limit`] the agent shares with its subagents.
+pub(crate) type SharedLimit = Arc<std::sync::Mutex<Limit>>;
+
+/// A [`ToolGate`] the agent shares with its subagents: they ask one at a
+/// time, and an "always" answer holds for all of them.
+pub(crate) type SharedGate = Arc<tokio::sync::Mutex<Box<dyn ToolGate>>>;
+
 /// The error of [`Agent::run`] when its [`Limit`] stopped it before a
 /// model call, with the limit's reason. Like [`TurnLimit`], the history is
 /// valid and ends with a user message.
@@ -135,7 +151,8 @@ impl std::fmt::Display for LimitReached {
 impl std::error::Error for LimitReached {}
 
 pub struct Agent {
-    provider: Box<dyn Provider>,
+    /// Shared with the subagents of `delegate` calls.
+    provider: Arc<dyn Provider>,
     tools: ToolRegistry,
     options: AgentOptions,
     transcript: Transcript,
@@ -147,9 +164,11 @@ pub struct Agent {
     /// Stops the current turn when set; see [`Agent::with_cancel`].
     cancel: Cancel,
     /// Checked before each model call; see [`Agent::with_limit`].
-    limit: Option<Limit>,
+    limit: Option<SharedLimit>,
     /// Asked before each tool call; see [`Agent::with_gate`].
-    gate: Option<Box<dyn ToolGate>>,
+    gate: Option<SharedGate>,
+    /// Runs `delegate` calls; see [`Agent::with_delegate`].
+    delegate: Option<subagent::Settings>,
 }
 
 impl Agent {
@@ -164,16 +183,29 @@ impl Agent {
         options: AgentOptions,
         transcript: Transcript,
     ) -> Self {
+        let mut agent = Self::sharing(Arc::from(provider), tools, options);
+        agent.transcript = transcript;
+        agent
+    }
+
+    /// A new agent making its model calls through `provider`, which others
+    /// use too (a subagent and the agent that delegated to it).
+    pub(crate) fn sharing(
+        provider: Arc<dyn Provider>,
+        tools: ToolRegistry,
+        options: AgentOptions,
+    ) -> Self {
         Self {
             provider,
             tools,
             options,
-            transcript,
+            transcript: Transcript::default(),
             journal: None,
             cleared: false,
             cancel: Cancel::new(),
             limit: None,
             gate: None,
+            delegate: None,
         }
     }
 
@@ -183,7 +215,7 @@ impl Agent {
     /// calling the model. A summary call that compaction makes before a
     /// model call is asked about on its own. Task runs use it for their token and time budget.
     pub fn with_limit(mut self, limit: Limit) -> Self {
-        self.limit = Some(limit);
+        self.limit = Some(Arc::new(std::sync::Mutex::new(limit)));
         self
     }
 
@@ -202,7 +234,17 @@ impl Agent {
     /// gate waits (for a person's answer) cancels the call like a running
     /// tool.
     pub fn with_gate(mut self, gate: Box<dyn ToolGate>) -> Self {
-        self.gate = Some(gate);
+        self.gate = Some(Arc::new(tokio::sync::Mutex::new(gate)));
+        self
+    }
+
+    /// Offers the model the `delegate` tool, which runs tasks on fresh
+    /// subagents (see [`crate::subagent`]). They share this agent's model,
+    /// tools (but `delegate`, `memory` and `skill_manage`), cancel, gate
+    /// and limit; the tokens they use count toward this agent's usage.
+    pub fn with_delegate(mut self, settings: subagent::Settings) -> Self {
+        self.tools.register(subagent::Delegate::new(settings));
+        self.delegate = Some(settings);
         self
     }
 
@@ -267,7 +309,7 @@ impl Agent {
     /// Makes the next model calls through `provider` (another model); the
     /// conversation stays.
     pub fn set_provider(&mut self, provider: Box<dyn Provider>) {
-        self.provider = provider;
+        self.provider = Arc::from(provider);
     }
 
     /// Handles one user input and returns the model's final text.
@@ -409,11 +451,18 @@ impl Agent {
                         name: &name,
                         input: &input,
                     });
-                    // Dropping the call stops the tool.
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => ToolOutput::error(CANCELLED),
-                        output = self.call_tool(&name, input) => output,
+                    match self.delegate {
+                        // The subagents stop on the cancel themselves, so
+                        // their journals record how they ended.
+                        Some(settings) if name == subagent::NAME => {
+                            self.delegate(settings, &input, &mut on_event).await
+                        }
+                        // Dropping the call stops the tool.
+                        _ => tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => ToolOutput::error(CANCELLED),
+                            output = self.call_tool(&name, input) => output,
+                        },
                     }
                 };
                 on_event(Event::ToolResult {
@@ -461,20 +510,47 @@ impl Agent {
 
     /// Runs one tool call, unless the gate turns it down.
     async fn call_tool(&mut self, name: &str, input: Value) -> ToolOutput {
-        if let Some(gate) = &mut self.gate
-            && let Some(refused) = gate.check(name, &input).await
-        {
-            return refused;
+        if let Some(gate) = &self.gate {
+            let refused = gate.lock().await.check(name, &input).await;
+            if let Some(refused) = refused {
+                return refused;
+            }
         }
         self.tools.dispatch(name, input).await
     }
 
+    /// Runs a `delegate` call on subagents and records the tokens they
+    /// used.
+    async fn delegate(
+        &mut self,
+        settings: subagent::Settings,
+        input: &Value,
+        on_event: &mut impl FnMut(Event<'_>),
+    ) -> ToolOutput {
+        let parent = subagent::Parent {
+            provider: &self.provider,
+            tools: &self.tools,
+            options: &self.options,
+            cancel: &self.cancel,
+            gate: self.gate.as_ref(),
+            limit: self.limit.as_ref(),
+            usage: self.transcript.usage,
+            journal: self.journal.as_ref().and_then(|journal| journal.file()),
+        };
+        let (output, usage) = subagent::run(parent, settings, input, on_event).await;
+        if usage != Usage::default() {
+            self.record(Entry::SubagentUsage(usage), on_event);
+        }
+        output
+    }
+
     /// Fails with [`LimitReached`] if the limit says to stop.
     fn check_limit(&mut self) -> Result<()> {
-        if let Some(limit) = &mut self.limit
-            && let Some(reason) = limit(self.transcript.usage)
-        {
-            return Err(LimitReached(reason).into());
+        if let Some(limit) = &self.limit {
+            let mut limit = limit.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(reason) = (*limit)(self.transcript.usage) {
+                return Err(LimitReached(reason).into());
+            }
         }
         Ok(())
     }

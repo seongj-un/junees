@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::approval::ApprovalMode;
 use crate::memory::Limits;
+use crate::subagent;
 use crate::task::budget::parse_duration;
 use crate::tools::{SettingsFile, ToolSettings};
 use crate::web_search::WebSearch;
@@ -66,6 +67,9 @@ pub struct Config {
     pub web_search: Option<WebSearch>,
     /// Character limits of the memory stores (`JUNEES_MEMORY_*_CHARS`).
     pub memory: Limits,
+    /// The `delegate` tool's settings (`JUNEES_SUBAGENTS` and
+    /// `JUNEES_SUBAGENT_*`); `None` turns it off.
+    pub subagents: Option<subagent::Settings>,
 }
 
 impl Config {
@@ -75,8 +79,8 @@ impl Config {
     /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
     /// `JUNEES_HIDDEN_ENV`, `JUNEES_APPROVAL`, `JUNEES_TASK_MAX_TOKENS`,
     /// `JUNEES_TASK_MAX_TIME`, `JUNEES_TASK_SKILL_MANAGE`, `JUNEES_STREAM`,
-    /// the `JUNEES_WEB_SEARCH*` settings and the `JUNEES_MEMORY_*_CHARS`
-    /// limits.
+    /// the `JUNEES_WEB_SEARCH*` settings, the `JUNEES_MEMORY_*_CHARS`
+    /// limits and the subagent settings.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -193,6 +197,7 @@ impl Config {
         };
         let web_search = WebSearch::read(get)?;
         let memory = Limits::read(get)?;
+        let subagents = subagent::Settings::read(get)?;
 
         Ok(Self {
             api_key,
@@ -212,6 +217,7 @@ impl Config {
             stream,
             web_search,
             memory,
+            subagents,
         })
     }
 

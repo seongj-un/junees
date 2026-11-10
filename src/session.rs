@@ -28,8 +28,8 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// [`Entry::Format`] line. Format 4 added `drop_server_calls`. Format 5
 /// added conversations run by Claude Code: the meta line's `backend` and
 /// `claude_turn` entries, which a format 4 Junees would replay as an empty
-/// API conversation.
-pub const FORMAT: u32 = 5;
+/// API conversation. Format 6 added `subagent_usage`.
+pub const FORMAT: u32 = 6;
 
 /// [`Meta::backend`] of a conversation Claude Code runs (the `claude-code`
 /// backend).
@@ -77,7 +77,7 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 10] = [
+const ENTRY_TYPES: [&str; 11] = [
     "meta",
     "message",
     "append_text",
@@ -88,6 +88,7 @@ const ENTRY_TYPES: [&str; 10] = [
     "format",
     "drop_server_calls",
     "claude_turn",
+    "subagent_usage",
 ];
 
 /// One line of a journal.
@@ -149,6 +150,11 @@ pub enum Entry {
     /// Code keeps the conversation itself; the journal keeps what is
     /// needed to continue it and a summary of the turn.
     ClaudeTurn(ClaudeTurn),
+    /// Tokens the subagents of a `delegate` call used together
+    /// ([`crate::subagent`]). They count toward the session's usage (and
+    /// a task's budget) but say nothing about this conversation's context
+    /// size; their own histories are in journals of their own.
+    SubagentUsage(Usage),
 }
 
 /// One turn of a conversation Claude Code runs.
@@ -192,6 +198,12 @@ struct LineIn {
 /// Somewhere the agent records its history changes.
 pub trait Journal: Send {
     fn record(&mut self, entry: &Entry) -> io::Result<()>;
+
+    /// The journal's file, if it is one: subagents keep theirs next to it
+    /// ([`SessionWriter::create_sub`]).
+    fn file(&self) -> Option<&Path> {
+        None
+    }
 }
 
 /// A conversation history and the tokens it has used so far.
@@ -274,7 +286,7 @@ impl Transcript {
                     self.drop_thinking();
                 }
             }
-            Entry::SummaryUsage(usage) => self.usage.add(usage),
+            Entry::SummaryUsage(usage) | Entry::SubagentUsage(usage) => self.usage.add(usage),
             Entry::Compact {
                 summary,
                 keep_from,
@@ -749,6 +761,32 @@ impl SessionWriter {
         &self.path
     }
 
+    /// The journal of a subagent of the session recorded at `parent`:
+    /// `<parent id>/<name>.jsonl` next to it, with the parent's folder and
+    /// model in its meta line. Like any session it is only created with its
+    /// first entry, in a 0700 folder as a 0600 file.
+    pub fn create_sub(parent: &Path, name: &str) -> Result<Self> {
+        let meta = read_meta(parent)
+            .with_context(|| format!("cannot read the meta line of {}", parent.display()))?;
+        let path = parent.with_extension("").join(format!("{name}.jsonl"));
+        if path.exists() {
+            bail!("{} already exists", path.display());
+        }
+        let meta = Meta {
+            id: format!("{}/{name}", meta.id),
+            format: FORMAT,
+            created_at: unix_now(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            backend: None,
+            ..meta
+        };
+        Ok(Self {
+            path,
+            meta,
+            file: None,
+        })
+    }
+
     /// Creates the file, locks it and writes the meta line. Journals hold
     /// every tool output (files read, command output), so the directories
     /// it creates are 0700 and the file is 0600 whatever the umask.
@@ -788,6 +826,10 @@ impl Journal for SessionWriter {
         let result = result.and_then(|()| write_line(&mut file, entry));
         self.file = Some(file);
         result
+    }
+
+    fn file(&self) -> Option<&Path> {
+        Some(&self.path)
     }
 }
 
@@ -1386,6 +1428,7 @@ mod tests {
             Entry::Format { format: FORMAT },
             Entry::DropServerCalls { ids: vec![] },
             Entry::ClaudeTurn(claude_turn(Some("c-1"), "hi")),
+            Entry::SubagentUsage(Usage::default()),
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -1401,7 +1444,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 5);
+        assert_eq!(value["format"], 6);
         // An API conversation has no backend field.
         assert!(value.get("backend").is_none(), "{value}");
         // Journals written before the field existed are format 1.

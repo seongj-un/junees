@@ -81,6 +81,7 @@ impl<'a> Collector<'a> {
                 "-> {name} {} (run by the API)",
                 crate::cli::preview(&tool_target(input), PREVIEW_CHARS)
             )),
+            Event::Subagent { index, line } => Progress::Tool(format!("[{index}] {line}")),
             Event::Sources(urls) => Progress::Text(crate::web_search::sources_text(urls)),
             Event::Compacted {
                 before_messages,
@@ -224,6 +225,9 @@ impl Engines for ApiEngines {
             },
         )
         .with_cancel(cancel);
+        if let Some(settings) = config.subagents {
+            agent = agent.with_delegate(settings);
+        }
         if config.approval != ApprovalMode::Off {
             let gate = Approval::new(
                 config.approval,
@@ -251,6 +255,7 @@ fn memory(config: &Config, cwd: &std::path::Path) -> Option<Memory> {
 fn api_system(config: &Config, cwd: &std::path::Path, memory: Option<&Memory>) -> String {
     prompt::system_prompt(cwd)
         + GATEWAY_NOTE
+        + crate::subagent::prompt_note(config.subagents)
         + &prompt::data_sections(
             memory,
             Mode::Conversation,

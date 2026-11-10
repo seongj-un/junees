@@ -58,6 +58,13 @@ pub trait ToolGate: Send {
     /// `None` lets the call run; `Some(output)` is the call's result
     /// instead, and the tool does not run.
     async fn check(&mut self, tool: &str, input: &Value) -> Option<ToolOutput>;
+
+    /// [`ToolGate::check`] for a call of the subagent `agent` (see
+    /// [`crate::subagent`]); a question about it says which one asks.
+    async fn check_for(&mut self, agent: &str, tool: &str, input: &Value) -> Option<ToolOutput> {
+        let _ = agent;
+        self.check(tool, input).await
+    }
 }
 
 /// A tool call that needs the person's approval.
@@ -194,7 +201,29 @@ impl Approval {
 #[async_trait]
 impl ToolGate for Approval {
     async fn check(&mut self, tool: &str, input: &Value) -> Option<ToolOutput> {
-        let request = self.request(tool, input)?;
+        self.check_asked_by(None, tool, input).await
+    }
+
+    async fn check_for(&mut self, agent: &str, tool: &str, input: &Value) -> Option<ToolOutput> {
+        self.check_asked_by(Some(agent), tool, input).await
+    }
+}
+
+impl Approval {
+    /// Asks about a call when it needs approval, naming the subagent that
+    /// makes it, if one does.
+    async fn check_asked_by(
+        &mut self,
+        agent: Option<&str>,
+        tool: &str,
+        input: &Value,
+    ) -> Option<ToolOutput> {
+        let mut request = self.request(tool, input)?;
+        if let Some(agent) = agent {
+            request
+                .reasons
+                .insert(0, format!("asked by subagent {agent}"));
+        }
         if request.kinds.iter().all(|kind| self.always.contains(kind)) {
             return None;
         }
@@ -680,6 +709,29 @@ mod tests {
         assert!(gate.check("bash", &bash("git push")).await.is_some());
         assert_eq!(gate.check("bash", &bash("rm d && git push")).await, None);
         assert_eq!(asker.asked(), ["rm a", "git push", "rm d && git push"]);
+    }
+
+    #[tokio::test]
+    async fn a_subagent_question_names_the_subagent_and_shares_always() {
+        let (_dir, workspace) = workspace();
+        let asker = Scripted::new([Answer::Always]);
+        let mut gate = approval(ApprovalMode::Risky, &workspace).asking(Box::new(asker.clone()));
+        assert_eq!(
+            gate.check_for("[2] tidy up", "bash", &bash("rm a")).await,
+            None
+        );
+        let asked = asker.asked.lock().unwrap().clone();
+        assert_eq!(
+            asked[0].reasons,
+            ["asked by subagent [2] tidy up", "`rm` deletes files"]
+        );
+        assert!(render(&asked[0]).contains("     * asked by subagent [2] tidy up\n"));
+        // What it allowed holds for the parent and the other subagents.
+        assert_eq!(gate.check("bash", &bash("rm b")).await, None);
+        assert_eq!(gate.check_for("[1] x", "bash", &bash("rm c")).await, None);
+        assert_eq!(asker.asked().len(), 1);
+        // Calls without a question stay without one.
+        assert_eq!(gate.check_for("[1] x", "bash", &bash("ls")).await, None);
     }
 
     #[tokio::test]
