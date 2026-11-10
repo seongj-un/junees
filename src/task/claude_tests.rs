@@ -218,7 +218,7 @@ async fn claude_code_sessions_get_the_memory_without_the_tool() {
             "{system}"
         );
         assert!(system.contains("\nMEMORY (persistent notes)\n"), "{system}");
-        assert!(system.contains("they cannot be changed in this session"));
+        assert!(system.contains("They cannot be changed in this session"));
         assert!(system.contains("\nBuild with make.\n"), "{system}");
     }
 }
