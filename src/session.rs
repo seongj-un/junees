@@ -401,6 +401,50 @@ impl Transcript {
             .collect()
     }
 
+    /// The entries that drop the server tool calls left without a result
+    /// (see [`Transcript::open_server_calls`]); empty when there are none.
+    ///
+    /// Such a call is normally in the last model reply, after its thinking
+    /// blocks, so dropping it changes nothing a thinking block was made
+    /// after. One in an earlier message (a history that went on past it,
+    /// as an older Junees could leave) is followed by later replies, whose
+    /// thinking blocks Claude 5.1 and later models would then reject: they
+    /// check that nothing before a thinking block changed. Then a second
+    /// entry, `clear_tool_results` with `upto: 0`, drops every thinking
+    /// block and clears no tool output: an entry Junees reads since format
+    /// 2, so the journal format stays. With `manual_thinking` the models do
+    /// not check this, so it is left out.
+    pub fn drop_server_calls_entries(&self, manual_thinking: bool) -> Vec<Entry> {
+        let ids = self.open_server_calls();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let last_reply = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == Role::Assistant);
+        let earlier = self.messages.iter().enumerate().any(|(i, message)| {
+            Some(i) != last_reply
+                && message.content.iter().any(|block| {
+                    matches!(block, ContentBlock::Other(value)
+                        if value["id"].as_str().is_some_and(|id| ids.iter().any(|d| d == id)))
+                })
+        });
+        let thinking = self
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(ContentBlock::is_thinking);
+        let mut entries = vec![Entry::DropServerCalls { ids }];
+        if earlier && thinking && !manual_thinking {
+            entries.push(Entry::ClearToolResults {
+                upto: 0,
+                keep_thinking: false,
+            });
+        }
+        entries
+    }
+
     /// Estimated size of the conversation: the last measured size plus the
     /// estimate of what came after it.
     pub fn context_size(&self) -> u64 {
@@ -562,14 +606,44 @@ impl Transcript {
 /// Block types of calls to tools the API runs itself.
 const SERVER_CALL_TYPES: [&str; 2] = ["server_tool_use", "mcp_tool_use"];
 
-/// A rough token count of content blocks: a token per 4 bytes of their
-/// JSON. Keys and quotes make it err high for plain text, and so do the
-/// base64 `encrypted_content` of web search results; Hangul, at 3 bytes a
-/// character, comes out near its real count. Erring high only compacts a
-/// little early.
+/// A rough token count of content blocks: [`estimate_text_tokens`] of
+/// their JSON.
 pub fn estimate_tokens(content: &[ContentBlock]) -> u64 {
-    let bytes = serde_json::to_string(content).map_or(0, |json| json.len());
-    bytes.div_ceil(4) as u64
+    serde_json::to_string(content).map_or(0, |json| estimate_text_tokens(&json))
+}
+
+/// A rough token count of `text`, counted per character: a quarter token
+/// for each ASCII character (4 characters a token), a whole token for each
+/// Hangul, CJK ideograph or kana character (see [`is_wide`]), and for any
+/// other character a quarter token per byte of its UTF-8 (2 to 4 bytes:
+/// accented Latin, Greek and Cyrillic come to 2 characters a token).
+///
+/// A token per 4 bytes undercounts Korean: a Hangul syllable is 3 bytes
+/// but takes about a token or more. English and other ASCII text estimate
+/// exactly as by bytes, and no text estimates lower than by bytes. Keys and
+/// quotes make the JSON of blocks err high, and so do the base64
+/// `encrypted_content` of web search results. Erring high only compacts a
+/// little early.
+pub fn estimate_text_tokens(text: &str) -> u64 {
+    let quarters: usize = text
+        .chars()
+        .map(|c| if is_wide(c) { 4 } else { c.len_utf8() })
+        .sum();
+    quarters.div_ceil(4) as u64
+}
+
+/// Hangul (syllables and jamo), CJK ideographs, radicals, symbols and
+/// punctuation, kana, bopomofo, and full-width forms: scripts whose
+/// characters take about a token each.
+fn is_wide(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{11FF}'
+        | '\u{2E80}'..='\u{9FFF}'
+        | '\u{A960}'..='\u{A97F}'
+        | '\u{AC00}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FF00}'..='\u{FFEF}'
+        | '\u{20000}'..='\u{3FFFF}')
 }
 
 fn has_tool_result(message: &Message) -> bool {
@@ -2036,6 +2110,71 @@ mod tests {
         assert_eq!(transcript.context_size(), 100);
     }
 
+    #[test]
+    fn estimates_korean_at_a_token_a_character_and_english_by_bytes() {
+        let korean = "한국어 테스트 문장입니다. ".repeat(100);
+        let hangul = korean
+            .chars()
+            .filter(|c| ('\u{AC00}'..='\u{D7A3}').contains(c))
+            .count() as u64;
+        assert_eq!(hangul, 1100);
+        let block = [ContentBlock::text(korean.clone())];
+        let json = serde_json::to_string(&block).unwrap();
+        // A token per 4 bytes came to less than a token per syllable.
+        assert!((json.len() as u64).div_ceil(4) < hangul);
+        assert!(
+            estimate_tokens(&block) >= hangul,
+            "{}",
+            estimate_tokens(&block)
+        );
+        // Hangul a token each, the spaces and dots and the JSON a quarter.
+        let ascii = json.chars().filter(char::is_ascii).count() as u64;
+        assert_eq!(estimate_tokens(&block), hangul + ascii.div_ceil(4));
+
+        // ASCII text estimates by bytes, as before.
+        let english = "The quick brown fox jumps over the lazy dog. ".repeat(100);
+        let block = [ContentBlock::text(english)];
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(estimate_tokens(&block), (json.len() as u64).div_ceil(4));
+
+        // Japanese and Chinese count like Korean; nothing counts below
+        // a token per 4 bytes.
+        assert_eq!(estimate_text_tokens("日本語のテキスト中文"), 10);
+        for text in [
+            "Привет, мир",
+            "café ñandú",
+            "emoji 😀🚀",
+            "สวัสดี",
+            "한글 and ASCII",
+        ] {
+            assert!(
+                estimate_text_tokens(text) >= (text.len() as u64).div_ceil(4),
+                "{text}"
+            );
+        }
+        assert_eq!(estimate_text_tokens("Привет"), 3);
+        assert_eq!(estimate_text_tokens(""), 0);
+    }
+
+    #[test]
+    fn replay_estimates_korean_input_per_character() {
+        // Sizes are computed while applying entries, never stored, so a
+        // journal written before this estimate replays with it.
+        let mut transcript = Transcript::default();
+        transcript.apply(Entry::Message(Message::user_text("hi")));
+        transcript.apply(Entry::Usage(Usage {
+            input_tokens: 100,
+            ..Default::default()
+        }));
+        transcript.apply(Entry::Message(assistant("ok")));
+        transcript.apply(Entry::Message(Message::user_text("가".repeat(1000))));
+        assert!(
+            transcript.context_size() >= 1100,
+            "{}",
+            transcript.context_size()
+        );
+    }
+
     fn server_call(id: &str) -> ContentBlock {
         ContentBlock::Other(json!({"type": "server_tool_use", "id": id,
             "name": "web_search", "input": {"query": "q"}}))
@@ -2089,6 +2228,90 @@ mod tests {
         // The emptied reply went, and the inputs around it became one.
         assert_eq!(transcript.messages[3].role, Role::User);
         assert_eq!(transcript.messages[3].text(), "next\nagain");
+    }
+
+    #[test]
+    fn a_call_before_the_last_reply_drops_the_thinking_after_it() {
+        let thinking = |signature: &str| {
+            ContentBlock::Other(json!({"type": "thinking", "thinking": "t",
+                "signature": signature}))
+        };
+        // A search left open in an earlier reply, with a thinking reply
+        // after it.
+        let messages = vec![
+            Message::user_text("q"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    thinking("sig-1"),
+                    ContentBlock::text("searching"),
+                    server_call("srvtoolu_a"),
+                ],
+            },
+            Message::user_text("next"),
+            Message {
+                role: Role::Assistant,
+                content: vec![thinking("sig-2"), ContentBlock::text("answer")],
+            },
+        ];
+        let transcript = transcript_of(messages.clone());
+        let entries = transcript.drop_server_calls_entries(false);
+        assert_eq!(
+            entries,
+            [
+                Entry::DropServerCalls {
+                    ids: vec!["srvtoolu_a".into()]
+                },
+                Entry::ClearToolResults {
+                    upto: 0,
+                    keep_thinking: false
+                },
+            ]
+        );
+        let mut dropped = transcript.clone();
+        for entry in entries {
+            dropped.apply(entry);
+        }
+        assert!(dropped.open_server_calls().is_empty());
+        assert!(
+            dropped
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .all(|block| !block.is_thinking())
+        );
+        assert_eq!(dropped.messages[1].text(), "searching");
+        assert_eq!(dropped.messages[3].text(), "answer");
+        // Manual thinking: those models do not check what came before.
+        assert_eq!(transcript.drop_server_calls_entries(true).len(), 1);
+
+        // Open in the last reply, after its thinking: thinking stays.
+        let last = transcript_of(messages[..2].to_vec());
+        let entries = last.drop_server_calls_entries(false);
+        assert_eq!(entries.len(), 1);
+        let mut dropped = last.clone();
+        dropped.apply(entries[0].clone());
+        assert_eq!(dropped.messages[1].content.len(), 2);
+        assert!(dropped.messages[1].content[0].is_thinking());
+        // The same reply with its call answered by tool results only: the
+        // call is still in the last reply.
+        let mut mixed = messages[..2].to_vec();
+        mixed[1].content.push(ContentBlock::ToolUse {
+            id: "toolu_1".into(),
+            name: "bash".into(),
+            input: json!({}),
+        });
+        mixed.push(tool_results("toolu_1", "out", false));
+        assert_eq!(
+            transcript_of(mixed).drop_server_calls_entries(false).len(),
+            1
+        );
+        // Nothing open, nothing to record.
+        assert!(
+            transcript_of(vec![Message::user_text("q")])
+                .drop_server_calls_entries(false)
+                .is_empty()
+        );
     }
 
     #[test]
