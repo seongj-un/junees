@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod memory;
 pub mod message;
 pub mod notify;
+pub mod plugins;
 pub mod prompt;
 pub mod prompt_text;
 pub mod provider;

@@ -171,6 +171,8 @@ mod tests {
             "Bash(junees cron add *)",
             "Bash(junees cron rm *)",
             "Bash(junees cron daemon)",
+            "Bash(junees plugin enable *)",
+            "Bash(junees plugins install *)",
         ] {
             assert!(rules.iter().any(|r| r == rule), "{rule} missing");
         }

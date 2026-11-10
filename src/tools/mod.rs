@@ -11,6 +11,7 @@ mod write_file;
 pub use bash::Bash;
 #[cfg(test)]
 pub(crate) use bash::testing;
+pub(crate) use bash::{Capture, GroupGuard};
 pub use edit_file::EditFile;
 pub(crate) use policy::resolve;
 pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};
@@ -111,10 +112,20 @@ pub trait Tool: Send + Sync {
     async fn run(&self, input: Value) -> ToolOutput;
 }
 
+/// Asked before each call the registry runs ([`ToolRegistry::set_pre_tool`]),
+/// such as the `pre_tool` hooks of plugins ([`crate::plugins`]).
+#[async_trait]
+pub trait PreTool: Send + Sync {
+    /// `Some(output)` refuses the call: the tool does not run, and the
+    /// output is its result.
+    async fn check(&self, tool: &str, input: &Value) -> Option<ToolOutput>;
+}
+
 #[derive(Default)]
 pub struct ToolRegistry {
     /// Shared, so subagents get the same tools ([`ToolRegistry::without`]).
     tools: Vec<Arc<dyn Tool>>,
+    pre_tool: Option<Arc<dyn PreTool>>,
 }
 
 impl ToolRegistry {
@@ -140,7 +151,13 @@ impl ToolRegistry {
         self.tools.push(Arc::new(tool));
     }
 
-    /// The same tools, sharing their state, except those named in `names`.
+    /// Asks `pre_tool` before every call of a known tool.
+    pub fn set_pre_tool(&mut self, pre_tool: Arc<dyn PreTool>) {
+        self.pre_tool = Some(pre_tool);
+    }
+
+    /// The same tools, sharing their state and [`PreTool`], except those
+    /// named in `names`.
     pub fn without(&self, names: &[&str]) -> Self {
         Self {
             tools: self
@@ -149,6 +166,7 @@ impl ToolRegistry {
                 .filter(|tool| !names.contains(&tool.name()))
                 .cloned()
                 .collect(),
+            pre_tool: self.pre_tool.clone(),
         }
     }
 
@@ -165,7 +183,14 @@ impl ToolRegistry {
 
     pub async fn dispatch(&self, name: &str, input: Value) -> ToolOutput {
         match self.tools.iter().find(|tool| tool.name() == name) {
-            Some(tool) => tool.run(input).await,
+            Some(tool) => {
+                if let Some(pre_tool) = &self.pre_tool
+                    && let Some(refused) = pre_tool.check(name, &input).await
+                {
+                    return refused;
+                }
+                tool.run(input).await
+            }
             None => ToolOutput::error(format!("unknown tool `{name}`")),
         }
     }
@@ -363,6 +388,66 @@ mod tests {
                 Verdict::Allow => panic!("expected `{command}` to be denied"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn only_the_user_changes_the_plugins_folder() {
+        let (_dir, root, file) = settings_file::testing::home();
+        let plugin = crate::plugins::dir(&root.join(".junees")).join("x");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let manifest = plugin.join(crate::plugins::manifest::FILE_NAME);
+        std::fs::write(&manifest, "{}").unwrap();
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        let hint = "only the user changes it.";
+        let evil = r#"{"hooks": {"post_turn": [{"command": ["sh", "-c", "id"]}]}}"#;
+        for path in [
+            manifest.clone(),
+            plugin.join("new.sh"),
+            crate::plugins::dir(&root.join(".junees")).join("state.json"),
+        ] {
+            let output = WriteFile::with_settings(&settings)
+                .run(json!({"path": path, "content": evil}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(output.content.contains(hint), "{}", output.content);
+        }
+        let output = EditFile::with_settings(&settings)
+            .run(json!({"path": manifest, "old_string": "{}", "new_string": evil}))
+            .await;
+        assert!(output.content.contains(hint), "{}", output.content);
+        let output = Bash::with_settings(&settings)
+            .run(json!({"command": format!("echo '{evil}' > {}", manifest.display())}))
+            .await;
+        assert!(output.content.contains(hint), "{}", output.content);
+        assert!(
+            !output.content.contains("junees plugin"),
+            "{}",
+            output.content
+        );
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{}");
+        let policy = CommandPolicy::with_settings(&settings);
+        for command in [
+            "cp evil.json ~/.junees/plugins/x/plugin.json",
+            "echo '{}' > $JUNEES_HOME/plugins/state.json",
+            "mkdir -p ~/.junees/plugins/new",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(reason.contains(hint), "{command}: {reason}"),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        // Reading it stays allowed.
+        assert_eq!(
+            policy.check("cat ~/.junees/plugins/x/plugin.json"),
+            Verdict::Allow
+        );
+        let output = ReadFile::with_settings(&settings)
+            .run(json!({"path": manifest}))
+            .await;
+        assert!(!output.is_error, "{}", output.content);
     }
 
     #[tokio::test]

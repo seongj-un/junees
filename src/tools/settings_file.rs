@@ -76,6 +76,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
         holds: "the scheduled jobs and their output",
         tool: None,
     },
+    DataFolder {
+        name: "plugins",
+        holds: "the installed plugins",
+        tool: None,
+    },
 ];
 
 impl DataFolder {

@@ -668,6 +668,7 @@ async fn a_question_does_not_hold_up_calls_that_need_none() {
     .with_external_tools([(
         "ext".to_string(),
         ExternalTool {
+            kind: "MCP server",
             server: "fake".into(),
             tool: "ext".into(),
             trusted: false,

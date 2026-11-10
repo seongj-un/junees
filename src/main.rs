@@ -20,6 +20,7 @@ use junees::gateway::engine::{ApiEngines, ClaudeEngines, Engines};
 use junees::mcp::Mcp;
 use junees::memory::{Memory, MemoryTool, Mode, Target};
 use junees::notify::Notifier;
+use junees::plugins::{self, Plugins};
 use junees::prompt;
 use junees::prompt_text::escape_hidden;
 use junees::provider::anthropic::AnthropicProvider;
@@ -103,6 +104,11 @@ async fn run() -> Result<ExitCode> {
         }
         // Needs no API key, and writes nothing.
         Command::Task(TaskCommand::Status { json }) => return task_status(json),
+        Command::Plugin(command) => {
+            let home = junees::config_file::home_dir(|key| std::env::var(key).ok());
+            print!("{}", plugins::manage::run(&command, home.as_deref())?);
+            return Ok(ExitCode::SUCCESS);
+        }
         _ => {}
     }
     let mut settings = if command == Command::Setup {
@@ -145,7 +151,9 @@ async fn run() -> Result<ExitCode> {
         Command::Task(command) => run_task(command, &settings).await,
         Command::Gateway => discord_gateway(&settings).await,
         Command::Cron(command) => junees::cron::command::main(command, settings).await,
-        Command::Setup | Command::Help | Command::Version => unreachable!("handled above"),
+        Command::Setup | Command::Help | Command::Version | Command::Plugin(_) => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -326,6 +334,7 @@ fn api_agent(
     cancel: &Cancel,
     input: Option<&SharedLines>,
     mcp: &Mcp,
+    plugins: &Plugins,
 ) -> Result<Agent> {
     let memory = conversation_memory(config, cwd);
     let gate = input.and_then(|input| approval::for_conversation(config, cwd, input));
@@ -341,11 +350,12 @@ fn api_agent(
     }
     skills::register(&mut tools, config.home.as_deref(), true);
     mcp.register(&mut tools);
+    plugins.register(&mut tools);
     let mut agent = Agent::new(
         make_provider(config)?,
         tools,
         AgentOptions {
-            system: api_system(config, cwd, memory.as_ref()),
+            system: api_system(config, cwd, memory.as_ref(), plugins),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
             context_window: config.context_window,
@@ -357,9 +367,25 @@ fn api_agent(
         agent = agent.with_delegate(settings);
     }
     if let Some(gate) = gate {
-        agent = agent.with_gate(Box::new(gate.with_external_tools(mcp.external_tools())));
+        let gate = gate
+            .with_external_tools(mcp.external_tools())
+            .with_external_tools(plugins.external_tools());
+        agent = agent.with_gate(Box::new(gate));
+    }
+    if let Some(after_turn) = plugins.after_turn() {
+        agent = agent.with_after_turn(after_turn);
     }
     Ok(agent)
+}
+
+/// Reads the enabled plugins of `$JUNEES_HOME/plugins` and says on stderr
+/// which ones this run uses.
+fn load_plugins(config: &Config, cwd: &Path) -> Arc<Plugins> {
+    let plugins = Plugins::load(config.home.as_deref(), &config.tools.hidden_env, cwd);
+    for line in plugins.report() {
+        eprintln!("{line}");
+    }
+    Arc::new(plugins)
 }
 
 /// Starts the MCP servers of `$JUNEES_HOME/mcp.json` and says on stderr
@@ -382,7 +408,7 @@ fn conversation_memory(config: &Config, cwd: &Path) -> Option<Memory> {
 /// The system prompt of Junees's own agent: the memory and the skill list
 /// are read now and stay as they are for the session, so the prompt cache
 /// holds.
-fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>) -> String {
+fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>, plugins: &Plugins) -> String {
     prompt::system_prompt(cwd)
         + subagent::prompt_note(config.subagents)
         + &prompt::data_sections(
@@ -391,6 +417,7 @@ fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>) -> String {
             config.home.as_deref(),
             skills::Mode::Manage,
         )
+        + plugins.prompt_section()
 }
 
 /// What the conversation adds to Claude Code's system prompt: the memory
@@ -458,9 +485,14 @@ async fn conversation(
         Backend::Api => start_mcp(&config, &cwd).await,
         Backend::ClaudeCode => Arc::new(Mcp::none()),
     };
+    let plugins = match backend {
+        Backend::Api => load_plugins(&config, &cwd),
+        Backend::ClaudeCode => Arc::new(Plugins::none()),
+    };
     let (mut engine, banner) = match backend {
         Backend::Api => {
-            let agent = api_agent(&config, &cwd, &cancel, interactive.then_some(&input), &mcp)?;
+            let input = interactive.then_some(&input);
+            let agent = api_agent(&config, &cwd, &cancel, input, &mcp, &plugins)?;
             (Engine::Api(Box::new(agent)), config.model.clone())
         }
         Backend::ClaudeCode => {
@@ -517,6 +549,7 @@ async fn conversation(
                 signals,
                 input,
                 mcp,
+                plugins,
             };
             let code = repl.run().await;
             repl.mcp.shutdown().await;
@@ -540,9 +573,11 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
         Backend::ClaudeCode => Arc::new(Mcp::none()),
     };
     let engines: Arc<dyn Engines> = match backend {
-        Backend::Api => {
-            Arc::new(ApiEngines::new(config.clone(), cwd.clone()).with_mcp(Arc::clone(&mcp)))
-        }
+        Backend::Api => Arc::new(
+            ApiEngines::new(config.clone(), cwd.clone())
+                .with_mcp(Arc::clone(&mcp))
+                .with_plugins(load_plugins(&config, &cwd)),
+        ),
         Backend::ClaudeCode => {
             let claude = ClaudeCode::from_lookup(lookup);
             let version = claude.check(&cwd, &config.tools).await?;
@@ -903,6 +938,9 @@ struct Repl {
     /// The MCP servers of the api backend (none on the claude-code one
     /// until `/backend api` starts them).
     mcp: Arc<Mcp>,
+    /// The enabled plugins on the api backend (none on the claude-code one
+    /// until `/backend api` reads them).
+    plugins: Arc<Plugins>,
 }
 
 impl Repl {
@@ -1050,6 +1088,13 @@ impl Repl {
                 Engine::Claude(_) => eprintln!(
                     "the claude-code backend runs without MCP servers (--strict-mcp-config); \
                      $JUNEES_HOME/mcp.json is used on the api backend"
+                ),
+            },
+            Slash::Plugins => match &self.engine {
+                Engine::Api(_) => print!("{}", self.plugins.overview()),
+                Engine::Claude(_) => eprintln!(
+                    "the claude-code backend runs without plugins; `junees plugin list` shows \
+                     them, and the api backend uses the enabled ones"
                 ),
             },
             Slash::Bad(message) => eprintln!("{message}"),
@@ -1229,12 +1274,16 @@ impl Repl {
                 if self.mcp.servers().is_empty() {
                     self.mcp = start_mcp(&config, &self.cwd).await;
                 }
+                if self.plugins.plugins().is_empty() {
+                    self.plugins = load_plugins(&config, &self.cwd);
+                }
                 Engine::Api(Box::new(api_agent(
                     &config,
                     &self.cwd,
                     &self.cancel,
                     Some(&self.input),
                     &self.mcp,
+                    &self.plugins,
                 )?))
             }
             Backend::ClaudeCode => {
@@ -1299,7 +1348,9 @@ impl Repl {
     fn reread_system(&mut self) {
         let memory = self.memory.as_ref();
         match &mut self.engine {
-            Engine::Api(agent) => agent.set_system(api_system(&self.config, &self.cwd, memory)),
+            Engine::Api(agent) => {
+                agent.set_system(api_system(&self.config, &self.cwd, memory, &self.plugins))
+            }
             Engine::Claude(chat) => chat.set_system(claude_system(&self.config, memory)),
         }
     }

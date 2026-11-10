@@ -133,6 +133,9 @@ pub struct Approval {
 /// call unless the server is trusted; `all` asks about trusted ones too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalTool {
+    /// What runs it: `MCP server` or `plugin`.
+    pub kind: &'static str,
+    /// The server's or plugin's name.
     pub server: String,
     /// Its name on the server.
     pub tool: String,
@@ -211,8 +214,8 @@ impl Approval {
             name => {
                 let external = self.external.get(name)?;
                 let target = format!(
-                    "tool `{}` of the MCP server `{}`",
-                    external.tool, external.server
+                    "tool `{}` of the {} `{}`",
+                    external.tool, external.kind, external.server
                 );
                 let mut preview = String::new();
                 let arguments = serde_json::to_string_pretty(input).unwrap_or_default();
@@ -223,9 +226,9 @@ impl Approval {
                     (
                         target,
                         vec![format!(
-                            "an external tool: the MCP server `{}` runs it with these arguments, \
+                            "an external tool: the {} `{}` runs it with these arguments, \
                              outside Junees's command rules",
-                            external.server
+                            external.kind, external.server
                         )],
                         vec![format!("{tool}: external tool")],
                         Some(preview),

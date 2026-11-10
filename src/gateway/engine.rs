@@ -18,6 +18,7 @@ use crate::claude_code::chat::Chat;
 use crate::config::Config;
 use crate::mcp::Mcp;
 use crate::memory::{Memory, MemoryTool, Mode};
+use crate::plugins::Plugins;
 use crate::prompt;
 use crate::provider::Provider;
 use crate::provider::anthropic::AnthropicProvider;
@@ -157,6 +158,7 @@ pub struct ApiEngines {
     cwd: PathBuf,
     provider: ProviderFactory,
     mcp: Arc<Mcp>,
+    plugins: Arc<Plugins>,
 }
 
 impl ApiEngines {
@@ -181,12 +183,20 @@ impl ApiEngines {
             cwd,
             provider,
             mcp: Arc::new(Mcp::none()),
+            plugins: Arc::new(Plugins::none()),
         }
     }
 
     /// Offers the tools of these MCP servers in every channel.
     pub fn with_mcp(mut self, mcp: Arc<Mcp>) -> Self {
         self.mcp = mcp;
+        self
+    }
+
+    /// Offers the tools, hooks and prompt notes of these plugins in every
+    /// channel.
+    pub fn with_plugins(mut self, plugins: Arc<Plugins>) -> Self {
+        self.plugins = plugins;
         self
     }
 
@@ -229,11 +239,12 @@ impl Engines for ApiEngines {
         }
         skills::register(&mut tools, config.home.as_deref(), true);
         self.mcp.register(&mut tools);
+        self.plugins.register(&mut tools);
         let mut agent = Agent::new(
             (self.provider)()?,
             tools,
             AgentOptions {
-                system: api_system(config, &self.cwd, memory.as_ref()),
+                system: api_system(config, &self.cwd, memory.as_ref(), &self.plugins),
                 max_tokens: config.max_tokens,
                 max_turns: config.max_turns,
                 context_window: config.context_window,
@@ -251,13 +262,18 @@ impl Engines for ApiEngines {
                 Workspace::new(&self.cwd).with_temp_dirs(),
             )
             .with_external_tools(self.mcp.external_tools())
+            .with_external_tools(self.plugins.external_tools())
             .asking(ask);
             agent = agent.with_gate(Box::new(gate));
+        }
+        if let Some(after_turn) = self.plugins.after_turn() {
+            agent = agent.with_after_turn(after_turn);
         }
         Ok(Box::new(ApiConversation {
             agent,
             config: Arc::clone(config),
             cwd: self.cwd.clone(),
+            plugins: Arc::clone(&self.plugins),
         }))
     }
 }
@@ -269,7 +285,12 @@ fn memory(config: &Config, cwd: &std::path::Path) -> Option<Memory> {
 
 /// The system prompt of the agent: the terminal conversation's, the
 /// gateway note, then the memory and the skills as they are now.
-fn api_system(config: &Config, cwd: &std::path::Path, memory: Option<&Memory>) -> String {
+fn api_system(
+    config: &Config,
+    cwd: &std::path::Path,
+    memory: Option<&Memory>,
+    plugins: &Plugins,
+) -> String {
     prompt::system_prompt(cwd)
         + GATEWAY_NOTE
         + crate::subagent::prompt_note(config.subagents)
@@ -279,12 +300,14 @@ fn api_system(config: &Config, cwd: &std::path::Path, memory: Option<&Memory>) -
             config.home.as_deref(),
             skills::Mode::Manage,
         )
+        + plugins.prompt_section()
 }
 
 struct ApiConversation {
     agent: Agent,
     config: Arc<Config>,
     cwd: PathBuf,
+    plugins: Arc<Plugins>,
 }
 
 #[async_trait(?Send)]
@@ -302,8 +325,12 @@ impl Conversation for ApiConversation {
 
     fn reset(&mut self, journal: Option<Box<dyn Journal>>) {
         let memory = memory(&self.config, &self.cwd);
-        self.agent
-            .set_system(api_system(&self.config, &self.cwd, memory.as_ref()));
+        self.agent.set_system(api_system(
+            &self.config,
+            &self.cwd,
+            memory.as_ref(),
+            &self.plugins,
+        ));
         self.agent.reset(journal);
     }
 

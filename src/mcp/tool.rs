@@ -64,7 +64,12 @@ impl Tool for McpTool {
 /// cut to [`MAX_TOOL_NAME`], and a name already in `taken` gets `_2`,
 /// `_3`, ... (within the limit). The result is added to `taken`.
 pub fn exposed_name(server: &str, tool: &str, taken: &mut HashSet<String>) -> String {
-    let clean: String = format!("mcp__{server}__{tool}")
+    prefixed_name("mcp", server, tool, taken)
+}
+
+/// [`exposed_name`] with another `prefix` than `mcp`.
+pub fn prefixed_name(prefix: &str, owner: &str, tool: &str, taken: &mut HashSet<String>) -> String {
+    let clean: String = format!("{prefix}__{owner}__{tool}")
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -109,7 +114,7 @@ fn description(server: &str, remote: &RemoteTool) -> String {
 
 /// The server's input schema with hidden characters in its descriptions
 /// and titles escaped: they reach the model like the description.
-fn clean_schema(value: Value) -> Value {
+pub(crate) fn clean_schema(value: Value) -> Value {
     match value {
         Value::Object(object) => Value::Object(
             object

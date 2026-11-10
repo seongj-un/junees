@@ -147,6 +147,7 @@ impl Mcp {
                 (
                     name.clone(),
                     ExternalTool {
+                        kind: "MCP server",
                         server: server.name().to_string(),
                         tool: remote.name.clone(),
                         trusted: server.config.trust,

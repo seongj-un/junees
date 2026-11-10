@@ -30,6 +30,8 @@ pub enum Slash {
     Skill(String),
     /// `/mcp` shows the MCP servers and their tools.
     Mcp,
+    /// `/plugins` shows the plugins.
+    Plugins,
     /// `/cron` lists the scheduled jobs.
     Cron,
     Help,
@@ -81,6 +83,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "memory" => memory(arg.as_deref()),
         "skills" => plain(Slash::Skills),
         "mcp" => plain(Slash::Mcp),
+        "plugins" => plain(Slash::Plugins),
         "cron" => plain(Slash::Cron),
         "skill" => match arg {
             None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
