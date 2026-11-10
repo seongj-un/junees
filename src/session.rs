@@ -401,6 +401,50 @@ impl Transcript {
             .collect()
     }
 
+    /// The entries that drop the server tool calls left without a result
+    /// (see [`Transcript::open_server_calls`]); empty when there are none.
+    ///
+    /// Such a call is normally in the last model reply, after its thinking
+    /// blocks, so dropping it changes nothing a thinking block was made
+    /// after. One in an earlier message (a history that went on past it,
+    /// as an older Junees could leave) is followed by later replies, whose
+    /// thinking blocks Claude 5.1 and later models would then reject: they
+    /// check that nothing before a thinking block changed. Then a second
+    /// entry, `clear_tool_results` with `upto: 0`, drops every thinking
+    /// block and clears no tool output: an entry Junees reads since format
+    /// 2, so the journal format stays. With `manual_thinking` the models do
+    /// not check this, so it is left out.
+    pub fn drop_server_calls_entries(&self, manual_thinking: bool) -> Vec<Entry> {
+        let ids = self.open_server_calls();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let last_reply = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == Role::Assistant);
+        let earlier = self.messages.iter().enumerate().any(|(i, message)| {
+            Some(i) != last_reply
+                && message.content.iter().any(|block| {
+                    matches!(block, ContentBlock::Other(value)
+                        if value["id"].as_str().is_some_and(|id| ids.iter().any(|d| d == id)))
+                })
+        });
+        let thinking = self
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(ContentBlock::is_thinking);
+        let mut entries = vec![Entry::DropServerCalls { ids }];
+        if earlier && thinking && !manual_thinking {
+            entries.push(Entry::ClearToolResults {
+                upto: 0,
+                keep_thinking: false,
+            });
+        }
+        entries
+    }
+
     /// Estimated size of the conversation: the last measured size plus the
     /// estimate of what came after it.
     pub fn context_size(&self) -> u64 {
@@ -2184,6 +2228,90 @@ mod tests {
         // The emptied reply went, and the inputs around it became one.
         assert_eq!(transcript.messages[3].role, Role::User);
         assert_eq!(transcript.messages[3].text(), "next\nagain");
+    }
+
+    #[test]
+    fn a_call_before_the_last_reply_drops_the_thinking_after_it() {
+        let thinking = |signature: &str| {
+            ContentBlock::Other(json!({"type": "thinking", "thinking": "t",
+                "signature": signature}))
+        };
+        // A search left open in an earlier reply, with a thinking reply
+        // after it.
+        let messages = vec![
+            Message::user_text("q"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    thinking("sig-1"),
+                    ContentBlock::text("searching"),
+                    server_call("srvtoolu_a"),
+                ],
+            },
+            Message::user_text("next"),
+            Message {
+                role: Role::Assistant,
+                content: vec![thinking("sig-2"), ContentBlock::text("answer")],
+            },
+        ];
+        let transcript = transcript_of(messages.clone());
+        let entries = transcript.drop_server_calls_entries(false);
+        assert_eq!(
+            entries,
+            [
+                Entry::DropServerCalls {
+                    ids: vec!["srvtoolu_a".into()]
+                },
+                Entry::ClearToolResults {
+                    upto: 0,
+                    keep_thinking: false
+                },
+            ]
+        );
+        let mut dropped = transcript.clone();
+        for entry in entries {
+            dropped.apply(entry);
+        }
+        assert!(dropped.open_server_calls().is_empty());
+        assert!(
+            dropped
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .all(|block| !block.is_thinking())
+        );
+        assert_eq!(dropped.messages[1].text(), "searching");
+        assert_eq!(dropped.messages[3].text(), "answer");
+        // Manual thinking: those models do not check what came before.
+        assert_eq!(transcript.drop_server_calls_entries(true).len(), 1);
+
+        // Open in the last reply, after its thinking: thinking stays.
+        let last = transcript_of(messages[..2].to_vec());
+        let entries = last.drop_server_calls_entries(false);
+        assert_eq!(entries.len(), 1);
+        let mut dropped = last.clone();
+        dropped.apply(entries[0].clone());
+        assert_eq!(dropped.messages[1].content.len(), 2);
+        assert!(dropped.messages[1].content[0].is_thinking());
+        // The same reply with its call answered by tool results only: the
+        // call is still in the last reply.
+        let mut mixed = messages[..2].to_vec();
+        mixed[1].content.push(ContentBlock::ToolUse {
+            id: "toolu_1".into(),
+            name: "bash".into(),
+            input: json!({}),
+        });
+        mixed.push(tool_results("toolu_1", "out", false));
+        assert_eq!(
+            transcript_of(mixed).drop_server_calls_entries(false).len(),
+            1
+        );
+        // Nothing open, nothing to record.
+        assert!(
+            transcript_of(vec![Message::user_text("q")])
+                .drop_server_calls_entries(false)
+                .is_empty()
+        );
     }
 
     #[test]

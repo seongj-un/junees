@@ -440,15 +440,19 @@ impl Agent {
     }
 
     /// Drops the server tool calls the last turn left without a result
-    /// (see [`Transcript::open_server_calls`]), before a new input ends
-    /// that turn for good: the API would reject the history otherwise.
+    /// (see [`Transcript::drop_server_calls_entries`]), before a new input
+    /// ends that turn for good: the API would reject the history otherwise.
     fn drop_open_server_calls(&mut self, on_event: &mut impl FnMut(Event<'_>)) {
-        let ids = self.transcript.open_server_calls();
-        if ids.is_empty() {
+        let entries = self
+            .transcript
+            .drop_server_calls_entries(self.provider.manual_thinking());
+        let Some(Entry::DropServerCalls { ids }) = entries.first() else {
             return;
-        }
+        };
         let count = ids.len();
-        self.record(Entry::DropServerCalls { ids }, on_event);
+        for entry in entries {
+            self.record(entry, on_event);
+        }
         on_event(Event::Warning(&format!(
             "dropped {count} web search call(s) the last turn stopped before running; \
              the model goes on from your new message"
@@ -1063,6 +1067,59 @@ mod tests {
         assert!(agent.transcript.open_server_calls().is_empty());
         // Recorded, so a replayed journal drops it too.
         assert_eq!(replay(entries_of(&journal)), agent.transcript);
+    }
+
+    #[tokio::test]
+    async fn a_search_left_open_before_the_last_reply_drops_later_thinking() {
+        // A history that went on past a search left open (an older Junees
+        // appended the next input after it), with thinking replies after.
+        let messages = vec![
+            Message::user_text("q"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    thinking_block("sig-1"),
+                    ContentBlock::text("searching"),
+                    ContentBlock::Other(json!({"type": "server_tool_use", "id": "srvtoolu_a",
+                        "name": "web_search", "input": {"query": "q"}})),
+                ],
+            },
+            Message::user_text("next"),
+            Message {
+                role: Role::Assistant,
+                content: vec![thinking_block("sig-2"), ContentBlock::text("answer")],
+            },
+        ];
+        let mut transcript = Transcript::default();
+        for message in messages {
+            transcript.apply(Entry::Message(message));
+        }
+        let provider = Scripted::new(vec![text("ok")]);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 5);
+        agent.resume(transcript.clone(), Some(Box::new(journal.clone())));
+        let mut log = Vec::new();
+        agent.run("again", notable(&mut log)).await.unwrap();
+
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(log[0].starts_with("warning dropped 1 web search call(s)"));
+        let seen = seen.lock().unwrap();
+        let sent = &seen[0];
+        // Dropping the call changed what the later thinking block was made
+        // after, which 5.1+ models reject, so no thinking block went.
+        assert!(thinking_in(sent).is_empty(), "{sent:#?}");
+        assert!(!serde_json::to_string(sent).unwrap().contains("srvtoolu_a"));
+        assert_eq!(sent.len(), 5);
+        assert_eq!(sent[1].text(), "searching");
+        assert_eq!(sent[3].text(), "answer");
+        assert_eq!(sent[4], Message::user_text("again"));
+        // Recorded, so a replayed journal matches.
+        let mut replayed = transcript;
+        for entry in entries_of(&journal) {
+            replayed.apply(entry);
+        }
+        assert_eq!(replayed, agent.transcript);
     }
 
     #[tokio::test]
