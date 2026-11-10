@@ -33,19 +33,37 @@ struct Splitter {
     limit: usize,
     messages: Vec<String>,
     current: String,
-    /// The line that opened the code block the text is in (```` ```rust ````).
+    /// How the code block the text is in opens again in the next message
+    /// (```` ```rust ````, see [`reopen_line`]).
     fence: Option<String>,
 }
 
 const CLOSE: &str = "```";
 
+/// The longest language a reopened code block repeats.
+const MAX_LANGUAGE: usize = 32;
+
 impl Splitter {
     fn line(&mut self, line: &str) {
-        let toggles = line.trim_start().starts_with(CLOSE);
+        let trimmed = line.trim_start();
+        let toggles = match self.fence {
+            Some(_) => trimmed.starts_with(CLOSE),
+            // ```` ```code``` ```` closes on its own line: no block.
+            None => trimmed
+                .strip_prefix(CLOSE)
+                .is_some_and(|info| !info.contains(CLOSE)),
+        };
+        // A line opening a block needs room for the block's closing after
+        // it, or the message could not be closed within the limit.
+        let opening = if toggles && self.fence.is_none() {
+            length(CLOSE) + 1
+        } else {
+            0
+        };
         // A fence line itself fits whole; a long ordinary line is cut.
         let mut rest = line;
         loop {
-            let room = self.room();
+            let room = self.room().saturating_sub(opening);
             let sep = usize::from(!self.current.is_empty());
             if length(rest) + sep <= room {
                 if sep == 1 {
@@ -73,7 +91,7 @@ impl Splitter {
         if toggles {
             self.fence = match self.fence {
                 Some(_) => None,
-                None => Some(line.trim().to_string()),
+                None => Some(reopen_line(line)),
             };
         }
     }
@@ -130,6 +148,20 @@ impl Splitter {
             self.messages.push(message);
         }
         self.messages
+    }
+}
+
+/// How a code block that `line` opened starts again in a later message:
+/// the fence and the language, which is all Discord reads of the line. A
+/// long info string is left out, or every message would repeat it (and
+/// one that is too long would leave no room for the text).
+fn reopen_line(line: &str) -> String {
+    let line = line.trim();
+    let info = line.trim_start_matches('`');
+    let fence = &line[..line.len() - info.len()];
+    match info.split_whitespace().next() {
+        Some(language) if length(language) <= MAX_LANGUAGE => format!("{fence}{language}"),
+        _ => fence.to_string(),
     }
 }
 
@@ -214,6 +246,39 @@ mod tests {
         for message in &messages {
             assert!(message.starts_with("```"), "{message}");
         }
+    }
+
+    #[test]
+    fn a_long_fence_line_is_not_opened_again_in_every_message() {
+        let fence = format!("```{}", "x".repeat(1995));
+        let text = format!("{fence}\n{}\n```\nafter", "body ".repeat(10).trim_end());
+        let messages = split_message(&text, MESSAGE_LIMIT);
+        for message in &messages {
+            assert!(length(message) <= MESSAGE_LIMIT, "{}", length(message));
+        }
+        assert!(messages.len() <= 3, "{} messages", messages.len());
+        assert_eq!(messages.iter().filter(|m| m.contains("xxxx")).count(), 1);
+        assert!(messages.last().unwrap().ends_with("after"));
+
+        // A short language is opened again; the rest of the line is not.
+        let code: Vec<String> = (0..20).map(|n| format!("let x{n} = {n};")).collect();
+        let text = format!("```rust title=\"main.rs\"\n{}\n```", code.join("\n"));
+        let messages = split_message(&text, 80);
+        check(&messages, 80);
+        assert!(messages[1].starts_with("```rust\nlet"), "{}", messages[1]);
+    }
+
+    #[test]
+    fn a_fence_closed_on_its_own_line_opens_no_block() {
+        let lines: Vec<String> = (0..30).map(|n| format!("line {n:02}")).collect();
+        let text = format!("```rm -rf build```\n{}", lines.join("\n"));
+        let messages = split_message(&text, 40);
+        check(&messages, 40);
+        assert_eq!(messages.join("\n"), text);
+        assert!(
+            messages[1..].iter().all(|m| m.starts_with("line")),
+            "{messages:#?}"
+        );
     }
 
     #[test]
