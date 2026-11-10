@@ -11,6 +11,7 @@
 //! - [`deliver`], [`output`]: where results go.
 //! - [`cli`], [`command`]: the `junees cron` commands.
 
+pub mod schedule;
 pub mod tz;
 
 use std::path::{Path, PathBuf};
