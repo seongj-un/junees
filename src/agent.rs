@@ -132,9 +132,10 @@ pub type Limit = Box<dyn FnMut(Usage) -> Option<String> + Send>;
 /// A [`Limit`] the agent shares with its subagents.
 pub(crate) type SharedLimit = Arc<std::sync::Mutex<Limit>>;
 
-/// A [`ToolGate`] the agent shares with its subagents: they ask one at a
-/// time, and an "always" answer holds for all of them.
-pub(crate) type SharedGate = Arc<tokio::sync::Mutex<Box<dyn ToolGate>>>;
+/// A [`ToolGate`] the agent shares with its subagents: they check their
+/// calls at the same time, the gate asks one question at a time, and an
+/// "always" answer holds for all of them.
+pub(crate) type SharedGate = Arc<dyn ToolGate>;
 
 /// The error of [`Agent::run`] when its [`Limit`] stopped it before a
 /// model call, with the limit's reason. Like [`TurnLimit`], the history is
@@ -234,7 +235,7 @@ impl Agent {
     /// gate waits (for a person's answer) cancels the call like a running
     /// tool.
     pub fn with_gate(mut self, gate: Box<dyn ToolGate>) -> Self {
-        self.gate = Some(Arc::new(tokio::sync::Mutex::new(gate)));
+        self.gate = Some(Arc::from(gate));
         self
     }
 
@@ -511,7 +512,7 @@ impl Agent {
     /// Runs one tool call, unless the gate turns it down.
     async fn call_tool(&mut self, name: &str, input: Value) -> ToolOutput {
         if let Some(gate) = &self.gate {
-            let refused = gate.lock().await.check(name, &input).await;
+            let refused = gate.check(name, &input).await;
             if let Some(refused) = refused {
                 return refused;
             }
@@ -2728,7 +2729,7 @@ mod tests {
 
     #[async_trait]
     impl ToolGate for TestGate {
-        async fn check(&mut self, tool: &str, input: &Value) -> Option<ToolOutput> {
+        async fn check(&self, tool: &str, input: &Value) -> Option<ToolOutput> {
             self.0.lock().unwrap().push(tool.to_string());
             if input["hang"] == true {
                 std::future::pending::<()>().await;

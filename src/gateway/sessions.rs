@@ -184,7 +184,15 @@ pub fn start(
     channel: &str,
     conversation: &mut dyn Conversation,
 ) -> String {
-    match SessionWriter::create_for(home, cwd, &engines.model(), engines.session_backend()) {
+    let created = SessionWriter::create_for_channel(
+        home,
+        cwd,
+        &engines.model(),
+        engines.session_backend(),
+        session::DISCORD,
+        channel,
+    );
+    match created {
         Ok((meta, writer)) => {
             conversation.reset(Some(Box::new(writer)));
             match index.set(channel, &meta.id) {

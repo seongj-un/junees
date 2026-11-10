@@ -274,11 +274,7 @@ struct ChildGate {
 
 #[async_trait]
 impl ToolGate for ChildGate {
-    async fn check(&mut self, tool: &str, input: &Value) -> Option<ToolOutput> {
-        self.shared
-            .lock()
-            .await
-            .check_for(&self.label, tool, input)
-            .await
+    async fn check(&self, tool: &str, input: &Value) -> Option<ToolOutput> {
+        self.shared.check_for(&self.label, tool, input).await
     }
 }
