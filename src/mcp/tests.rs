@@ -712,7 +712,7 @@ async fn untrusted_servers_are_asked_about_trusted_ones_are_not() {
         .lock()
         .unwrap()
         .extend([Answer::No, Answer::Always]);
-    let mut risky = gate(ApprovalMode::Risky, &mcp, &asker, fake.dir.path());
+    let risky = gate(ApprovalMode::Risky, &mcp, &asker, fake.dir.path());
     let input = json!({"text": "rm everything"});
     let request = risky.request("mcp__fake__echo", &input).unwrap();
     assert_eq!(

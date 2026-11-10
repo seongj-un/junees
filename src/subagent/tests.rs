@@ -8,6 +8,7 @@ use serde_json::json;
 
 use super::*;
 use crate::agent::{Agent, AgentOptions, Cancelled, Event, LimitReached};
+use crate::approval::{Answer, Approval, ApprovalMode, Ask, ExternalTool, Request};
 use crate::cancel::Cancel;
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -562,12 +563,12 @@ struct Recorder(Arc<Mutex<Vec<String>>>);
 
 #[async_trait]
 impl ToolGate for Recorder {
-    async fn check(&mut self, tool: &str, _input: &Value) -> Option<ToolOutput> {
+    async fn check(&self, tool: &str, _input: &Value) -> Option<ToolOutput> {
         self.0.lock().unwrap().push(format!("parent: {tool}"));
         None
     }
 
-    async fn check_for(&mut self, agent: &str, tool: &str, _input: &Value) -> Option<ToolOutput> {
+    async fn check_for(&self, agent: &str, tool: &str, _input: &Value) -> Option<ToolOutput> {
         self.0.lock().unwrap().push(format!("{agent}: {tool}"));
         agent
             .starts_with("[2]")
@@ -616,6 +617,80 @@ async fn subagents_ask_through_the_parent_gate() {
     );
     assert!(
         log.contains(&"[2] <- echo error: the user declined: not this one".into()),
+        "{log:?}"
+    );
+}
+
+/// Answers a question only once subagent `beta` made its second model
+/// call (its tool call ran), or after a few seconds; declines either way.
+struct AnswerAfterBeta {
+    router: Arc<Router>,
+    timed_out: Arc<Mutex<Option<bool>>>,
+}
+
+#[async_trait]
+impl Ask for AnswerAfterBeta {
+    async fn ask(&mut self, _request: &Request) -> Answer {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut timed_out = false;
+        while self.router.seen("beta").len() < 2 {
+            if tokio::time::Instant::now() > deadline {
+                timed_out = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        *self.timed_out.lock().unwrap() = Some(timed_out);
+        Answer::No
+    }
+}
+
+#[tokio::test]
+async fn a_question_does_not_hold_up_calls_that_need_none() {
+    let router = Router::new(vec![
+        ("go", vec![delegate(&["alpha", "beta"]), text("ok", 1)]),
+        (
+            "alpha",
+            vec![call("a1", "ext", json!({}), 1), text("alpha answer", 1)],
+        ),
+        (
+            "beta",
+            vec![call("b1", "echo", json!({}), 1), text("beta answer", 1)],
+        ),
+    ]);
+    let timed_out = Arc::new(Mutex::new(None));
+    let root = std::path::Path::new("/nonexistent-junees-workspace");
+    let gate = Approval::new(
+        ApprovalMode::Risky,
+        &crate::tools::ToolSettings::default(),
+        crate::tools::Workspace::new(root),
+    )
+    .with_external_tools([(
+        "ext".to_string(),
+        ExternalTool {
+            server: "fake".into(),
+            tool: "ext".into(),
+            trusted: false,
+        },
+    )])
+    .asking(Box::new(AnswerAfterBeta {
+        router: Arc::clone(&router),
+        timed_out: Arc::clone(&timed_out),
+    }));
+    let (agent, runs) = parent(&router, settings(2));
+    let mut agent = agent.with_gate(Box::new(gate));
+    let mut log = Vec::new();
+    agent.run("go", lines(&mut log)).await.unwrap();
+    // Subagent 1's question waited for its answer while subagent 2's echo,
+    // which needs no question, ran and subagent 2 finished.
+    assert_eq!(*timed_out.lock().unwrap(), Some(false), "{log:?}");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let beta_done = log.iter().position(|line| line.starts_with("[2] done"));
+    let alpha_declined = log
+        .iter()
+        .position(|line| line.starts_with("[1] <- ext error: the user declined"));
+    assert!(
+        beta_done.is_some() && alpha_declined.is_some() && beta_done < alpha_declined,
         "{log:?}"
     );
 }
