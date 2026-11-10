@@ -32,7 +32,7 @@ use junees::subagent;
 use junees::task::budget::Budget;
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
-use junees::tools::ToolRegistry;
+use junees::tools::{ToolRegistry, ToolSettings};
 use junees::web_search;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
@@ -144,6 +144,7 @@ async fn run() -> Result<ExitCode> {
         Command::Run(args) => conversation(args, settings, input).await,
         Command::Task(command) => run_task(command, &settings).await,
         Command::Gateway => discord_gateway(&settings).await,
+        Command::Cron(command) => junees::cron::command::main(command, settings).await,
         Command::Setup | Command::Help | Command::Version => unreachable!("handled above"),
     }
 }
@@ -158,7 +159,7 @@ fn on_terminal() -> bool {
 /// key (nothing on the claude-code backend does).
 fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     // The gateway usually runs as a service, with no one to answer.
-    if *command == Command::Gateway
+    if matches!(command, Command::Gateway | Command::Cron(_))
         || settings.file_exists()
         || settings.path().is_none()
         || settings.env("ANTHROPIC_API_KEY").is_some()
@@ -327,7 +328,14 @@ fn api_agent(
     mcp: &Mcp,
 ) -> Result<Agent> {
     let memory = conversation_memory(config, cwd);
-    let mut tools = ToolRegistry::with_defaults(&config.tools);
+    let gate = input.and_then(|input| approval::for_conversation(config, cwd, input));
+    // Junees's own state-changing commands go to the question, or are
+    // refused when no one asks.
+    let settings = ToolSettings {
+        approval_gate: gate.is_some(),
+        ..config.tools.clone()
+    };
+    let mut tools = ToolRegistry::with_defaults(&settings);
     if let Some(memory) = &memory {
         tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
     }
@@ -348,7 +356,7 @@ fn api_agent(
     if let Some(settings) = config.subagents {
         agent = agent.with_delegate(settings);
     }
-    if let Some(gate) = input.and_then(|input| approval::for_conversation(config, cwd, input)) {
+    if let Some(gate) = gate {
         agent = agent.with_gate(Box::new(gate.with_external_tools(mcp.external_tools())));
     }
     Ok(agent)
@@ -1028,6 +1036,14 @@ impl Repl {
             },
             Slash::MemoryClear(target) => return self.clear_memory(target).await,
             Slash::Skills => self.skills(),
+            Slash::Cron => print!(
+                "{}",
+                junees::cron::listing(
+                    self.config.home.as_deref(),
+                    &|key| self.settings.get(key),
+                    true
+                )
+            ),
             Slash::Skill(name) => self.skill(&name),
             Slash::Mcp => match &self.engine {
                 Engine::Api(_) => print!("{}", self.mcp.overview()),
@@ -1361,8 +1377,9 @@ impl Repl {
     }
 
     /// `/sessions`: lists recent sessions and continues the one picked by
-    /// number. Sessions of the Discord gateway's channels are only shown:
-    /// the gateway continues them. Returns whether SIGTERM came while it
+    /// number. Sessions of the Discord gateway's channels and of scheduled
+    /// job runs are only shown: the gateway continues its own, and a job
+    /// starts a new session each run. Returns whether SIGTERM came while it
     /// asked.
     async fn sessions(&mut self) -> bool {
         let listed = self.config.require_home().and_then(|home| {
@@ -1379,7 +1396,7 @@ impl Repl {
             }
         };
         if !channels.is_empty() {
-            println!("channel sessions (the Discord gateway continues them):");
+            println!("channel and scheduled-job sessions (shown only, not continued here):");
             for summary in &channels {
                 let current = self.session_id.as_deref() == Some(summary.id.as_str());
                 println!("    {}", cli::session_line(summary, current));

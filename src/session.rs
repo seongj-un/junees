@@ -38,6 +38,10 @@ pub const CLAUDE_CODE: &str = "claude-code";
 /// [`Meta::source`] of a conversation in a channel of the Discord gateway.
 pub const DISCORD: &str = "discord";
 
+/// [`Meta::source`] of a run of a scheduled job (`junees cron`); its
+/// [`Meta::channel`] is the job id.
+pub const CRON: &str = "cron";
+
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
 
@@ -75,8 +79,9 @@ pub struct Meta {
     pub backend: Option<String>,
     /// Where the conversation takes place when not at a terminal:
     /// [`DISCORD`] for a channel of the Discord gateway, which continues
-    /// it there. `junees -c` and the `/sessions` list leave such sessions
-    /// out. `None` (the field left out) for the terminal.
+    /// it there, or [`CRON`] for a run of a scheduled job. `junees -c` and
+    /// the `/sessions` list leave such sessions out. `None` (the field left
+    /// out) for the terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// The id of the channel a [`Meta::source`] session belongs to.

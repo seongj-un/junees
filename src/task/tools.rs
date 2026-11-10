@@ -254,6 +254,7 @@ mod tests {
             deny_commands: vec!["touch".into()],
             allow_dangerous: false,
             settings_file: None,
+            approval_gate: false,
         };
         let verifier = Verifier::new(root.path().to_path_buf(), &settings);
         let output = verifier.run("test -z \"$HOME\"").await;

@@ -61,6 +61,9 @@ pub const KEYS: &[(&str, &str)] = &[
     ("discord_allowed_users", "JUNEES_DISCORD_ALLOWED_USERS"),
     ("discord_channels", "JUNEES_DISCORD_CHANNELS"),
     ("discord_parallel", "JUNEES_DISCORD_PARALLEL"),
+    ("timezone", "JUNEES_TIMEZONE"),
+    ("cron_max_time", "JUNEES_CRON_MAX_TIME"),
+    ("cron_max_tokens", "JUNEES_CRON_MAX_TOKENS"),
     (
         "discord_approval_timeout",
         "JUNEES_DISCORD_APPROVAL_TIMEOUT",

@@ -247,7 +247,12 @@ mod tests {
             ..settings.clone()
         };
         let args = claude.arguments(&request(Path::new("/repo"), &open, None));
-        assert_eq!(args[args.len() - expected.len() - 1], "--disallowedTools");
+        // Only the rules that hold with the policy off come before them.
+        let kept = deny_rules(&open);
+        assert!(kept.iter().all(|rule| rule.starts_with("Bash(junees ")));
+        let start = args.len() - expected.len() - kept.len();
+        assert_eq!(args[start - 1], "--disallowedTools");
+        assert_eq!(args[start..args.len() - expected.len()], kept[..]);
         assert_eq!(args[args.len() - expected.len()..], expected);
 
         // `..` is resolved, as Claude Code compares resolved paths.
