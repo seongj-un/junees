@@ -118,6 +118,7 @@ pub const REPL_HELP: &str = "\
                    empty one memory (asks first)
 /skills            list the skills ($JUNEES_HOME/skills)
 /skill <name>      show a skill
+/mcp               show the MCP servers ($JUNEES_HOME/mcp.json) and their tools
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
 approval question it skips the call and cancels the turn. During /task it

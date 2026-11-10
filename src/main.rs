@@ -17,6 +17,7 @@ use junees::config_file::Settings;
 use junees::gateway::Gateway;
 use junees::gateway::config::DiscordConfig;
 use junees::gateway::engine::{ApiEngines, ClaudeEngines, Engines};
+use junees::mcp::Mcp;
 use junees::memory::{Memory, MemoryTool, Mode, Target};
 use junees::notify::Notifier;
 use junees::prompt;
@@ -322,6 +323,7 @@ fn api_agent(
     cwd: &Path,
     cancel: &Cancel,
     input: Option<&SharedLines>,
+    mcp: &Mcp,
 ) -> Result<Agent> {
     let memory = conversation_memory(config, cwd);
     let mut tools = ToolRegistry::with_defaults(&config.tools);
@@ -329,6 +331,7 @@ fn api_agent(
         tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
     }
     skills::register(&mut tools, config.home.as_deref(), true);
+    mcp.register(&mut tools);
     let mut agent = Agent::new(
         make_provider(config)?,
         tools,
@@ -342,9 +345,19 @@ fn api_agent(
     )
     .with_cancel(cancel.clone());
     if let Some(gate) = input.and_then(|input| approval::for_conversation(config, cwd, input)) {
-        agent = agent.with_gate(Box::new(gate));
+        agent = agent.with_gate(Box::new(gate.with_external_tools(mcp.external_tools())));
     }
     Ok(agent)
+}
+
+/// Starts the MCP servers of `$JUNEES_HOME/mcp.json` and says on stderr
+/// how each one went.
+async fn start_mcp(config: &Config) -> Arc<Mcp> {
+    let mcp = Mcp::start(config.home.as_deref(), &config.tools.hidden_env).await;
+    for line in mcp.report() {
+        eprintln!("{line}");
+    }
+    Arc::new(mcp)
 }
 
 /// The persistent memory of a conversation in `cwd`, if there is a state
@@ -428,9 +441,13 @@ async fn conversation(
     let cwd = std::env::current_dir()?;
     let cancel = Cancel::new();
     let interactive = args.prompt.is_none();
+    let mcp = match backend {
+        Backend::Api => start_mcp(&config).await,
+        Backend::ClaudeCode => Arc::new(Mcp::none()),
+    };
     let (mut engine, banner) = match backend {
         Backend::Api => {
-            let agent = api_agent(&config, &cwd, &cancel, interactive.then_some(&input))?;
+            let agent = api_agent(&config, &cwd, &cancel, interactive.then_some(&input), &mcp)?;
             (Engine::Api(Box::new(agent)), config.model.clone())
         }
         Backend::ClaudeCode => {
@@ -461,6 +478,7 @@ async fn conversation(
             let mut printer = Printer::new();
             let result = engine.turn(&prompt, |event| printer.event(event)).await;
             printer.end_line();
+            mcp.shutdown().await;
             match result {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
@@ -485,8 +503,11 @@ async fn conversation(
                 cancel,
                 signals,
                 input,
+                mcp,
             };
-            repl.run().await
+            let code = repl.run().await;
+            repl.mcp.shutdown().await;
+            code
         }
     }
 }
@@ -501,8 +522,14 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
     let backend = Backend::from_lookup(lookup)?;
     let config = conversation_config(settings, backend)?;
     let cwd = std::env::current_dir()?;
+    let mcp = match backend {
+        Backend::Api => start_mcp(&config).await,
+        Backend::ClaudeCode => Arc::new(Mcp::none()),
+    };
     let engines: Arc<dyn Engines> = match backend {
-        Backend::Api => Arc::new(ApiEngines::new(config.clone(), cwd.clone())),
+        Backend::Api => {
+            Arc::new(ApiEngines::new(config.clone(), cwd.clone()).with_mcp(Arc::clone(&mcp)))
+        }
         Backend::ClaudeCode => {
             let claude = ClaudeCode::from_lookup(lookup);
             let version = claude.check(&cwd, &config.tools).await?;
@@ -523,9 +550,11 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
         cwd.display()
     );
     let memory = conversation_memory(&config, &cwd);
-    Gateway::new(discord, engines, config.home.clone(), cwd, memory)
+    let result = Gateway::new(discord, engines, config.home.clone(), cwd, memory)
         .run(cancel)
-        .await?;
+        .await;
+    mcp.shutdown().await;
+    result?;
     eprintln!("gateway stopped");
     Ok(ExitCode::SUCCESS)
 }
@@ -857,6 +886,9 @@ struct Repl {
     /// What `/memory` shows and `/new` reads again; `None` without a state
     /// folder.
     memory: Option<Memory>,
+    /// The MCP servers of the api backend (none on the claude-code one
+    /// until `/backend api` starts them).
+    mcp: Arc<Mcp>,
 }
 
 impl Repl {
@@ -907,7 +939,13 @@ impl Repl {
     async fn command(&mut self, command: Slash) -> bool {
         match command {
             Slash::Help => println!("{}", cli::REPL_HELP),
-            Slash::New => self.reset(),
+            Slash::New => {
+                // A new session starts the servers that stopped again.
+                for line in self.mcp.restart_stopped().await {
+                    eprintln!("{line}");
+                }
+                self.reset();
+            }
             Slash::Sessions => return self.sessions().await,
             Slash::Status => {
                 if let Err(err) = task_status(false) {
@@ -985,6 +1023,13 @@ impl Repl {
             Slash::MemoryClear(target) => return self.clear_memory(target).await,
             Slash::Skills => self.skills(),
             Slash::Skill(name) => self.skill(&name),
+            Slash::Mcp => match &self.engine {
+                Engine::Api(_) => print!("{}", self.mcp.overview()),
+                Engine::Claude(_) => eprintln!(
+                    "the claude-code backend runs without MCP servers (--strict-mcp-config); \
+                     $JUNEES_HOME/mcp.json is used on the api backend"
+                ),
+            },
             Slash::Bad(message) => eprintln!("{message}"),
             Slash::Exit => {}
         }
@@ -1158,12 +1203,18 @@ impl Repl {
     async fn switch(&mut self, backend: Backend) -> Result<()> {
         let config = conversation_config(&self.settings, backend)?;
         self.engine = match backend {
-            Backend::Api => Engine::Api(Box::new(api_agent(
-                &config,
-                &self.cwd,
-                &self.cancel,
-                Some(&self.input),
-            )?)),
+            Backend::Api => {
+                if self.mcp.servers().is_empty() {
+                    self.mcp = start_mcp(&config).await;
+                }
+                Engine::Api(Box::new(api_agent(
+                    &config,
+                    &self.cwd,
+                    &self.cancel,
+                    Some(&self.input),
+                    &self.mcp,
+                )?))
+            }
             Backend::ClaudeCode => {
                 let (chat, version) =
                     claude_chat(&self.settings, &config, &self.cwd, &self.cancel).await?;
