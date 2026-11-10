@@ -5,7 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::tools::SECRET_ENV_VARS;
+use crate::tools::{CLAUDE_CODE_SECRET_ENV_VARS, SECRET_ENV_VARS};
 
 /// Variables that point git at a repository other than the one in the
 /// current folder, or hand it settings from a parent git process. Git hooks
@@ -44,13 +44,11 @@ const SAFE_CONFIG: &[&str] = &[
 ///
 /// Git can still run commands from the repository's config (clean filters
 /// on `git add`, for one), so it gets neither the repository variables nor
-/// the API key, like the session's own bash.
+/// any credential, like the session's own bash.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new("git");
     command.args(SAFE_CONFIG).args(args).current_dir(dir);
-    for name in REPO_ENV_VARS.iter().chain(SECRET_ENV_VARS) {
-        command.env_remove(name);
-    }
+    hide_env(&mut command);
     let output = command.output().context("cannot run git")?;
     if !output.status.success() {
         bail!(
@@ -60,6 +58,18 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Removes the repository variables, the credentials Junees reads and
+/// Claude Code's credentials from a git command's environment.
+fn hide_env(command: &mut Command) {
+    for name in REPO_ENV_VARS
+        .iter()
+        .chain(SECRET_ENV_VARS)
+        .chain(CLAUDE_CODE_SECRET_ENV_VARS)
+    {
+        command.env_remove(name);
+    }
 }
 
 /// The root of the git work tree `dir` is in. Task mode does not create
@@ -261,9 +271,7 @@ pub fn is_ignored(root: &Path, path: &str) -> Result<bool> {
         .args(SAFE_CONFIG)
         .args(["check-ignore", "-q", "--no-index", "--", path])
         .current_dir(root);
-    for name in REPO_ENV_VARS.iter().chain(SECRET_ENV_VARS) {
-        command.env_remove(name);
-    }
+    hide_env(&mut command);
     match command.status().context("cannot run git")?.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),

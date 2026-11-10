@@ -39,6 +39,7 @@ pub const HELP: &str = "\
 `!status` what runs here: session, queue, tokens
 `!memory` what the persistent memory holds (in a server channel only how much; the contents in a DM)
 `!skills` the skills Junees knows
+`!cron` the scheduled jobs (in a server channel without their prompts and folders)
 `!help` this list
 In a server channel, mention the bot (`@Junees !stop`) unless the channel is one of discord_channels.";
 
@@ -135,6 +136,7 @@ pub enum Command {
     Status,
     Memory,
     Skills,
+    Cron,
     Help,
     Task,
     Unknown(String),
@@ -156,6 +158,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "status" => Command::Status,
         "memory" => Command::Memory,
         "skills" => Command::Skills,
+        "cron" => Command::Cron,
         "help" => Command::Help,
         "task" => Command::Task,
         _ => Command::Unknown(word.to_string()),
@@ -359,6 +362,8 @@ impl Bot {
                 None => "memory is off: neither JUNEES_HOME nor HOME is set".to_string(),
             },
             Command::Skills => self.skills(),
+            // Prompts and folders only in DMs, like the memory.
+            Command::Cron => crate::cron::listing_from_env(self.shared.home.as_deref(), direct),
             Command::Help => HELP.to_string(),
             Command::Task => {
                 "`!task` is not available in the gateway yet; run `junees task \"<goal>\"` \
@@ -763,6 +768,7 @@ mod tests {
         assert_eq!(parse_command("!status"), Some(Command::Status));
         assert_eq!(parse_command("!memory"), Some(Command::Memory));
         assert_eq!(parse_command("!skills"), Some(Command::Skills));
+        assert_eq!(parse_command("!cron"), Some(Command::Cron));
         assert_eq!(parse_command("!task build it"), Some(Command::Task));
         assert_eq!(parse_command("!foo"), Some(Command::Unknown("foo".into())));
         for text in ["new", "!", "! new", "!!!", "!123", "hello !new"] {

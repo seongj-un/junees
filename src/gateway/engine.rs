@@ -24,7 +24,7 @@ use crate::provider::Provider;
 use crate::provider::anthropic::AnthropicProvider;
 use crate::session::{self, Journal, Transcript};
 use crate::skills;
-use crate::tools::{ToolRegistry, Workspace};
+use crate::tools::{ToolRegistry, ToolSettings, Workspace};
 
 /// Characters of a tool call's input shown in its one-line summary.
 const PREVIEW_CHARS: usize = 120;
@@ -227,7 +227,13 @@ impl Engines for ApiEngines {
     fn open(&self, ask: Box<dyn Ask>, cancel: Cancel) -> Result<Box<dyn Conversation>> {
         let config = &self.config;
         let memory = memory(config, &self.cwd);
-        let mut tools = ToolRegistry::with_defaults(&config.tools);
+        // With a gate, Junees's own state-changing commands go to its
+        // question; without one bash refuses them.
+        let settings = ToolSettings {
+            approval_gate: self.asks(),
+            ..config.tools.clone()
+        };
+        let mut tools = ToolRegistry::with_defaults(&settings);
         if let Some(memory) = &memory {
             tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
         }

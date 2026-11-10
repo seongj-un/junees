@@ -1,7 +1,7 @@
-//! The harness's own git commands must not hand the API key to commands a
-//! session planted in the repository: hooks, or a clean filter in
-//! `.git/config` that `git add` runs. This file holds a single test because
-//! it changes the process environment.
+//! The harness's own git commands must not hand the API key or Claude
+//! Code's token to commands a session planted in the repository: hooks, or
+//! a clean filter in `.git/config` that `git add` runs. This file holds a
+//! single test because it changes the process environment.
 
 use std::path::Path;
 use std::process::Command;
@@ -9,6 +9,7 @@ use std::process::Command;
 use junees::task::git;
 
 const KEY: &str = "sk-ant-test-planted-hook-must-not-see-this";
+const CLAUDE_TOKEN: &str = "claude-code-oauth-test-value";
 
 fn run_git(dir: &Path, args: &[&str]) {
     let mut command = Command::new("git");
@@ -20,7 +21,7 @@ fn run_git(dir: &Path, args: &[&str]) {
 }
 
 #[test]
-fn harness_git_runs_no_planted_hook_and_hides_the_api_key() {
+fn harness_git_runs_no_planted_hook_and_hides_the_credentials() {
     let repo = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(repo.path()).unwrap();
     for args in [
@@ -33,7 +34,10 @@ fn harness_git_runs_no_planted_hook_and_hides_the_api_key() {
     }
     let outside = tempfile::tempdir().unwrap();
     let leak = outside.path().join("leaked.txt");
-    let record = format!("printenv ANTHROPIC_API_KEY >> '{}'", leak.display());
+    let record = format!(
+        "printenv ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN >> '{}'",
+        leak.display()
+    );
 
     // What a session can plant with its bash: a pre-commit hook, and a clean
     // filter that git runs on `git add` whatever the hook settings.
@@ -58,6 +62,7 @@ fn harness_git_runs_no_planted_hook_and_hides_the_api_key() {
     // the environment concurrently.
     unsafe {
         std::env::set_var("ANTHROPIC_API_KEY", KEY);
+        std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", CLAUDE_TOKEN);
     }
     assert!(git::is_dirty(&root).unwrap());
     git::commit_all(&root, "junees: checkpoint after session 1").unwrap();
@@ -68,4 +73,8 @@ fn harness_git_runs_no_planted_hook_and_hides_the_api_key() {
     assert!(!hook_ran.exists(), "the planted pre-commit hook ran");
     let seen = std::fs::read_to_string(&leak).expect("the clean filter ran");
     assert!(!seen.contains(KEY), "the key leaked: {seen}");
+    assert!(
+        !seen.contains(CLAUDE_TOKEN),
+        "the Claude Code token leaked: {seen}"
+    );
 }

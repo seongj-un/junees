@@ -33,7 +33,7 @@ use junees::subagent;
 use junees::task::budget::Budget;
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
-use junees::tools::ToolRegistry;
+use junees::tools::{ToolRegistry, ToolSettings};
 use junees::web_search;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
@@ -150,6 +150,7 @@ async fn run() -> Result<ExitCode> {
         Command::Run(args) => conversation(args, settings, input).await,
         Command::Task(command) => run_task(command, &settings).await,
         Command::Gateway => discord_gateway(&settings).await,
+        Command::Cron(command) => junees::cron::command::main(command, settings).await,
         Command::Setup | Command::Help | Command::Version | Command::Plugin(_) => {
             unreachable!("handled above")
         }
@@ -166,7 +167,7 @@ fn on_terminal() -> bool {
 /// key (nothing on the claude-code backend does).
 fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     // The gateway usually runs as a service, with no one to answer.
-    if *command == Command::Gateway
+    if matches!(command, Command::Gateway | Command::Cron(_))
         || settings.file_exists()
         || settings.path().is_none()
         || settings.env("ANTHROPIC_API_KEY").is_some()
@@ -336,7 +337,14 @@ fn api_agent(
     plugins: &Plugins,
 ) -> Result<Agent> {
     let memory = conversation_memory(config, cwd);
-    let mut tools = ToolRegistry::with_defaults(&config.tools);
+    let gate = input.and_then(|input| approval::for_conversation(config, cwd, input));
+    // Junees's own state-changing commands go to the question, or are
+    // refused when no one asks.
+    let settings = ToolSettings {
+        approval_gate: gate.is_some(),
+        ..config.tools.clone()
+    };
+    let mut tools = ToolRegistry::with_defaults(&settings);
     if let Some(memory) = &memory {
         tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
     }
@@ -358,7 +366,7 @@ fn api_agent(
     if let Some(settings) = config.subagents {
         agent = agent.with_delegate(settings);
     }
-    if let Some(gate) = input.and_then(|input| approval::for_conversation(config, cwd, input)) {
+    if let Some(gate) = gate {
         let gate = gate
             .with_external_tools(mcp.external_tools())
             .with_external_tools(plugins.external_tools());
@@ -1066,6 +1074,14 @@ impl Repl {
             },
             Slash::MemoryClear(target) => return self.clear_memory(target).await,
             Slash::Skills => self.skills(),
+            Slash::Cron => print!(
+                "{}",
+                junees::cron::listing(
+                    self.config.home.as_deref(),
+                    &|key| self.settings.get(key),
+                    true
+                )
+            ),
             Slash::Skill(name) => self.skill(&name),
             Slash::Mcp => match &self.engine {
                 Engine::Api(_) => print!("{}", self.mcp.overview()),
@@ -1412,23 +1428,35 @@ impl Repl {
     }
 
     /// `/sessions`: lists recent sessions and continues the one picked by
-    /// number. Returns whether SIGTERM came while it asked.
+    /// number. Sessions of the Discord gateway's channels and of scheduled
+    /// job runs are only shown: the gateway continues its own, and a job
+    /// starts a new session each run. Returns whether SIGTERM came while it
+    /// asked.
     async fn sessions(&mut self) -> bool {
-        let listed = self
-            .config
-            .require_home()
-            .and_then(|home| session::list_recent(home, SESSIONS_LISTED));
-        let list = match listed {
-            Ok(list) if list.is_empty() => {
-                println!("(no saved sessions)");
-                return false;
-            }
-            Ok(list) => list,
+        let listed = self.config.require_home().and_then(|home| {
+            Ok((
+                session::list_recent(home, SESSIONS_LISTED)?,
+                session::list_channel_sessions(home, SESSIONS_LISTED)?,
+            ))
+        });
+        let (list, channels) = match listed {
+            Ok(listed) => listed,
             Err(err) => {
                 report(&err);
                 return false;
             }
         };
+        if !channels.is_empty() {
+            println!("channel and scheduled-job sessions (shown only, not continued here):");
+            for summary in &channels {
+                let current = self.session_id.as_deref() == Some(summary.id.as_str());
+                println!("    {}", cli::session_line(summary, current));
+            }
+        }
+        if list.is_empty() {
+            println!("(no saved sessions)");
+            return false;
+        }
         for (n, summary) in list.iter().enumerate() {
             let current = self.session_id.as_deref() == Some(summary.id.as_str());
             println!("{:>3} {}", n + 1, cli::session_line(summary, current));

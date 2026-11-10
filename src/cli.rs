@@ -21,6 +21,7 @@ Usage:
   junees status           show where the task stands
   junees setup            change the settings
   junees gateway          run as a Discord bot (also `junees discord`; see README)
+  junees cron             prompts that run on a schedule (`junees cron --help`)
   junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
                           plugin install <folder> [--name <n>], enable <name> [--trust],
                           disable <name>, remove <name>
@@ -98,6 +99,9 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_DISCORD_PARALLEL       [discord_parallel] channels running a turn at once (default 2)
   JUNEES_DISCORD_APPROVAL_TIMEOUT  [discord_approval_timeout] wait for an approval
                                 answer before declining (default 5m)
+  JUNEES_TIMEZONE         [timezone] zone of `junees cron` schedules (default the system's)
+  JUNEES_CRON_MAX_TIME    [cron_max_time] time one scheduled run may take (default 30m)
+  JUNEES_CRON_MAX_TOKENS  [cron_max_tokens] tokens one scheduled run may use (default 1000000)
   (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
   JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see README)
 ";
@@ -123,6 +127,7 @@ pub const REPL_HELP: &str = "\
 /skill <name>      show a skill
 /mcp               show the MCP servers ($JUNEES_HOME/mcp.json) and their tools
 /plugins           show the plugins this session uses and the installed ones
+/cron              list the scheduled jobs (`junees cron` manages them)
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
 approval question it skips the call and cancels the turn. During /task it
@@ -136,6 +141,8 @@ pub enum Command {
     Setup,
     /// `junees gateway` (or `junees discord`): run as a Discord bot.
     Gateway,
+    /// `junees cron ...`: scheduled jobs.
+    Cron(crate::cron::cli::CronCommand),
     /// `junees plugin ...` (or `junees plugins`).
     Plugin(crate::plugins::manage::PluginCommand),
     Help,
@@ -235,6 +242,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Some("status") => {
             args.next();
             return parse_status(args);
+        }
+        Some("cron") => {
+            args.next();
+            return crate::cron::cli::parse(args).map(Command::Cron);
         }
         Some("setup") => {
             args.next();
@@ -414,7 +425,8 @@ pub fn positive(text: &str) -> Option<u64> {
     text.trim().parse().ok().filter(|&n| n > 0)
 }
 
-/// One `/sessions` line: id, last write (UTC), first input.
+/// One `/sessions` line: id, last write (UTC), backend and channel tags,
+/// first input.
 pub fn session_line(summary: &Summary, current: bool) -> String {
     let marker = if current { '*' } else { ' ' };
     let first = if summary.first_input.trim().is_empty() {
@@ -422,14 +434,18 @@ pub fn session_line(summary: &Summary, current: bool) -> String {
     } else {
         preview(&summary.first_input, SESSION_PREVIEW_CHARS)
     };
+    let mut tags = String::new();
+    if let Some(backend) = &summary.backend {
+        tags.push_str(&format!("[{backend}] "));
+    }
+    if let Some(source) = &summary.source {
+        let channel = summary.channel.as_deref().unwrap_or("?");
+        tags.push_str(&format!("[{source} {channel}] "));
+    }
     format!(
-        "{marker} {}  {} UTC  {}{first}",
+        "{marker} {}  {} UTC  {tags}{first}",
         summary.id,
         format_utc(summary.updated),
-        match summary.backend.as_deref() {
-            Some(backend) => format!("[{backend}] "),
-            None => String::new(),
-        }
     )
 }
 
@@ -479,6 +495,10 @@ mod tests {
         assert_eq!(parse(&["discord"]).unwrap(), Command::Gateway);
         assert_eq!(parse(&["gateway", "--help"]).unwrap(), Command::Help);
         assert!(parse(&["discord", "now"]).is_err());
+        assert_eq!(
+            parse(&["cron", "rm", "ab"]).unwrap(),
+            Command::Cron(crate::cron::cli::CronCommand::Remove("ab".into()))
+        );
     }
 
     #[test]
@@ -736,6 +756,8 @@ mod tests {
             cwd: "/work".into(),
             first_input: "이 폴더에\n뭐가 있어? ".repeat(10),
             backend: None,
+            source: None,
+            channel: None,
         };
         let line = session_line(&summary, true);
         assert!(
@@ -755,6 +777,13 @@ mod tests {
             ..summary
         };
         assert!(session_line(&claude, false).ends_with("UTC  [claude-code] hi"));
+        // So does a conversation of a Discord channel.
+        let channel = Summary {
+            source: Some("discord".into()),
+            channel: Some("505".into()),
+            ..claude
+        };
+        assert!(session_line(&channel, false).ends_with("UTC  [claude-code] [discord 505] hi"));
     }
 
     #[test]

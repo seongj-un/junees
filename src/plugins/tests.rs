@@ -272,7 +272,7 @@ async fn plugin_tools_are_asked_about_unless_trusted() {
     let plugins = home.load();
     let asker = Scripted::default();
     asker.answers.lock().unwrap().push_back(Answer::No);
-    let mut risky = gate(&plugins, &asker, &home.work);
+    let risky = gate(&plugins, &asker, &home.work);
     let input = json!({"x": 1});
     let request = risky.request("plugin__plain__t", &input).unwrap();
     assert_eq!(request.target, "tool `t` of the plugin `plain`");

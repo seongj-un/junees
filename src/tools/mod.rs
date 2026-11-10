@@ -4,6 +4,7 @@ mod bash;
 mod edit_file;
 mod policy;
 mod read_file;
+pub mod self_command;
 mod settings_file;
 mod write_file;
 
@@ -70,6 +71,12 @@ pub struct ToolSettings {
     /// The user's settings file, which the file tools refuse and bash
     /// commands may not name, even with `allow_dangerous`.
     pub settings_file: Option<SettingsFile>,
+    /// An approval gate asks the user before risky calls (the conversation
+    /// or the Discord gateway with `JUNEES_APPROVAL` risky or all), so bash
+    /// leaves Junees's own state-changing subcommands ([`self_command`]) to
+    /// its question instead of refusing them. Off for `-p`, task mode and
+    /// scheduled runs, where no one is asked.
+    pub approval_gate: bool,
 }
 
 /// What a tool hands back to the model. Failures are reported as output with
@@ -394,7 +401,7 @@ mod tests {
             settings_file: Some(file),
             ..ToolSettings::default()
         };
-        let hint = "only the user changes it, with `junees plugin`";
+        let hint = "only the user changes it.";
         let evil = r#"{"hooks": {"post_turn": [{"command": ["sh", "-c", "id"]}]}}"#;
         for path in [
             manifest.clone(),

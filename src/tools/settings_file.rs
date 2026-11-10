@@ -50,9 +50,8 @@ pub struct DataFolder {
     pub name: &'static str,
     /// What it holds, for messages.
     pub holds: &'static str,
-    /// The tool that changes it, or the `junees` command the user changes
-    /// it with (a name with a space: no tool of the model does).
-    pub tool: &'static str,
+    /// The tool that changes it, or `None` when only the user does.
+    pub tool: Option<&'static str>,
 }
 
 /// The folders under `$JUNEES_HOME` the model may read but not write.
@@ -60,22 +59,27 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
     DataFolder {
         name: "memory",
         holds: "the saved memory",
-        tool: "memory",
+        tool: Some("memory"),
     },
     DataFolder {
         name: "projects",
         holds: "the saved project memory",
-        tool: "memory",
+        tool: Some("memory"),
     },
     DataFolder {
         name: "skills",
         holds: "the saved skills",
-        tool: "skill_manage",
+        tool: Some("skill_manage"),
+    },
+    DataFolder {
+        name: "cron",
+        holds: "the scheduled jobs and their output",
+        tool: None,
     },
     DataFolder {
         name: "plugins",
         holds: "the installed plugins",
-        tool: "junees plugin",
+        tool: None,
     },
 ];
 
@@ -84,10 +88,10 @@ impl DataFolder {
     pub fn refusal(&self, path: &str) -> String {
         format!(
             "{path} is in `$JUNEES_HOME/{}/`, {} of Junees. The file tools may read it \
-             but not change it; {}.",
+             but not change it; {}",
             self.name,
             self.holds,
-            self.instead()
+            self.changed_by()
         )
     }
 
@@ -95,18 +99,17 @@ impl DataFolder {
     pub fn reason(&self, word: &str) -> String {
         format!(
             "`{word}` is in `$JUNEES_HOME/{}/`, {} of Junees. Commands may read it (cat, \
-             grep, ls and the like) but not change, move or copy it; {}.",
+             grep, ls and the like) but not change, move or copy it; {}",
             self.name,
             self.holds,
-            self.instead()
+            self.changed_by()
         )
     }
 
-    fn instead(&self) -> String {
-        if self.tool.contains(' ') {
-            format!("only the user changes it, with `{}`", self.tool)
-        } else {
-            format!("use the `{}` tool instead", self.tool)
+    fn changed_by(&self) -> String {
+        match self.tool {
+            Some(tool) => format!("use the `{tool}` tool instead."),
+            None => "only the user changes it.".into(),
         }
     }
 }
@@ -727,6 +730,7 @@ mod tests {
             (".junees/sessions/../memory/./user.md", "memory"),
             (".junees/projects/0123/notes.md", "projects"),
             (".junees/skills/new/SKILL.md", "skills"),
+            (".junees/cron/jobs.json", "cron"),
             ("link", "memory"),
             ("dirlink/notes.md", "memory"),
             ("dangling", "skills"),
@@ -735,7 +739,7 @@ mod tests {
         }
         assert_eq!(
             file.data_folder(&relative(&junees.join("memory/user.md")))
-                .map(|folder| folder.tool),
+                .and_then(|folder| folder.tool),
             Some("memory")
         );
         for path in [

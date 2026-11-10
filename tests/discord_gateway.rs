@@ -22,7 +22,7 @@ use junees::gateway::engine::{ApiEngines, Conversation, Engines, Progress};
 use junees::gateway::shard::Timing;
 use junees::gateway::{Gateway, Log};
 use junees::memory::{Limits, Memory, Target};
-use junees::session::{Journal, Session, Transcript};
+use junees::session::{self, Journal, Session, Transcript};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1353,11 +1353,24 @@ async fn each_channel_continues_its_session_after_a_restart() {
         texts(&requests[0]),
         ["user: hello", "assistant: first answer", "user: again"]
     );
-    // The session is an ordinary journal of the gateway's folder.
+    // The session is an ordinary journal of the gateway's folder, marked as
+    // the channel's.
     let id = index["505"].as_str().unwrap();
     let journal =
         std::fs::read_to_string(home.path().join(format!("sessions/{id}.jsonl"))).unwrap();
     assert!(journal.contains("second answer"));
+    let meta: Value = serde_json::from_str(journal.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        (&meta["source"], &meta["channel"]),
+        (&json!("discord"), &json!("505"))
+    );
+    // `junees -c` and the `/sessions` list in the gateway's folder leave the
+    // channel sessions to the gateway.
+    assert_eq!(
+        session::find_latest(home.path(), cwd.path(), None).unwrap(),
+        None
+    );
+    assert!(session::list_recent(home.path(), 10).unwrap().is_empty());
 }
 
 #[tokio::test]

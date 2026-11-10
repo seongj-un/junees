@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod config_file;
 pub mod context;
+pub mod cron;
 pub mod flock;
 pub mod gateway;
 pub mod mcp;
