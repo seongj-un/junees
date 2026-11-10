@@ -15,7 +15,7 @@ mod claude_tests;
 pub mod features;
 pub mod git;
 pub mod lock;
-mod prompt;
+pub(crate) mod prompt;
 pub mod runner;
 pub mod state;
 pub mod status;

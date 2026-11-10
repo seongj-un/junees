@@ -306,6 +306,7 @@ async fn init_then_run_builds_the_features_and_commits() {
     let system = first_work["system"].to_string();
     assert!(system.contains("work session 1"), "{system}");
     assert!(system.contains("- [ ] F1: hello.txt says hello"));
+    assert!(system.contains("skill_manage is not available"), "{system}");
     let tools: Vec<&str> = first_work["tools"]
         .as_array()
         .unwrap()
@@ -320,7 +321,8 @@ async fn init_then_run_builds_the_features_and_commits() {
             "write_file",
             "edit_file",
             "memory",
-            "mark_feature_passing"
+            "mark_feature_passing",
+            "skill_view"
         ]
     );
     let results = tool_results(&requests[4]);

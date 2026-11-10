@@ -17,10 +17,12 @@ use junees::config_file::Settings;
 use junees::memory::{Memory, MemoryTool, Mode, Target};
 use junees::notify::Notifier;
 use junees::prompt;
+use junees::prompt_text::escape_hidden;
 use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::setup::{self, EchoOff, Prompter};
+use junees::skills;
 use junees::slash::{self, Slash};
 use junees::task::budget::Budget;
 use junees::task::state::StopReason;
@@ -320,11 +322,12 @@ fn api_agent(
     if let Some(memory) = &memory {
         tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
     }
+    skills::register(&mut tools, config.home.as_deref(), true);
     let mut agent = Agent::new(
         make_provider(config)?,
         tools,
         AgentOptions {
-            system: api_system(cwd, memory.as_ref()),
+            system: api_system(config, cwd, memory.as_ref()),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
             context_window: config.context_window,
@@ -345,22 +348,23 @@ fn conversation_memory(config: &Config, cwd: &Path) -> Option<Memory> {
     Some(Memory::for_folder(home, cwd, config.memory))
 }
 
-/// The system prompt of Junees's own agent: the memory is read now and
-/// stays as it is for the session, so the prompt cache holds.
-fn api_system(cwd: &Path, memory: Option<&Memory>) -> String {
-    let mut system = prompt::system_prompt(cwd);
-    if let Some(memory) = memory {
-        system.push_str(&memory.snapshot().section(Mode::Conversation));
-    }
-    system
+/// The system prompt of Junees's own agent: the memory and the skill list
+/// are read now and stay as they are for the session, so the prompt cache
+/// holds.
+fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>) -> String {
+    prompt::system_prompt(cwd)
+        + &prompt::data_sections(
+            memory,
+            Mode::Conversation,
+            config.home.as_deref(),
+            skills::Mode::Manage,
+        )
 }
 
-/// What the conversation adds to Claude Code's system prompt: the memory,
-/// to read only (the memory tool is Junees's own).
-fn claude_system(memory: Option<&Memory>) -> String {
-    memory.map_or_else(String::new, |memory| {
-        memory.snapshot().section(Mode::ReadOnly)
-    })
+/// What the conversation adds to Claude Code's system prompt: the memory
+/// and the skill list ([`prompt::claude_append`]).
+fn claude_system(config: &Config, memory: Option<&Memory>) -> String {
+    prompt::claude_append(String::new(), memory, config.home.as_deref())
 }
 
 /// Claude Code for the conversation, once `claude --version` and its
@@ -389,7 +393,10 @@ async fn claude_chat(
         config.max_turns,
         cancel.clone(),
     );
-    chat.set_system(claude_system(conversation_memory(config, cwd).as_ref()));
+    chat.set_system(claude_system(
+        config,
+        conversation_memory(config, cwd).as_ref(),
+    ));
     Ok((chat, version))
 }
 
@@ -626,6 +633,7 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         cancel,
         notify: Notifier::from_lookup(lookup)?,
         claude,
+        skill_manage: config.task_skill_manage,
         memory,
     };
     let mut printer = Printer::new();
@@ -930,6 +938,8 @@ impl Repl {
                 None => eprintln!("{NO_MEMORY}"),
             },
             Slash::MemoryClear(target) => return self.clear_memory(target).await,
+            Slash::Skills => self.skills(),
+            Slash::Skill(name) => self.skill(&name),
             Slash::Bad(message) => eprintln!("{message}"),
             Slash::Exit => {}
         }
@@ -1166,17 +1176,19 @@ impl Repl {
         false
     }
 
-    /// Gives the conversation the memory as it is now, for a new session.
-    fn reread_memory(&mut self) {
+    /// Gives the conversation the memory and the skills as they are now,
+    /// for a new session.
+    fn reread_system(&mut self) {
         let memory = self.memory.as_ref();
         match &mut self.engine {
-            Engine::Api(agent) => agent.set_system(api_system(&self.cwd, memory)),
-            Engine::Claude(chat) => chat.set_system(claude_system(memory)),
+            Engine::Api(agent) => agent.set_system(api_system(&self.config, &self.cwd, memory)),
+            Engine::Claude(chat) => chat.set_system(claude_system(&self.config, memory)),
         }
     }
 
     fn reset(&mut self) {
-        self.reread_memory();
+        // A new session reads the memory and the skills again.
+        self.reread_system();
         if !self.saving {
             self.engine.reset(None);
             println!("(new conversation, not saved)");
@@ -1191,6 +1203,59 @@ impl Repl {
         self.engine.reset(opened.journal);
         self.session_id = opened.id;
         println!("(new conversation) {}", opened.status);
+    }
+
+    /// The skills folder, or why there is none.
+    fn skills_store(&self) -> Option<skills::Store> {
+        match self.config.require_home() {
+            Ok(home) => Some(skills::Store::new(skills::dir(home))),
+            Err(err) => {
+                eprintln!("no skills: {err}");
+                None
+            }
+        }
+    }
+
+    /// `/skills`: the skills in the folder now, and the folders that are
+    /// not skills.
+    fn skills(&self) {
+        let Some(store) = self.skills_store() else {
+            return;
+        };
+        let index = skills::Index::load(store.dir());
+        if index.skills.is_empty() {
+            println!("(no skills in {})", store.dir().display());
+        } else {
+            let count = index.skills.len();
+            println!(
+                "{count} {} in {} (prompt list {} / {} characters):",
+                if count == 1 { "skill" } else { "skills" },
+                store.dir().display(),
+                index.listing_chars(),
+                skills::INDEX_MAX_CHARS
+            );
+            for entry in &index.skills {
+                println!(
+                    "  {}: {}",
+                    escape_hidden(&entry.name),
+                    escape_hidden(&entry.description)
+                );
+            }
+        }
+        for problem in &index.problems {
+            eprintln!("  !! {}", escape_hidden(problem));
+        }
+    }
+
+    /// `/skill <name>`: a skill's SKILL.md and the list of its files.
+    fn skill(&self, name: &str) {
+        let Some(store) = self.skills_store() else {
+            return;
+        };
+        match store.view(name, None) {
+            Ok(text) => println!("{}", text.trim_end()),
+            Err(err) => eprintln!("{err}"),
+        }
     }
 
     /// `/sessions`: lists recent sessions and continues the one picked by

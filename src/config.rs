@@ -55,6 +55,9 @@ pub struct Config {
     pub task_max_tokens: Option<u64>,
     /// Default time budget of `task run` (`JUNEES_TASK_MAX_TIME`).
     pub task_max_time: Option<Duration>,
+    /// Lets task sessions change skills with `skill_manage`
+    /// (`JUNEES_TASK_SKILL_MANAGE`, off by default).
+    pub task_skill_manage: bool,
     /// Stream model replies, showing text as it is written
     /// (`JUNEES_STREAM`, on by default).
     pub stream: bool,
@@ -71,8 +74,9 @@ impl Config {
     /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_THINKING_BUDGET`, `JUNEES_HOME`, `HOME`,
     /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
     /// `JUNEES_HIDDEN_ENV`, `JUNEES_APPROVAL`, `JUNEES_TASK_MAX_TOKENS`,
-    /// `JUNEES_TASK_MAX_TIME`, `JUNEES_STREAM`, the `JUNEES_WEB_SEARCH*`
-    /// settings and the `JUNEES_MEMORY_*_CHARS` limits.
+    /// `JUNEES_TASK_MAX_TIME`, `JUNEES_TASK_SKILL_MANAGE`, `JUNEES_STREAM`,
+    /// the `JUNEES_WEB_SEARCH*` settings and the `JUNEES_MEMORY_*_CHARS`
+    /// limits.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -181,6 +185,8 @@ impl Config {
         let task_max_time = get("JUNEES_TASK_MAX_TIME")
             .map(|raw| parse_duration(&raw).context("JUNEES_TASK_MAX_TIME"))
             .transpose()?;
+        let task_skill_manage =
+            parse_flag(get("JUNEES_TASK_SKILL_MANAGE"), "JUNEES_TASK_SKILL_MANAGE")?;
         let stream = match get("JUNEES_STREAM") {
             None => true,
             raw => parse_flag(raw, "JUNEES_STREAM")?,
@@ -202,6 +208,7 @@ impl Config {
             approval,
             task_max_tokens,
             task_max_time,
+            task_skill_manage,
             stream,
             web_search,
             memory,
@@ -329,7 +336,27 @@ mod tests {
         assert_eq!(config.task_max_time, None);
         assert!(config.stream);
         assert_eq!(config.web_search, None);
+        assert!(!config.task_skill_manage);
         assert_eq!(config.memory, Limits::default());
+    }
+
+    #[test]
+    fn task_sessions_may_be_allowed_to_change_skills() {
+        let parsed = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_TASK_SKILL_MANAGE", "1"),
+        ]);
+        assert!(parsed.unwrap().task_skill_manage);
+        let err = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_TASK_SKILL_MANAGE", "maybe"),
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(
+            err.to_string(),
+            "JUNEES_TASK_SKILL_MANAGE must be 1 or 0, got `maybe`"
+        );
     }
 
     #[test]

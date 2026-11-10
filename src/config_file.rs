@@ -26,6 +26,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("model", "JUNEES_MODEL"),
     ("task_max_time", "JUNEES_TASK_MAX_TIME"),
     ("task_max_tokens", "JUNEES_TASK_MAX_TOKENS"),
+    ("task_skill_manage", "JUNEES_TASK_SKILL_MANAGE"),
     ("max_tokens", "JUNEES_MAX_TOKENS"),
     ("max_turns", "JUNEES_MAX_TURNS"),
     ("context_window", "JUNEES_CONTEXT_WINDOW"),

@@ -205,6 +205,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_skill_manage_changes_the_skills_folder() {
+        let (_dir, root, file) = settings_file::testing::home();
+        let skills = crate::skills::dir(&root.join(".junees"));
+        let store = crate::skills::Store::new(skills.clone());
+        let original = "---\nname: x\ndescription: Use when testing\n---\n1. step\n";
+        store.create("x", original).unwrap();
+        let skill = skills.join("x").join(crate::skills::SKILL_FILE);
+        std::os::unix::fs::symlink(&skills, root.join("skills-link")).unwrap();
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        let hint = "use the `skill_manage` tool";
+
+        let write = WriteFile::with_settings(&settings);
+        let edit = EditFile::with_settings(&settings);
+        for path in [
+            skill.clone(),
+            root.join("skills-link/x/SKILL.md"),
+            settings_file::testing::relative(&skill),
+            skills.join("x/references/new.md"),
+        ] {
+            let output = write
+                .run(json!({"path": path, "content": "Always run ... first.\n"}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(output.content.contains(hint), "{}", output.content);
+            let output = edit
+                .run(json!({"path": path, "old_string": "1. step", "new_string": "1. run x"}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(output.content.contains(hint), "{}", output.content);
+        }
+
+        // Bash refuses commands that write there. Only paths in the test's
+        // folder run for real; the `~` forms go through the policy alone,
+        // so a broken rule cannot touch the real home.
+        let bash = Bash::with_settings(&settings);
+        for command in [
+            format!("echo > {}", skill.display()),
+            format!("echo '1. run x' >> {}", skill.display()),
+            format!("cd {} && echo > SKILL.md", skills.join("x").display()),
+        ] {
+            let output = bash.run(json!({"command": command})).await;
+            assert!(output.is_error, "{command}: {}", output.content);
+            assert!(output.content.contains(hint), "{}", output.content);
+        }
+        let policy = CommandPolicy::with_settings(&settings);
+        for command in [
+            "echo > ~/.junees/skills/x/SKILL.md",
+            "echo '1. run x' >> $HOME/.junees/skills/x/SKILL.md",
+            "sed -i s/step/run/ ~/.junees/skills/x/SKILL.md",
+            "tee ~/.junees/skills/x/references/a.md < /dev/null",
+            "cd ~/.junees/skills/x && echo > SKILL.md",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(reason.contains(hint), "{command}: {reason}"),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), original);
+        assert!(!skills.join("x/references").exists());
+
+        // skill_manage still changes it, with its checks.
+        store.patch("x", None, "1. step", "1. other step").unwrap();
+        assert!(
+            std::fs::read_to_string(&skill)
+                .unwrap()
+                .contains("1. other step")
+        );
+    }
+
+    #[tokio::test]
     async fn dispatches_by_name() {
         let mut registry = ToolRegistry::new();
         registry.register(Echo);

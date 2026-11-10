@@ -32,7 +32,8 @@ pub struct Chat {
     journal: Option<Box<dyn Journal>>,
     cancel: Cancel,
     /// What Junees adds to Claude Code's system prompt
-    /// (`--append-system-prompt`), such as its memory; empty for nothing.
+    /// (`--append-system-prompt`): its memory and skill list; empty for
+    /// nothing.
     system: String,
 }
 
@@ -416,6 +417,27 @@ mod tests {
                 "\nMEMORY (persistent notes)\n...",
                 "--disallowedTools"
             ]
+        );
+        // The skill list goes to Claude Code's system prompt.
+        chat.set_system("\n# Skills\n- deploy: Use when deploying\n".into());
+        let args = chat.arguments();
+        assert_eq!(
+            args[18..25],
+            [
+                "--resume",
+                "c-1",
+                "--model",
+                "opus",
+                "--append-system-prompt",
+                "\n# Skills\n- deploy: Use when deploying\n",
+                "--disallowedTools"
+            ]
+        );
+        chat.set_system(String::new());
+        assert!(
+            !chat
+                .arguments()
+                .contains(&"--append-system-prompt".to_string())
         );
     }
 

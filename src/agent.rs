@@ -257,7 +257,8 @@ impl Agent {
     }
 
     /// Makes the next model calls use `system` as the system prompt, for a
-    /// new session (fresh memory); the conversation stays.
+    /// new session (`/new` reads the memory and the skills again); the
+    /// conversation stays.
     pub fn set_system(&mut self, system: String) {
         self.options.system = system;
     }

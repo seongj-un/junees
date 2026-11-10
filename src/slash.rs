@@ -24,6 +24,10 @@ pub enum Slash {
     Memory,
     /// `/memory clear <target>` empties one store, after asking.
     MemoryClear(Target),
+    /// `/skills` lists the skills.
+    Skills,
+    /// `/skill <name>` shows one.
+    Skill(String),
     Help,
     Exit,
     /// A command typed wrong: what to tell the user.
@@ -71,6 +75,14 @@ pub fn parse(line: &str) -> Option<Slash> {
         "context" => plain(Slash::Context),
         "usage" => plain(Slash::Usage),
         "memory" => memory(arg.as_deref()),
+        "skills" => plain(Slash::Skills),
+        "skill" => match arg {
+            None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
+            Some(name) => match crate::skills::check_name(&name) {
+                Ok(()) => Slash::Skill(name),
+                Err(err) => Slash::Bad(err),
+            },
+        },
         "help" => plain(Slash::Help),
         "exit" | "quit" => plain(Slash::Exit),
         _ => Slash::Bad(format!("unknown command /{name}; /help lists the commands")),
@@ -152,6 +164,8 @@ mod tests {
             ("/memory clear user", Slash::MemoryClear(Target::User)),
             ("/memory  clear   notes ", Slash::MemoryClear(Target::Notes)),
             ("/memory clear project", Slash::MemoryClear(Target::Project)),
+            ("/skills", Slash::Skills),
+            ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),
             ("/exit", Slash::Exit),
             ("/quit", Slash::Exit),
@@ -188,6 +202,12 @@ mod tests {
                 "{line}"
             );
         }
+        assert_eq!(
+            bad("/skill"),
+            "/skill takes a skill name; /skills lists them"
+        );
+        assert!(bad("/skill ../x").contains("invalid skill name"));
+        assert_eq!(bad("/skills all"), "/skills takes no argument");
     }
 
     #[test]
