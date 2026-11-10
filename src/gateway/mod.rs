@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod rest;
+pub mod shard;
 pub mod split;
 
 use std::sync::Arc;
