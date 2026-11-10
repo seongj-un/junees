@@ -2744,8 +2744,8 @@ mod tests {
             ("mkdir -p ~/.junees/skills/evil".into(), "skill_manage"),
             ("cp -r /tmp/evil ~/.junees/skills/".into(), "skill_manage"),
             ("rm -r ~/.junees/skills/deploy".into(), "skill_manage"),
-            ("echo '{}' > ~/.junees/cron/jobs.json".into(), "junees cron"),
-            ("rm -r ~/.junees/cron/output".into(), "junees cron"),
+            ("echo '{}' > ~/.junees/cron/jobs.json".into(), ""),
+            ("rm -r ~/.junees/cron/output".into(), ""),
             ("mv ~/.junees/memory /tmp/old".into(), "memory"),
             ("ln -s ~/.junees/memory/user.md /tmp/l".into(), "memory"),
             ("touch ~/.junees/mem*/user.md".into(), "memory"),
@@ -2779,7 +2779,14 @@ mod tests {
             match policy.check(&command) {
                 Verdict::Deny(reason) => assert!(
                     reason.contains("Commands may read it")
-                        && reason.contains(&format!("use the `{tool}` tool")),
+                        && if tool.is_empty() {
+                            // Names no command that would change it.
+                            reason.contains("only the user changes it")
+                                && !reason.contains("junees cron")
+                                && !reason.contains("tool instead")
+                        } else {
+                            reason.contains(&format!("use the `{tool}` tool"))
+                        },
                     "{command}: {reason}"
                 ),
                 Verdict::Allow => panic!("expected `{command}` to be denied"),

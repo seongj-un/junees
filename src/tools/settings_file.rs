@@ -50,8 +50,8 @@ pub struct DataFolder {
     pub name: &'static str,
     /// What it holds, for messages.
     pub holds: &'static str,
-    /// The tool that changes it.
-    pub tool: &'static str,
+    /// The tool that changes it, or `None` when only the user does.
+    pub tool: Option<&'static str>,
 }
 
 /// The folders under `$JUNEES_HOME` the model may read but not write.
@@ -59,22 +59,22 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
     DataFolder {
         name: "memory",
         holds: "the saved memory",
-        tool: "memory",
+        tool: Some("memory"),
     },
     DataFolder {
         name: "projects",
         holds: "the saved project memory",
-        tool: "memory",
+        tool: Some("memory"),
     },
     DataFolder {
         name: "skills",
         holds: "the saved skills",
-        tool: "skill_manage",
+        tool: Some("skill_manage"),
     },
     DataFolder {
         name: "cron",
         holds: "the scheduled jobs and their output",
-        tool: "junees cron",
+        tool: None,
     },
 ];
 
@@ -83,8 +83,10 @@ impl DataFolder {
     pub fn refusal(&self, path: &str) -> String {
         format!(
             "{path} is in `$JUNEES_HOME/{}/`, {} of Junees. The file tools may read it \
-             but not change it; use the `{}` tool instead.",
-            self.name, self.holds, self.tool
+             but not change it; {}",
+            self.name,
+            self.holds,
+            self.changed_by()
         )
     }
 
@@ -92,10 +94,18 @@ impl DataFolder {
     pub fn reason(&self, word: &str) -> String {
         format!(
             "`{word}` is in `$JUNEES_HOME/{}/`, {} of Junees. Commands may read it (cat, \
-             grep, ls and the like) but not change, move or copy it; use the `{}` tool \
-             instead.",
-            self.name, self.holds, self.tool
+             grep, ls and the like) but not change, move or copy it; {}",
+            self.name,
+            self.holds,
+            self.changed_by()
         )
+    }
+
+    fn changed_by(&self) -> String {
+        match self.tool {
+            Some(tool) => format!("use the `{tool}` tool instead."),
+            None => "only the user changes it.".into(),
+        }
     }
 }
 
@@ -724,7 +734,7 @@ mod tests {
         }
         assert_eq!(
             file.data_folder(&relative(&junees.join("memory/user.md")))
-                .map(|folder| folder.tool),
+                .and_then(|folder| folder.tool),
             Some("memory")
         );
         for path in [
