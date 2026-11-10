@@ -1482,6 +1482,7 @@ fn print_event(event: Event<'_>) {
                 cli::preview(&input.to_string(), PREVIEW_CHARS)
             );
         }
+        Event::Subagent { index, line } => eprintln!("  [{index}] {line}"),
         // Part of the answer, after its text.
         Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),
         Event::Compacted {

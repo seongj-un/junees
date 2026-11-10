@@ -81,6 +81,7 @@ impl<'a> Collector<'a> {
                 "-> {name} {} (run by the API)",
                 crate::cli::preview(&tool_target(input), PREVIEW_CHARS)
             )),
+            Event::Subagent { index, line } => Progress::Tool(format!("[{index}] {line}")),
             Event::Sources(urls) => Progress::Text(crate::web_search::sources_text(urls)),
             Event::Compacted {
                 before_messages,
