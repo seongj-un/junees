@@ -77,12 +77,21 @@ impl Shared {
 #[derive(Default)]
 pub struct ChannelState {
     running: AtomicBool,
+    /// A turn waits for a free slot (`discord_parallel`).
+    waiting: AtomicBool,
     queued: AtomicUsize,
     /// Raised by `!stop`; queued jobs of an older epoch are dropped.
     epoch: AtomicU64,
     answers: Arc<AnswerSlot>,
     session: Mutex<String>,
     usage: Mutex<String>,
+}
+
+impl ChannelState {
+    /// A turn runs or waits for a slot.
+    fn busy(&self) -> bool {
+        self.running.load(Ordering::SeqCst) || self.waiting.load(Ordering::SeqCst)
+    }
 }
 
 fn locked<T: Clone>(mutex: &Mutex<T>) -> T {
@@ -327,14 +336,14 @@ impl Bot {
             }
             Command::Stop => match self.channels.get(channel) {
                 Some(known)
-                    if known.state.running.load(Ordering::SeqCst)
-                        || known.state.queued.load(Ordering::SeqCst) > 0 =>
+                    if known.state.busy() || known.state.queued.load(Ordering::SeqCst) > 0 =>
                 {
                     known.state.epoch.fetch_add(1, Ordering::SeqCst);
                     let dropped = known.state.queued.swap(0, Ordering::SeqCst);
-                    let running = known.state.running.load(Ordering::SeqCst);
+                    let busy = known.state.busy();
                     known.cancel.cancel();
-                    match (running, dropped) {
+                    match (busy, dropped) {
+                        // The worker says when the turn stopped.
                         (true, 0) => return,
                         (true, n) => format!("(stopping; dropped {n} queued)"),
                         (false, n) => format!("(dropped {n} queued)"),
@@ -395,6 +404,8 @@ impl Bot {
                     locked(&state.session),
                     if state.running.load(Ordering::SeqCst) {
                         "a turn is running"
+                    } else if state.waiting.load(Ordering::SeqCst) {
+                        "a turn waits for a free slot"
                     } else {
                         "idle"
                     },
@@ -580,21 +591,24 @@ async fn turn(
     let permit = match permits.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
+            state.waiting.store(true, Ordering::SeqCst);
             shared
                 .say(
                     channel,
                     &format!(
-                        "(waiting: {} channels are running, the most at once)",
+                        "(waiting for a free slot: at most {} turns run at once)",
                         shared.config.parallel
                     ),
                 )
                 .await;
-            tokio::select! {
-                permit = permits.acquire_owned() => match permit {
-                    Ok(permit) => permit,
-                    Err(_) => return,
-                },
-                _ = cancel.cancelled() => {
+            let permit = tokio::select! {
+                permit = permits.acquire_owned() => permit.ok(),
+                _ = cancel.cancelled() => None,
+            };
+            state.waiting.store(false, Ordering::SeqCst);
+            match permit {
+                Some(permit) => permit,
+                None => {
                     shared.say(channel, "(stopped before it started)").await;
                     return;
                 }
@@ -607,6 +621,8 @@ async fn turn(
         let run = conversation.turn(input, out);
         tokio::pin!(run);
         let mut typing = tokio::time::interval(shared.typing_every);
+        // Posting can wait out a rate limit; no burst of typing after it.
+        typing.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
