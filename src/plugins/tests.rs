@@ -837,4 +837,12 @@ fn parses_plugin_commands() {
     );
     assert!(parse("enable ../x").is_err());
     assert!(format!("{:#}", parse("frobnicate").unwrap_err()).starts_with("usage: junees plugin"));
+    assert_eq!(
+        crate::cli::parse_args(["plugin".to_string(), "list".to_string()]).unwrap(),
+        crate::cli::Command::Plugin(PluginCommand::List)
+    );
+    assert_eq!(
+        crate::slash::parse("/plugins"),
+        Some(crate::slash::Slash::Plugins)
+    );
 }

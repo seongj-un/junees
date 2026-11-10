@@ -30,6 +30,8 @@ pub enum Slash {
     Skill(String),
     /// `/mcp` shows the MCP servers and their tools.
     Mcp,
+    /// `/plugins` shows the plugins.
+    Plugins,
     Help,
     Exit,
     /// A command typed wrong: what to tell the user.
@@ -79,6 +81,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "memory" => memory(arg.as_deref()),
         "skills" => plain(Slash::Skills),
         "mcp" => plain(Slash::Mcp),
+        "plugins" => plain(Slash::Plugins),
         "skill" => match arg {
             None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
             Some(name) => match crate::skills::check_name(&name) {

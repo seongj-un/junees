@@ -21,6 +21,9 @@ Usage:
   junees status           show where the task stands
   junees setup            change the settings
   junees gateway          run as a Discord bot (also `junees discord`; see README)
+  junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
+                          plugin install <folder> [--name <n>], enable <name> [--trust],
+                          disable <name>, remove <name>
 
 In the conversation, /help lists the commands (/task, /status, /sessions,
 /new, /model, /backend, ...). Settings are in $JUNEES_HOME/config.toml
@@ -119,6 +122,7 @@ pub const REPL_HELP: &str = "\
 /skills            list the skills ($JUNEES_HOME/skills)
 /skill <name>      show a skill
 /mcp               show the MCP servers ($JUNEES_HOME/mcp.json) and their tools
+/plugins           show the plugins this session uses and the installed ones
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
 approval question it skips the call and cancels the turn. During /task it
@@ -132,6 +136,8 @@ pub enum Command {
     Setup,
     /// `junees gateway` (or `junees discord`): run as a Discord bot.
     Gateway,
+    /// `junees plugin ...` (or `junees plugins`).
+    Plugin(crate::plugins::manage::PluginCommand),
     Help,
     Version,
 }
@@ -237,6 +243,13 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                 Some("-h" | "--help") => Ok(Command::Help),
                 Some(other) => bail!("setup takes no arguments (got `{other}`)"),
             };
+        }
+        Some("plugin" | "plugins") => {
+            args.next();
+            if matches!(args.peek().map(String::as_str), Some("-h" | "--help")) {
+                return Ok(Command::Help);
+            }
+            return crate::plugins::manage::parse(args).map(Command::Plugin);
         }
         Some(name @ ("gateway" | "discord")) => {
             let name = name.to_string();
