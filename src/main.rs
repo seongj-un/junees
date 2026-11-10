@@ -32,7 +32,7 @@ use junees::subagent;
 use junees::task::budget::Budget;
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
-use junees::tools::ToolRegistry;
+use junees::tools::{ToolRegistry, ToolSettings};
 use junees::web_search;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
@@ -328,7 +328,14 @@ fn api_agent(
     mcp: &Mcp,
 ) -> Result<Agent> {
     let memory = conversation_memory(config, cwd);
-    let mut tools = ToolRegistry::with_defaults(&config.tools);
+    let gate = input.and_then(|input| approval::for_conversation(config, cwd, input));
+    // Junees's own state-changing commands go to the question, or are
+    // refused when no one asks.
+    let settings = ToolSettings {
+        approval_gate: gate.is_some(),
+        ..config.tools.clone()
+    };
+    let mut tools = ToolRegistry::with_defaults(&settings);
     if let Some(memory) = &memory {
         tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
     }
@@ -349,7 +356,7 @@ fn api_agent(
     if let Some(settings) = config.subagents {
         agent = agent.with_delegate(settings);
     }
-    if let Some(gate) = input.and_then(|input| approval::for_conversation(config, cwd, input)) {
+    if let Some(gate) = gate {
         agent = agent.with_gate(Box::new(gate.with_external_tools(mcp.external_tools())));
     }
     Ok(agent)
