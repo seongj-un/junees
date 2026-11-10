@@ -21,7 +21,7 @@ use junees::gateway::config::DiscordConfig;
 use junees::gateway::engine::{ApiEngines, Conversation, Engines, Progress};
 use junees::gateway::shard::Timing;
 use junees::gateway::{Gateway, Log};
-use junees::session::{Journal, Transcript};
+use junees::session::{Journal, Session, Transcript};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1204,6 +1204,72 @@ async fn each_channel_continues_its_session_after_a_restart() {
     let journal =
         std::fs::read_to_string(home.path().join(format!("sessions/{id}.jsonl"))).unwrap();
     assert!(journal.contains("second answer"));
+}
+
+#[tokio::test]
+async fn a_session_in_use_elsewhere_stays_the_channels() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let (api, served) = common::fake_api(vec![(200, common::text_reply("first answer"))]).await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        discord(&rest.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "hello", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "first answer").await;
+    running.stop().await;
+    tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    let index_path = home.path().join("gateway/discord-sessions.json");
+    let before = std::fs::read_to_string(&index_path).unwrap();
+    let index: Value = serde_json::from_str(&before).unwrap();
+    let id = index["505"].as_str().unwrap().to_string();
+
+    // Another Junees (`junees --resume <id>`) has the session open.
+    let held = Session::resume(&home.path().join(format!("sessions/{id}.jsonl"))).unwrap();
+    let (api, served) = common::fake_api(vec![(200, common::text_reply("second answer"))]).await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        discord(&rest.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "again", false, &[]))
+        .await;
+    let posts = rest.wait_post("505", |p| p.starts_with("(not run)")).await;
+    let refused = posts.iter().find(|p| p.starts_with("(not run)")).unwrap();
+    assert!(refused.contains("in use by another Junees"), "{refused}");
+    assert!(refused.contains(&id), "{refused}");
+    assert_eq!(std::fs::read_to_string(&index_path).unwrap(), before);
+
+    // Once the other Junees has let go, the next message continues it.
+    drop(held);
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "again", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "second answer").await;
+    running.stop().await;
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(
+        texts(&requests[0]),
+        ["user: hello", "assistant: first answer", "user: again"]
+    );
+    assert_eq!(std::fs::read_to_string(&index_path).unwrap(), before);
 }
 
 fn tool_call(command: &str) -> Value {

@@ -494,22 +494,9 @@ async fn worker(
             return;
         }
     };
-    let status = {
-        let mut index = shared
-            .index
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions::open(
-            &mut index,
-            shared.home.as_deref(),
-            &shared.cwd,
-            shared.engines.as_ref(),
-            &channel,
-            conversation.as_mut(),
-        )
-    };
-    (shared.log)(&format!("channel {channel}: {status}"));
-    store(&state.session, status);
+    // The channel's session is opened before the first input, and again
+    // before each later one while it is unavailable for now.
+    let mut ready = false;
     while let Some(job) = jobs.recv().await {
         if job.epoch() < state.epoch.load(Ordering::SeqCst) {
             continue;
@@ -548,6 +535,7 @@ async fn worker(
                         "session not saved".to_string()
                     }
                 };
+                ready = true;
                 (shared.log)(&format!("channel {channel}: new conversation, {status}"));
                 shared
                     .say(&channel, &format!("(new conversation) {status}"))
@@ -556,6 +544,39 @@ async fn worker(
                 store(&state.usage, String::new());
             }
             Job::Input { text, .. } => {
+                if !ready {
+                    let opened = {
+                        let mut index = shared
+                            .index
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        sessions::open(
+                            &mut index,
+                            shared.home.as_deref(),
+                            &shared.cwd,
+                            shared.engines.as_ref(),
+                            &channel,
+                            conversation.as_mut(),
+                        )
+                    };
+                    (shared.log)(&format!("channel {channel}: {}", opened.status));
+                    store(&state.session, opened.status.clone());
+                    ready = opened.ready;
+                    if !ready {
+                        shared
+                            .say(
+                                &channel,
+                                &format!(
+                                    "(not run) {}. It stays this channel's conversation: send \
+                                     the message again once the other Junees has closed it, or \
+                                     `!new` to start a new one here.",
+                                    opened.status
+                                ),
+                            )
+                            .await;
+                        continue;
+                    }
+                }
                 turn(
                     &shared,
                     &channel,

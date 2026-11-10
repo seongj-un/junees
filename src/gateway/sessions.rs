@@ -92,9 +92,35 @@ impl SessionIndex {
     }
 }
 
+/// What [`open`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opened {
+    /// A line about which session it is, or why there is none yet.
+    pub status: String,
+    /// The conversation is set up. `false` when the channel's session could
+    /// not be continued for now (another Junees has it open, or reading it
+    /// failed on the disk): the conversation was left alone, the index
+    /// still names the session, and the next try may work.
+    pub ready: bool,
+}
+
+impl Opened {
+    fn ready(status: String) -> Self {
+        Self {
+            status,
+            ready: true,
+        }
+    }
+}
+
 /// Gives `conversation` the session `channel` had (resumed and locked for
-/// this process), or a new one tied to the channel. Returns a line about
-/// which session it is. Without a state folder nothing is saved.
+/// this process), or a new one tied to the channel. Without a state folder
+/// nothing is saved.
+///
+/// A session that is only unavailable for now (see [`Opened::ready`])
+/// stays the channel's: replacing it would drop the conversation from the
+/// index for good. A session that cannot be continued at all (deleted,
+/// broken, another backend's) is replaced by a new one.
 pub fn open(
     index: &mut SessionIndex,
     home: Option<&Path>,
@@ -102,10 +128,10 @@ pub fn open(
     engines: &dyn Engines,
     channel: &str,
     conversation: &mut dyn Conversation,
-) -> String {
+) -> Opened {
     let Some(home) = home else {
         conversation.reset(None);
-        return "session not saved (neither JUNEES_HOME nor HOME is set)".into();
+        return Opened::ready("session not saved (neither JUNEES_HOME nor HOME is set)".into());
     };
     let backend = engines.session_backend();
     if let Some(id) = index.get(channel).map(str::to_string) {
@@ -121,15 +147,32 @@ pub fn open(
                     status.push_str(&format!("; {warning}"));
                 }
                 conversation.resume(session.transcript, Some(Box::new(writer)));
-                return status;
+                return Opened::ready(status);
+            }
+            Err(err) if for_now(&err) => {
+                return Opened {
+                    status: format!("cannot continue session {id} for now ({err:#})"),
+                    ready: false,
+                };
             }
             Err(err) => {
                 let status = start(index, home, cwd, engines, channel, conversation);
-                return format!("could not continue session {id} ({err:#}); {status}");
+                return Opened::ready(format!(
+                    "could not continue session {id} ({err:#}); {status}"
+                ));
             }
         }
     }
-    start(index, home, cwd, engines, channel, conversation)
+    Opened::ready(start(index, home, cwd, engines, channel, conversation))
+}
+
+/// Whether a failed resume may work later: the session is locked by
+/// another Junees, or the disk failed. A missing file is not; nor are
+/// errors without an I/O cause (a broken journal, another backend's).
+fn for_now(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| io.kind() != std::io::ErrorKind::NotFound)
 }
 
 /// A new session for `channel`, tied to it in the index.
