@@ -181,3 +181,56 @@ async fn the_conversation_reads_and_keeps_skills() {
         1
     );
 }
+
+#[tokio::test]
+async fn the_skills_screen_escapes_hidden_characters() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("junees");
+    let skills = home.join("skills");
+    for (folder, name, description) in [
+        ("evil", "evil", "ok\x1b[2K\rfake"),
+        ("other", "x\x1b]0;title\x07", "d"),
+    ] {
+        std::fs::create_dir_all(skills.join(folder)).unwrap();
+        std::fs::write(
+            skills.join(folder).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n1. go\n"),
+        )
+        .unwrap();
+    }
+    let cwd = dir.path().join("work");
+    std::fs::create_dir(&cwd).unwrap();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    command
+        .arg("--no-session")
+        .current_dir(&cwd)
+        .env("ANTHROPIC_API_KEY", "sk-fake")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+        .env("HOME", dir.path())
+        .env("JUNEES_HOME", &home)
+        .env_remove("JUNEES_BACKEND")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"/skills\n/exit\n").await.unwrap();
+    }
+    let out = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("junees did not exit")
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("  evil: ok\\u{1b}[2K\\rfake\n"), "{stdout}");
+    assert!(
+        stderr.contains("  !! skipped other/: its SKILL.md says `name: x\\u{1b}]0;title\\u{7}`"),
+        "{stderr}"
+    );
+    for text in [&stdout, &stderr] {
+        assert!(!text.contains(['\x1b', '\r', '\x07']), "{text:?}");
+    }
+}

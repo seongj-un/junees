@@ -1146,11 +1146,15 @@ impl Repl {
                 skills::INDEX_MAX_CHARS
             );
             for entry in &index.skills {
-                println!("  {}: {}", entry.name, entry.description);
+                println!(
+                    "  {}: {}",
+                    skills::visible(&entry.name),
+                    skills::visible(&entry.description)
+                );
             }
         }
         for problem in &index.problems {
-            eprintln!("  !! {problem}");
+            eprintln!("  !! {}", skills::visible(problem));
         }
     }
 
