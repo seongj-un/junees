@@ -28,7 +28,7 @@ pub enum PluginCommand {
         name: Option<String>,
     },
     /// Turns it on from the next run; `trust` lets its tools run without
-    /// approval questions.
+    /// approval questions, and without it an earlier trust ends.
     Enable {
         name: String,
         trust: bool,
@@ -178,12 +178,23 @@ fn enable(dir: &Path, name: &str, trust: bool) -> Result<String> {
     let manifest = manifest::load(&folder).with_context(|| format!("plugin {name}"))?;
     let mut state = state::load(dir)?;
     state.enabled.insert(name.to_string());
-    if trust {
+    // Each enable says whether it is trusted: without --trust an earlier
+    // trust ends.
+    let untrusted = if trust {
         state.trusted.insert(name.to_string());
-    }
+        false
+    } else {
+        state.trusted.remove(name)
+    };
     state::save(dir, &state)?;
     let mut text = format!("enabled plugin {name}; the next junees run uses it\n");
     text.push_str(&runs(&folder, &manifest));
+    if untrusted {
+        text.push_str(
+            "it is no longer trusted (enabled without --trust): its tools ask before they \
+             run\n",
+        );
+    }
     if trust {
         text.push_str("its tools run without approval questions (--trust)\n");
     } else if manifest.trust {

@@ -865,6 +865,27 @@ fn install_copies_a_plugin_that_stays_off_until_enabled() {
         "{text}"
     );
     assert!(home.load().plugins()[0].trusted);
+    // Enabling again without --trust takes the trust back, and says so
+    // (PR #40 review, note 3).
+    let text = run(PluginCommand::Enable {
+        name: "issues".into(),
+        trust: false,
+    })
+    .unwrap();
+    assert!(
+        text.contains(
+            "it is no longer trusted (enabled without --trust): its tools ask before they run\n"
+        ),
+        "{text}"
+    );
+    assert!(!home.load().plugins()[0].trusted);
+    assert!(state::load(&home.plugins_dir()).unwrap().trusted.is_empty());
+    let text = run(PluginCommand::Enable {
+        name: "issues".into(),
+        trust: false,
+    })
+    .unwrap();
+    assert!(!text.contains("no longer trusted"), "{text}");
     let missing = run(PluginCommand::Enable {
         name: "nope".into(),
         trust: false,
