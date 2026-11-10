@@ -399,6 +399,46 @@ fn the_prompt_section_shows_every_store_and_its_use() {
 }
 
 #[test]
+fn hidden_characters_never_reach_the_prompt_or_the_terminal() {
+    let home = tempfile::tempdir().unwrap();
+    let memory = memory(home.path());
+    // ESC[2K and `\r` would wipe the line `/memory` shows; U+202E flips
+    // what follows.
+    let err = add(&memory, Target::User, "ok\u{1b}[2K\rfake line\u{202e}abc").unwrap_err();
+    assert!(err.contains("U+001B"), "{err}");
+    add(&memory, Target::User, "Name: 성준").unwrap();
+    let err = memory
+        .change(
+            Target::User,
+            Change::Replace {
+                old: "성준".into(),
+                new: "a\u{2066}b".into(),
+            },
+        )
+        .unwrap_err();
+    assert!(err.contains("U+2066"), "{err}");
+    assert_eq!(memory.entries(Target::User).unwrap(), ["Name: 성준"]);
+    // Tabs and line breaks are plain text.
+    add(&memory, Target::Notes, "two\tcolumns\nand two lines").unwrap();
+
+    // A store edited by hand shows them as escapes.
+    fs::write(memory.path(Target::User), "evil\u{1b}[2K\rline\u{202e}x\n").unwrap();
+    let section = memory.snapshot().section(Mode::Conversation);
+    assert!(
+        section.contains("\nevil\\u{1b}[2K\\rline\\u{202e}x\n"),
+        "{section}"
+    );
+    let overview = memory.overview();
+    assert!(
+        overview.contains("  evil\\u{1b}[2K\\rline\\u{202e}x\n"),
+        "{overview}"
+    );
+    for text in [section, overview] {
+        assert!(!text.contains(['\u{1b}', '\r', '\u{202e}']), "{text:?}");
+    }
+}
+
+#[test]
 fn the_prompt_section_is_bounded_by_the_limits() {
     let home = tempfile::tempdir().unwrap();
     let memory = small(home.path(), 5);

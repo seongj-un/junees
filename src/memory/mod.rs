@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::prompt_text::{check_plain, escape_hidden};
+
 pub use secret::secret_kind;
 pub use tool::MemoryTool;
 
@@ -341,7 +343,7 @@ impl Memory {
                 store.chars(),
                 store.limit
             ));
-            for line in store.text.lines() {
+            for line in escape_hidden(&store.text).lines() {
                 out.push_str(&format!("  {line}\n"));
             }
         }
@@ -419,9 +421,10 @@ impl Snapshot {
             let title = match store.target {
                 Target::User => "About the user".to_string(),
                 Target::Notes => "Notes on the environment and conventions".to_string(),
-                Target::Project => {
-                    format!("Notes on this project ({})", self.project_root.display())
-                }
+                Target::Project => format!(
+                    "Notes on this project ({})",
+                    escape_hidden(&self.project_root.display().to_string())
+                ),
             };
             out.push_str(&format!(
                 "\n[{title}; {}: {}/{} characters]\n",
@@ -434,7 +437,8 @@ impl Snapshot {
             } else if store.text.is_empty() {
                 out.push_str("(empty)\n");
             } else {
-                out.push_str(&cut(&store.text, store.limit));
+                // A store edited by hand may hold what `check_entry` refuses.
+                out.push_str(&cut(&escape_hidden(&store.text), store.limit));
                 out.push('\n');
             }
         }
@@ -540,6 +544,8 @@ fn check_entry(text: &str) -> Result<String, String> {
     if entry.is_empty() {
         return Err("`content` is empty".into());
     }
+    // It goes into every later system prompt and onto the terminal.
+    check_plain("`content`", entry)?;
     if entry.lines().any(|line| line.trim() == SEPARATOR) {
         return Err(format!(
             "`content` has a line holding just `{SEPARATOR}`, which separates entries; \
