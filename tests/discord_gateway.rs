@@ -1035,6 +1035,56 @@ async fn rate_limited_posts_are_retried() {
     assert!(log.contains("rate limited, waiting 0.20s"), "{log}");
 }
 
+#[tokio::test]
+async fn a_second_gateway_on_the_same_home_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let first = start(
+        discord(&rest.url, &[]),
+        fake(Duration::ZERO),
+        Some(home.path().into()),
+        dir.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+
+    let second = start(
+        discord(&rest.url, &[]),
+        fake(Duration::ZERO),
+        Some(home.path().into()),
+        dir.path(),
+    );
+    let err = tokio::time::timeout(WAIT, second.task)
+        .await
+        .expect("the second gateway kept running")
+        .unwrap()
+        .unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("another Junees gateway is running"), "{text}");
+    assert!(text.contains("gateway/lock"), "{text}");
+    // It stopped before asking Discord for anything.
+    let asked = rest
+        .requests()
+        .iter()
+        .filter(|r| r.path.ends_with("/gateway/bot"))
+        .count();
+    assert_eq!(asked, 1);
+
+    // Once the first one has stopped, a gateway starts again.
+    first.stop().await;
+    let third = start(
+        discord(&rest.url, &[]),
+        fake(Duration::ZERO),
+        Some(home.path().into()),
+        dir.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    third.stop().await;
+}
+
 // -------------------------------------- With the real agent on a fake API
 
 fn api_config(api: &str, home: &Path, approval: &str) -> Config {
