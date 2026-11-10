@@ -54,6 +54,14 @@ pub const KEYS: &[(&str, &str)] = &[
     ("memory_user_chars", "JUNEES_MEMORY_USER_CHARS"),
     ("memory_notes_chars", "JUNEES_MEMORY_NOTES_CHARS"),
     ("memory_project_chars", "JUNEES_MEMORY_PROJECT_CHARS"),
+    ("discord_token", "JUNEES_DISCORD_TOKEN"),
+    ("discord_allowed_users", "JUNEES_DISCORD_ALLOWED_USERS"),
+    ("discord_channels", "JUNEES_DISCORD_CHANNELS"),
+    ("discord_parallel", "JUNEES_DISCORD_PARALLEL"),
+    (
+        "discord_approval_timeout",
+        "JUNEES_DISCORD_APPROVAL_TIMEOUT",
+    ),
 ];
 
 const HEADER: &str = "\
