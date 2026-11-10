@@ -213,7 +213,7 @@ mod tests {
         // reads as a token.
         for text in [
             format!("token {sha1}"),
-            format!("{sha1}"),
+            sha1.to_string(),
             format!("api key: {sha256}"),
             format!("commit {}", sha1.to_uppercase()),
             format!("commit {}", &sha256[..48]),
