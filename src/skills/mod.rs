@@ -59,6 +59,74 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `c` is a control character, a bidirectional formatting
+/// character or a line/paragraph separator: these can rewrite a terminal
+/// line or make a line of the system prompt read differently from what it
+/// holds.
+fn is_hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
+
+/// Refuses a front matter value of a `SKILL.md` being written that holds a
+/// hidden character ([`is_hidden`]): it would reach the system prompt and
+/// the terminal.
+fn check_header(key: &str, value: &str) -> Result<(), String> {
+    match value.chars().find(|&c| is_hidden(c)) {
+        None => Ok(()),
+        Some(c) => Err(format!(
+            "the `{key}` contains U+{:04X}, a control or bidirectional formatting \
+             character; write it as plain text",
+            c as u32
+        )),
+    }
+}
+
+/// Refuses control characters in a `SKILL.md` being written, other than
+/// tab and line ends (`\n`, `\r\n`).
+fn check_text(text: &str) -> Result<(), String> {
+    let mut chars = text.chars().peekable();
+    let mut line = 1;
+    while let Some(c) = chars.next() {
+        let allowed = match c {
+            '\n' => {
+                line += 1;
+                true
+            }
+            '\t' => true,
+            '\r' => chars.peek() == Some(&'\n'),
+            c => !c.is_control(),
+        };
+        if !allowed {
+            return Err(format!(
+                "{SKILL_FILE} contains the control character U+{:04X} on line {line}; \
+                 remove it",
+                c as u32
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Checks the text of a `SKILL.md` being written: no control characters
+/// besides tab and line ends, and no hidden characters in the `name` or
+/// `description`. Only writes are checked: a hand-written file is read as
+/// it is.
+pub(crate) fn check_written(text: &str, front: &FrontMatter) -> Result<(), String> {
+    check_header("name", &front.name)?;
+    check_header("description", &front.description)?;
+    check_text(text)
+}
+
 /// What the front matter of a `SKILL.md` says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontMatter {
