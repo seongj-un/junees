@@ -148,6 +148,18 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 남은 위험: 서버 프로세스는 exec 뒤 다시 dumpable이라 bash가 `/proc/<서버 pid>/environ`으로 `env`의 토큰을 읽을 수 있다(Junees 자신의 환경은 L4의 `PR_SET_DUMPABLE`로 막혀 있다). PID 네임스페이스나 서버별 사용자 같은 격리가 필요하다. 두 번째 시그널로 즉시 끝내면(`process::exit`) 서버 정리를 건너뛴다(입력이 닫히므로 명세를 따르는 서버는 스스로 끝남)
 - 미룬 것: Streamable HTTP(원격 서버, OAuth), resources/prompts, `subscriptions/listen`(목록 변경), MRTR(elicitation), task 모드의 MCP, 게이트웨이 `!mcp`, claude-code 백엔드의 `--mcp-config`(`--permission-prompts none`이라 trust 서버만 쓸 수 있고 env 값 전달, 환경 정리 스위치와의 관계, 연결 대기를 맞춰야 해서 간단하지 않음)
 
+### 플러그인 (로드맵 6단계 2차 B)
+- 새 모듈 `src/plugins/`(`manifest.rs`, `process.rs`, `tool.rs`, `hooks.rs`, `state.rs`, `manage.rs`, `mod.rs`, `tests.rs`). 공유 파일은 연결만: `tools/mod.rs`(`PreTool` 트레이트, `ToolRegistry::set_pre_tool`, `without`이 함께 넘김, `dispatch`가 아는 도구에만 묻기), `agent.rs`(`AfterTurn` 트레이트, `Agent::with_after_turn`, `run`이 `run_turn` 뒤에 알림), `tools/bash.rs`(`Capture`, `GroupGuard`를 crate에 공개), `mcp/tool.rs`(`prefixed_name`, `clean_schema` 공유), `approval.rs`(`ExternalTool::kind`: `MCP server`/`plugin`), `tools/settings_file.rs`(데이터 폴더 `plugins`), `main.rs`/`gateway/engine.rs`(읽기, 등록, 승인, 프롬프트, `/plugins`), `cli.rs`(`junees plugin`), `slash.rs`. 새 의존성 없음
+- 형식: `plugin.json`(`description`, `trust`, `tools[{name, description, input_schema, command, timeout_secs}]`, `hooks{pre_tool[{command, timeout_secs}], post_turn[...]}`, `prompt`), 모르는 키 거절, serde 타입 오류는 값을 인용하지 않게 바꿈(MCP와 같음). 훅 항목은 인자 배열만 쓰는 줄임 형태 없이 객체만 받는다(오류 메시지가 분명하도록). 켜짐 상태는 설정 파일 키가 아니라 `plugins/state.json`(`enabled`, `trusted`): config.toml의 평평한 키 표(`KEYS`)를 바꾸지 않고, 모델이 쓰지 못하는 데이터 폴더 안에 둔다. 상태 파일 이름은 점이 있어 플러그인 이름과 겹치지 않는다
+- 실행 폴더: MCP 규칙(작업 폴더에서 띄우지 않음)을 따르되 기본을 `/`가 아니라 플러그인 폴더로 했다. 플러그인 파일을 상대 경로로 부를 수 있어야 하고, 그 폴더는 모델이 쓰지 못하는 데이터 폴더다. 상대 경로 프로그램과 프롬프트 파일은 `..` 없이 플러그인 폴더 안만. 작업 폴더는 `JUNEES_WORKDIR`로 알려 준다
+- pre_tool 위치: 승인 게이트(`ToolGate`)가 아니라 `ToolRegistry::dispatch`에 걸었다. 게이트는 대화에만 있어서 `-p`와 게이트웨이의 질문 없는 설정에서 훅이 빠지고, 동시에 작업 중인 #37(게이트 잠금) 변경과 겹치기 때문이다. 결과로 훅은 승인 질문 뒤에 돌고(거절될 호출을 먼저 묻는 경우가 있다), 서브에이전트는 `without`으로 같은 훅을 받는다. `delegate`는 레지스트리를 거치지 않으므로 그 호출 자체에는 훅이 없다
+- post_turn 위치: `Agent::run`이 끝난 뒤(답, 취소, 실패 모두) 기다려서 부른다. 서브에이전트(`Agent::sharing`)는 받지 않는다. 경고는 `Event`가 아니라 표준 오류로(`Hooks`의 `warn`, 테스트는 모음): pre_tool은 이벤트 콜백이 없는 레지스트리 안에서 돌기 때문에 둘을 같게 했다
+- 실패는 열린 쪽으로: pre_tool 훅의 다른 종료 코드, 시간 초과, 실행 실패는 경고하고 호출을 실행한다(스펙의 "훅 실패는 경고만")
+- 쓰는 곳: api 백엔드의 대화, `-p`, 게이트웨이(MCP와 같음). 실행마다 한 번 읽고 `/new`에도 그대로(도구와 프롬프트가 같이 움직이도록). 작업 모드와 claude-code 백엔드는 쓰지 않는다
+- 테스트: `src/plugins/tests.rs`(명령 도구의 입력/폴더/환경, 실패/시간 초과와 자식 정리/빈 출력/실행 실패, 이름 정리와 설명 이스케이프, 승인과 두 가지 trust, pre_tool 거절과 실패 경고 셋과 받은 JSON, post_turn 세 결과와 실패 경고, 서브에이전트가 플러그인 도구와 훅을 빌려 씀, 프롬프트 이스케이프와 상한, 켜짐/권한/없는 플러그인, 설치/켜기/끄기/지우기와 링크 거절, 명령 파싱), `src/plugins/manifest.rs`(형식, 오류, 이름, 권한), `src/tools/mod.rs`(모델 도구의 plugins 폴더 쓰기 거절, 읽기 허용), `tests/plugins.rs`(바이너리). 숨긴 변수 제거, 실행 폴더, 시간 초과 kill, 거절 코드, `without`의 훅 전달, 권한 검사, 절 상한, 조각 이스케이프, after_turn 호출, trust 전달, `.git` 제외, 링크 거절, 데이터 폴더 등록, 상태 파일 권한을 하나씩 되돌리는 변이 스크립트로 각각 테스트가 실패하는 것을 확인했다
+- 남은 위험: 플러그인 명령은 사용자 권한으로 도는 보통 프로세스다(설치 자체가 신뢰). 실행 중 만든 경로로 플러그인 폴더에 쓰는 bash 명령은 차단 목록이 못 잡는다. 홈 폴더에서 실행하면 플러그인 폴더도 작업 폴더 안이다. 동시에 두 `junees plugin enable`을 돌리면 한쪽 변경이 사라질 수 있다(상태 파일 잠금 없음)
+- 미룬 것: git URL 설치, 업데이트, 훅의 도구 필터와 입력 변경, 플러그인이 주는 MCP 서버/스킬, 게이트웨이 `!plugins`, 작업 모드와 claude-code 백엔드. 실제 API로는 돌려 보지 않았다
+
 ## 상태
 
 - [x] 1단계 에이전트 루프 (PR #1)
