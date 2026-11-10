@@ -217,7 +217,9 @@ fn parse_time(text: &str, tz: &TimeZone) -> Option<Result<i64>> {
         )
     };
     Some((|| {
-        let (date, rest) = text.split_at(10);
+        let (Some(date), Some(rest)) = (text.get(..10), text.get(10..)) else {
+            return Err(invalid());
+        };
         let rest = rest.strip_prefix(['T', ' ']).ok_or_else(invalid)?;
         let mut date_parts = date.split('-');
         let mut number = |len: usize| -> Result<u32> {
@@ -438,6 +440,21 @@ mod tests {
         assert_eq!(once.next_after(now, &tz), Some(now + 1200));
         assert_eq!(once.next_after(now + 1200, &tz), None);
         assert!(!once.repeats() && every.repeats());
+    }
+
+    #[test]
+    fn a_time_with_other_than_ascii_is_a_format_error() {
+        let tz = TimeZone::utc();
+        let now = utc(2026, 11, 10, 8, 7);
+        // The review's probe panicked: byte 10 is inside the `é`.
+        for text in [
+            "2026-11-1é 09:00",
+            "2026-11-é0 09:00",
+            "2026-11-10\u{3000}09:00",
+        ] {
+            let err = Schedule::parse(text, now, &tz).unwrap_err().to_string();
+            assert!(err.contains("is not a time"), "{text}: {err}");
+        }
     }
 
     #[test]
