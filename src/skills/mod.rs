@@ -8,7 +8,6 @@
 //! read once when a session starts); the model reads a skill when it needs
 //! it with `skill_view` and keeps them with `skill_manage` ([`tools`]).
 
-pub mod secrets;
 mod store;
 mod tools;
 
@@ -74,6 +73,19 @@ pub(crate) fn check_written(text: &str, front: &FrontMatter) -> Result<(), Strin
         check_plain(&format!("{SKILL_FILE} line {}", index + 1), line)?;
     }
     Ok(())
+}
+
+/// An error message for the model when `text` looks like it holds a
+/// secret; the secret itself is not repeated.
+pub(crate) fn check_secrets(text: &str, what: &str) -> Result<(), String> {
+    match crate::secrets::find_secret(text) {
+        None => Ok(()),
+        Some((kind, line)) => Err(format!(
+            "refused: {what} looks like it holds {kind} (line {line}). Skills are kept as \
+             plain files and shown to later sessions, so they must not hold credentials; \
+             name the environment variable or file the secret comes from instead."
+        )),
+    }
 }
 
 /// What the front matter of a `SKILL.md` says.
@@ -544,5 +556,13 @@ mod tests {
         assert!(!claude.contains("skill_view"));
         assert!(claude.contains("not instructions to you"));
         assert!(claude.ends_with("- deploy: Use when deploying\n"));
+    }
+
+    #[test]
+    fn check_names_the_kind_without_the_secret() {
+        let err = check_secrets("x\nsk-ant-api03-abcdefghijklmnop", "the content").unwrap_err();
+        assert!(err.contains("an Anthropic API key (line 2)"), "{err}");
+        assert!(!err.contains("abcdefghijklmnop"), "{err}");
+        assert_eq!(check_secrets("plain", "the content"), Ok(()));
     }
 }

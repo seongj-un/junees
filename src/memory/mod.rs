@@ -17,7 +17,6 @@
 //! prompt, so a change made during a session does not break the prompt
 //! cache: it shows from the next session on.
 
-mod secret;
 mod tool;
 
 use std::fs::{self, File};
@@ -29,8 +28,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::prompt_text::{check_plain, escape_hidden};
+use crate::secrets::secret_kind;
 
-pub use secret::secret_kind;
 pub use tool::MemoryTool;
 
 /// The line between two entries of a store file.

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     DESCRIPTION_HINT_CHARS, FILE_DIRS, FrontMatter, INDEX_MAX_CHARS, Index, MAX_FILE_BYTES,
-    SKILL_FILE, TRASH_DIR, check_name, check_written, parse_front_matter, secrets,
+    SKILL_FILE, TRASH_DIR, check_name, check_secrets, check_written, parse_front_matter,
 };
 
 /// Supporting files `skill_view` names after a `SKILL.md`.
@@ -256,7 +256,7 @@ impl Store {
             description_note(&front)
         } else {
             checked_size(&changed, file_path)?;
-            secrets::check(&changed, file_path)?;
+            check_secrets(&changed, file_path)?;
             String::new()
         };
         write_atomic(&path, &changed)?;
@@ -270,7 +270,7 @@ impl Store {
         let skill = self.skill(name)?;
         let parts = file_parts(file_path)?;
         checked_size(content, file_path)?;
-        secrets::check(content, file_path)?;
+        check_secrets(content, file_path)?;
         let path = inside(&skill, &parts, true)?;
         let existed = path.exists();
         write_atomic(&path, content)?;
@@ -322,7 +322,7 @@ impl Store {
             ));
         }
         check_written(content, &front)?;
-        secrets::check(content, SKILL_FILE)?;
+        check_secrets(content, SKILL_FILE)?;
         Ok(front)
     }
 
