@@ -12,6 +12,7 @@ junees "이 폴더에 뭐가 있어?"        # 한 번만 묻기
 junees -c                           # 이 폴더의 마지막 대화 이어서
 junees task "할 일 관리 웹 앱을 만들어"   # 장기 작업: 계획하고 바로 실행 (git 저장소 안에서)
 junees setup                        # 설정 다시
+junees gateway                      # 디스코드 봇으로 띄우기 (아래 디스코드 게이트웨이)
 ```
 
 대화 안에서 쓰는 명령:
@@ -26,7 +27,7 @@ junees setup                        # 설정 다시
 - `/skills`: 스킬 목록(`$JUNEES_HOME/skills`, 아래 스킬), `/skill <이름>`: 스킬 본문과 파일 목록.
 - `/compact`, `/context`(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), `/usage`, `/help`, `/exit`.
 
-명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
 ### 설정 파일과 처음 설정
 
@@ -36,6 +37,7 @@ junees setup                        # 설정 다시
 2. 구독이면 `claude --version`과 `claude auth status --json`으로 확인한다(작업 모드가 쓰는 것과 같은 검사). 로그인이 안 돼 있으면 방법(`claude` 실행 후 `/login`, 브라우저가 없으면 `claude setup-token`, Linux면 bubblewrap 설치)을 보여 주고 설정은 저장한다. 구독은 대화(`junees`, `junees "질문"`)와 장기 작업(`junees task`, `/task`)을 모두 Claude Code로 돌리므로 API 키는 묻지 않는다(파일에 있던 키는 api 백엔드로 돌아갈 때를 위해 그대로 둔다).
 3. API 키를 고르면 화면에 보이지 않게 입력한다(터미널 echo를 끔). `sk-ant-`로 시작하지 않으면 다시 묻고, 잘못 넣은 값도 화면에 다시 찍지 않는다.
 4. API 키를 골랐으면 대화 모델(기본 `claude-sonnet-4-6`)을 묻고, 작업 기본 예산(시간 기본 `2h`, 토큰 상한은 선택)을 묻고 저장한다.
+5. 마지막으로 디스코드 봇을 설정할지 묻는다(선택, 기본 아니오. 이 질문에서 입력이 끝나면 건너뛴다). `y`면 봇 토큰(화면에 보이지 않게, 디스코드 토큰 모양이 아니면 값을 되풀이하지 않고 다시 묻는다), 허용할 사용자 id(하나 이상), 멘션 없이 답할 채널 id(선택, `none`이면 비움)를 묻는다. 아래 디스코드 게이트웨이 참고.
 
 Ctrl-C나 입력 끝(Ctrl-D)이면 아무것도 저장하지 않고 끝난다. 터미널이 아니면(cron, 파이프) 마법사를 띄우지 않고 `no API key: run `junees setup`, or set ANTHROPIC_API_KEY` 오류로 끝난다. 백엔드가 `claude-code`면(설정, `JUNEES_BACKEND`, 작업의 `--backend`) 키가 필요 없으므로 대화든 작업이든 마법사 없이 실행한다.
 
@@ -49,7 +51,7 @@ task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
 task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 ```
 
-그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
+그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `discord_*`는 `JUNEES_DISCORD_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
 파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령과, 이 파일이 든 폴더(`$JUNEES_HOME`)를 통째로 다루는 명령을 막는다(아래 명령 정책 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽은 차단 목록일 뿐 샌드박스가 아니어서 다른 변수나 실행 중에 만든 경로, 더 위 폴더를 통째로 다루는 명령으로는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
 
@@ -262,6 +264,106 @@ claude -p --output-format stream-json --verbose --include-partial-messages
 - 입력은 인자가 아니라 표준 입력으로 넘기고 다 쓴 뒤 닫는다. `-p`에 프롬프트 인자가 없으면 Claude Code는 표준 입력을 프롬프트로 읽는다([headless](https://code.claude.com/docs/en/headless)의 Pipe data through Claude: "Non-interactive mode reads stdin", [CLI reference](https://code.claude.com/docs/en/cli-reference)의 `--input-format` 기본값 `text`). 인자로 넘기면 리눅스에서 인자 하나가 128 KiB(`MAX_ARG_STRLEN`)를 넘을 때 `claude`를 실행하지 못하고(`Argument list too long`), `-`로 시작하는 입력(`-v 옵션이 뭐야`)은 옵션으로 읽힌다. 표준 입력은 그대로 전해진다. 쓰기는 따로 돌려서 `claude`가 큰 입력을 읽는 동안에도 출력과 Ctrl-C를 처리하고, `claude`가 끝났는데 다 쓰지 못한 입력은 버린다. 표준 입력의 한도는 10MB다(headless 문서: 넘으면 Claude Code가 오류로 끝난다). 작업 모드는 지금처럼 인자로 넘긴다.
 - `--permission-prompt-tool`로 Junees의 승인 질문을 붙이는 것은 아직 하지 않았다. 문서상 가능하다: `-p`에서 `--permission-prompt-tool mcp__<서버>__<도구>`를 주면 확인이 필요한 호출마다 Claude Code가 그 MCP 도구를 부른다([CLI reference](https://code.claude.com/docs/en/cli-reference)). 비용: Junees가 stdio MCP 서버(초기화, `tools/list`, `tools/call`)를 직접 구현해 `--mcp-config`로 넘기고(`--strict-mcp-config`와 함께 쓸 수 있다), 그 서버 프로세스가 대화 중인 Junees에 질문을 넘겨 터미널에서 묻고 답을 돌려줄 통로(유닉스 소켓 등)가 필요하다. `--permission-prompts host`로 바꿔야 하고, 이때 Claude Code는 `permission_denied` 이벤트를 내지 않으며, MCP 서버 연결을 첫 턴 전에 기다린다(`MCP_TIMEOUT`, 기본 30초). Ctrl-C로 질문을 취소하는 것과 Claude Code 쪽 대기의 관계도 맞춰야 한다. 후속 작업으로 남긴다.
 
+### 디스코드 게이트웨이
+
+`junees gateway`(또는 `junees discord`)는 Junees를 디스코드 봇으로 띄운다. 터미널 대화처럼 도구, 메모리, 스킬, 세션 기록, 실행 전 승인을 그대로 쓰고, 채널(스레드, DM)마다 대화 하나를 따로 둔다. 봇 프레임워크(serenity, twilight) 없이 Gateway v10 WebSocket과 REST를 직접 구현했다(의존성은 `tokio-tungstenite`와 `futures-util`만 늘었다).
+
+#### 봇 만들기
+
+1. [개발자 포털](https://discord.com/developers/applications)에서 New Application을 만들고, Bot 페이지에서 Reset Token으로 토큰을 받는다. 토큰은 비밀번호와 같다(아래 설정 파일이나 환경 변수에만 둔다).
+2. 같은 Bot 페이지의 Privileged Gateway Intents에서 **MESSAGE CONTENT INTENT를 켠다.** 메시지 내용은 특권 인텐트라서 꺼져 있으면 디스코드가 연결을 `4014 Disallowed intent(s)`로 닫고, Junees는 이 스위치를 켜라는 안내와 함께 끝난다([Gateway: Privileged Intents](https://docs.discord.com/developers/events/gateway#privileged-intents)). 봇이 쓰는 인텐트는 `GUILDS`(스레드 이벤트), `GUILD_MESSAGES`, `DIRECT_MESSAGES`, `MESSAGE_CONTENT`다.
+3. 서버에 초대한다. OAuth2 페이지의 URL Generator에서 scope `bot`, 권한 View Channels, Send Messages, Send Messages in Threads, Read Message History를 고르거나, 아래 URL의 `client_id`를 자기 애플리케이션 id로 바꿔 연다([OAuth2: Bot Authorization Flow](https://docs.discord.com/developers/topics/oauth2#bot-authorization-flow)). 권한 값 274877975552는 `VIEW_CHANNEL`(1<<10), `SEND_MESSAGES`(1<<11), `READ_MESSAGE_HISTORY`(1<<16), `SEND_MESSAGES_IN_THREADS`(1<<38)의 합이다.
+   ```
+   https://discord.com/oauth2/authorize?client_id=<애플리케이션 id>&scope=bot&permissions=274877975552
+   ```
+4. 디스코드 설정의 고급에서 개발자 모드를 켜면 사용자와 채널을 우클릭해 id를 복사할 수 있다(Copy User ID, Copy Channel ID).
+
+#### 설정
+
+`junees setup`의 마지막 질문(선택)이나 설정 파일, 환경 변수로 둔다. 환경 변수가 파일보다 우선한다.
+
+```toml
+discord_token = "..."                 # JUNEES_DISCORD_TOKEN (필수)
+discord_allowed_users = "123456789012345678"   # JUNEES_DISCORD_ALLOWED_USERS (필수, 쉼표 목록)
+discord_channels = "234567890123456789"        # JUNEES_DISCORD_CHANNELS (선택, 쉼표 목록)
+discord_parallel = 2                  # JUNEES_DISCORD_PARALLEL (동시에 턴을 돌릴 채널 수, 기본 2)
+discord_approval_timeout = "5m"       # JUNEES_DISCORD_APPROVAL_TIMEOUT (승인 답장 대기, 기본 5m)
+```
+
+- `discord_allowed_users`가 비어 있으면 시작하지 않는다(`no allowed Discord users ...`). 목록이 없으면 봇에게 말을 걸 수 있는 누구나 이 컴퓨터에서 명령을 실행할 수 있기 때문이다. id는 숫자만 받는다.
+- 토큰은 화면, 로그, 오류에 나오지 않는다: `Debug`는 `Token(hidden)`이고, REST의 `Authorization: Bot <토큰>` 헤더(민감 표시)와 Gateway의 IDENTIFY/RESUME 페이로드에만 들어간다. 오류는 경로(`Discord GET /gateway/bot: 401 Unauthorized ...`)와 닫힘 코드만 말한다. bash 도구, 작업 git, Claude Code의 환경에서 `JUNEES_DISCORD_TOKEN`을 지우고(`SECRET_ENV_VARS`), 설정 파일 보호(모델의 파일 도구와 bash 정책이 `config.toml`을 막음)도 그대로다. 메모리와 스킬은 디스코드 봇 토큰 모양(점으로 이은 세 base64 조각, 첫 조각이 숫자 id)의 내용을 저장하지 않는다(`src/secrets.rs`).
+- `JUNEES_DISCORD_API_URL`(환경 변수만, 기본 `https://discord.com/api/v10`)은 테스트와 프록시용이다. 토큰이 평문으로 나가지 않도록 `https://`만 받고 `http://`는 이 컴퓨터(`127.0.0.1`, `localhost`, `::1`)일 때만 받는다. Gateway 주소(`Get Gateway Bot`의 `url`, Ready의 `resume_gateway_url`)도 `wss://`(이 컴퓨터면 `ws://`)만 쓴다.
+- 백엔드는 설정의 `backend` 그대로다. api면 `ANTHROPIC_API_KEY`가, claude-code면 로그인된 `claude`가 필요하다(시작할 때 확인).
+
+#### 실행
+
+```sh
+cd ~/work/some-project      # 도구가 도는 폴더 (세션 기록의 cwd)
+junees gateway
+```
+
+연결, 재연결, 채널별 세션 같은 진행 상황은 표준 오류에 시각과 함께 한 줄씩 나온다(메시지 내용과 토큰은 찍지 않는다). SIGINT/SIGTERM이면 진행 중인 턴을 취소해 세션에 기록하고(채널에 `(stopped: Junees is shutting down)`), Gateway를 1000으로 닫고 종료 코드 0으로 끝난다. 두 번째 시그널은 바로 끝낸다. 게이트웨이는 처음 실행 마법사를 띄우지 않는다.
+
+systemd 사용자 서비스 예시(`~/.config/systemd/user/junees-gateway.service`):
+
+```ini
+[Unit]
+Description=Junees Discord gateway
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/work/some-project
+ExecStart=%h/.cargo/bin/junees gateway
+Restart=on-failure
+RestartSec=10
+# 설정은 ~/.junees/config.toml. 환경 변수로 줄 때는 0600 파일에:
+# EnvironmentFile=%h/.config/junees/gateway.env
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now junees-gateway
+journalctl --user -u junees-gateway -f     # 로그
+loginctl enable-linger "$USER"             # 로그아웃해도 계속 돌게
+```
+
+`systemctl --user stop`은 SIGTERM이므로 위처럼 턴을 정리하고 끝난다. claude-code 백엔드를 서비스로 돌리면 서비스 환경에서도 `claude`가 로그인돼 있어야 한다(`CLAUDE_CODE_OAUTH_TOKEN`이라면 `EnvironmentFile`로).
+
+#### 누구의 어떤 메시지에 답하나
+
+- `discord_allowed_users`의 사용자만. 다른 사용자의 메시지는 무시하고 로그에 사용자 id를 한 번만 남긴다. 봇(자기 자신 포함)의 메시지와 일반/답장이 아닌 시스템 메시지도 무시한다.
+- DM은 늘 답한다. 서버 채널에서는 봇을 멘션했을 때(`@Junees 질문`, 멘션 글자는 빼고 넘긴다), `discord_channels`에 있는 채널과 스레드, 그 채널 아래 스레드, 봇이 만든 스레드에서만 답한다. 그 밖의 채널에서는 명령도 멘션과 함께 쓴다(`@Junees !stop`). 승인 질문이 기다리는 채널에서는 멘션 없는 답장도 받는다.
+- 모델 출력이 누구도 호출하지 않도록 모든 메시지를 `allowed_mentions: {"parse": []}`로 보낸다(`@everyone`을 써도 알림이 가지 않는다).
+
+#### 대화
+
+- 채널(스레드, DM)마다 Junees 세션 하나. 세션은 보통 세션 기록(`$JUNEES_HOME/sessions/<id>.jsonl`, cwd는 게이트웨이를 띄운 폴더)이고, 어느 채널이 어느 세션인지는 `$JUNEES_HOME/gateway/discord-sessions.json`(채널 id -> 세션 id, 0600)에 둔다. 다시 띄우면 채널의 첫 메시지 때 그 세션을 이어 간다(flock으로 잠그므로 같은 세션을 연 다른 Junees가 있으면 새 세션으로 시작하고 `!status`에 이유가 나온다). 백엔드를 바꾸면 이전 백엔드의 세션은 이어 가지 않고 새로 시작한다. 터미널의 `/sessions`, `junees --resume <id>`로도 열 수 있다(게이트웨이가 그 세션을 쥐고 있지 않을 때).
+- 같은 채널의 메시지는 받은 순서대로 하나씩 처리한다(턴 중에 온 메시지는 대기열). 다른 채널은 동시에 돌고, 동시에 턴을 돌리는 채널은 `discord_parallel`(기본 2)까지다. 자리가 없으면 `(waiting: ...)`을 알리고 기다린다. 모든 채널의 대화는 한 스레드에서 비동기로 돈다(에이전트의 future가 `Send`가 아니라서 `LocalSet`).
+- 출력: 턴 중에는 타이핑 표시(8초마다 갱신, 승인 질문을 기다리는 동안은 멈춤). 응답은 메시지 편집으로 스트리밍하지 않고 **완성된 텍스트 블록마다** 보낸다(편집은 레이트 리밋을 빨리 쓰고, 끊긴 응답의 재시도 처리가 복잡해진다). 다음 텍스트 전까지의 도구 호출은 `-> bash ls -la` 같은 한 줄 요약(명령, 경로, 검색어 120자)을 코드 블록 하나로 묶어 보낸다. 2000자가 넘는 블록은 줄 단위로 나누고, 코드 블록이 잘리면 앞 메시지에서 닫고 다음 메시지에서 같은 언어로 다시 연다(길이는 UTF-16 단위로 세어 어느 방식으로 세도 2000자를 넘지 않게 한다). 잘리거나 압축된 응답 같은 안내도 채널에 나온다. 오류는 `error: ...`와 터미널과 같은 힌트로 보낸다.
+- 시스템 프롬프트에 "디스코드로 대화 중이니 짧게, 표 없는 Markdown"이라는 한 문단을 더한다.
+- 명령(슬래시 명령 등록 없이 텍스트로):
+  - `!new`: 새 대화(새 세션, 메모리와 스킬 다시 읽음). 대기열 순서대로 처리된다.
+  - `!stop`: 진행 중인 턴을 취소하고(도구의 프로세스 그룹까지, 기록은 터미널의 Ctrl-C와 같다) 대기열의 메시지를 버린다. 자리를 기다리던 턴도 멈춘다.
+  - `!status`: 백엔드와 모델, 동시 실행 중인 턴 수, 승인 방식, 이 채널의 세션과 상태(실행 중/대기열/승인 대기), 토큰 사용량.
+  - `!memory`: 영구 메모리 보기(터미널의 `/memory`와 같다. 서버 채널에서는 그 채널을 보는 모두에게 보이므로 DM에서 쓰는 것이 좋다). `!skills`: 스킬 목록. `!help`: 명령 목록.
+  - `!task`: 아직 지원하지 않는다는 안내(아래 범위 밖).
+- 승인(`JUNEES_APPROVAL`, 기본 `risky`): 위험한 도구 호출이면 채널에 `Approve this tool call?`과 명령(코드 블록, 터미널 질문과 같은 내용)을 보내고, 그 채널에서 허용 사용자의 다음 메시지로 정한다. `y`는 실행, `n`은 거절, `n <이유>`는 이유와 함께 거절(모델이 읽는다), `a`는 이 채널의 대화가 끝날 때까지 같은 종류 허용, 그 밖의 말은 그 말을 이유로 거절한다. `discord_approval_timeout`(기본 5분) 안에 답이 없으면 `(no answer within 5m: declined)`와 함께 거절한다. `!stop`은 질문을 취소하고 턴을 끝낸다. claude-code 백엔드는 터미널처럼 승인 질문 없이 Claude Code의 거절 규칙만 적용된다(`!status`에 나온다).
+
+#### 연결과 레이트 리밋
+
+[Gateway 문서](https://docs.discord.com/developers/events/gateway)를 따른다. `Get Gateway Bot`으로 받은 주소에 `?v=10&encoding=json`으로 연결하고(그 주소를 재연결에 다시 쓴다), Hello의 `heartbeat_interval`에 0~1 사이 무작위 값을 곱한 뒤 첫 하트비트를, 그 뒤로는 간격마다 마지막 시퀀스 번호와 함께 보낸다. 디스코드가 하트비트(op 1)를 요청하면 바로 보낸다. 다음 하트비트 때까지 ACK(op 11)가 없으면 좀비 연결로 보고 1000/1001이 아닌 코드(4000)로 닫은 뒤 Ready의 `resume_gateway_url`로 RESUME(op 6, `session_id`, `seq`)한다. Reconnect(op 7), 재연결 가능한 닫힘 코드, 코드 없는 끊김도 RESUME한다. Invalid Session(op 9)이 `d: false`면 1~5초 기다린 뒤 처음 주소로 새로 IDENTIFY한다. 4007, 4009는 새 세션, 4004(토큰 거절), 4010~4014는 다시 시도하지 않고 이유와 함께 끝난다([닫힘 코드](https://docs.discord.com/developers/topics/opcodes-and-status-codes#gateway-gateway-close-event-codes)). 재연결 사이 대기는 1초에서 두 배씩 120초까지 늘고 Ready/Resumed를 받으면 처음으로 돌아간다(하루 1000번의 IDENTIFY 한도를 아끼려고). 압축(zlib/zstd)과 샤딩은 쓰지 않는다(봇 하나, 서버 몇 개 기준).
+
+REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rate-limits)대로 하드코딩 없이 응답 헤더를 따른다: 경로(메서드 + 채널 id)마다 `X-RateLimit-Remaining`이 0이면 `X-RateLimit-Reset-After`까지 다음 요청을 미룬다. 429면 본문의 `retry_after`(없으면 `Retry-After` 헤더)만큼 기다렸다 다시 보내고, `global: true`면 모든 경로를 멈춘다. 429는 다섯 번, 네트워크 오류와 5xx는 세 번까지 시도한다. 10분 넘게 기다리라면 그 메시지는 실패로 로그에 남긴다. `X-RateLimit-Bucket`으로 경로를 묶지는 않는다(묶인 경로가 먼저 429를 받으면 그때 기다린다). User-Agent는 문서가 요구하는 `DiscordBot (https://github.com/seongj-un/junees, <버전>)`이다.
+
+#### 범위 밖, 한계
+
+- `!task <목표>`(게이트웨이에서 장기 작업 시작)는 후속으로 미뤘다. 작업 모드는 프로세스의 현재 폴더를 저장소 루트로 옮기고 한 저장소에 하나만 돌기 때문에, 여러 채널이 동시에 도는 게이트웨이 안에서는 따로 설계해야 한다. 지금은 컴퓨터에서 `junees task`를 돌리고 진행 알림은 웹훅(`notify_webhook`)으로 받는다.
+- 디스코드 애플리케이션(슬래시) 명령 등록, 첨부 파일 읽기, 메시지 편집 스트리밍, 반응 이모지, 봇이 스스로 스레드를 만드는 것은 하지 않는다.
+- 테스트는 테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST 서버로만 했다(`tests/discord_gateway.rs`). 실제 디스코드에는 연결해 보지 않았다.
+
 ### 컨텍스트 관리
 
 긴 작업에서도 대화가 모델의 컨텍스트 창을 넘지 않게 하고, 반복되는 앞부분은 캐시한다.
@@ -425,7 +527,17 @@ src/
   memory/            영구 메모리
     mod.rs             저장소 셋(user, notes, 프로젝트별 notes) 읽기/쓰기(0600, 원자적, flock), 항목 추가/교체/삭제와 상한, 프롬프트 절(대화, task, Claude Code 읽기 전용), /memory 보기
     tool.rs            memory 도구 (task 세션은 project만)
-  cli.rs             인자 파싱(위치 인자 질문, task/status/setup 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
+  cli.rs             인자 파싱(위치 인자 질문, task/status/setup/gateway 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
+  gateway/           디스코드 게이트웨이 (junees gateway)
+    mod.rs             Gateway::run: Get Gateway Bot, 연결 태스크, 채널 LocalSet, 종료 처리, 로그(Log)
+    config.rs          discord_* 설정 (토큰 Token은 Debug에서 숨김, 허용 사용자 필수, https/wss 확인)
+    shard.rs           Gateway v10 WebSocket: Hello/Identify/Ready, 하트비트(지터, ACK 누락), Resume, Reconnect, Invalid Session, 닫힘 코드, 지수 대기
+    rest.rs            REST: Get Gateway Bot, Create Message(allowed_mentions 없음), 타이핑, 경로별 레이트 리밋과 429 재시도
+    bot.rs             메시지 고르기(허용 사용자, DM/멘션/지정 채널/스레드), ! 명령, 채널별 작업자(대기열, 동시 실행 상한, 타이핑, 도구 줄 묶기, 취소)
+    engine.rs          Conversation/Engines 트레이트, api 에이전트와 Claude Code 대화, 이벤트를 텍스트 블록과 도구 한 줄로(Collector)
+    ask.rs             채널 승인 질문(다음 메시지로 답, 시간 초과 거절)
+    sessions.rs        채널 -> 세션 색인(discord-sessions.json), 세션 이어 가기/새로 만들기
+    split.rs           2000자 나누기(줄 단위, 코드 블록 닫고 다시 열기, UTF-16 길이)
 tests/
   common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림)
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
@@ -445,6 +557,7 @@ tests/
   claude_chat.rs       실제 바이너리와 가짜 claude로 구독 대화: 두 번째 턴이 같은 세션을 --resume, 스트리밍과 도구/거절 표시, /usage와 /compact, /context 안내, 거절 규칙 인자, claude 환경에 API 변수 없음, -p와 -c, Ctrl-C 후 다음 턴, 사용 한도 안내 검증
   memory.rs            실제 바이너리와 가짜 API 서버로 memory 도구가 저장한 항목이 지금 세션이 아니라 다음 세션의 시스템 프롬프트에 들어가는지, /memory 보기와 clear(확인 질문), /new가 메모리를 다시 읽는지 검증
   skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기, /skills 화면의 제어 문자 이스케이프 검증
+  discord_gateway.rs   테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST로 IDENTIFY/READY, 하트비트와 ACK 누락, resume_gateway_url로 RESUME, Reconnect, INVALID_SESSION, 닫힘 코드, 거절된 토큰이 오류와 로그에 안 나옴, 허용 사용자와 멘션 규칙, 메시지 나누기, 채널별 대기열과 동시 실행, !stop/!new/!status, 종료 시 취소, 429 재시도, 실제 에이전트와 가짜 API로 재시작 뒤 채널 세션 이어 가기와 승인 답장/시간 초과 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
 
@@ -454,7 +567,7 @@ tests/
 2. 장기 실행 하네스: 세션 기록과 재개, 컨텍스트 압축, 여러 세션에 걸친 장기 작업 모드, 무인 실행 안정성. 자세한 계획과 진행 상황은 [docs/long-running.md](docs/long-running.md)
 3. 도구 체계: 스트리밍 출력, 위험 명령 승인, 파일 패치(edit_file), 웹 검색, 확장 사고 블록 보존 (완료)
 4. 메모리와 스킬: 세션을 넘어 남는 기억, 절차 문서화와 재사용
-5. 게이트웨이: 디스코드 봇
+5. 게이트웨이: 디스코드 봇 (`junees gateway`, 위 디스코드 게이트웨이)
 6. 확장: 서브에이전트, 예약 작업, 플러그인, MCP 클라이언트
 
 ## 개발

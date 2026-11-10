@@ -109,6 +109,20 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - claude-code 백엔드: 대화, `/new`, 작업의 계획/작업 세션 모두 메모리 절 다음에 목록을 붙여 한 `--append-system-prompt` 인자로(`prompt::claude_append`. 둘 다 비면 인자 없음). `settings_rules`가 `$JUNEES_HOME` 전체의 Read/Edit를 거절하므로 Claude Code는 스킬 파일을 읽을 수 없고, 목록에 그렇다고 적는다. 메모리를 모두 8000자로 채우고 목록까지 꽉 채운 최악의 경우(4바이트 문자)도 128 KiB 한도 아래인지 테스트로 확인한다
 - 남은 것: 여러 Junees 프로세스가 같은 스킬을 동시에 고치면 마지막 쓰기가 이긴다(잠금 없음). 하위 폴더(카테고리)나 Hermes 스킬 형식의 메타데이터는 읽지 않는다
 
+### 디스코드 게이트웨이 (로드맵 5단계)
+- `junees gateway`(별칭 `junees discord`): 새 모듈 `src/gateway/`에 두고 기존 파일은 연결만 바꿨다: `main.rs`(명령, 백엔드별 Engines, 시그널), `cli.rs`(명령과 도움말), `config_file.rs`(`discord_*` 키), `tools/mod.rs`(`JUNEES_DISCORD_TOKEN`을 `SECRET_ENV_VARS`에), `secrets.rs`(디스코드 봇 토큰 모양), `setup.rs`(선택 단계), `lib.rs`
+- 의존성: 봇 프레임워크 대신 `tokio-tungstenite`(rustls + webpki roots, reqwest와 같은 rustls 0.23)와 `futures-util`(Sink/Stream)만 더했다. Gateway v10 JSON, 압축과 샤딩 없음
+- 연결(`shard.rs`): Get Gateway Bot의 주소를 캐시해 재사용, Hello -> 지터 곱한 첫 하트비트 -> 간격마다, ACK 누락이면 4000으로 닫고 RESUME(`resume_gateway_url`, `session_id`, `seq`), op 1 요청엔 즉시 하트비트, op 7과 재연결 가능한 닫힘은 RESUME, op 9 `false`면 1~5초 뒤 처음 주소로 IDENTIFY, 4007/4009는 새 세션, 4004/4010~4014는 끝(4014는 MESSAGE CONTENT INTENT 안내). 재연결 대기 1초부터 두 배씩 120초까지, Ready/Resumed에 초기화. 연결에 실패하면 RESUME 정보를 버리고 처음 주소로(문서의 "reconnect fails")
+- REST(`rest.rs`): 경로(메서드 + 채널 id)별로 `X-RateLimit-Remaining: 0`이면 `Reset-After`까지 대기, 429는 `retry_after`(전역이면 모든 경로) 대기 후 재시도 5번, 네트워크 오류/5xx 3번. `X-RateLimit-Bucket` 묶음은 쓰지 않음. 모든 메시지에 `allowed_mentions: {parse: []}`. 오류는 경로만, URL은 `without_url`
+- 보안: 허용 사용자 목록이 비면 시작 거부. 토큰은 `Token`(Debug 숨김, Display 없음), 헤더는 sensitive. API URL은 https(루프백만 http), Gateway 주소는 wss(루프백만 ws). 다른 사용자의 메시지는 로그에 id만 한 번
+- 대화: 채널마다 작업자 하나(대기열, `!stop`은 epoch를 올려 대기열을 버리고 Cancel), 동시 실행은 Semaphore(`discord_parallel`, 기본 2). 에이전트와 Claude Code 대화의 future가 `Send`가 아니어서(Agent가 `&self`를 await 너머로 잡음) 채널들은 `LocalSet` 한 스레드에서 돈다. 그래서 `Gateway::run`은 `block_on`으로 돌려야 한다(테스트는 전용 스레드와 current_thread 런타임). Agent를 `Send`로 바꾸는 것은 다른 작업과 겹치는 `agent.rs` 변경이라 하지 않았다
+- 세션: 보통 세션 기록을 쓰고 채널 -> 세션 id 색인(`$JUNEES_HOME/gateway/discord-sessions.json`)만 더했다. `session.rs`와 세션 형식은 바꾸지 않았다. 다른 백엔드의 세션, 잠긴 세션, 지워진 세션이면 새로 시작하고 이유를 `!status`에
+- 출력: 메시지 편집 스트리밍 대신 완성된 텍스트 블록마다 보낸다(레이트 리밋, 재시도 시 지울 텍스트). 도구 호출은 다음 텍스트나 질문 전에 한 코드 블록으로. 2000자 나누기는 UTF-16 길이로
+- 승인: `Ask`를 채널용으로(`ask.rs`). 질문은 작업자의 출력 순서를 거쳐(도구 줄 뒤) 나가고, 답 슬롯이 차 있으면 그 채널의 다음 비명령 메시지가 답이다(멘션 없어도). `y`/`n`/`n 이유`/`a`/그 밖은 이유로 거절, 시간 초과는 거절. claude-code 백엔드는 질문 없음
+- 종료: SIGINT/SIGTERM이면 채널 턴을 취소(기록)하고 작업자를 30초까지 기다린 뒤 1000으로 닫는다
+- 테스트: `tests/discord_gateway.rs`(가짜 Gateway/REST, 실제 에이전트 + 가짜 API로 세션 이어 가기와 승인), 모듈 단위 테스트(설정, 나누기, 답 읽기, 명령, 토큰 모양)
+- 미룬 것: `!task`(작업 모드가 프로세스 cwd를 바꾸고 저장소당 하나라 게이트웨이의 동시 채널과 따로 설계 필요), 슬래시 명령 등록, 첨부 파일, 봇이 스레드를 만드는 것, 메시지 편집 스트리밍. 실제 디스코드로는 확인하지 않았다
+
 ## 상태
 
 - [x] 1단계 에이전트 루프 (PR #1)
