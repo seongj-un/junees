@@ -13,6 +13,7 @@ junees -c                           # 이 폴더의 마지막 대화 이어서
 junees task "할 일 관리 웹 앱을 만들어"   # 장기 작업: 계획하고 바로 실행 (git 저장소 안에서)
 junees setup                        # 설정 다시
 junees gateway                      # 디스코드 봇으로 띄우기 (아래 디스코드 게이트웨이)
+junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작업 (아래 예약 작업)
 ```
 
 대화 안에서 쓰는 명령:
@@ -25,9 +26,10 @@ junees gateway                      # 디스코드 봇으로 띄우기 (아래 �
 - `/backend [api|claude-code]`: 대화와 `/task`를 무엇으로 돌릴지 보여 주거나, 이 실행 동안만 둘 다 바꾼다. 대화를 바꾸면 새 세션으로 시작한다(아래 구독 모드).
 - `/memory`: 영구 메모리 세 저장소의 파일, 사용량, 항목을 보여 준다. `/memory clear user|notes|project`는 한 저장소를 비운다(`y`로 확인한 뒤. 아래 메모리).
 - `/skills`: 스킬 목록(`$JUNEES_HOME/skills`, 아래 스킬), `/skill <이름>`: 스킬 본문과 파일 목록.
+- `/cron`: 예약 작업 목록(아래 예약 작업).
 - `/compact`, `/context`(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), `/usage`, `/help`, `/exit`.
 
-명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `cron`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
 ### 설정 파일과 처음 설정
 
@@ -51,7 +53,7 @@ task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
 task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 ```
 
-그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `discord_*`는 `JUNEES_DISCORD_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
+그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`, `timezone`, `cron_max_time`, `cron_max_tokens`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `discord_*`는 `JUNEES_DISCORD_*`, `cron_*`는 `JUNEES_CRON_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
 파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령과, 이 파일이 든 폴더(`$JUNEES_HOME`)를 통째로 다루는 명령을 막는다(아래 명령 정책 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽은 차단 목록일 뿐 샌드박스가 아니어서 다른 변수나 실행 중에 만든 경로, 더 위 폴더를 통째로 다루는 명령으로는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
 
@@ -370,7 +372,7 @@ loginctl enable-linger "$USER"             # 로그아웃해도 계속 돌게
   - `!new`: 새 대화(새 세션, 메모리와 스킬 다시 읽음). 대기열 순서대로 처리된다.
   - `!stop`: 진행 중인 턴을 취소하고(도구의 프로세스 그룹까지, 기록은 터미널의 Ctrl-C와 같다) 대기열의 메시지를 버린다. 자리를 기다리던 턴도 멈춘다.
   - `!status`: 백엔드와 모델, 동시 실행 중인 턴 수, 승인 방식, 이 채널의 세션과 상태(실행 중/대기열/승인 대기), 토큰 사용량.
-  - `!memory`: 영구 메모리 보기. DM에서는 터미널의 `/memory`와 같다. 서버 채널에서는 답이 그 채널을 보는 모두에게 보이므로 저장소마다 항목 수와 글자 수만 보여 주고, 내용은 DM에서 보라고 안내한다. `!skills`: 스킬 목록. `!help`: 명령 목록.
+  - `!memory`: 영구 메모리 보기. DM에서는 터미널의 `/memory`와 같다. 서버 채널에서는 답이 그 채널을 보는 모두에게 보이므로 저장소마다 항목 수와 글자 수만 보여 주고, 내용은 DM에서 보라고 안내한다. `!skills`: 스킬 목록. `!cron`: 예약 작업 목록(서버 채널에서는 프롬프트와 폴더 없이, 아래 예약 작업 절). `!help`: 명령 목록.
   - `!task`: 아직 지원하지 않는다는 안내(아래 범위 밖).
 - 승인(`JUNEES_APPROVAL`, 기본 `risky`): 위험한 도구 호출이면 채널에 `Approve this tool call?`과 명령(코드 블록, 터미널 질문과 같은 내용)을 보내고, 그 채널에서 허용 사용자의 다음 메시지로 정한다. `y`는 실행, `n`은 거절, `n <이유>`는 이유와 함께 거절(모델이 읽는다), `a`는 이 채널의 대화가 끝날 때까지 같은 종류 허용, 그 밖의 말은 그 말을 이유로 거절한다. `discord_approval_timeout`(기본 5분) 안에 답이 없으면 `(no answer within 5m: declined)`와 함께 거절한다. `!stop`은 질문을 취소하고 턴을 끝낸다. claude-code 백엔드는 터미널처럼 승인 질문 없이 Claude Code의 거절 규칙만 적용된다(`!status`에 나온다).
 
@@ -424,6 +426,66 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
 승인(`JUNEES_APPROVAL`, 아래 실행 전 승인 절): `risky`(기본)에서는 `trust`가 없는 서버의 도구를 부를 때마다 "외부 도구"로 묻는다. 질문에는 서버와 원래 도구 이름, 인자 JSON 앞부분(8줄)이 나오고, `a`는 그 도구 하나를 이번 실행 동안 허용한다. `all`은 trust 서버의 도구도 묻고, `off`는 묻지 않는다. 게이트웨이는 같은 질문을 채널에서 묻는다. `-p`는 사람이 없으므로 묻지 않는다(기존 정책 그대로).
 
 범위 밖: Streamable HTTP 전송(원격 서버. 후속 작업으로 제안: 같은 `Connection` 자리에 HTTP POST/SSE를 붙이고 OAuth는 따로), resources/prompts, 목록 변경 구독(`subscriptions/listen`), sampling/elicitation(MRTR), 작업 모드(`junees task`)와 claude-code 백엔드의 MCP. claude-code 백엔드는 지금처럼 `--strict-mcp-config`로 MCP 서버 없이 돈다. `--mcp-config`로 같은 목록을 넘기는 것은 문서상 가능하지만([CLI reference](https://code.claude.com/docs/en/cli-reference)) 간단하지 않아 미뤘다: `-p`는 `--permission-prompts none`이라 `--allowedTools`에 없는 MCP 도구는 모두 거절되므로 trust 서버만 쓸 수 있고, `env` 값이 인자나 임시 파일로 Claude Code에 넘어가야 하며, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 서버 환경에서 무엇을 지우는지와 서버 연결 대기(`MCP_TIMEOUT`)도 맞춰야 한다.
+
+### 예약 작업
+
+`junees cron`은 프롬프트를 일정에 맞춰 실행한다. 실행마다 새 세션을 `junees -p`와 같은 무인 경로로 돌리고, 마지막 답을 파일로 남긴 뒤 디스코드 채널이나 웹훅으로 보낸다.
+
+```sh
+cd ~/work/some-project
+junees cron add "weekdays 09:00" "어제 들어온 이슈를 요약해 줘" --name issues --deliver discord:234567890123456789
+junees cron list                 # 작업, 다음/마지막 실행, 프롬프트, 폴더, 전달처
+junees cron run issues           # 지금 한 번 실행하고 답을 출력
+junees cron pause issues         # 멈춤 (resume으로 다시)
+junees cron remove issues        # (rm)
+junees cron daemon               # 때가 된 작업을 실행 (계속 띄워 둔다)
+```
+
+- 작업은 id(8자리 hex), id 앞부분(겹치지 않을 때), `--name`으로 가리킨다. 폴더는 `--dir`(기본은 `cron add`를 실행한 폴더)이고 실행은 그 폴더에서 한다. 대화 안 `/cron`과 게이트웨이 `!cron`은 목록만 보여 준다(`!cron`은 서버 채널에서 프롬프트와 폴더를 빼고, DM에서는 다 보여 준다).
+- 일정(따옴표로 한 덩어리로 준다):
+  - `every 30m`, `every 2h`, `every 1h30m`: 추가한 때부터 그 간격마다(1분 이상).
+  - `in 20m`: 지금부터 그만큼 뒤 한 번.
+  - `daily 09:00`, `weekdays 09:00`(월~금): 현지 시각.
+  - cron 식 5필드(`분 시 일 월 요일`, 현지 시각): 숫자, `*`, 범위 `1-5`, 간격 `*/15`와 `10-20/5`, 목록 `1,15`, 월/요일 이름(`jan`, `mon`). 요일 0과 7은 일요일. Vixie cron처럼 일과 요일을 둘 다 지정하면 어느 쪽이 맞아도 실행한다. 어떤 날짜에도 맞지 않는 식(`0 0 30 2 *`)은 추가할 때 거절한다.
+  - ISO 시각 한 번: `2026-11-10T09:00`, `2026-11-10 09:00:30`, `Z`나 `+09:00`을 붙이면 그 오프셋. 지난 시각은 거절한다.
+- 시간대: 설정 `timezone`(`JUNEES_TIMEZONE`, IANA 이름 `Asia/Seoul`). 없으면 시스템 시간대(`TZ`, 그다음 `/etc/localtime`). 시스템의 시간대 파일(`/usr/share/zoneinfo`, TZif)을 직접 읽으므로 새 의존성이 없다(`chrono-tz`처럼 시간대 DB를 바이너리에 넣지 않는다). 서머타임으로 건너뛰는 시각(뉴욕 3월 둘째 일요일 02:30)은 그 간격만큼 뒤(03:30)에 실행하고, 두 번 오는 시각(11월 첫 일요일 01:30)은 처음 한 번만 실행한다. 데몬과 `cron add`가 같은 시간대를 쓰도록 서비스로 돌릴 때는 `timezone`을 설정 파일에 적어 두는 편이 안전하다(데몬은 시작할 때 한 번 읽는다).
+- 실행: `-p`처럼 승인 질문이 없고(명령 정책의 거절 규칙은 그대로), MCP 서버도 `-p`처럼 쓴다. 메모리와 스킬은 읽기만 한다(`memory`, `skill_manage` 도구 없음). 실행마다 새 세션(`$JUNEES_HOME/sessions/`)이고, 시스템 프롬프트에 "사람 없이 도는 예약 작업이고 마지막 메시지가 결과로 전달된다"는 한 문단을 더한다. 한 번에 `cron_max_time`(`JUNEES_CRON_MAX_TIME`, 기본 30m)과 `cron_max_tokens`(`JUNEES_CRON_MAX_TOKENS`, 기본 1000000, 0이면 없음, 작업 예산처럼 캐시 읽기/쓰기 포함)까지 쓴다. 토큰 한도는 모델 호출 전마다 확인하고, 시간 한도는 그 확인과 함께 시간이 되는 순간의 취소(도는 도구의 프로세스 그룹까지)로 지킨다. 백엔드는 설정의 `backend`를 따른다. claude-code 백엔드는 Claude Code가 스스로 돌기 때문에 토큰 한도로 중간에 멈추지 못하고, 넘었으면 결과에 적기만 한다(`max_turns`와 시간 한도는 지킨다).
+- 결과: `$JUNEES_HOME/cron/output/<id>/<UTC 시각>.md`(0600)에 작업, 일정, 폴더, 예정/실행 시각, 상태(ok, failed, missed), 이유, 세션 id, 토큰, 프롬프트, 마지막 답을 남긴다. 작업마다 최근 100개만 둔다. `jobs.json`에는 마지막 실행만 남는다.
+- 전달(`--deliver`, 기본 `local`): `local`은 위 파일만. `discord:<채널 id>`는 게이트웨이의 REST 클라이언트로 봇이 그 채널에 올린다(`discord_token`이 필요하고 게이트웨이가 돌 필요는 없다. 봇이 그 채널을 볼 수 있어야 한다). 첫 줄은 굵은 `junees cron`, 코드 표시한 작업 이름, 상태(`ok`, 실패면 `failed`와 이유)이고 그 아래가 답이다. 2000자씩 나눠 다섯 메시지까지 보내고 넘치면 파일 경로를 알려 준다. `webhook`은 작업 알림 웹훅(`notify_webhook`)으로 메시지 하나(2000자에서 자름). 실패와 놓친 실행도 똑같이 보낸다. 전달이 실패하면 이유를 `cron list`의 마지막 실행 줄과 표준 오류에 남긴다.
+- 데몬(`junees cron daemon`): 매 분 0초에 깨어 때가 된 작업을 찾고, 다음 실행 시각을 먼저 옮겨 저장한 뒤 작업마다 `junees cron run <id>`를 따로 띄운다(도구가 프로세스의 현재 폴더에서 돌기 때문에 작업마다 자기 폴더의 프로세스가 필요하다. 프로세스 그룹도 따로). 같은 작업의 이전 실행이 아직 돌면 이번 차례는 건너뛴다. 데몬이 꺼져 있던 동안 놓친 반복 작업은 다시 켜졌을 때 **한 번만** 실행하고(밀린 횟수만큼 돌리지 않는다) 다음 실행은 지금 이후로 잡는다. 한 번짜리 작업이 10분 넘게 늦었으면 실행하지 않고 `missed`로 기록하고 전달한다. 실행이 결과를 남기지 못하고 끝나면(죽음, 시작 실패) 데몬이 `failed`(`the run ended without a result (...)`)로 기록하고 전달한다. 시간 한도를 1분 넘긴 실행은 SIGINT, 30초 뒤 SIGKILL로 멈춘다. SIGINT/SIGTERM이면 돌고 있는 실행에 SIGINT를 보내(각자 `interrupted`로 기록) 30초까지 기다린 뒤 끝난다. 한 `$JUNEES_HOME`에 데몬은 하나만 돈다(`cron/daemon.lock` flock).
+- 게이트웨이 안에서 함께 돌리지 않고 따로 띄우는 이유: 게이트웨이는 디스코드를 쓰지 않으면 필요 없는 프로세스이고, 채널들이 한 스레드(LocalSet)와 한 작업 폴더를 함께 쓰는 반면 예약 작업은 작업마다 폴더가 다르다. 디스코드 전달은 REST만 쓰므로 게이트웨이 없이 된다.
+- 저장: `$JUNEES_HOME/cron/jobs.json`(0600, 폴더 0700). 바꿀 때는 `cron/jobs.lock`에 flock을 잡고 임시 파일에 쓴 뒤 rename한다(CLI, 데몬, 실행 중인 작업이 함께 쓴다). 다른 사용자 소유이거나 그룹/기타가 쓸 수 있는 파일은 읽지 않는다(그 프롬프트가 내 도구로 실행되므로). 모델의 도구는 `cron/` 아래를 읽을 수만 있다(메모리, 스킬과 같은 데이터 폴더 보호: `write_file`/`edit_file` 거절, 쓰는 bash 명령 거절). 모델이 스스로 작업을 예약하지 못하게 하려는 것이다.
+- 작업 이름은 64자까지(백틱, 제어 문자, `-`로 시작 불가), 프롬프트는 50000자까지(줄바꿈과 탭 말고 제어/방향 문자 불가).
+
+systemd 사용자 서비스 예시(`~/.config/systemd/user/junees-cron.service`):
+
+```ini
+[Unit]
+Description=Junees scheduled jobs
+After=network-online.target
+
+[Service]
+ExecStart=%h/.cargo/bin/junees cron daemon
+Restart=on-failure
+RestartSec=10
+# 설정(timezone, api_key, discord_token, notify_webhook)은 ~/.junees/config.toml.
+# 환경 변수로 줄 때는 0600 파일에:
+# EnvironmentFile=%h/.config/junees/cron.env
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now junees-cron
+journalctl --user -u junees-cron -f      # 시작, 끝, 놓침, 전달 실패 로그
+loginctl enable-linger "$USER"           # 로그아웃해도 계속 돌게
+```
+
+`systemctl --user stop`은 SIGTERM이므로 위처럼 실행을 정리하고 끝난다. 작업 폴더는 작업마다 `--dir`로 정하므로 서비스에 `WorkingDirectory`는 필요 없다.
+
+범위 밖, 한계: 실행 중인 작업의 세션은 그 폴더의 보통 세션이라 `junees -c`가 이어 갈 수 있다(세션 meta에 출처를 남기는 작업 #34와 합쳐서 건너뛰게 할 수 있다). 작업마다 다른 한도, 실패 시 재시도, 실행 사이에 결과를 넘기는 것, 대화와 게이트웨이에서 작업을 추가/삭제하는 명령(`/cron`, `!cron`은 목록만), 데몬이 돌고 있는 중 설정 파일의 `timezone` 변경 반영(데몬 재시작 필요)은 하지 않는다. 같은 작업을 `cron run`으로 손수 돌리는 동안 데몬이 그 작업을 또 시작하는 것은 막지 않는다. 실제 API와 실제 디스코드로는 확인하지 않았다(가짜 API, 가짜 REST, 가짜 시계로만).
 
 ### 컨텍스트 관리
 
@@ -576,7 +638,7 @@ src/
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
-  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json)과 쓰기 금지 데이터 폴더(memory, projects, skills)를 알아보는 판단(settings_file.rs)
+  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json)과 쓰기 금지 데이터 폴더(memory, projects, skills, cron)를 알아보는 판단(settings_file.rs)
   mcp/               MCP 클라이언트 (stdio)
     config.rs          $JUNEES_HOME/mcp.json 읽기와 검사 (0600, 자기 소유, 값을 되풀이하지 않는 오류)
     conn.rs            서버 프로세스(프로세스 그룹, 환경 정리)와 JSON-RPC 2.0 줄 메시지, 요청 id와 답 대기, 취소 알림, 서버 요청(ping) 답, stderr 꼬리, 종료(입력 닫기 -> SIGTERM -> SIGKILL)
@@ -601,7 +663,7 @@ src/
   memory/            영구 메모리
     mod.rs             저장소 셋(user, notes, 프로젝트별 notes) 읽기/쓰기(0600, 원자적, flock), 항목 추가/교체/삭제와 상한, 프롬프트 절(대화, task, Claude Code 읽기 전용), /memory 보기
     tool.rs            memory 도구 (task 세션은 project만)
-  cli.rs             인자 파싱(위치 인자 질문, task/status/setup/gateway 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
+  cli.rs             인자 파싱(위치 인자 질문, task/status/setup/gateway/cron 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
   gateway/           디스코드 게이트웨이 (junees gateway)
     mod.rs             Gateway::run: Get Gateway Bot, 연결 태스크, 채널 LocalSet, 종료 처리, 로그(Log)
     config.rs          discord_* 설정 (토큰 Token은 Debug에서 숨김, 허용 사용자 필수, https/wss 확인)
@@ -612,6 +674,16 @@ src/
     ask.rs             채널 승인 질문(다음 메시지로 답, 시간 초과 거절)
     sessions.rs        채널 -> 세션 색인(discord-sessions.json), 세션 이어 가기/새로 만들기
     split.rs           2000자 나누기(줄 단위, 코드 블록 닫고 다시 열기, UTF-16 길이)
+  cron/              예약 작업 (junees cron)
+    tz.rs              시스템 시간대 파일(TZif)과 POSIX TZ 규칙 읽기, 현지 시각 <-> UTC(건너뛴/두 번 오는 시각), 날짜 계산
+    schedule.rs        일정 문법(every, in, daily, weekdays, cron 식, ISO 시각)과 다음 실행 시각
+    store.rs           jobs.json (flock, 원자적 쓰기, 0600/0700, 소유자/권한 확인), 작업 찾기(id, 앞부분, 이름)
+    run.rs             실행 하나: -p와 같은 무인 경로(api 에이전트 또는 Claude Code), 읽기 전용 메모리/스킬, 시간/토큰 한도, 마지막 답
+    output.rs          실행 기록 파일 cron/output/<id>/<시각>.md (작업마다 100개)
+    deliver.rs         전달: 디스코드 채널(봇 REST), 웹훅, 로컬
+    daemon.rs          junees cron daemon: 매 분 틱, 따라잡기 한 번, 놓친 한 번짜리 기록, 작업마다 자식 프로세스, 결과 없이 끝난 실행 기록, 종료
+    cli.rs, command.rs junees cron 인자 파싱과 명령(add/list/remove/pause/resume/run/daemon)
+    mod.rs             설정(timezone, cron_max_time, cron_max_tokens), 실행 마무리(finish), /cron과 !cron 목록
 tests/
   common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림)
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
@@ -633,6 +705,7 @@ tests/
   skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기, /skills 화면의 제어 문자 이스케이프 검증
   discord_gateway.rs   테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST로 IDENTIFY/READY, 하트비트와 ACK 누락, resume_gateway_url로 RESUME, Reconnect, INVALID_SESSION, 닫힘 코드, 거절된 토큰이 오류와 로그에 안 나옴, 허용 사용자와 멘션 규칙, 메시지 나누기, 채널별 대기열과 동시 실행, !stop/!new/!status, 종료 시 취소, 429 재시도, 실제 에이전트와 가짜 API로 재시작 뒤 채널 세션 이어 가기와 승인 답장/시간 초과 검증
   mcp.rs               실제 바이너리와 가짜 API, 가짜 MCP 서버(tests/fixtures/fake_mcp.py)로 모델의 MCP 도구 호출, 서버 환경에 API 키/디스코드 토큰/숨긴 변수가 없음, 종료 때 서버와 그 자식 정리, 0644 mcp.json 거절, /mcp, 파이프 입력 대화의 승인 거절과 trust, 게이트웨이 채널 질문, 작업 폴더의 모듈과 스크립트를 서버로 실행하지 않음(작업 폴더 안 상대 경로는 trust만) 검증
+  cron.rs              실제 바이너리와 가짜 API, 가짜 디스코드 REST로 cron add/list/run(전달, 출력 파일, 세션, 읽기 전용 도구)/pause/resume/rm, 데몬이 때가 된 작업을 자식 프로세스로 실행하고 실패를 전달하는지 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
 
