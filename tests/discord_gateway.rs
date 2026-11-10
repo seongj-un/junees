@@ -21,6 +21,7 @@ use junees::gateway::config::DiscordConfig;
 use junees::gateway::engine::{ApiEngines, Conversation, Engines, Progress};
 use junees::gateway::shard::Timing;
 use junees::gateway::{Gateway, Log};
+use junees::memory::{Limits, Memory, Target};
 use junees::session::{Journal, Session, Transcript};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -534,13 +535,23 @@ fn start(
     home: Option<PathBuf>,
     cwd: &Path,
 ) -> Running {
+    start_with(config, engines, home, cwd, None)
+}
+
+fn start_with(
+    config: DiscordConfig,
+    engines: Arc<dyn Engines>,
+    home: Option<PathBuf>,
+    cwd: &Path,
+    memory: Option<Memory>,
+) -> Running {
     let (log, lines) = capture();
     let gateway = Gateway {
         config,
         engines,
         home,
         cwd: cwd.to_path_buf(),
-        memory: None,
+        memory,
         timing: timing(),
         typing_every: Duration::from_secs(3600),
         log,
@@ -1133,6 +1144,49 @@ async fn a_retried_post_keeps_its_enforced_nonce() {
     assert_eq!(posts[0].body["content"], posts[1].body["content"]);
     assert_eq!(posts[0].body["nonce"], posts[1].body["nonce"]);
     assert_ne!(posts[1].body["nonce"], posts[2].body["nonce"]);
+}
+
+#[tokio::test]
+async fn memory_contents_show_only_in_direct_messages() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let memory = Memory::new(home.path(), dir.path(), Limits::default());
+    std::fs::create_dir_all(home.path().join("memory")).unwrap();
+    std::fs::write(memory.path(Target::User), "likes green tea\n").unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let running = start_with(
+        discord(&rest.url, &[]),
+        fake(Duration::ZERO),
+        None,
+        dir.path(),
+        Some(memory),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+
+    // A server channel: how much, not what.
+    conn.dispatch("MESSAGE_CREATE", message("600", USER, "!memory", true, &[]))
+        .await;
+    let posts = rest.wait_post("600", |p| p.contains("entries")).await;
+    let shown = posts.join("\n");
+    assert!(shown.contains("user: 1 entries"), "{shown}");
+    assert!(shown.contains("direct message"), "{shown}");
+    assert!(!shown.contains("green tea"), "{shown}");
+    assert!(
+        !shown.contains(&home.path().display().to_string()),
+        "{shown}"
+    );
+
+    // A DM: the contents.
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "!memory", false, &[]),
+    )
+    .await;
+    rest.wait_post("505", |p| p.contains("likes green tea"))
+        .await;
+    running.stop().await;
 }
 
 #[tokio::test]

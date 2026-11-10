@@ -37,7 +37,7 @@ pub const HELP: &str = "\
 `!new` start a new conversation in this channel
 `!stop` stop the turn that runs here (and drop the queued messages)
 `!status` what runs here: session, queue, tokens
-`!memory` what the persistent memory holds
+`!memory` what the persistent memory holds (in a server channel only how much; the contents in a DM)
 `!skills` the skills Junees knows
 `!help` this list
 In a server channel, mention the bot (`@Junees !stop`) unless the channel is one of discord_channels.";
@@ -277,7 +277,7 @@ impl Bot {
         }
         let channel = channel.to_string();
         if let Some(command) = parse_command(&content) {
-            self.command(&channel, command);
+            self.command(&channel, command, direct);
             return;
         }
         if let Some(known) = self.channels.get(&channel)
@@ -325,7 +325,8 @@ impl Bot {
         })
     }
 
-    fn command(&mut self, channel: &str, command: Command) {
+    /// Runs a `!` command; `direct` when it came in a DM.
+    fn command(&mut self, channel: &str, command: Command, direct: bool) {
         let reply = match command {
             Command::New => {
                 let known = self.channel(channel);
@@ -353,7 +354,8 @@ impl Bot {
             },
             Command::Status => self.status(channel),
             Command::Memory => match &self.shared.memory {
-                Some(memory) => memory.overview(),
+                Some(memory) if direct => memory.overview(),
+                Some(memory) => memory_counts(memory),
                 None => "memory is off: neither JUNEES_HOME nor HOME is set".to_string(),
             },
             Command::Skills => self.skills(),
@@ -465,6 +467,31 @@ impl Bot {
             (self.shared.log)("some channels did not stop in time");
         }
     }
+}
+
+/// What `!memory` shows in a server channel, where everyone who reads the
+/// channel sees the answer: how much each store holds, not what (the user
+/// store holds facts about the user), and no paths.
+fn memory_counts(memory: &Memory) -> String {
+    let mut lines: Vec<String> = memory
+        .snapshot()
+        .stores
+        .iter()
+        .map(|store| match &store.error {
+            Some(_) => format!("{}: cannot read", store.target.name()),
+            None => format!(
+                "{}: {} entries, {}/{} characters",
+                store.target.name(),
+                store.entries,
+                store.chars(),
+                store.limit
+            ),
+        })
+        .collect();
+    lines.push(
+        "The contents show only in a direct message: send `!memory` to the bot there.".to_string(),
+    );
+    lines.join("\n")
 }
 
 /// Runs a channel's jobs one after the other.
