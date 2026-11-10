@@ -304,11 +304,16 @@ impl Conn {
 
     /// The next heartbeat carrying `seq`; earlier ones are acknowledged.
     async fn beat(&mut self, seq: u64) -> Value {
+        let deadline = tokio::time::Instant::now() + WAIT;
         loop {
             let beat = self.expect(1).await;
             if beat["d"] == seq {
                 return beat;
             }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no heartbeat with {seq}, last {beat}"
+            );
             self.send(json!({"op": 11})).await;
         }
     }
@@ -926,6 +931,50 @@ async fn queues_per_channel_runs_channels_side_by_side_and_stops() {
     rest.wait_post("505", |p| p == "(nothing is running here)")
         .await;
     running.stop().await;
+}
+
+#[tokio::test]
+async fn a_turn_waiting_for_a_slot_can_be_stopped() {
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(
+        discord(&rest.url, &[("JUNEES_DISCORD_PARALLEL", "1")]),
+        fake(Duration::ZERO),
+        None,
+        dir.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "wait", false, &[]))
+        .await;
+    rest.wait_typing("505", 0).await;
+    conn.dispatch("MESSAGE_CREATE", message("506", USER, "next", false, &[]))
+        .await;
+    rest.wait_post("506", |p| {
+        p == "(waiting for a free slot: at most 1 turns run at once)"
+    })
+    .await;
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("506", USER, "!status", false, &[]),
+    )
+    .await;
+    rest.wait_post("506", |p| p.contains("a turn waits for a free slot"))
+        .await;
+    conn.dispatch("MESSAGE_CREATE", message("506", USER, "!stop", false, &[]))
+        .await;
+    rest.wait_post("506", |p| p == "(stopped before it started)")
+        .await;
+    // The slot frees once the first channel stops; the next turn runs.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "!stop", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "(stopped)").await;
+    conn.dispatch("MESSAGE_CREATE", message("506", USER, "later", false, &[]))
+        .await;
+    rest.wait_post("506", |p| p == "reply 1: later").await;
+    running.stop().await;
+    assert!(!rest.posts("506").iter().any(|p| p.contains(": next")));
 }
 
 #[tokio::test]

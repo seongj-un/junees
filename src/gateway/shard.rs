@@ -463,6 +463,20 @@ mod tests {
         assert_eq!(INTENTS, 1 + 512 + 4096 + 32768);
     }
 
+    /// rustls needs exactly one crypto provider compiled in (reqwest's
+    /// ring); with none or two, setting up a wss connection panics.
+    #[tokio::test]
+    async fn wss_sets_up_tls_without_panicking() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            // Accept and hang up: the TLS handshake fails.
+            let _ = listener.accept().await;
+        });
+        let result = tokio_tungstenite::connect_async(format!("wss://127.0.0.1:{port}/")).await;
+        assert!(result.is_err());
+    }
+
     #[test]
     fn jitter_stays_in_range() {
         for _ in 0..100 {
