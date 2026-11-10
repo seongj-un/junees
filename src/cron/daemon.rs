@@ -145,7 +145,7 @@ impl Daemon {
             let Some(due) = job.next_run.filter(|&due| due <= now && !job.paused) else {
                 continue;
             };
-            job.next_run = job.schedule.next_after(now, &self.tz);
+            job.next_run = job.schedule.next_after(now, &job.zone(&self.tz));
             if !job.schedule.repeats() {
                 job.next_run = None;
                 if now - due > MISSED_AFTER {
@@ -180,7 +180,7 @@ impl Daemon {
         match due {
             Due::Run { job, due, late } => {
                 let run_id = random_hex(8);
-                let when = self.tz.format(due);
+                let when = job.zone(&self.tz).format(due);
                 let catch_up = if late { ", catching up" } else { "" };
                 match self.launcher.launch(&job, &run_id, due, done.clone()) {
                     Ok(()) => {
@@ -198,7 +198,7 @@ impl Daemon {
             Due::Missed { job, due } => {
                 let note = format!(
                     "missed: due at {}, when no daemon was running; not run",
-                    self.tz.format(due)
+                    job.zone(&self.tz).format(due)
                 );
                 (self.log)(&format!("job {} {note}", job.id));
                 self.conclude(&job, &random_hex(8), due, RunStatus::Missed, note)
@@ -208,7 +208,7 @@ impl Daemon {
                 (self.log)(&format!(
                     "job {}: the run due at {} is skipped, the previous one is still going",
                     job.id,
-                    self.tz.format(due)
+                    job.zone(&self.tz).format(due)
                 ));
             }
         }
@@ -732,6 +732,22 @@ mod tests {
             missed.note
         );
         assert!(missed.output.unwrap().exists());
+    }
+
+    #[test]
+    fn jobs_keep_the_zone_they_were_added_in() {
+        let home = tempfile::tempdir().unwrap();
+        let mut nine = job("aaaaaaaa", Schedule::Daily { hour: 9, minute: 0 }, Some(T0));
+        nine.timezone = Some("EST5EDT,M3.2.0,M11.1.0".into());
+        save(home.path(), vec![nine]);
+        // The daemon's own zone is UTC.
+        let (mut daemon, _, _) = daemon(home.path(), T0, false, usize::MAX);
+        assert_eq!(daemon.tick(T0).unwrap().len(), 1);
+        // 09:00 in New York in November is 14:00Z.
+        assert_eq!(
+            stored(home.path(), "aaaaaaaa").next_run,
+            Some(T0 + 5 * 3600)
+        );
     }
 
     #[test]

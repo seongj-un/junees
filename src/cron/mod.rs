@@ -108,6 +108,7 @@ pub async fn finish(
     outcome: &Outcome,
 ) -> LastRun {
     let finished_at = unix_now();
+    let tz = &job.zone(tz);
     let record = output::Record {
         job,
         status: outcome.status,
@@ -178,6 +179,7 @@ pub fn overview(jobs: &[Job], tz: &TimeZone, detail: bool) -> String {
     }
     let mut out = String::new();
     for job in jobs {
+        let tz = &job.zone(tz);
         let mut line = job.id.clone();
         if let Some(name) = &job.name {
             line.push_str(&format!(" {}", escape_hidden(name)));

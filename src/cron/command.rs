@@ -71,7 +71,11 @@ pub async fn main(command: CronCommand, settings: Settings) -> Result<ExitCode> 
             let index = locked.find(&key)?;
             let job = locked.jobs.remove(index);
             locked.save()?;
-            println!("removed job {} ({})", job.id, job.schedule.describe(&tz));
+            println!(
+                "removed job {} ({})",
+                job.id,
+                job.schedule.describe(&job.zone(&tz))
+            );
         }
         CronCommand::Pause(key) => {
             let mut locked = store.lock()?;
@@ -84,6 +88,7 @@ pub async fn main(command: CronCommand, settings: Settings) -> Result<ExitCode> 
             let mut locked = store.lock()?;
             let index = locked.find(&key)?;
             let job = &mut locked.jobs[index];
+            let tz = job.zone(&tz);
             let next = job.schedule.next_after(unix_now(), &tz);
             if next.is_none() {
                 bail!(
@@ -190,6 +195,10 @@ fn new_job(
         name,
         next_run: schedule.next_after(now, tz),
         schedule,
+        // Kept if the zone can be found by its name again.
+        timezone: TimeZone::named(tz.name())
+            .is_ok_and(|named| named == *tz)
+            .then(|| tz.name().to_string()),
         text: schedule_text.trim().to_string(),
         prompt,
         dir,
@@ -371,6 +380,7 @@ mod tests {
         assert_eq!(job.next_run, Some(job.created_at + 7200));
         assert_eq!(job.dir, std::fs::canonicalize(home.path()).unwrap());
         assert_eq!(job.deliver, Delivery::Webhook);
+        assert_eq!(job.timezone.as_deref(), Some("UTC"));
         assert_eq!(store.jobs().unwrap(), [job]);
         for (schedule, prompt, name, deliver, wanted) in [
             ("every 2h", "x", Some("logs"), None, "exists already"),

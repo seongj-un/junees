@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use super::deliver::Delivery;
 use super::schedule::Schedule;
+use super::tz::TimeZone;
 
 /// The format of jobs.json this build writes; newer ones are refused.
 pub const FORMAT: u32 = 1;
@@ -34,6 +35,11 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub schedule: Schedule,
+    /// The zone its local times are in: the `timezone` setting (or the
+    /// system's zone) when it was added. `None` when that zone has no name
+    /// to find it by again; the zone of the moment is used then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     /// The schedule as it was typed.
     pub text: String,
     pub prompt: String,
@@ -54,6 +60,17 @@ impl Job {
     /// The name, or the id.
     pub fn label(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
+    }
+
+    /// The zone of the job's schedule, else `fallback` (the zone of the
+    /// setting now).
+    pub fn zone(&self, fallback: &TimeZone) -> TimeZone {
+        match &self.timezone {
+            Some(name) if name != fallback.name() => {
+                TimeZone::named(name).unwrap_or_else(|_| fallback.clone())
+            }
+            _ => fallback.clone(),
+        }
     }
 }
 
@@ -321,6 +338,7 @@ pub(crate) mod tests {
             id: id.to_string(),
             name: None,
             schedule,
+            timezone: None,
             text: "every 1h".into(),
             prompt: "say hi".into(),
             dir: PathBuf::from("/"),
