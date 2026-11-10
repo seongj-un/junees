@@ -98,7 +98,7 @@ impl FakeRest {
             .filter(|r| {
                 r.method == "POST" && r.path.ends_with(&format!("/channels/{channel}/messages"))
             })
-            .filter(|r| r.headers.get("x-fake-status").is_none())
+            .filter(|r| !r.headers.contains_key("x-fake-status"))
             .map(|r| r.body["content"].as_str().unwrap_or_default().to_string())
             .collect()
     }
@@ -255,6 +255,8 @@ impl FakeGateway {
         Self { listener, url }
     }
 
+    // The handshake callback's error type is the library's.
+    #[allow(clippy::result_large_err)]
     async fn accept(&self) -> Conn {
         let (socket, _) = tokio::time::timeout(WAIT, self.listener.accept())
             .await
@@ -1026,7 +1028,7 @@ async fn rate_limited_posts_are_retried() {
     let limited = rest
         .requests()
         .iter()
-        .filter(|r| r.headers.get("x-fake-status").is_some())
+        .filter(|r| r.headers.contains_key("x-fake-status"))
         .count();
     assert_eq!(limited, 2);
     let log = running.stop().await.join("\n");
