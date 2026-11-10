@@ -136,8 +136,8 @@ async fn the_conversation_reads_and_keeps_skills() {
     assert!(!first.contains("new-one"), "{first}");
     let names = tool_names(&requests[0]);
     assert_eq!(
-        names[names.len() - 2..],
-        ["skill_view".to_string(), "skill_manage".to_string()]
+        names[names.len() - 3..],
+        ["skill_view", "skill_manage", "delegate"]
     );
     let results = tool_results(&requests[1]);
     assert_eq!(results[0], (DEPLOY.to_string(), false));
