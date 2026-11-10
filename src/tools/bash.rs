@@ -194,11 +194,11 @@ impl Tool for Bash {
 
 /// The process group of a running command, killed when dropped unless
 /// disarmed first.
-struct GroupGuard(Option<u32>);
+pub(crate) struct GroupGuard(pub(crate) Option<u32>);
 
 impl GroupGuard {
     /// Kills the group now.
-    fn kill(&mut self) {
+    pub(crate) fn kill(&mut self) {
         if let Some(pid) = self
             .0
             .take()
@@ -215,7 +215,7 @@ impl GroupGuard {
     }
 
     /// Leaves the group alone from now on.
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.0 = None;
     }
 }
@@ -233,13 +233,13 @@ fn ensure_newline(text: &mut String) {
 }
 
 /// Reads a pipe in the background, keeping only its head and tail.
-struct Capture {
+pub(crate) struct Capture {
     kept: Arc<Mutex<HeadTail>>,
     task: Option<JoinHandle<()>>,
 }
 
 impl Capture {
-    fn start<R>(reader: Option<R>) -> Self
+    pub(crate) fn start<R>(reader: Option<R>) -> Self
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
@@ -260,13 +260,13 @@ impl Capture {
     }
 
     /// Resolves when the pipe reaches end of file.
-    async fn finished(&mut self) {
+    pub(crate) async fn finished(&mut self) {
         if let Some(task) = &mut self.task {
             let _ = task.await;
         }
     }
 
-    fn into_text(self) -> String {
+    pub(crate) fn into_text(self) -> String {
         if let Some(task) = &self.task {
             task.abort();
         }
