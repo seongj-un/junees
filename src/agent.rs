@@ -136,6 +136,13 @@ pub(crate) type SharedLimit = Arc<std::sync::Mutex<Limit>>;
 /// time, and an "always" answer holds for all of them.
 pub(crate) type SharedGate = Arc<tokio::sync::Mutex<Box<dyn ToolGate>>>;
 
+/// Told how each [`Agent::run`] ended, such as the `post_turn` hooks of
+/// plugins ([`crate::plugins`]); see [`Agent::with_after_turn`].
+#[async_trait::async_trait]
+pub trait AfterTurn: Send + Sync {
+    async fn after_turn(&self, input: &str, result: &Result<String>);
+}
+
 /// The error of [`Agent::run`] when its [`Limit`] stopped it before a
 /// model call, with the limit's reason. Like [`TurnLimit`], the history is
 /// valid and ends with a user message.
@@ -169,6 +176,8 @@ pub struct Agent {
     gate: Option<SharedGate>,
     /// Runs `delegate` calls; see [`Agent::with_delegate`].
     delegate: Option<subagent::Settings>,
+    /// Told how each run ended; see [`Agent::with_after_turn`].
+    after_turn: Option<Arc<dyn AfterTurn>>,
 }
 
 impl Agent {
@@ -206,6 +215,7 @@ impl Agent {
             limit: None,
             gate: None,
             delegate: None,
+            after_turn: None,
         }
     }
 
@@ -245,6 +255,13 @@ impl Agent {
     pub fn with_delegate(mut self, settings: subagent::Settings) -> Self {
         self.tools.register(subagent::Delegate::new(settings));
         self.delegate = Some(settings);
+        self
+    }
+
+    /// Tells `after_turn` how each [`Agent::run`] ended, once it did
+    /// (subagents do not tell it).
+    pub fn with_after_turn(mut self, after_turn: Arc<dyn AfterTurn>) -> Self {
+        self.after_turn = Some(after_turn);
         self
     }
 
@@ -319,6 +336,18 @@ impl Agent {
     /// The exception is a reply the API paused (`pause_turn`): it is kept,
     /// and the next input follows it as a new user message.
     pub async fn run(
+        &mut self,
+        input: &str,
+        mut on_event: impl FnMut(Event<'_>),
+    ) -> Result<String> {
+        let result = self.run_turn(input, &mut on_event).await;
+        if let Some(after_turn) = &self.after_turn {
+            after_turn.after_turn(input, &result).await;
+        }
+        result
+    }
+
+    async fn run_turn(
         &mut self,
         input: &str,
         mut on_event: impl FnMut(Event<'_>),
