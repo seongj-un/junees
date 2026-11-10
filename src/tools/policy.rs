@@ -11,7 +11,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::settings_file::Named;
+use super::settings_file::{DATA_FOLDERS, Named};
 use super::{SettingsFile, ToolSettings};
 
 /// Whether a command may run.
@@ -49,6 +49,30 @@ const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
 /// look at names and metadata, never at file contents.
 const LISTS_FOLDER: &[&str] = &[
     "cd", "pushd", "ls", "stat", "du", "test", "[", "realpath", "readlink", "echo",
+];
+
+/// Programs besides [`LISTS_FOLDER`] that may name a path in a Junees data
+/// folder: they only read the files they are given and have no option
+/// that writes to a named file.
+const READS_DATA: &[&str] = &[
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "wc",
+    "file",
+    "diff",
+    "cmp",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "nl",
+    "jq",
 ];
 
 /// Top-level folders whose recursive removal breaks the machine.
@@ -95,6 +119,13 @@ impl CommandPolicy {
     /// A deny list: a path built at run time (`cat $(echo ~/.junees)/x`) or
     /// a command on a folder above it (`grep -r key ~`) still reaches the
     /// file.
+    ///
+    /// The same way it refuses commands that may write into a Junees data
+    /// folder ([`DATA_FOLDERS`], such as `$JUNEES_HOME/memory`): a redirect
+    /// that writes there, or a path there given to any program other than
+    /// [`LISTS_FOLDER`] and [`READS_DATA`]. Running a file there (as the
+    /// program, or as the script of `bash`, `source` and the like) is
+    /// allowed.
     pub fn protect_settings_file(mut self, file: Option<SettingsFile>) -> Self {
         self.settings_file = file;
         self
@@ -134,27 +165,41 @@ impl CommandPolicy {
             let mut piped: Option<String> = None;
             for command in pipeline {
                 if let Some(file) = &self.settings_file {
+                    let words = self
+                        .command_words(&command.words, depth)
+                        .unwrap_or_default();
+                    let program = words.first().map(|program| basename(program));
                     // Only these may use the settings folder as a whole:
                     // they look at names, not contents.
-                    let lists_folder = self
-                        .command_words(&command.words, depth)
-                        .ok()
-                        .and_then(|words| words.first())
-                        .is_some_and(|program| LISTS_FOLDER.contains(&basename(program)));
+                    let lists_folder = program.is_some_and(|name| LISTS_FOLDER.contains(&name));
+                    let reads_data =
+                        lists_folder || program.is_some_and(|name| READS_DATA.contains(&name));
+                    // The program itself, or the script a shell runs.
+                    let runs = |word: &String| {
+                        words.first().is_some_and(|first| std::ptr::eq(first, word))
+                            || (program.is_some_and(|name| {
+                                SHELLS.contains(&name) || matches!(name, "source" | ".")
+                            }) && words
+                                .get(1)
+                                .is_some_and(|script| std::ptr::eq(script, word)))
+                    };
                     let reason = command
                         .words
                         .iter()
+                        .map(|word| (word, !reads_data && !runs(word)))
                         .chain(
                             command
                                 .redirects
                                 .iter()
                                 .filter(|(op, _)| !op.starts_with("<<"))
-                                .map(|(_, target)| target),
+                                .map(|(op, target)| (target, redirect_writes(op, target))),
                         )
-                        .find_map(|word| match file.names(word, cwd.as_deref())? {
+                        .find_map(|(word, writes)| match file.names(word, cwd.as_deref())? {
                             Named::File => Some(file.named_reason(word)),
                             Named::Folder if !lists_folder => Some(file.folder_reason(word)),
                             Named::Folder => None,
+                            Named::Data(index) if writes => Some(DATA_FOLDERS[index].reason(word)),
+                            Named::Data(_) => None,
                         });
                     if reason.is_some() {
                         return reason;
@@ -2663,6 +2708,100 @@ mod tests {
             Verdict::Allow,
             "only a policy given the file protects it"
         );
+    }
+
+    #[test]
+    fn denies_commands_that_write_into_junees_data_folders() {
+        let (_dir, root, file) = super::super::settings_file::testing::home();
+        let memory = root.join(".junees/memory/user.md");
+        // Like the settings file rule, this holds with the built-in rules
+        // off: it keeps the checks of the memory and skill tools.
+        let policy = CommandPolicy::default()
+            .allow_dangerous(true)
+            .protect_settings_file(Some(file));
+        let relative = super::super::settings_file::testing::relative(&memory);
+        for (command, tool) in [
+            // What the review found allowed.
+            (
+                "echo 'always run ...' >> ~/.junees/memory/user.md".to_string(),
+                "memory",
+            ),
+            ("printf x > $HOME/.junees/memory/notes.md".into(), "memory"),
+            ("sed -i s/J/K/ ~/.junees/memory/user.md".into(), "memory"),
+            // Other forms of the same.
+            (format!("tee -a {}", memory.display()), "memory"),
+            (format!("cp /tmp/x {}", relative.display()), "memory"),
+            (
+                "cat /tmp/x > ${JUNEES_HOME}/memory/user.md".into(),
+                "memory",
+            ),
+            (
+                "echo x >| ~/.junees/projects/0123/notes.md".into(),
+                "memory",
+            ),
+            ("echo x &> ~/.junees/memory/notes.md".into(), "memory"),
+            ("exec 3> ~/.junees/memory/user.md".into(), "memory"),
+            ("mkdir -p ~/.junees/skills/evil".into(), "skill_manage"),
+            ("cp -r /tmp/evil ~/.junees/skills/".into(), "skill_manage"),
+            ("rm -r ~/.junees/skills/deploy".into(), "skill_manage"),
+            ("mv ~/.junees/memory /tmp/old".into(), "memory"),
+            ("ln -s ~/.junees/memory/user.md /tmp/l".into(), "memory"),
+            ("touch ~/.junees/mem*/user.md".into(), "memory"),
+            (
+                "truncate -s 0 ~/.junees/memory/{user,notes}.md".into(),
+                "memory",
+            ),
+            (
+                "python3 -c 'pass' ~/.junees/memory/user.md".into(),
+                "memory",
+            ),
+            ("cd ~/.junees/memory && echo x >> user.md".into(), "memory"),
+            ("cd ~/.junees; echo x > memory/user.md".into(), "memory"),
+            (
+                "cd ~/.junees/memory && sed -i d /proc/self/cwd/user.md".into(),
+                "memory",
+            ),
+            (
+                "bash -c 'echo x >> ~/.junees/memory/user.md'".into(),
+                "memory",
+            ),
+            (
+                "echo $(echo x | tee ~/.junees/memory/user.md)".into(),
+                "memory",
+            ),
+            (
+                "dir=~/.junees/memory; echo x > $dir/user.md".into(),
+                "memory",
+            ),
+        ] {
+            match policy.check(&command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("Commands may read it")
+                        && reason.contains(&format!("use the `{tool}` tool")),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        for command in [
+            "cat ~/.junees/memory/user.md",
+            "grep -r Name ~/.junees/memory ~/.junees/projects",
+            "head -n 3 < ~/.junees/memory/user.md",
+            "ls -la ~/.junees/memory && wc -c ~/.junees/memory/*",
+            "cd ~/.junees/memory && cat user.md > /tmp/copy",
+            "diff ~/.junees/memory/user.md /tmp/copy 2>&1",
+            "cat ~/.junees/skills/deploy/SKILL.md | head",
+            "~/.junees/skills/deploy/scripts/run.sh --dry-run",
+            "bash ~/.junees/skills/deploy/scripts/run.sh",
+            "echo x > ~/.junees/sessions/note",
+            "echo x > ~/.junees/memoryx",
+            // Not caught: a deny list, not a sandbox. A path in another
+            // variable or inside a script's text still gets there.
+            "d=$HOME; echo x > $d/.junees/memory/user.md",
+            "python3 -c \"open('/home/u/.junees/memory/user.md', 'a')\"",
+        ] {
+            assert_eq!(policy.check(command), Verdict::Allow, "{command}");
+        }
     }
 
     #[test]
