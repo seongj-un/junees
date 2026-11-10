@@ -8,12 +8,31 @@
 //! at the same time up to `discord_parallel` ([`bot`]). Only the users in
 //! `discord_allowed_users` are listened to.
 
+pub mod ask;
+pub mod bot;
 pub mod config;
+pub mod engine;
 pub mod rest;
+pub mod sessions;
 pub mod shard;
 pub mod split;
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use tokio::sync::{Semaphore, mpsc};
+
+use crate::cancel::Cancel;
+use crate::memory::Memory;
+use bot::{Bot, Shared};
+use config::DiscordConfig;
+use engine::Engines;
+use rest::Rest;
+use sessions::SessionIndex;
+use shard::{Shard, Timing};
 
 /// Where the gateway writes what it does (one line each). Lines never hold
 /// the bot token or message text.
@@ -27,4 +46,115 @@ pub fn stderr_log() -> Log {
             .map_or(0, |time| time.as_secs());
         eprintln!("{} {line}", crate::session::format_utc_seconds(now));
     })
+}
+
+/// How long the channels get to stop when the gateway does.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+/// Everything the gateway runs with.
+pub struct Gateway {
+    pub config: DiscordConfig,
+    pub engines: Arc<dyn Engines>,
+    /// The state folder: sessions and the channel index. `None` saves
+    /// nothing.
+    pub home: Option<PathBuf>,
+    /// The process's current folder: the tools run there, and approval
+    /// questions and sessions name it.
+    pub cwd: PathBuf,
+    /// What `!memory` shows.
+    pub memory: Option<Memory>,
+    pub timing: Timing,
+    pub typing_every: Duration,
+    pub log: Log,
+}
+
+impl Gateway {
+    /// A gateway with the default timing, logging to stderr.
+    pub fn new(
+        config: DiscordConfig,
+        engines: Arc<dyn Engines>,
+        home: Option<PathBuf>,
+        cwd: PathBuf,
+        memory: Option<Memory>,
+    ) -> Self {
+        Self {
+            config,
+            engines,
+            home,
+            cwd,
+            memory,
+            timing: Timing::default(),
+            typing_every: Duration::from_secs(8),
+            log: stderr_log(),
+        }
+    }
+
+    /// Connects and answers until `shutdown` is set (then running turns are
+    /// cancelled and recorded, and the connection closed) or Discord
+    /// refuses the bot for good (an error). The channels run on the calling
+    /// thread ([`tokio::task::LocalSet`]), so the future is not `Send`:
+    /// `block_on` it rather than spawning it.
+    pub async fn run(self, shutdown: Cancel) -> Result<()> {
+        let index = SessionIndex::load(self.home.as_deref())?;
+        let rest = Arc::new(Rest::new(&self.config, Arc::clone(&self.log))?);
+        let url = tokio::select! {
+            url = rest.gateway_url() => url.context("cannot reach Discord (Get Gateway Bot)")?,
+            _ = shutdown.cancelled() => return Ok(()),
+        };
+        (self.log)(&format!(
+            "gateway: {} ; {} allowed users, {} listed channels, {} turns at once",
+            self.engines.describe(),
+            self.config.allowed_users.len(),
+            self.config.channels.len(),
+            self.config.parallel
+        ));
+        let shared = Arc::new(Shared {
+            rest,
+            engines: self.engines,
+            permits: Arc::new(Semaphore::new(self.config.parallel)),
+            config: self.config.clone(),
+            home: self.home,
+            cwd: self.cwd,
+            memory: self.memory,
+            index: std::sync::Mutex::new(index),
+            typing_every: self.typing_every,
+            log: Arc::clone(&self.log),
+            closing: AtomicBool::new(false),
+        });
+        let (events, mut received) = mpsc::unbounded_channel();
+        let stop_shard = Cancel::new();
+        let shard = Shard::new(
+            self.config.token.clone(),
+            url,
+            self.timing,
+            Arc::clone(&self.log),
+        );
+        let mut connection = tokio::spawn(shard.run(events, stop_shard.clone()));
+        let log = Arc::clone(&self.log);
+        // The channels' conversations run here, on this thread.
+        let channels = tokio::task::LocalSet::new();
+        let ended = channels
+            .run_until(async move {
+                let mut bot = Bot::new(shared);
+                let ended = loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => break None,
+                        dispatch = received.recv() => match dispatch {
+                            Some(dispatch) => bot.handle(dispatch),
+                            None => break Some((&mut connection).await),
+                        },
+                    }
+                };
+                log("gateway: stopping");
+                bot.shutdown(SHUTDOWN_GRACE).await;
+                (ended, connection)
+            })
+            .await;
+        stop_shard.cancel();
+        let result = match ended {
+            (Some(result), _) => result,
+            (None, connection) => connection.await,
+        };
+        result.context("the gateway connection panicked")?
+    }
 }
