@@ -101,6 +101,7 @@ async fn the_model_calls_mcp_tools_whose_server_sees_no_secrets() {
     let names = [
         "ANTHROPIC_API_KEY",
         "JUNEES_DISCORD_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "JUNEES_TEST_HIDDEN",
         "FAKE_TOKEN",
         "JUNEES_TEST_VISIBLE",
@@ -123,6 +124,7 @@ async fn the_model_calls_mcp_tools_whose_server_sees_no_secrets() {
         .env("JUNEES_TEST_HIDDEN", "hidden-value")
         .env("JUNEES_TEST_VISIBLE", "shown")
         .env("JUNEES_DISCORD_TOKEN", "discord-secret")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-secret")
         .output()
         .await
         .unwrap();
@@ -159,7 +161,8 @@ async fn the_model_calls_mcp_tools_whose_server_sees_no_secrets() {
     assert_eq!(results[0]["tool_use_id"], "toolu_1");
     assert_eq!(
         results[0]["content"],
-        "ANTHROPIC_API_KEY=<unset>\nJUNEES_DISCORD_TOKEN=<unset>\nJUNEES_TEST_HIDDEN=<unset>\n\
+        "ANTHROPIC_API_KEY=<unset>\nJUNEES_DISCORD_TOKEN=<unset>\nCLAUDE_CODE_OAUTH_TOKEN=<unset>\n\
+         JUNEES_TEST_HIDDEN=<unset>\n\
          FAKE_TOKEN=from-config\nJUNEES_TEST_VISIBLE=shown"
     );
     let sleep_pid: u32 = results[1]["content"].as_str().unwrap().parse().unwrap();

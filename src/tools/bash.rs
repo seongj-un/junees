@@ -10,8 +10,8 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 
 use super::{
-    CommandPolicy, SECRET_ENV_VARS, Tool, ToolOutput, ToolSettings, Verdict, opt_u64_arg, str_arg,
-    truncate_middle,
+    CLAUDE_CODE_SECRET_ENV_VARS, CommandPolicy, SECRET_ENV_VARS, Tool, ToolOutput, ToolSettings,
+    Verdict, opt_u64_arg, str_arg, truncate_middle,
 };
 
 const MAX_OUTPUT_CHARS: usize = 30_000;
@@ -56,12 +56,14 @@ impl Bash {
         self
     }
 
-    /// The bash of the default tools: it never sees [`SECRET_ENV_VARS`] or
-    /// the user's extra hidden variables, and runs only the commands the
-    /// user's [`CommandPolicy`] allows.
+    /// The bash of the default tools: it never sees [`SECRET_ENV_VARS`],
+    /// [`CLAUDE_CODE_SECRET_ENV_VARS`] or the user's extra hidden
+    /// variables, and runs only the commands the user's [`CommandPolicy`]
+    /// allows.
     pub fn with_settings(settings: &ToolSettings) -> Self {
         Self::default()
             .hide_env(SECRET_ENV_VARS.iter().copied())
+            .hide_env(CLAUDE_CODE_SECRET_ENV_VARS.iter().copied())
             .hide_env(settings.hidden_env.iter().cloned())
             .policy(CommandPolicy::with_settings(settings))
     }

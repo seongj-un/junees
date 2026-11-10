@@ -38,6 +38,23 @@ pub const SECRET_ENV_VARS: &[&str] = &[
     "JUNEES_DISCORD_TOKEN",
 ];
 
+/// Claude Code's own credentials, as its documentation names them
+/// (code.claude.com/docs/en/env-vars and authentication): the subscription
+/// token `junees setup` tells headless users to export, its refresh token,
+/// the mTLS key passphrase, the cloud provider keys and the MCP OAuth client
+/// secret. The `claude` child of the claude-code backend needs them, so they
+/// are not in [`SECRET_ENV_VARS`]; bash and MCP servers never see them.
+pub const CLAUDE_CODE_SECRET_ENV_VARS: &[&str] = &[
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+    "ANTHROPIC_AWS_API_KEY",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "MCP_CLIENT_SECRET",
+];
+
 /// User settings for the default tools, read by [`crate::config::Config`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolSettings {
