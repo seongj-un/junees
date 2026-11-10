@@ -2887,6 +2887,13 @@ mod tests {
             "eval junees cron add x y".into(),
             "bash <<'EOF'\njunees cron add 'in 1m' x\nEOF".into(),
             "echo 'junees cron rm a1' | sh".into(),
+            // The PR #40 review's probe: install a plugin the model wrote
+            // and trust it, or turn off the user's policy hook.
+            "junees plugin install /tmp/p && junees plugin enable p --trust".into(),
+            "junees plugin enable p".into(),
+            "junees plugin disable policy-guard".into(),
+            "junees plugins remove policy-guard".into(),
+            "bash -c 'junees plugins install /tmp/p --name q'".into(),
         ]
     }
 
@@ -2926,6 +2933,8 @@ mod tests {
             "junees cron list",
             "junees cron",
             "junees status",
+            "junees plugin list",
+            "junees plugins",
             "echo junees cron add x",
             "grep 'junees cron add' README.md",
             "git commit -m 'junees cron rm a1'",

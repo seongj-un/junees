@@ -259,6 +259,53 @@ fn gate(plugins: &Plugins, asker: &Scripted, root: &Path) -> Approval {
     .asking(Box::new(asker.clone()))
 }
 
+/// The PR #40 review's probe: the model writes a plugin into a temporary
+/// folder, then installs and trusts it with `junees plugin`, which names
+/// no path in the protected plugins folder.
+#[test]
+fn the_model_cannot_install_or_enable_plugins_on_its_own() {
+    let home = Home::new();
+    let probe = "junees plugin install /tmp/p && junees plugin enable p --trust";
+    let input = json!({ "command": probe });
+    // Refused where no one is asked (`-p`, task, scheduled runs).
+    let output = crate::tools::CommandPolicy::with_settings(&ToolSettings::default()).check(probe);
+    match output {
+        crate::tools::Verdict::Deny(reason) => assert!(
+            reason.contains("`junees plugin install` installs a plugin"),
+            "{reason}"
+        ),
+        verdict => panic!("expected a refusal, got {verdict:?}"),
+    }
+    // Asked about in the conversation, even with `risky`.
+    let plugins = home.load();
+    let asker = Scripted::default();
+    let risky = gate(&plugins, &asker, &home.work);
+    let request = risky.request("bash", &input).unwrap();
+    assert_eq!(
+        request.reasons,
+        [
+            "`junees plugin install` installs a plugin (programs Junees runs) (Junees's own state)",
+            "`junees plugin enable` enables a plugin (its tools and hooks run in later sessions) \
+             (Junees's own state)",
+        ]
+    );
+    for command in [
+        "junees plugin disable policy-guard",
+        "junees plugins remove x",
+    ] {
+        assert!(
+            risky
+                .request("bash", &json!({ "command": command }))
+                .is_some(),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        risky.request("bash", &json!({"command": "junees plugin list"})),
+        None
+    );
+}
+
 #[tokio::test]
 async fn plugin_tools_are_asked_about_unless_trusted() {
     let home = Home::new();

@@ -1,9 +1,12 @@
 //! Junees's own subcommands that change its state (`junees cron add`,
-//! `junees cron remove`, ...), recognized in bash commands.
+//! `junees plugin enable`, ...), recognized in bash commands.
 //!
 //! The model must not run them on its own: a job it schedules runs later
 //! with no one watching (and can post to any Discord channel the bot sees),
-//! and removing or pausing a job breaks the user's. Writing the files under
+//! and removing or pausing a job breaks the user's. A plugin it installs
+//! and enables runs its programs in every later session (its hooks see
+//! every tool call and every answer), and disabling one can turn off the
+//! user's policy hook. Writing the files under
 //! `$JUNEES_HOME` is already refused ([`super::settings_file::DATA_FOLDERS`]);
 //! these commands change the same state without naming a path.
 //!
@@ -28,8 +31,11 @@ pub struct SelfCommand {
     pub does: &'static str,
 }
 
-/// Every subcommand that changes Junees's state. A new one (for example
-/// `plugin install`) only needs an entry here.
+/// Every subcommand that changes Junees's state. A new one only needs an
+/// entry here. [`find`] compares the words right after the program, so
+/// every spelling the CLI accepts is listed (`plugin` and `plugins`);
+/// neither `junees cron` nor `junees plugin` takes an option before its
+/// subcommand.
 pub const STATE_CHANGING: &[SelfCommand] = &[
     SelfCommand {
         words: &["cron", "add"],
@@ -58,6 +64,38 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
     SelfCommand {
         words: &["cron", "daemon"],
         does: "starts running the scheduled jobs",
+    },
+    SelfCommand {
+        words: &["plugin", "install"],
+        does: "installs a plugin (programs Junees runs)",
+    },
+    SelfCommand {
+        words: &["plugin", "enable"],
+        does: "enables a plugin (its tools and hooks run in later sessions)",
+    },
+    SelfCommand {
+        words: &["plugin", "disable"],
+        does: "disables a plugin",
+    },
+    SelfCommand {
+        words: &["plugin", "remove"],
+        does: "removes a plugin",
+    },
+    SelfCommand {
+        words: &["plugins", "install"],
+        does: "installs a plugin (programs Junees runs)",
+    },
+    SelfCommand {
+        words: &["plugins", "enable"],
+        does: "enables a plugin (its tools and hooks run in later sessions)",
+    },
+    SelfCommand {
+        words: &["plugins", "disable"],
+        does: "disables a plugin",
+    },
+    SelfCommand {
+        words: &["plugins", "remove"],
+        does: "removes a plugin",
     },
 ];
 
@@ -153,6 +191,17 @@ mod tests {
                 "junees cron pause",
             ),
             (&format!("{exe_name} cron add x y"), "junees cron add"),
+            ("junees plugin install /tmp/p", "junees plugin install"),
+            ("junees plugin enable p --trust", "junees plugin enable"),
+            (
+                "junees plugin disable policy-guard",
+                "junees plugin disable",
+            ),
+            ("junees plugin remove p", "junees plugin remove"),
+            ("junees plugins install /tmp/p", "junees plugins install"),
+            ("junees plugins enable p", "junees plugins enable"),
+            ("junees plugins disable p", "junees plugins disable"),
+            ("junees plugins remove p", "junees plugins remove"),
         ] {
             assert_eq!(
                 find(&words(command)).map(SelfCommand::command).as_deref(),
@@ -165,6 +214,10 @@ mod tests {
             "junees cron ls",
             "junees cron",
             "junees cron --help",
+            "junees plugin",
+            "junees plugin list",
+            "junees plugins",
+            "junees plugin --help",
             "junees status",
             "junees -p cron add",
             "junees add cron",

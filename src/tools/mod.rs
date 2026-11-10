@@ -422,6 +422,11 @@ mod tests {
             .run(json!({"command": format!("echo '{evil}' > {}", manifest.display())}))
             .await;
         assert!(output.content.contains(hint), "{}", output.content);
+        assert!(
+            !output.content.contains("junees plugin"),
+            "{}",
+            output.content
+        );
         assert_eq!(std::fs::read_to_string(&manifest).unwrap(), "{}");
         let policy = CommandPolicy::with_settings(&settings);
         for command in [
