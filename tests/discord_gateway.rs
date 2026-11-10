@@ -59,6 +59,8 @@ struct RestState {
     notify: Notify,
     /// Answer this many message posts with 429 first.
     limit_next: Mutex<usize>,
+    /// Answer this many message posts with 500 first.
+    fail_next: Mutex<usize>,
     /// Answer every request with 401.
     unauthorized: AtomicBool,
     gateway_url: Mutex<String>,
@@ -170,7 +172,19 @@ async fn serve_rest(mut socket: TcpStream, state: Arc<RestState>) {
             *left = left.saturating_sub(1);
             limited
         };
-        if limited {
+        let failed = !limited && {
+            let mut left = state.fail_next.lock().unwrap();
+            let failed = *left > 0;
+            *left = left.saturating_sub(1);
+            failed
+        };
+        if failed {
+            request.headers.insert("x-fake-status".into(), "500".into());
+            (
+                500,
+                json!({"message": "500: Internal Server Error", "code": 0}),
+            )
+        } else if limited {
             request.headers.insert("x-fake-status".into(), "429".into());
             (
                 429,
@@ -1033,6 +1047,43 @@ async fn rate_limited_posts_are_retried() {
     assert_eq!(limited, 2);
     let log = running.stop().await.join("\n");
     assert!(log.contains("rate limited, waiting 0.20s"), "{log}");
+}
+
+#[tokio::test]
+async fn a_retried_post_keeps_its_enforced_nonce() {
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(
+        discord(&rest.url, &[]),
+        fake(Duration::ZERO),
+        None,
+        dir.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    // The first post fails with a 500, as if Discord had stored it anyway.
+    *rest.state.fail_next.lock().unwrap() = 1;
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "hello", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "reply 1: hello").await;
+    running.stop().await;
+    let posts: Vec<Received> = rest
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/channels/505/messages"))
+        .collect();
+    assert_eq!(posts.len(), 3, "{posts:#?}");
+    assert_eq!(posts[0].headers["x-fake-status"], "500");
+    for post in &posts {
+        assert_eq!(post.body["enforce_nonce"], true, "{post:?}");
+        let nonce = post.body["nonce"].as_str().unwrap();
+        assert!(!nonce.is_empty() && nonce.len() <= 25, "{nonce}");
+    }
+    // The retry sends the failed post's nonce again; another post has its own.
+    assert_eq!(posts[0].body["content"], posts[1].body["content"]);
+    assert_eq!(posts[0].body["nonce"], posts[1].body["nonce"]);
+    assert_ne!(posts[1].body["nonce"], posts[2].body["nonce"]);
 }
 
 #[tokio::test]

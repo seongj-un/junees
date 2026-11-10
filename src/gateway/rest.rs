@@ -6,9 +6,19 @@
 //! no requests left, the next one on it waits for the reset. A 429 answer
 //! says how long to wait in `retry_after` (seconds, with decimals; the
 //! `Retry-After` header too), and `global: true` holds back every route.
+//!
+//! A message post that fails after sending (no answer, a 5xx) may have
+//! created the message anyway, so posts carry a `nonce` with
+//! `enforce_nonce: true` (developer docs, "Message", Create Message: "If
+//! true and nonce is present, it will be checked for uniqueness in the past
+//! few minutes. If another message was created by the same author with the
+//! same nonce, that message will be returned and no new message will be
+//! created."); every try of one post sends the same nonce.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -84,11 +94,14 @@ impl Rest {
 
     /// Create Message with `content` (at most 2000 characters). Mentions
     /// in it do not notify anyone (`allowed_mentions: {parse: []}`): the
-    /// text comes from the model.
+    /// text comes from the model. A retried post cannot show twice: its
+    /// tries share one enforced `nonce` (module docs).
     pub async fn create_message(&self, channel: &str, content: &str) -> Result<()> {
         let body = json!({
             "content": content,
             "allowed_mentions": {"parse": []},
+            "nonce": nonce(),
+            "enforce_nonce": true,
         });
         self.request(
             Method::POST,
@@ -241,6 +254,19 @@ impl Rest {
             _ => {}
         }
     }
+}
+
+/// A Create Message `nonce` (docs: up to 25 characters): 16 hex digits,
+/// random and different for every call.
+fn nonce() -> String {
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(CALLS.fetch_add(1, Ordering::Relaxed));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos());
+    hasher.write_u128(now);
+    format!("{:016x}", hasher.finish())
 }
 
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {
