@@ -19,7 +19,7 @@ junees gateway                      # 디스코드 봇으로 띄우기 (아래 �
 
 - `/task <목표>`: 지금 폴더의 git 저장소에서 장기 작업을 계획하고 바로 실행한다(`junees task "목표"`와 같음). `/task`만 쓰면 멈춘 작업을 이어서 한다(`junees task`).
 - `/status`: 작업 상태(`junees status`와 같음).
-- `/sessions`: 최근 세션 10개를 번호와 함께 보여 주고, 번호를 넣으면 그 세션으로 이어 간다(Enter는 그대로).
+- `/sessions`: 최근 세션 10개를 번호와 함께 보여 주고, 번호를 넣으면 그 세션으로 이어 간다(Enter는 그대로). 디스코드 게이트웨이의 채널 세션은 번호 없이 따로 보여 주기만 한다(아래 디스코드 게이트웨이).
 - `/new`: 새 대화(예전 이름 `/reset`도 됨).
 - `/model [이름]`: 지금 모델을 보여 주거나, 이 실행 동안만 다른 모델로 바꾼다(claude-code 백엔드에서는 Claude Code에 `--model`로 넘긴다).
 - `/backend [api|claude-code]`: 대화와 `/task`를 무엇으로 돌릴지 보여 주거나, 이 실행 동안만 둘 다 바꾼다. 대화를 바꾸면 새 세션으로 시작한다(아래 구독 모드).
@@ -88,7 +88,7 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 
 - id는 `20261109-061704-3fa2`처럼 UTC 시각 + 랜덤 hex라서 이름순이 생성순이다.
 - 파일은 첫 입력이 기록될 때 만들어진다. 시작하고 바로 나가면 빈 세션이 남지 않는다.
-- `-c`는 시작한 폴더(기록의 `cwd`)가 지금 폴더와 같고 지금 백엔드가 쓴 세션 중 마지막으로 기록된(파일 수정 시각) 것을 고른다. 없으면 새 세션을 시작한다. api 백엔드의 대화와 claude-code 백엔드의 대화는 서로 이어 갈 수 없어서(Claude Code는 Junees가 들고 있는 기록을 못 보고, 반대도 같다), `--resume`이나 `/sessions`로 다른 백엔드의 세션을 고르면 `session <id> was run by claude-code, ... continue it with `/backend claude-code``처럼 바꿀 방법을 알려 주고 열지 않는다. `/sessions` 목록에는 claude-code 세션 앞에 `[claude-code]`가 붙는다.
+- `-c`는 시작한 폴더(기록의 `cwd`)가 지금 폴더와 같고 지금 백엔드가 쓴 세션 중 마지막으로 기록된(파일 수정 시각) 것을 고른다. 없으면 새 세션을 시작한다. api 백엔드의 대화와 claude-code 백엔드의 대화는 서로 이어 갈 수 없어서(Claude Code는 Junees가 들고 있는 기록을 못 보고, 반대도 같다), `--resume`이나 `/sessions`로 다른 백엔드의 세션을 고르면 `session <id> was run by claude-code, ... continue it with `/backend claude-code``처럼 바꿀 방법을 알려 주고 열지 않는다. `/sessions` 목록에는 claude-code 세션 앞에 `[claude-code]`가 붙는다. 디스코드 채널 세션(meta의 `source`가 있는 세션)은 `-c`가 고르지 않는다.
 - `--resume`으로 다른 폴더에서 시작한 세션을 열면 `resumed <id> (N messages, started in <폴더>)`로 알려 준다(claude-code 세션은 `N Claude Code turns`). 기록 속 상대 경로는 그 폴더 기준이다.
 - 세션 파일은 그 세션을 쓰는 Junees가 `flock`으로 잠근다. 아직 실행 중인 세션을 다른 터미널에서 `-c`나 `--resume`으로 열면 "session <id> is in use by another Junees" 오류로 끝나고 파일은 건드리지 않는다. 프로세스가 죽으면 잠금은 커널이 풀어 준다.
 - 이어 갈 때 마지막 줄이 줄바꿈 없이 끝나고 읽히지 않으면(쓰는 도중 죽은 흔적) 그 줄만 버린다. 줄바꿈까지 있는 줄이 읽히지 않으면 위치와 상관없이 오류로 멈추고 파일을 고치지 않는다. 도구 실행 중에 끊겨서 결과가 없는 도구 호출은 `interrupted` 오류 결과로 채우고 그것도 기록한다.
@@ -361,7 +361,7 @@ loginctl enable-linger "$USER"             # 로그아웃해도 계속 돌게
 
 #### 대화
 
-- 채널(스레드, DM)마다 Junees 세션 하나. 세션은 보통 세션 기록(`$JUNEES_HOME/sessions/<id>.jsonl`, cwd는 게이트웨이를 띄운 폴더)이고, 어느 채널이 어느 세션인지는 `$JUNEES_HOME/gateway/discord-sessions.json`(채널 id -> 세션 id, 0600)에 둔다. 다시 띄우면 채널의 첫 메시지 때 그 세션을 이어 간다. 세션은 flock으로 잠그므로, 다른 Junees(`junees -c`, `--resume`)가 그 세션을 열고 있거나 디스크 오류로 읽지 못하면 채널을 새 세션으로 옮기지 않는다. 그 메시지는 실행하지 않고 `(not run) cannot continue session <id> for now (...)`로 알리며, 다음 메시지 때 다시 시도한다(`!new`면 새로 시작). 지워졌거나 깨진 세션이면 새로 시작하고 이유가 `!status`에 나온다. 백엔드를 바꾸면 이전 백엔드의 세션은 이어 가지 않고 새로 시작한다. 터미널의 `/sessions`, `junees --resume <id>`로도 열 수 있다(게이트웨이가 그 세션을 쥐고 있지 않을 때).
+- 채널(스레드, DM)마다 Junees 세션 하나. 세션은 보통 세션 기록(`$JUNEES_HOME/sessions/<id>.jsonl`, cwd는 게이트웨이를 띄운 폴더)이고, 어느 채널이 어느 세션인지는 `$JUNEES_HOME/gateway/discord-sessions.json`(채널 id -> 세션 id, 0600)에 둔다. 다시 띄우면 채널의 첫 메시지 때 그 세션을 이어 간다. 세션은 flock으로 잠그므로, 다른 Junees(`junees -c`, `--resume`)가 그 세션을 열고 있거나 디스크 오류로 읽지 못하면 채널을 새 세션으로 옮기지 않는다. 그 메시지는 실행하지 않고 `(not run) cannot continue session <id> for now (...)`로 알리며, 다음 메시지 때 다시 시도한다(`!new`면 새로 시작). 지워졌거나 깨진 세션이면 새로 시작하고 이유가 `!status`에 나온다. 백엔드를 바꾸면 이전 백엔드의 세션은 이어 가지 않고 새로 시작한다. 채널 세션의 meta 줄에는 `"source": "discord"`와 `"channel": "<채널 id>"`가 들어간다. 그래서 게이트웨이를 띄운 폴더에서 `junees -c`를 해도 채널 세션을 고르지 않고(그동안 채널이 잠금 때문에 `(not run)`이 되지 않게), `/sessions`는 채널 세션을 `[discord <채널 id>]`를 붙여 번호 없이 보여 주기만 한다. 꼭 열어야 하면 `junees --resume <id>`로 연다(게이트웨이가 그 세션을 쥐고 있지 않을 때). 이 필드가 생기기 전에 만든 채널 세션에는 표시가 없어 예전처럼 `-c`와 `/sessions` 후보에 나온다.
 - 한 `$JUNEES_HOME`에는 게이트웨이 하나만 돈다. 시작할 때 `$JUNEES_HOME/gateway/lock`에 flock을 잡고, 이미 잡혀 있으면 `another Junees gateway is running ...` 오류로 끝난다(두 프로세스가 같은 메시지에 두 번 답하고 도구도 두 번 돌리지 않도록). 프로세스가 죽으면 커널이 잠금을 푼다.
 - 같은 채널의 메시지는 받은 순서대로 하나씩 처리한다(턴 중에 온 메시지는 대기열). 다른 채널은 동시에 돌고, 동시에 턴을 돌리는 채널은 `discord_parallel`(기본 2)까지다. 자리가 없으면 `(waiting for a free slot: ...)`을 알리고 기다린다(이때 `!stop`이면 시작하지 않는다). 모든 채널의 대화는 한 스레드에서 비동기로 돈다(에이전트의 future가 `Send`가 아니라서 `LocalSet`).
 - 출력: 턴 중에는 타이핑 표시(8초마다 갱신, 승인 질문을 기다리는 동안은 멈춤). 응답은 메시지 편집으로 스트리밍하지 않고 **완성된 텍스트 블록마다** 보낸다(편집은 레이트 리밋을 빨리 쓰고, 끊긴 응답의 재시도 처리가 복잡해진다). 다음 텍스트 전까지의 도구 호출은 `-> bash ls -la` 같은 한 줄 요약(명령, 경로, 검색어 120자)을 코드 블록 하나로 묶어 보낸다. 2000자가 넘는 블록은 줄 단위로 나누고, 코드 블록이 잘리면 앞 메시지에서 닫고 다음 메시지에서 같은 언어로 다시 연다(다시 여는 줄은 펜스와 32자 이하의 언어만이고, ```` ```rm -rf build``` ````처럼 같은 줄에서 닫히는 펜스는 코드 블록으로 보지 않는다. 길이는 UTF-16 단위로 세어 어느 방식으로 세도 2000자를 넘지 않게 한다). 잘리거나 압축된 응답 같은 안내도 채널에 나온다. 오류는 `error: ...`와 터미널과 같은 힌트로 보낸다.
@@ -552,7 +552,7 @@ src/
   agent.rs           에이전트 루프 (기록 변경을 세션 기록에 남김, 도구 결과 비우기/압축/초과 시 재시도, 취소, 모델 호출 전 한도 확인, 도구 호출 전 승인 훅 ToolGate, 스트리밍 이벤트 전달, pause_turn 이어 가기와 인용 출처 보고, delegate 호출 실행(서브에이전트와 provider, 도구, 취소, 승인, 한도 공유))
   approval.rs        실행 전 승인 (JUNEES_APPROVAL, 묻는 범위 판단(MCP 외부 도구 포함), 터미널 질문, 세션 동안 항상 허용, 프롬프트와 공유하는 표준 입력, 서브에이전트 질문 표시(check_for), 묻지 않는 호출은 기다리지 않고 질문만 하나씩)
   cancel.rs          취소 플래그 (시그널 처리기와 에이전트 루프가 공유)
-  session.rs         세션 기록(JSONL) 쓰기, 재생, 이어 가기, 세션 찾기/목록(백엔드별), 비우기/압축 지점 계산, Claude Code 턴 기록, 서브에이전트 기록(create_sub)과 사용량
+  session.rs         세션 기록(JSONL) 쓰기, 재생, 이어 가기, 세션 찾기/목록(백엔드별, 디스코드 채널 세션은 -c와 번호 목록에서 뺌), 비우기/압축 지점 계산, Claude Code 턴 기록, 서브에이전트 기록(create_sub)과 사용량
   context.rs         압축 요약 요청(시스템 프롬프트, 앞부분을 텍스트로 옮기기)
   claude_code/       claude-code 백엔드 공용 부분 (대화와 작업이 함께 씀)
     mod.rs             백엔드 설정, claude --version/auth status 확인, 환경 정리와 CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, 세션 실행(Spawn)과 예산/취소, 프로세스 그룹과 자손 종료
@@ -631,7 +631,7 @@ tests/
   claude_chat.rs       실제 바이너리와 가짜 claude로 구독 대화: 두 번째 턴이 같은 세션을 --resume, 스트리밍과 도구/거절 표시, /usage와 /compact, /context 안내, 거절 규칙 인자, claude 환경에 API 변수 없음, -p와 -c, Ctrl-C 후 다음 턴, 사용 한도 안내 검증
   memory.rs            실제 바이너리와 가짜 API 서버로 memory 도구가 저장한 항목이 지금 세션이 아니라 다음 세션의 시스템 프롬프트에 들어가는지, /memory 보기와 clear(확인 질문), /new가 메모리를 다시 읽는지 검증
   skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기, /skills 화면의 제어 문자 이스케이프 검증
-  discord_gateway.rs   테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST로 IDENTIFY/READY, 하트비트와 ACK 누락, resume_gateway_url로 RESUME, Reconnect, INVALID_SESSION, 닫힘 코드, 거절된 토큰이 오류와 로그에 안 나옴, 허용 사용자와 멘션 규칙, 메시지 나누기, 채널별 대기열과 동시 실행, !stop/!new/!status, 종료 시 취소, 429 재시도, 실제 에이전트와 가짜 API로 재시작 뒤 채널 세션 이어 가기와 승인 답장/시간 초과 검증
+  discord_gateway.rs   테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST로 IDENTIFY/READY, 하트비트와 ACK 누락, resume_gateway_url로 RESUME, Reconnect, INVALID_SESSION, 닫힘 코드, 거절된 토큰이 오류와 로그에 안 나옴, 허용 사용자와 멘션 규칙, 메시지 나누기, 채널별 대기열과 동시 실행, !stop/!new/!status, 종료 시 취소, 429 재시도, 실제 에이전트와 가짜 API로 재시작 뒤 채널 세션 이어 가기(meta의 source/channel, -c와 /sessions 번호 목록에서 빠짐)와 승인 답장/시간 초과 검증
   mcp.rs               실제 바이너리와 가짜 API, 가짜 MCP 서버(tests/fixtures/fake_mcp.py)로 모델의 MCP 도구 호출, 서버 환경에 API 키/디스코드 토큰/숨긴 변수가 없음, 종료 때 서버와 그 자식 정리, 0644 mcp.json 거절, /mcp, 파이프 입력 대화의 승인 거절과 trust, 게이트웨이 채널 질문, 작업 폴더의 모듈과 스크립트를 서버로 실행하지 않음(작업 폴더 안 상대 경로는 trust만) 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```

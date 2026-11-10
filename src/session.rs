@@ -35,6 +35,9 @@ pub const FORMAT: u32 = 6;
 /// backend).
 pub const CLAUDE_CODE: &str = "claude-code";
 
+/// [`Meta::source`] of a conversation in a channel of the Discord gateway.
+pub const DISCORD: &str = "discord";
+
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
 
@@ -70,6 +73,15 @@ pub struct Meta {
     /// left out) for Junees's own agent on the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Where the conversation takes place when not at a terminal:
+    /// [`DISCORD`] for a channel of the Discord gateway, which continues
+    /// it there. `junees -c` and the `/sessions` list leave such sessions
+    /// out. `None` (the field left out) for the terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The id of the channel a [`Meta::source`] session belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 fn first_format() -> u32 {
@@ -730,6 +742,29 @@ impl SessionWriter {
         model: &str,
         backend: Option<&str>,
     ) -> Result<(Meta, Self)> {
+        Self::create_with(home, cwd, model, backend, None)
+    }
+
+    /// [`SessionWriter::create_for`] for a conversation in `channel` of
+    /// `source` ([`Meta::source`]), such as a Discord channel.
+    pub fn create_for_channel(
+        home: &Path,
+        cwd: &Path,
+        model: &str,
+        backend: Option<&str>,
+        source: &str,
+        channel: &str,
+    ) -> Result<(Meta, Self)> {
+        Self::create_with(home, cwd, model, backend, Some((source, channel)))
+    }
+
+    fn create_with(
+        home: &Path,
+        cwd: &Path,
+        model: &str,
+        backend: Option<&str>,
+        channel: Option<(&str, &str)>,
+    ) -> Result<(Meta, Self)> {
         let dir = sessions_dir(home);
         let now = unix_now();
         for _ in 0..16 {
@@ -746,6 +781,8 @@ impl SessionWriter {
                 model: model.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 backend: backend.map(str::to_string),
+                source: channel.map(|(source, _)| source.to_string()),
+                channel: channel.map(|(_, channel)| channel.to_string()),
             };
             let writer = Self {
                 path,
@@ -1014,6 +1051,10 @@ pub struct Summary {
     pub first_input: String,
     /// [`Meta::backend`].
     pub backend: Option<String>,
+    /// [`Meta::source`].
+    pub source: Option<String>,
+    /// [`Meta::channel`].
+    pub channel: Option<String>,
 }
 
 struct SessionFile {
@@ -1071,15 +1112,17 @@ pub fn read_meta(path: &Path) -> Option<Meta> {
     read_head(path).map(|(meta, _)| meta)
 }
 
-/// The most recently written session started in `cwd` and run by
-/// `backend` ([`Meta::backend`]).
+/// The most recently written session started at the terminal in `cwd`
+/// and run by `backend` ([`Meta::backend`]). Sessions of a channel
+/// ([`Meta::source`]) are left to the gateway that continues them.
 pub fn find_latest(home: &Path, cwd: &Path, backend: Option<&str>) -> Result<Option<PathBuf>> {
     let cwd = cwd.to_string_lossy();
     Ok(session_files(home)?
         .into_iter()
         .find(|file| {
-            read_meta(&file.path)
-                .is_some_and(|meta| meta.cwd == cwd && meta.backend.as_deref() == backend)
+            read_meta(&file.path).is_some_and(|meta| {
+                meta.cwd == cwd && meta.backend.as_deref() == backend && meta.source.is_none()
+            })
         })
         .map(|file| file.path))
 }
@@ -1110,14 +1153,27 @@ pub fn find_by_prefix(home: &Path, prefix: &str) -> Result<PathBuf> {
     }
 }
 
-/// Up to `limit` sessions with a readable meta line, most recently written
-/// first. Only the meta line and the first entry (the first user input) of
-/// each file are read, so long sessions do not slow the list down.
+/// Up to `limit` sessions started at the terminal with a readable meta
+/// line, most recently written first. Only the meta line and the first
+/// entry (the first user input) of each file are read, so long sessions do
+/// not slow the list down.
 pub fn list_recent(home: &Path, limit: usize) -> Result<Vec<Summary>> {
+    list(home, limit, false)
+}
+
+/// [`list_recent`] for the sessions of channels ([`Meta::source`]).
+pub fn list_channel_sessions(home: &Path, limit: usize) -> Result<Vec<Summary>> {
+    list(home, limit, true)
+}
+
+fn list(home: &Path, limit: usize, channels: bool) -> Result<Vec<Summary>> {
     Ok(session_files(home)?
         .into_iter()
         .filter_map(|file| {
             let (meta, mut rest) = read_head(&file.path)?;
+            if meta.source.is_some() != channels {
+                return None;
+            }
             let first_input = match read_entry(&mut rest) {
                 Some(Entry::Message(message)) if message.role == Role::User => message.text(),
                 Some(Entry::ClaudeTurn(turn)) => turn.input,
@@ -1133,6 +1189,8 @@ pub fn list_recent(home: &Path, limit: usize) -> Result<Vec<Summary>> {
                 cwd: meta.cwd,
                 first_input,
                 backend: meta.backend,
+                source: meta.source,
+                channel: meta.channel,
             })
         })
         .take(limit)
@@ -1241,6 +1299,8 @@ mod tests {
             model: "m".into(),
             version: "0.1.0".into(),
             backend: None,
+            source: None,
+            channel: None,
         })
     }
 
@@ -2694,6 +2754,75 @@ mod tests {
         let all = list_recent(home, 10).unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(all[2].first_input, "first question");
+    }
+
+    fn channel_session(home: &Path, cwd: &str, input: &str, mtime: u64) -> PathBuf {
+        let (meta, mut writer) =
+            SessionWriter::create_for_channel(home, Path::new(cwd), "m", None, DISCORD, "505")
+                .unwrap();
+        writer
+            .record(&Entry::Message(Message::user_text(input)))
+            .unwrap();
+        let path = sessions_dir(home).join(format!("{}.jsonl", meta.id));
+        set_mtime(&path, mtime);
+        path
+    }
+
+    #[test]
+    fn channel_sessions_are_left_to_their_channel() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let terminal = new_session(home, "/x", &["at the terminal"], 1_000);
+        let channel = channel_session(home, "/x", "in discord", 2_000);
+
+        // The meta line says where the conversation takes place.
+        let meta = read_meta(&channel).unwrap();
+        assert_eq!(meta.source.as_deref(), Some(DISCORD));
+        assert_eq!(meta.channel.as_deref(), Some("505"));
+        let first: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(&channel)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (&first["source"], &first["channel"]),
+            (&json!("discord"), &json!("505"))
+        );
+        // A terminal session has neither field, and older journals read
+        // without them.
+        let first: serde_json::Value = serde_json::from_str(
+            fs::read_to_string(&terminal)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            first.get("source").is_none() && first.get("channel").is_none(),
+            "{first}"
+        );
+        assert_eq!(read_meta(&terminal).unwrap().source, None);
+
+        // `-c` passes over the newer channel session.
+        assert_eq!(
+            find_latest(home, Path::new("/x"), None).unwrap(),
+            Some(terminal)
+        );
+        let listed = list_recent(home, 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].first_input, "at the terminal");
+        let channels = list_channel_sessions(home, 10).unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].first_input, "in discord");
+        assert_eq!(channels[0].source.as_deref(), Some(DISCORD));
+        assert_eq!(channels[0].channel.as_deref(), Some("505"));
+        // `--resume <id>` still finds it by its id.
+        let id = channel.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(find_by_prefix(home, &id).unwrap(), channel);
     }
 
     #[test]
