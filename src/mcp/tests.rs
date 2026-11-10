@@ -14,7 +14,10 @@ use super::config::{DEFAULT_CALL_TIMEOUT, ServerConfig};
 use super::server::{LEGACY_VERSIONS, MODERN_VERSION};
 use super::tool::{MAX_OUTPUT_CHARS, exposed_name, tool_output};
 use super::*;
+use crate::agent::{Agent, AgentOptions};
 use crate::approval::{Answer, Approval, ApprovalMode, Ask, Request, ToolGate};
+use crate::message::{ContentBlock, Message, StopReason, Usage};
+use crate::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use crate::tools::{ToolOutput, ToolSettings, Workspace};
 
 /// The fake server. Modes: `modern`, `modern_other` (supports only a
@@ -739,5 +742,176 @@ async fn untrusted_servers_are_asked_about_trusted_ones_are_not() {
     );
     let off = gate(ApprovalMode::Off, &mcp, &asker, fake.dir.path());
     assert!(off.request("mcp__fake__echo", &input).is_none());
+    mcp.shutdown().await;
+}
+
+/// What one model call was sent: its conversation, tool names and messages.
+type Seen = (String, Vec<String>, Vec<Message>);
+
+/// Answers each conversation from its own replies, picked by the first line
+/// of its first message (the parent's input or a subagent's goal), and
+/// keeps every request.
+#[derive(Default)]
+struct Routes {
+    replies: Mutex<std::collections::HashMap<String, VecDeque<CompletionResponse>>>,
+    seen: Mutex<Vec<Seen>>,
+}
+
+#[async_trait]
+impl Provider for Arc<Routes> {
+    async fn complete(
+        &self,
+        request: CompletionRequest<'_>,
+    ) -> std::result::Result<CompletionResponse, ProviderError> {
+        let first = request
+            .messages
+            .first()
+            .map(Message::text)
+            .unwrap_or_default();
+        let key = first.lines().next().unwrap_or_default().to_string();
+        self.seen.lock().unwrap().push((
+            key.clone(),
+            request.tools.iter().map(|tool| tool.name.clone()).collect(),
+            request.messages.to_vec(),
+        ));
+        Ok(self
+            .replies
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .and_then(VecDeque::pop_front)
+            .unwrap_or_else(|| panic!("no reply left for `{key}`")))
+    }
+}
+
+fn reply(blocks: Vec<ContentBlock>, stop_reason: StopReason) -> CompletionResponse {
+    CompletionResponse {
+        content: blocks,
+        stop_reason,
+        usage: Usage::default(),
+    }
+}
+
+fn use_tool(id: &str, name: &str, input: Value) -> CompletionResponse {
+    reply(
+        vec![ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+        }],
+        StopReason::ToolUse,
+    )
+}
+
+#[tokio::test]
+async fn subagents_share_the_servers_and_ask_through_the_same_gate() {
+    let fake = Fake::new();
+    let mcp = start(vec![fake.config("fake", "modern")]).await;
+    let routes = Arc::new(Routes::default());
+    let done = || reply(vec![ContentBlock::text("done")], StopReason::EndTurn);
+    routes.replies.lock().unwrap().extend([
+        (
+            "go".to_string(),
+            VecDeque::from([
+                use_tool(
+                    "d1",
+                    crate::subagent::NAME,
+                    json!({"tasks": [{"goal": "alpha"}, {"goal": "beta"}]}),
+                ),
+                done(),
+            ]),
+        ),
+        (
+            "alpha".to_string(),
+            VecDeque::from([
+                use_tool("a1", "mcp__fake__echo", json!({"text": "from alpha"})),
+                done(),
+            ]),
+        ),
+        (
+            "beta".to_string(),
+            VecDeque::from([
+                use_tool("b1", "mcp__fake__echo", json!({"text": "from beta"})),
+                done(),
+            ]),
+        ),
+    ]);
+    let mut tools = ToolRegistry::new();
+    mcp.register(&mut tools);
+    let asker = Scripted::default();
+    asker
+        .answers
+        .lock()
+        .unwrap()
+        .extend([Answer::Yes, Answer::Yes]);
+    let mut agent = Agent::new(
+        Box::new(Arc::clone(&routes)),
+        tools,
+        AgentOptions {
+            system: "test".into(),
+            max_tokens: 100,
+            max_turns: 5,
+            context_window: 100_000,
+            compact_threshold: 0.8,
+        },
+    )
+    .with_delegate(crate::subagent::Settings {
+        parallel: 2,
+        ..Default::default()
+    })
+    .with_gate(Box::new(gate(
+        ApprovalMode::Risky,
+        &mcp,
+        &asker,
+        fake.dir.path(),
+    )));
+    agent.run("go", |_| {}).await.unwrap();
+
+    // Both subagents were asked about through the parent's gate, each
+    // question naming its subagent.
+    let mut asked: Vec<(String, String)> = asker
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| (request.tool.clone(), request.reasons[0].clone()))
+        .collect();
+    asked.sort();
+    assert_eq!(
+        asked,
+        [
+            (
+                "mcp__fake__echo".to_string(),
+                "asked by subagent [1] alpha".to_string()
+            ),
+            (
+                "mcp__fake__echo".to_string(),
+                "asked by subagent [2] beta".to_string()
+            ),
+        ]
+    );
+    // Each subagent saw the server's tools and got the answer to its own
+    // call from the one shared server.
+    let seen = routes.seen.lock().unwrap().clone();
+    for (goal, id) in [("alpha", "a1"), ("beta", "b1")] {
+        let calls: Vec<_> = seen.iter().filter(|(key, ..)| key == goal).collect();
+        assert_eq!(calls.len(), 2, "{goal}");
+        assert!(calls[0].1.contains(&"mcp__fake__echo".to_string()));
+        assert!(!calls[0].1.contains(&crate::subagent::NAME.to_string()));
+        assert_eq!(
+            calls[1].2.last().unwrap().content,
+            [ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: format!("echo: from {goal}"),
+                is_error: false,
+            }]
+        );
+    }
+    let calls = fake
+        .methods()
+        .iter()
+        .filter(|method| *method == "tools/call")
+        .count();
+    assert_eq!(calls, 2);
     mcp.shutdown().await;
 }
