@@ -11,6 +11,7 @@
 //! - [`deliver`], [`output`]: where results go.
 //! - [`cli`], [`command`]: the `junees cron` commands.
 
+pub mod daemon;
 pub mod deliver;
 pub mod output;
 pub mod run;
@@ -23,6 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::prompt_text::escape_hidden;
 use deliver::{Lookup, Report};
 use run::{Limits, Outcome};
 use store::{Job, LastRun, Store};
@@ -38,6 +40,9 @@ pub const MAX_TOKENS_ENV: &str = "JUNEES_CRON_MAX_TOKENS";
 
 pub const DEFAULT_MAX_TIME: Duration = Duration::from_secs(30 * 60);
 pub const DEFAULT_MAX_TOKENS: u64 = 1_000_000;
+
+/// Characters of a prompt shown in a listing.
+const PROMPT_PREVIEW: usize = 80;
 
 /// The time now, in unix seconds.
 pub fn unix_now() -> i64 {
@@ -162,9 +167,103 @@ pub async fn finish(
     last
 }
 
+/// The jobs as text: id, name, schedule, next and last run, and with
+/// `detail` the prompt (shortened), folder and destination too.
+pub fn overview(jobs: &[Job], tz: &TimeZone, detail: bool) -> String {
+    if jobs.is_empty() {
+        return "(no scheduled jobs; add one with `junees cron add \"<schedule>\" \"<prompt>\"`)\n"
+            .to_string();
+    }
+    let mut out = String::new();
+    for job in jobs {
+        let mut line = job.id.clone();
+        if let Some(name) = &job.name {
+            line.push_str(&format!(" {}", escape_hidden(name)));
+        }
+        line.push_str(&format!(": {}", job.schedule.describe(tz)));
+        if job.paused {
+            line.push_str(", paused");
+        } else if let Some(next) = job.next_run {
+            line.push_str(&format!(", next {}", tz.format(next)));
+        } else {
+            line.push_str(", done");
+        }
+        out.push_str(&line);
+        out.push('\n');
+        if let Some(last) = &job.last {
+            let mut line = format!(
+                "  last: {} at {}",
+                last.status.word(),
+                tz.format(last.started_at)
+            );
+            if !last.note.is_empty() {
+                line.push_str(&format!(
+                    " ({})",
+                    crate::cli::preview(&escape_hidden(&last.note), 120)
+                ));
+            }
+            if let Some(err) = &last.delivery_error
+                && detail
+            {
+                line.push_str(&format!("; not delivered: {}", escape_hidden(err)));
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+        if detail {
+            out.push_str(&format!(
+                "  prompt: {}\n  folder: {}, deliver: {}\n",
+                crate::cli::preview(&escape_hidden(&job.prompt), PROMPT_PREVIEW),
+                escape_hidden(&job.dir.display().to_string()),
+                job.deliver
+            ));
+        }
+    }
+    out
+}
+
+/// The listing of `/cron` and `!cron`: the jobs of `home`, and whether a
+/// daemon runs them.
+pub fn listing(
+    home: Option<&Path>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    detail: bool,
+) -> String {
+    let Some(home) = home else {
+        return "no scheduled jobs: neither JUNEES_HOME nor HOME is set\n".to_string();
+    };
+    let tz = match timezone(lookup) {
+        Ok(tz) => tz,
+        Err(err) => return format!("cannot read the time zone: {err:#}\n"),
+    };
+    let jobs = match Store::new(home).jobs() {
+        Ok(jobs) => jobs,
+        Err(err) => return format!("cannot read the scheduled jobs: {err:#}\n"),
+    };
+    let mut out = overview(&jobs, &tz, detail);
+    if !jobs.is_empty() && !daemon::is_running(home) {
+        out.push_str("(no `junees cron daemon` is running: the jobs wait until one does)\n");
+    }
+    out
+}
+
+/// [`listing`] with the settings of the environment and the settings
+/// file (for the gateway, which keeps no settings of its own).
+pub fn listing_from_env(home: Option<&Path>, detail: bool) -> String {
+    let settings = crate::config_file::Settings::from_env().ok();
+    let lookup = |key: &str| match &settings {
+        Some(settings) => settings.get(key),
+        None => std::env::var(key).ok(),
+    };
+    listing(home, &lookup, detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cron::schedule::Schedule;
+    use crate::cron::store::RunStatus;
+    use crate::cron::store::tests::job;
 
     #[test]
     fn settings_have_defaults_and_are_checked() {
@@ -209,5 +308,59 @@ mod tests {
                 .to_string()
                 .contains("whole number")
         );
+    }
+
+    #[test]
+    fn the_overview_shows_guild_channels_less() {
+        let tz = TimeZone::utc();
+        let mut daily = job(
+            "aaaaaaaa",
+            Schedule::Daily { hour: 9, minute: 0 },
+            Some(1_794_301_200),
+        );
+        daily.name = Some("news".into());
+        daily.prompt = "summarise\nthe news".into();
+        daily.last = Some(LastRun {
+            run_id: "r".into(),
+            due: 0,
+            started_at: 0,
+            finished_at: Some(1),
+            status: RunStatus::Failed,
+            note: "time limit reached (30m)".into(),
+            output: None,
+            session: None,
+            tokens: 0,
+            delivery_error: Some("no webhook".into()),
+        });
+        let mut paused = job(
+            "bbbbbbbb",
+            Schedule::Every {
+                secs: 3600,
+                anchor: 0,
+            },
+            Some(5),
+        );
+        paused.paused = true;
+        let done = job("cccccccc", Schedule::Once { at: 5 }, None);
+        let jobs = [daily, paused, done];
+        let full = overview(&jobs, &tz, true);
+        assert_eq!(
+            full,
+            "aaaaaaaa news: daily 09:00 (UTC), next 2026-11-10 09:00 +00:00\n\
+             \x20 last: failed at 1970-01-01 00:00 +00:00 (time limit reached (30m)); not delivered: no webhook\n\
+             \x20 prompt: summarise the news\n\
+             \x20 folder: /, deliver: local\n\
+             bbbbbbbb: every 1h, paused\n\
+             \x20 prompt: say hi\n\
+             \x20 folder: /, deliver: local\n\
+             cccccccc: once at 1970-01-01 00:00 +00:00, done\n\
+             \x20 prompt: say hi\n\
+             \x20 folder: /, deliver: local\n"
+        );
+        let short = overview(&jobs, &tz, false);
+        assert!(
+            !short.contains("prompt") && !short.contains("folder") && !short.contains("webhook")
+        );
+        assert!(overview(&[], &tz, true).contains("no scheduled jobs"));
     }
 }
