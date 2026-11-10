@@ -575,11 +575,21 @@ mod tests {
                 "---\nname: evil\ndescription: d\n---\nstep\x1b[2K\n",
             )
             .unwrap_err();
-        assert!(err.contains("control character U+001B on line 5"), "{err}");
-        let err = store
-            .create("evil", "---\nname: evil\ndescription: d\n---\nstep\rover\n")
-            .unwrap_err();
-        assert!(err.contains("U+000D on line 5"), "{err}");
+        assert!(err.contains("SKILL.md line 5 contains U+001B"), "{err}");
+        for (text, found) in [
+            ("step\rover\n", "line 5 contains U+000D"),
+            ("ok\nstep\r", "line 6 contains U+000D"),
+            ("abc \u{202e}cba\n", "line 5 contains U+202E"),
+            ("one\u{2028}two\n", "line 5 contains U+2028"),
+        ] {
+            let err = store
+                .create(
+                    "evil",
+                    &format!("---\nname: evil\ndescription: d\n---\n{text}"),
+                )
+                .unwrap_err();
+            assert!(err.contains(found), "{text:?}: {err}");
+        }
         assert!(!store.dir().join("evil").exists());
 
         // Tabs, CRLF line ends and other scripts are fine.

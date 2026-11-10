@@ -15,6 +15,8 @@ mod tools;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::prompt_text::{check_plain, escape_hidden};
+
 pub use store::Store;
 pub use tools::{SkillManage, SkillView, register};
 
@@ -59,88 +61,19 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// Whether `c` is a control character, a bidirectional formatting
-/// character or a line/paragraph separator: these can rewrite a terminal
-/// line or make a line of the system prompt read differently from what it
-/// holds.
-fn is_hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-                | '\u{2028}'
-                | '\u{2029}'
-        )
-}
-
-/// `text` with hidden characters ([`is_hidden`]) written out as escapes
-/// (`\u{1b}`, `\r`, `\u{202e}`), so they show instead of acting: for the
-/// skill list in the system prompt and on the terminal, which also show
-/// hand-written skills that were never checked.
-pub fn visible(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
-    for c in text.chars() {
-        if is_hidden(c) {
-            shown.extend(c.escape_default());
-        } else {
-            shown.push(c);
-        }
-    }
-    shown
-}
-
-/// Refuses a front matter value of a `SKILL.md` being written that holds a
-/// hidden character ([`is_hidden`]): it would reach the system prompt and
-/// the terminal.
-fn check_header(key: &str, value: &str) -> Result<(), String> {
-    match value.chars().find(|&c| is_hidden(c)) {
-        None => Ok(()),
-        Some(c) => Err(format!(
-            "the `{key}` contains U+{:04X}, a control or bidirectional formatting \
-             character; write it as plain text",
-            c as u32
-        )),
-    }
-}
-
-/// Refuses control characters in a `SKILL.md` being written, other than
-/// tab and line ends (`\n`, `\r\n`).
-fn check_text(text: &str) -> Result<(), String> {
-    let mut chars = text.chars().peekable();
-    let mut line = 1;
-    while let Some(c) = chars.next() {
-        let allowed = match c {
-            '\n' => {
-                line += 1;
-                true
-            }
-            '\t' => true,
-            '\r' => chars.peek() == Some(&'\n'),
-            c => !c.is_control(),
-        };
-        if !allowed {
-            return Err(format!(
-                "{SKILL_FILE} contains the control character U+{:04X} on line {line}; \
-                 remove it",
-                c as u32
-            ));
-        }
+/// Checks the text of a `SKILL.md` being written with
+/// [`check_plain`]: no control, bidirectional formatting or line separator
+/// characters besides tab and line ends, in the `name` and `description`
+/// (they reach the system prompt and the terminal) or anywhere else. Only
+/// writes are checked: a hand-written file is read as it is, and the list
+/// escapes what it holds ([`escape_hidden`]).
+pub(crate) fn check_written(text: &str, front: &FrontMatter) -> Result<(), String> {
+    check_plain("the `name`", &front.name)?;
+    check_plain("the `description`", &front.description)?;
+    for (index, line) in text.lines().enumerate() {
+        check_plain(&format!("{SKILL_FILE} line {}", index + 1), line)?;
     }
     Ok(())
-}
-
-/// Checks the text of a `SKILL.md` being written: no control characters
-/// besides tab and line ends, and no hidden characters in the `name` or
-/// `description`. Only writes are checked: a hand-written file is read as
-/// it is.
-pub(crate) fn check_written(text: &str, front: &FrontMatter) -> Result<(), String> {
-    check_header("name", &front.name)?;
-    check_header("description", &front.description)?;
-    check_text(text)
 }
 
 /// What the front matter of a `SKILL.md` says.
@@ -242,8 +175,8 @@ impl Entry {
     fn line(&self) -> String {
         format!(
             "- {}: {}\n",
-            visible(&self.name),
-            visible(&self.description)
+            escape_hidden(&self.name),
+            escape_hidden(&self.description)
         )
     }
 }
@@ -530,10 +463,11 @@ mod tests {
         );
         let section = system_section(Some(home.path()), Mode::Manage);
         assert!(
-            !section.chars().any(|c| is_hidden(c) && c != '\n'),
+            !section
+                .chars()
+                .any(|c| crate::prompt_text::is_hidden(c) && c != '\n'),
             "{section:?}"
         );
-        assert_eq!(visible("한글\ttab"), "한글\\ttab");
     }
 
     #[test]

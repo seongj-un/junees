@@ -17,6 +17,7 @@ use junees::config_file::Settings;
 use junees::memory::{Memory, MemoryTool, Mode, Target};
 use junees::notify::Notifier;
 use junees::prompt;
+use junees::prompt_text::escape_hidden;
 use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
@@ -1236,13 +1237,13 @@ impl Repl {
             for entry in &index.skills {
                 println!(
                     "  {}: {}",
-                    skills::visible(&entry.name),
-                    skills::visible(&entry.description)
+                    escape_hidden(&entry.name),
+                    escape_hidden(&entry.description)
                 );
             }
         }
         for problem in &index.problems {
-            eprintln!("  !! {}", skills::visible(problem));
+            eprintln!("  !! {}", escape_hidden(problem));
         }
     }
 
