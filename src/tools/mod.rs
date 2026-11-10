@@ -280,6 +280,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_mcp_server_list_is_as_private_as_the_settings_file() {
+        let (_dir, root, file) = settings_file::testing::home();
+        let list = root.join(".junees").join(crate::mcp::config::FILE_NAME);
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        // Not there yet: writing it would start programs next session.
+        let write = WriteFile::with_settings(&settings);
+        let servers = r#"{"servers": {"x": {"command": "sh"}}}"#;
+        let output = write.run(json!({"path": list, "content": servers})).await;
+        assert!(output.is_error, "{}", output.content);
+        assert!(!list.exists());
+        std::fs::write(
+            &list,
+            r#"{"servers": {"x": {"command": "x", "env": {"T": "tok"}}}}"#,
+        )
+        .unwrap();
+        let read = ReadFile::with_settings(&settings);
+        for path in [list.clone(), settings_file::testing::relative(&list)] {
+            let output = read.run(json!({"path": path})).await;
+            assert!(output.is_error, "{}", output.content);
+            assert!(output.content.contains("private Junees settings file"));
+            assert!(!output.content.contains("tok"));
+        }
+        let edit = EditFile::with_settings(&settings);
+        let output = edit
+            .run(json!({"path": list, "old_string": "x", "new_string": "sh"}))
+            .await;
+        assert!(output.is_error, "{}", output.content);
+        let policy = CommandPolicy::with_settings(&settings);
+        for command in [
+            "cat ~/.junees/mcp.json",
+            "echo '{}' > $JUNEES_HOME/mcp.json",
+            "cp /tmp/evil.json ~/.junees/mcp.*",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("private Junees settings file"),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn dispatches_by_name() {
         let mut registry = ToolRegistry::new();
         registry.register(Echo);
