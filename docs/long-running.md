@@ -158,7 +158,8 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 전달(`deliver.rs`): 디스코드는 `gateway::rest::Rest`를 `discord_token`과 `JUNEES_DISCORD_API_URL`만으로 만든 `DiscordConfig`로 재사용(허용 사용자 목록 불필요), `split_message`로 다섯 메시지까지. 웹훅은 `Notifier::send`. 제목 줄의 이름과 이유는 `escape_hidden` + 백틱을 `'`로
 - 테스트: 단위(`src/cron/*`: 시간대 오프셋/건너뛴 시각/두 번 오는 시각/POSIX 규칙/이름 탈출/깨진 파일, 일정 경계와 DST와 잘못된 식 25가지, 저장 권한/잠금 대기/거절, 출력 파일과 100개 유지, 가짜 HTTP로 디스코드와 웹훅 전달, Scripted provider로 실행(읽기 전용 도구, 토큰 한도, 시간 한도, 중단), 가짜 시계와 가짜 실행기로 따라잡기/놓침/바쁨/매 분 틱/결과 없이 끝난 실행), 통합 `tests/cron.rs`(바이너리 add/list/run/pause/resume/rm, 가짜 API와 가짜 디스코드 REST, 데몬이 때가 된 작업을 자식 프로세스로 실행하고 실패를 전달). 시간대 변환, 따라잡기, 놓침 판정, 결과 확인, 권한 검사, 읽기 전용 스킬, Vixie 규칙, 메시지 상한, 데이터 폴더 보호를 하나씩 되돌리는 변이 스크립트로 각 테스트가 실패하는 것을 확인했다
 - 시간대를 작업에 저장하는 이유: 바이너리 스모크에서 `America/New_York`으로 추가한 작업을 `Asia/Seoul` 설정으로 보면 다음 실행 시각(뉴욕 기준으로 계산)과 설명(서울)이 어긋났다. 셸의 `TZ`와 서비스 환경의 시간대가 다른 흔한 경우도 같다. 이제 계산, 목록, 출력 파일 모두 작업의 시간대를 쓰고 설정은 이름 없는 시간대일 때의 대체값이다
-- 남은 위험: 예약 실행 세션은 그 폴더의 보통 세션이라 `junees -c`에 잡힌다(#34의 세션 출처와 합쳐 정리). claude-code 백엔드의 토큰 한도는 사후 기록뿐이다. 실제 API, 실제 디스코드, 실제 systemd로는 확인하지 않았다
+- 리뷰 반영(#39): 예약 실행 세션은 meta `source: "cron"`, `channel: <작업 id>`(#38의 채널 세션과 같은 방식)라 `-c`와 `/sessions` 번호 목록에서 빠진다. 새 모듈 `src/tools/self_command.rs`가 bash 명령 안의 `junees cron add/remove/rm/pause/resume/run/daemon`(표 `STATE_CHANGING`, 나중에 `plugin install` 같은 항목을 더함)을 알아보고, 명령 정책은 게이트가 없을 때(`-p`, task, 예약 실행, approval off) 막고 게이트가 있으면(`ToolSettings::approval_gate`) 승인 주의 신호(`change Junees's own state`)로 넘긴다. claude-code 백엔드는 같은 표로 `Bash(...)` 거절 규칙. cron 데이터 폴더의 거절 문구는 명령 이름을 빼고 "사용자만 바꾼다"로. `every`/`in`은 10년 이하이고 `next_after`는 넘침 검사 산술, ISO 시각은 `str::get`으로 잘라 ASCII 밖 글자가 형식 오류, 작업 찾기는 id, 이름, id 앞부분 순서
+- 남은 위험: claude-code 백엔드의 토큰 한도는 사후 기록뿐이다. 실제 API, 실제 디스코드, 실제 systemd로는 확인하지 않았다
 
 ## 상태
 

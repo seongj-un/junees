@@ -17,7 +17,7 @@ Usage:
   junees cron run <id>           run it now, once, and print the answer
   junees cron daemon             run the jobs when they are due (keep it running)
 
-A job is named by its id, a unique start of it, or its --name.
+A job is named by its id, its --name, or a unique start of its id.
 
 Schedules (local times in the `timezone` setting, default the system's):
   every 30m, every 2h, every 1h30m   from now on, at that interval
