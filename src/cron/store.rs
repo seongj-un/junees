@@ -226,8 +226,8 @@ impl Locked {
         write().with_context(|| format!("cannot write {}", self.path.display()))
     }
 
-    /// The index of the job `key` names: its id, a unique id prefix, or
-    /// its name.
+    /// The index of the job `key` names: its id, its name, or a unique id
+    /// prefix, in that order.
     pub fn find(&self, key: &str) -> Result<usize> {
         find(&self.jobs, key)
     }
@@ -242,15 +242,23 @@ pub fn find(jobs: &[Job], key: &str) -> Result<usize> {
     if let Some(index) = jobs.iter().position(|job| job.id == key) {
         return Ok(index);
     }
-    let by_prefix: Vec<usize> = (0..jobs.len())
-        .filter(|&index| jobs[index].id.starts_with(key))
-        .collect();
+    // A name wins over the start of another job's id: `remove news` must
+    // not remove a job whose id starts with `news`.
     let by_name: Vec<usize> = (0..jobs.len())
         .filter(|&index| jobs[index].name.as_deref() == Some(key))
         .collect();
-    match (by_prefix.as_slice(), by_name.as_slice()) {
-        ([index], _) | ([], [index]) => Ok(*index),
-        ([], []) => bail!("no job `{key}`; `junees cron list` shows them"),
+    match by_name.as_slice() {
+        [index] => return Ok(*index),
+        [] => {}
+        // Names are unique when added; jobs.json may have been edited.
+        _ => bail!("`{key}` is the name of more than one job; give its id"),
+    }
+    let by_prefix: Vec<usize> = (0..jobs.len())
+        .filter(|&index| jobs[index].id.starts_with(key))
+        .collect();
+    match by_prefix.as_slice() {
+        [index] => Ok(*index),
+        [] => bail!("no job `{key}`; `junees cron list` shows them"),
         _ => bail!("`{key}` names more than one job; give more of the id"),
     }
 }
@@ -456,6 +464,22 @@ pub(crate) mod tests {
                 .contains("no job")
         );
         assert!(find(&jobs, " ").is_err());
+
+        // The review's case: a name that is also the start of another
+        // job's id picks the named job.
+        jobs.push(job("a1b2c3d4", Schedule::Once { at: 1 }, None));
+        jobs.push(job("ffff0000", Schedule::Once { at: 1 }, None));
+        jobs[3].name = Some("a1".into());
+        assert_eq!(find(&jobs, "a1").unwrap(), 3);
+        assert_eq!(find(&jobs, "a1b").unwrap(), 2);
+        // A full id still wins over a name equal to it.
+        jobs[1].name = Some("a1b2c3d4".into());
+        assert_eq!(find(&jobs, "a1b2c3d4").unwrap(), 2);
+        // Two jobs of one name (an edited jobs.json): ambiguous.
+        jobs[1].name = Some("a1".into());
+        let err = find(&jobs, "a1").unwrap_err().to_string();
+        assert!(err.contains("more than one job"), "{err}");
+
         let id = new_id(&jobs);
         assert_eq!(id.len(), 8);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
