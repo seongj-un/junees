@@ -356,8 +356,8 @@ fn api_agent(
 
 /// Starts the MCP servers of `$JUNEES_HOME/mcp.json` and says on stderr
 /// how each one went.
-async fn start_mcp(config: &Config) -> Arc<Mcp> {
-    let mcp = Mcp::start(config.home.as_deref(), &config.tools.hidden_env).await;
+async fn start_mcp(config: &Config, cwd: &Path) -> Arc<Mcp> {
+    let mcp = Mcp::start(config.home.as_deref(), &config.tools.hidden_env, cwd).await;
     for line in mcp.report() {
         eprintln!("{line}");
     }
@@ -447,7 +447,7 @@ async fn conversation(
     let cancel = Cancel::new();
     let interactive = args.prompt.is_none();
     let mcp = match backend {
-        Backend::Api => start_mcp(&config).await,
+        Backend::Api => start_mcp(&config, &cwd).await,
         Backend::ClaudeCode => Arc::new(Mcp::none()),
     };
     let (mut engine, banner) = match backend {
@@ -528,7 +528,7 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
     let config = conversation_config(settings, backend)?;
     let cwd = std::env::current_dir()?;
     let mcp = match backend {
-        Backend::Api => start_mcp(&config).await,
+        Backend::Api => start_mcp(&config, &cwd).await,
         Backend::ClaudeCode => Arc::new(Mcp::none()),
     };
     let engines: Arc<dyn Engines> = match backend {
@@ -1211,7 +1211,7 @@ impl Repl {
         self.engine = match backend {
             Backend::Api => {
                 if self.mcp.servers().is_empty() {
-                    self.mcp = start_mcp(&config).await;
+                    self.mcp = start_mcp(&config, &self.cwd).await;
                 }
                 Engine::Api(Box::new(api_agent(
                     &config,

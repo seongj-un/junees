@@ -59,6 +59,7 @@ impl Fake {
             enabled: true,
             trust: false,
             call_timeout: DEFAULT_CALL_TIMEOUT,
+            cwd: None,
         }
     }
 
@@ -94,7 +95,7 @@ fn quick() -> Timeouts {
 }
 
 async fn start(configs: Vec<ServerConfig>) -> Mcp {
-    Mcp::start_servers(configs, &[], quick()).await
+    Mcp::start_servers(configs, &[], Path::new("/nonexistent"), quick()).await
 }
 
 async fn call(mcp: &Mcp, tool: &str, input: Value) -> ToolOutput {
@@ -288,6 +289,7 @@ async fn servers_that_cannot_start_are_reported() {
             disabled,
         ],
         &[],
+        Path::new("/nonexistent"),
         Timeouts {
             probe: Duration::from_millis(300),
             start: Duration::from_secs(2),
@@ -596,7 +598,13 @@ async fn the_server_sees_its_env_but_not_hidden_variables() {
     let mut config = fake.config("fake", "modern");
     config.env.insert("FAKE_TOKEN".into(), "from-config".into());
     // HOME is always set in the test process; hiding it shows the rule.
-    let mcp = Mcp::start_servers(vec![config], &["HOME".to_string()], quick()).await;
+    let mcp = Mcp::start_servers(
+        vec![config],
+        &["HOME".to_string()],
+        Path::new("/nonexistent"),
+        quick(),
+    )
+    .await;
     let output = call(
         &mcp,
         "mcp__fake__env",
@@ -637,7 +645,7 @@ async fn the_overview_shows_no_secrets() {
 #[tokio::test]
 async fn the_file_is_read_from_the_state_folder() {
     let home = tempfile::tempdir().unwrap();
-    let mcp = Mcp::start(Some(home.path()), &[]).await;
+    let mcp = Mcp::start(Some(home.path()), &[], home.path()).await;
     assert!(mcp.report().is_empty());
     assert_eq!(
         mcp.overview(),
@@ -650,7 +658,7 @@ async fn the_file_is_read_from_the_state_folder() {
     std::fs::write(&path, r#"{"servers": {"a": {"command": "x"}}}"#).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
-    let mcp = Mcp::start(Some(home.path()), &[]).await;
+    let mcp = Mcp::start(Some(home.path()), &[], home.path()).await;
     let report = mcp.report();
     assert_eq!(report.len(), 1);
     assert!(
@@ -660,7 +668,7 @@ async fn the_file_is_read_from_the_state_folder() {
     );
     assert!(report[0].contains("chmod 600"), "{}", report[0]);
     assert!(
-        Mcp::start(None, &[])
+        Mcp::start(None, &[], Path::new("/"))
             .await
             .overview()
             .contains("neither JUNEES_HOME nor HOME")

@@ -3,8 +3,13 @@
 //! ```json
 //! { "servers": { "github": { "command": "github-mcp", "args": ["stdio"],
 //!   "env": {"GITHUB_TOKEN": "..."}, "enabled": true, "trust": false,
-//!   "timeout_secs": 120 } } }
+//!   "timeout_secs": 120, "cwd": "/home/me/servers" } } }
 //! ```
+//!
+//! Servers run in `cwd`, or in `/` without one, never in the folder Junees
+//! works in: a server started there may run files from it (`python -m`
+//! looks in the current folder first), and the model writes files there
+//! without a question.
 //!
 //! JSON rather than a table in `config.toml`: the settings file parser
 //! reads flat keys only. The file starts programs and may hold tokens, so
@@ -13,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -49,6 +54,8 @@ pub struct ServerConfig {
     pub trust: bool,
     /// How long one tool call may take.
     pub call_timeout: Duration,
+    /// The folder it runs in (absolute); `None` runs it in `/`.
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +78,7 @@ struct RawServer {
     #[serde(default)]
     trust: bool,
     timeout_secs: Option<u64>,
+    cwd: Option<String>,
 }
 
 fn enabled_by_default() -> bool {
@@ -155,6 +163,11 @@ fn server_config(name: String, raw: RawServer) -> Result<ServerConfig> {
     if raw.args.iter().any(|arg| arg.contains('\0')) || raw.command.contains('\0') {
         bail!("`command` or `args` holds a NUL character");
     }
+    if let Some(cwd) = &raw.cwd
+        && (cwd.contains('\0') || !Path::new(cwd).is_absolute())
+    {
+        bail!("`cwd` must be an absolute path");
+    }
     let call_timeout = match raw.timeout_secs {
         None => DEFAULT_CALL_TIMEOUT,
         Some(secs @ 1..=MAX_CALL_TIMEOUT_SECS) => Duration::from_secs(secs),
@@ -170,7 +183,88 @@ fn server_config(name: String, raw: RawServer) -> Result<ServerConfig> {
         enabled: raw.enabled,
         trust: raw.trust,
         call_timeout,
+        cwd: raw.cwd.map(PathBuf::from),
     })
+}
+
+impl ServerConfig {
+    /// The folder the server runs in: its `cwd`, or `/`. Never the folder
+    /// Junees works in, unless `cwd` names it.
+    pub fn run_folder(&self) -> &Path {
+        self.cwd.as_deref().unwrap_or(Path::new("/"))
+    }
+
+    /// The program to run: `command` as given when it is a name to look up
+    /// on `PATH` or an absolute path; a relative path (`./server`,
+    /// `bin/server`) is taken from [`ServerConfig::run_folder`].
+    pub fn program(&self) -> PathBuf {
+        if self.has_relative_path() {
+            self.run_folder().join(&self.command)
+        } else {
+            PathBuf::from(&self.command)
+        }
+    }
+
+    fn has_relative_path(&self) -> bool {
+        self.command.contains('/') && Path::new(&self.command).is_relative()
+    }
+
+    /// Why the server may not start while Junees works in `workdir`: a
+    /// relative `command` that leads into it would run a file the model may
+    /// write without a question. `trust` allows it.
+    pub fn check_workdir(&self, workdir: &Path) -> std::result::Result<(), String> {
+        if self.trust || !self.has_relative_path() {
+            return Ok(());
+        }
+        if inside(&self.program(), workdir) {
+            return Err(format!(
+                "`command` `{}` is a relative path into the folder Junees works in ({}), \
+                 where the model may write files without a question; give an absolute path \
+                 outside it, or set `\"trust\": true` to run it anyway",
+                crate::prompt_text::escape_hidden(&self.command),
+                workdir.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Whether the absolute `path` lies in `folder`, resolving links and `..`
+/// like the kernel. The last part counts unresolved too: a link there is a
+/// file in the folder that could be changed to point elsewhere.
+fn inside(path: &Path, folder: &Path) -> bool {
+    let folder = resolve(folder);
+    let unresolved_name = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => Some(resolve(parent).join(name)),
+        _ => None,
+    };
+    [unresolved_name, Some(resolve(path))]
+        .into_iter()
+        .flatten()
+        .any(|path| path.starts_with(&folder))
+}
+
+/// The absolute `path` with links and `..` resolved as far as it exists;
+/// the parts that do not exist yet (the model may create them later) are
+/// added as written.
+fn resolve(path: &Path) -> PathBuf {
+    for existing in path.ancestors() {
+        let Ok(mut resolved) = existing.canonicalize() else {
+            continue;
+        };
+        let rest = path.strip_prefix(existing).unwrap_or(Path::new(""));
+        for part in rest.components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    resolved.pop();
+                }
+                std::path::Component::Normal(name) => resolved.push(name),
+                _ => {}
+            }
+        }
+        return resolved;
+    }
+    path.to_path_buf()
 }
 
 /// A server name: 1 to [`MAX_NAME_CHARS`] ASCII letters, digits, `_` and
@@ -199,7 +293,8 @@ mod tests {
         let servers = parse(
             r#"{"servers": {
                 "zeta": {"command": "z", "args": ["-v"], "env": {"TOKEN": "t"},
-                         "enabled": false, "trust": true, "timeout_secs": 5},
+                         "enabled": false, "trust": true, "timeout_secs": 5,
+                         "cwd": "/srv/mcp"},
                 "alpha": {"command": "a"}
             }}"#,
         )
@@ -211,11 +306,14 @@ mod tests {
         assert!(alpha.args.is_empty() && alpha.env.is_empty());
         assert!(alpha.enabled && !alpha.trust);
         assert_eq!(alpha.call_timeout, DEFAULT_CALL_TIMEOUT);
+        assert_eq!(alpha.cwd, None);
+        assert_eq!(alpha.run_folder(), Path::new("/"));
         let zeta = &servers[1];
         assert_eq!(zeta.args, ["-v"]);
         assert_eq!(zeta.env.get("TOKEN").map(String::as_str), Some("t"));
         assert!(!zeta.enabled && zeta.trust);
         assert_eq!(zeta.call_timeout, Duration::from_secs(5));
+        assert_eq!(zeta.run_folder(), Path::new("/srv/mcp"));
         assert!(parse("{}").unwrap().is_empty());
     }
 
@@ -247,12 +345,61 @@ mod tests {
             err(r#"{"servers": {"a": {"command": "x", "env": {"A=B": "c"}}}}"#)
                 .contains("holds `=`")
         );
+        assert!(
+            err(r#"{"servers": {"a": {"command": "x", "cwd": "servers"}}}"#)
+                .contains("`cwd` must be an absolute path")
+        );
         // A token where a flag belongs is not repeated.
         let message = err(r#"{"servers": {"a": {"command": "x", "trust": "ghp_secret"}}}"#);
         assert!(message.contains("a value has the wrong type"), "{message}");
         assert!(!message.contains("ghp_secret"), "{message}");
         let message = err(r#"{"servers": {"a": {"command": "x", "env": {"T": 12345}}}}"#);
         assert!(!message.contains("12345"), "{message}");
+    }
+
+    #[test]
+    fn relative_commands_into_the_working_folder_need_trust() {
+        let work = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir(work.path().join("bin")).unwrap();
+        std::os::unix::fs::symlink(work.path(), other.path().join("link")).unwrap();
+        let server = |command: &str, cwd: &Path| {
+            let text = json_list(command, cwd);
+            parse(&text).unwrap().remove(0)
+        };
+        let check = |config: &ServerConfig| config.check_workdir(work.path());
+
+        // Names on PATH and absolute paths are the user's choice.
+        assert_eq!(check(&server("python3", work.path())), Ok(()));
+        let absolute = work.path().join("bin/server").display().to_string();
+        assert_eq!(check(&server(&absolute, work.path())), Ok(()));
+        // Relative paths are taken from the run folder.
+        let relative = server("./bin/server", work.path());
+        assert_eq!(relative.program(), work.path().join("./bin/server"));
+        let message = check(&relative).unwrap_err();
+        assert!(message.contains("relative path into the folder Junees works in"));
+        assert!(message.contains("\"trust\": true"), "{message}");
+        assert!(check(&server("bin/../bin/server", work.path())).is_err());
+        // Through a link and `..` into the folder.
+        assert!(check(&server("link/bin/server", other.path())).is_err());
+        assert!(check(&server("../x/bin/server", &work.path().join("bin"))).is_err());
+        // Folders the model has yet to create count too.
+        assert!(check(&server("new/server", work.path())).is_err());
+        // Outside it, or trusted, it may start.
+        assert_eq!(check(&server("./server", other.path())), Ok(()));
+        let mut trusted = relative.clone();
+        trusted.trust = true;
+        assert_eq!(check(&trusted), Ok(()));
+        // Without `cwd` the run folder is `/`, not the working folder.
+        let plain = parse(r#"{"servers": {"a": {"command": "./server"}}}"#)
+            .unwrap()
+            .remove(0);
+        assert_eq!(plain.program(), Path::new("/server"));
+        assert_eq!(check(&plain), Ok(()));
+    }
+
+    fn json_list(command: &str, cwd: &Path) -> String {
+        serde_json::json!({"servers": {"a": {"command": command, "cwd": cwd}}}).to_string()
     }
 
     #[test]

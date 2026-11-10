@@ -49,14 +49,15 @@ impl Mcp {
     /// Reads `<home>/mcp.json` and starts its enabled servers (all at once)
     /// with `hidden_env` hidden from them, as [`Mcp::start_servers`] does.
     /// Never fails: a broken file is kept as a problem to report.
-    pub async fn start(home: Option<&Path>, hidden_env: &[String]) -> Self {
+    pub async fn start(home: Option<&Path>, hidden_env: &[String], workdir: &Path) -> Self {
         let Some(home) = home else {
             return Self::none();
         };
         let path = home.join(config::FILE_NAME);
         match config::load(&path) {
             Ok(configs) => {
-                let mut mcp = Self::start_servers(configs, hidden_env, Timeouts::default()).await;
+                let mut mcp =
+                    Self::start_servers(configs, hidden_env, workdir, Timeouts::default()).await;
                 mcp.path = Some(path);
                 mcp
             }
@@ -69,14 +70,24 @@ impl Mcp {
     }
 
     /// Starts the enabled servers of `configs` and names their tools.
+    /// `workdir` is the folder Junees works in: servers do not run there
+    /// ([`ServerConfig::check_workdir`]).
     pub async fn start_servers(
         configs: Vec<ServerConfig>,
         hidden_env: &[String],
+        workdir: &Path,
         timeouts: Timeouts,
     ) -> Self {
         let servers: Vec<Arc<Server>> = configs
             .into_iter()
-            .map(|config| Arc::new(Server::new(config, hidden_env.to_vec(), timeouts)))
+            .map(|config| {
+                Arc::new(Server::new(
+                    config,
+                    hidden_env.to_vec(),
+                    workdir.to_path_buf(),
+                    timeouts,
+                ))
+            })
             .collect();
         let starts: Vec<_> = servers
             .iter()

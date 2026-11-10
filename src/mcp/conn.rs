@@ -63,13 +63,15 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Starts the server of `config` in its own process group, in the
-    /// current folder. Its environment is Junees's without
+    /// Starts the server of `config` in its own process group, in its run
+    /// folder ([`ServerConfig::run_folder`], never the folder Junees works
+    /// in unless `cwd` says so). Its environment is Junees's without
     /// [`SECRET_ENV_VARS`] and `hidden_env`, plus the server's `env`.
     pub fn spawn(config: &ServerConfig, hidden_env: &[String]) -> std::io::Result<Self> {
-        let mut command = Command::new(&config.command);
+        let mut command = Command::new(config.program());
         command
             .args(&config.args)
+            .current_dir(config.run_folder())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -347,7 +347,7 @@ async fn gateway_channels_ask_before_untrusted_mcp_tools() {
             .map(|(_, value)| value.clone())
     })
     .unwrap();
-    let mcp = Arc::new(Mcp::start(config.home.as_deref(), &[]).await);
+    let mcp = Arc::new(Mcp::start(config.home.as_deref(), &[], dir.path()).await);
     let engines = ApiEngines::new(config, dir.path().to_path_buf()).with_mcp(Arc::clone(&mcp));
     let asked = Decline::default();
     let mut conversation = engines
@@ -367,4 +367,128 @@ async fn gateway_channels_ask_before_untrusted_mcp_tools() {
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].target, "tool `echo` of the MCP server `fake`");
     mcp.shutdown().await;
+}
+
+/// Writes an executable script and runs it once, so a test thread that
+/// forked while it was open for writing cannot make exec fail later.
+fn write_script(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..200 {
+        match std::process::Command::new(path)
+            .env("MARKER_DIR", "/nonexistent")
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(_) => return,
+            Err(err) if err.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => panic!("cannot run {}: {err}", path.display()),
+        }
+    }
+    panic!("{} stayed busy", path.display());
+}
+
+/// A working folder holding a Python module and a script that only leave
+/// a marker file in `markers` when they run, and a state folder whose
+/// `mcp.json` holds `servers`.
+fn repo_with_servers(dir: &Path, servers: Value) -> (PathBuf, PathBuf, PathBuf) {
+    let repo = dir.join("repo");
+    let markers = dir.join("markers");
+    let home = dir.join("home");
+    for folder in [&repo, &markers, &home] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::fs::write(
+        repo.join("mcp_server_repo.py"),
+        "import os\nopen(os.path.join(os.environ['MARKER_DIR'], 'module'), 'w').close()\n",
+    )
+    .unwrap();
+    write_script(
+        &repo.join("server.sh"),
+        "#!/bin/sh\ntouch \"$MARKER_DIR/script-$(basename \"$PWD\")\"\n",
+    );
+    let path = home.join("mcp.json");
+    std::fs::write(&path, json!({ "servers": servers }).to_string()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    (repo, markers, home)
+}
+
+fn markers(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn servers_do_not_run_files_of_the_working_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = |markers: &Path| json!({ "MARKER_DIR": markers });
+    let markers_dir = dir.path().join("markers");
+    let (repo, markers_dir, home) = repo_with_servers(
+        dir.path(),
+        json!({
+            "module": {"command": "python3", "args": ["-m", "mcp_server_repo"], "env": env(&markers_dir)},
+            "script": {"command": "./server.sh", "env": env(&markers_dir)},
+        }),
+    );
+    let (url, api) = fake_api(vec![(200, text_reply("done"))]).await;
+    let output = command(&home, &repo, &url, &["-p", "go", "--no-session"])
+        .output()
+        .await
+        .unwrap();
+    check(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    tokio::time::timeout(Duration::from_secs(10), api)
+        .await
+        .unwrap()
+        .unwrap();
+    // Neither the module nor the script of the repository ran: the servers
+    // ran in `/`, where `python3 -m` finds no such module and `./server.sh`
+    // is `/server.sh`.
+    assert!(markers(&markers_dir).is_empty(), "{stderr}");
+    assert!(stderr.contains("mcp: module failed to start"), "{stderr}");
+    assert!(
+        stderr.contains("mcp: script failed to start: cannot run `./server.sh`"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn a_relative_command_into_the_working_folder_needs_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let markers_dir = dir.path().join("markers");
+    let repo = dir.path().join("repo");
+    let (repo, markers_dir, home) = repo_with_servers(
+        dir.path(),
+        json!({
+            "pinned": {"command": "./server.sh", "cwd": repo, "env": {"MARKER_DIR": markers_dir}},
+            "trusted": {"command": "./server.sh", "cwd": repo, "trust": true,
+                        "env": {"MARKER_DIR": markers_dir}},
+        }),
+    );
+    let (url, api) = fake_api(vec![(200, text_reply("done"))]).await;
+    let output = command(&home, &repo, &url, &["-p", "go", "--no-session"])
+        .output()
+        .await
+        .unwrap();
+    check(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    tokio::time::timeout(Duration::from_secs(10), api)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        stderr.contains(
+            "mcp: pinned failed to start: `command` `./server.sh` is a relative path into \
+             the folder Junees works in"
+        ),
+        "{stderr}"
+    );
+    // Only the trusted one ran, in its `cwd`.
+    assert_eq!(markers(&markers_dir), ["script-repo"], "{stderr}");
 }

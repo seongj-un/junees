@@ -8,6 +8,7 @@
 //! `initialize` / `notifications/initialized` handshake (2025-11-25 and
 //! earlier).
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,6 +96,8 @@ pub struct RemoteTool {
 pub struct Server {
     pub config: ServerConfig,
     hidden_env: Vec<String>,
+    /// The folder Junees works in ([`ServerConfig::check_workdir`]).
+    workdir: PathBuf,
     timeouts: Timeouts,
     state: Mutex<State>,
 }
@@ -120,10 +123,16 @@ pub enum Status {
 }
 
 impl Server {
-    pub fn new(config: ServerConfig, hidden_env: Vec<String>, timeouts: Timeouts) -> Self {
+    pub fn new(
+        config: ServerConfig,
+        hidden_env: Vec<String>,
+        workdir: PathBuf,
+        timeouts: Timeouts,
+    ) -> Self {
         Self {
             config,
             hidden_env,
+            workdir,
             timeouts,
             state: Mutex::default(),
         }
@@ -181,6 +190,10 @@ impl Server {
     /// and tool list within [`Timeouts::start`]. A failure is kept for
     /// [`Server::status`] and returned.
     pub async fn start(&self) -> Result<(), String> {
+        if let Err(refused) = self.config.check_workdir(&self.workdir) {
+            self.state.lock().unwrap().failure = Some(refused.clone());
+            return Err(refused);
+        }
         let old = self.state.lock().unwrap().connection.take();
         if let Some(old) = old {
             old.shutdown().await;
