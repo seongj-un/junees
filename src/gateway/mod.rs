@@ -102,7 +102,7 @@ impl Gateway {
             _ = shutdown.cancelled() => return Ok(()),
         };
         (self.log)(&format!(
-            "gateway: {} ; {} allowed users, {} listed channels, {} turns at once",
+            "gateway: {}; {} allowed users, {} listed channels, {} turns at once",
             self.engines.describe(),
             self.config.allowed_users.len(),
             self.config.channels.len(),
