@@ -20,8 +20,28 @@ const PREFIXES: &[(&str, &str)] = &[
 ];
 
 /// A run of hex digits at least this long reads as a token (API keys of
-/// many services are 32 hex digits). Short commit ids stay allowed.
+/// many services are 32 hex digits). Short commit ids stay allowed, and
+/// so do full hashes next to a word that says so ([`is_named_hash`]).
 const HEX_RUN: usize = 32;
+
+/// The lengths of a full git SHA-1 (40) and a SHA-256 (64) in hex.
+const HASH_LENGTHS: [usize; 2] = [40, 64];
+
+/// Words that, right before or after a 40- or 64-digit hex run, say it is
+/// a hash and not a token: `commit 1a2b...`, `sha256:1a2b...`,
+/// `1a2b... 커밋`. A word counts when it starts with one of these, case
+/// ignored (`commits`, `sha1`, `sha-256`, `커밋을`).
+const HASH_WORDS: &[&str] = &[
+    "commit",
+    "sha",
+    "hash",
+    "checksum",
+    "digest",
+    "rev",
+    "커밋",
+    "해시",
+    "체크섬",
+];
 
 /// A run of base64/token characters at least this long with upper-case
 /// letters, lower-case letters and digits reads as a token.
@@ -38,11 +58,14 @@ pub fn secret_kind(text: &str) -> Option<&'static str> {
     {
         return Some(kind);
     }
-    for run in runs(text) {
+    for (at, run) in runs(text) {
         if is_aws_key_id(run) {
             return Some("an AWS access key id");
         }
-        if run.len() >= HEX_RUN && run.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if run.len() >= HEX_RUN
+            && run.bytes().all(|b| b.is_ascii_hexdigit())
+            && !is_named_hash(text, at, run)
+        {
             return Some("a long hex token");
         }
         if run.len() >= MIXED_RUN
@@ -56,12 +79,42 @@ pub fn secret_kind(text: &str) -> Option<&'static str> {
     None
 }
 
-/// The maximal runs of token characters (`A-Za-z0-9+=_-`) in `text`.
-/// Every other character, `/` and `.` included, ends a run, so paths and
-/// file names split into short pieces.
-fn runs(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '=' | '_' | '-')))
-        .filter(|run| !run.is_empty())
+/// The maximal runs of token characters (`A-Za-z0-9+=_-`) in `text`, with
+/// their byte offsets. Every other character, `/` and `.` included, ends a
+/// run, so paths and file names split into short pieces.
+fn runs(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let is_token = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '=' | '_' | '-');
+    let mut rest = text.char_indices().peekable();
+    std::iter::from_fn(move || {
+        while rest.next_if(|&(_, c)| !is_token(c)).is_some() {}
+        let (start, _) = *rest.peek()?;
+        let mut end = start;
+        while let Some((at, c)) = rest.next_if(|&(_, c)| is_token(c)) {
+            end = at + c.len_utf8();
+        }
+        Some((start, &text[start..end]))
+    })
+}
+
+/// Whether the hex run `run` at byte `at` of `text` is a full git SHA-1 or
+/// SHA-256 named as such: 40 or 64 lower-case hex digits (as git and
+/// `sha256sum` print them) with a [`HASH_WORDS`] word right before or after
+/// it. Everything else that long still reads as a token.
+fn is_named_hash(text: &str, at: usize, run: &str) -> bool {
+    if !HASH_LENGTHS.contains(&run.len()) || run.bytes().any(|b| b.is_ascii_uppercase()) {
+        return false;
+    }
+    // The words around it, without punctuation (`sha256:`, `(commit`).
+    let before = text[..at].split_whitespace().next_back();
+    let after = text[at + run.len()..].split_whitespace().next();
+    [before, after].into_iter().flatten().any(|word| {
+        let word = word
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        HASH_WORDS
+            .iter()
+            .any(|hash_word| word.starts_with(hash_word))
+    })
 }
 
 /// Whether `prefix` starts a word of `text` (so `task-ant-` is no key)
@@ -137,5 +190,48 @@ mod tests {
         ] {
             assert_eq!(secret_kind(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn full_hashes_pass_when_named() {
+        let sha1 = "cf302d7c3b6a4f0e9d1a2b3c4d5e6f708192a3b4";
+        let sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        for text in [
+            format!("main은 {sha1} 커밋 이후 PR 규칙이 바뀜"),
+            format!("Rules changed after commit {sha1}."),
+            format!("(commit: {sha1})"),
+            format!("Pinned to git rev {sha1}"),
+            format!("{sha1} commit fixed the build"),
+            format!("release.tar.gz sha256 {sha256}"),
+            format!("image digest sha256:{sha256}"),
+            format!("SHA-256 checksum: {sha256}"),
+            format!("{sha256} 체크섬"),
+        ] {
+            assert_eq!(secret_kind(&text), None, "{text}");
+        }
+        // Without such a word, in upper case, or at other lengths it still
+        // reads as a token.
+        for text in [
+            format!("token {sha1}"),
+            format!("{sha1}"),
+            format!("api key: {sha256}"),
+            format!("commit {}", sha1.to_uppercase()),
+            format!("commit {}", &sha256[..48]),
+            format!("commit {sha1}0"),
+            format!("committer x {sha1}"),
+            format!("hash this: {}", "0123456789abcdef".repeat(2)),
+        ] {
+            assert_eq!(secret_kind(&text), Some("a long hex token"), "{text}");
+        }
+    }
+
+    #[test]
+    fn runs_keep_their_offsets() {
+        assert_eq!(
+            runs("가 ab-c/d.e  f").collect::<Vec<_>>(),
+            [(4, "ab-c"), (9, "d"), (11, "e"), (14, "f")]
+        );
+        assert_eq!(runs("").count(), 0);
+        assert_eq!(runs("../").count(), 0);
     }
 }
