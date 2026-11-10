@@ -85,7 +85,8 @@ pub struct ToolDef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub description: String,
-    /// `true`: its tools run without approval questions.
+    /// `true`: its author recommends trusting it. Shown on install and
+    /// enable; only `junees plugin enable --trust` trusts a plugin.
     pub trust: bool,
     pub tools: Vec<ToolDef>,
     pub pre_tool: Vec<Command>,

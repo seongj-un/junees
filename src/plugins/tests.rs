@@ -335,9 +335,16 @@ async fn plugin_tools_are_asked_about_unless_trusted() {
         risky.check("plugin__plain__t", &input).await,
         Some(ToolOutput::error("the user declined: no reason given"))
     );
-    // Trusted by `enable --trust` or by its own manifest.
+    // Trusted by `enable --trust` only: a manifest's own `"trust": true`
+    // is a recommendation (PR #40 review, note 2).
     assert!(risky.request("plugin__chosen__t", &input).is_none());
-    assert!(risky.request("plugin__self__t", &input).is_none());
+    assert!(risky.request("plugin__self__t", &input).is_some());
+    assert!(
+        !plugins
+            .plugins()
+            .iter()
+            .any(|plugin| plugin.name == "self" && plugin.trusted)
+    );
     assert_eq!(asker.asked.lock().unwrap().len(), 1);
     assert_eq!(
         plugins.report()[0],
@@ -800,16 +807,20 @@ fn install_copies_a_plugin_that_stays_off_until_enabled() {
         )),
         "{text}"
     );
-    assert!(text.contains("\"trust\": true"), "{text}");
+    let recommends = "its plugin.json recommends trusting it (\"trust\": true); its tools \
+                      still ask before they run unless you enable it with `junees plugin \
+                      enable issues --trust`\n";
+    assert!(text.ends_with(recommends), "{text}");
     let file_mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(file_mode(&target.join(manifest::FILE_NAME)), 0o600);
     assert_eq!(file_mode(&target.join("bin/find")), 0o700);
     assert_eq!(file_mode(&target), 0o700);
     assert!(!target.join(".git").exists());
     assert!(home.load().plugins().is_empty());
-    assert!(manage::listing(&home.plugins_dir()).starts_with(
-        "  issues: disabled, 1 tool, trusted (no approval questions)\n     Issue tools\n"
-    ));
+    assert!(
+        manage::listing(&home.plugins_dir())
+            .starts_with("  issues: disabled, 1 tool\n     Issue tools\n")
+    );
 
     // Installed once only; links are refused.
     let again = run(PluginCommand::Install {
@@ -841,6 +852,19 @@ fn install_copies_a_plugin_that_stays_off_until_enabled() {
     );
     assert_eq!(file_mode(&home.plugins_dir().join(state::FILE_NAME)), 0o600);
     assert_eq!(home.load().tool_names(), ["plugin__issues__find"]);
+    // Its manifest's `"trust": true` is shown, and trusts nothing.
+    assert!(text.ends_with(recommends), "{text}");
+    assert!(!home.load().plugins()[0].trusted);
+    let text = run(PluginCommand::Enable {
+        name: "issues".into(),
+        trust: true,
+    })
+    .unwrap();
+    assert!(
+        text.ends_with("its tools run without approval questions (--trust)\n"),
+        "{text}"
+    );
+    assert!(home.load().plugins()[0].trusted);
     let missing = run(PluginCommand::Enable {
         name: "nope".into(),
         trust: false,

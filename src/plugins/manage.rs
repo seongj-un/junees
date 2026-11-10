@@ -137,7 +137,7 @@ pub fn listing(dir: &Path) -> String {
                 let plugin = super::Plugin {
                     name: name.clone(),
                     dir: dir.join(name),
-                    trusted: manifest.trust || state.trusted.contains(name),
+                    trusted: state.trusted.contains(name),
                     manifest,
                 };
                 line.push_str(&format!(", {}", super::offers(&plugin)));
@@ -184,17 +184,21 @@ fn enable(dir: &Path, name: &str, trust: bool) -> Result<String> {
     state::save(dir, &state)?;
     let mut text = format!("enabled plugin {name}; the next junees run uses it\n");
     text.push_str(&runs(&folder, &manifest));
-    if trust || manifest.trust {
-        text.push_str(&format!(
-            "its tools run without approval questions ({})\n",
-            if trust {
-                "--trust"
-            } else {
-                "\"trust\": true in its plugin.json"
-            }
-        ));
+    if trust {
+        text.push_str("its tools run without approval questions (--trust)\n");
+    } else if manifest.trust {
+        text.push_str(&recommends_trust(name));
     }
     Ok(text)
+}
+
+/// What install and enable say about a manifest's `"trust": true`: a
+/// recommendation of the plugin's author, which trusts nothing itself.
+fn recommends_trust(name: &str) -> String {
+    format!(
+        "its plugin.json recommends trusting it (\"trust\": true); its tools still ask \
+         before they run unless you enable it with `junees plugin enable {name} --trust`\n"
+    )
 }
 
 /// The programs a plugin runs, for the user to check.
@@ -273,10 +277,7 @@ fn install(dir: &Path, from: &Path, name: Option<&str>) -> Result<String> {
     );
     text.push_str(&runs(&target, &manifest));
     if manifest.trust {
-        text.push_str(
-            "  !! its plugin.json sets \"trust\": true: once enabled, its tools run without \
-             approval questions\n",
-        );
+        text.push_str(&recommends_trust(&name));
     }
     Ok(text)
 }

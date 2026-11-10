@@ -57,8 +57,9 @@ pub struct Plugin {
     pub name: String,
     pub dir: PathBuf,
     pub manifest: Manifest,
-    /// Its tools run without approval questions (its manifest's `trust`,
-    /// or `junees plugin enable --trust`).
+    /// Its tools run without approval questions: the user enabled it with
+    /// `junees plugin enable --trust`. The manifest's `trust` only
+    /// recommends that and trusts nothing by itself.
     pub trusted: bool,
 }
 
@@ -323,7 +324,7 @@ fn load_one(folder: &Path, name: &str, trusted: bool) -> Result<Plugin> {
     Ok(Plugin {
         name: name.to_string(),
         dir,
-        trusted: trusted || manifest.trust,
+        trusted,
         manifest,
     })
 }
