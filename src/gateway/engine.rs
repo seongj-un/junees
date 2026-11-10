@@ -16,6 +16,7 @@ use crate::cancel::Cancel;
 use crate::claude_code::ClaudeCode;
 use crate::claude_code::chat::Chat;
 use crate::config::Config;
+use crate::mcp::Mcp;
 use crate::memory::{Memory, MemoryTool, Mode};
 use crate::prompt;
 use crate::provider::Provider;
@@ -155,6 +156,7 @@ pub struct ApiEngines {
     config: Arc<Config>,
     cwd: PathBuf,
     provider: ProviderFactory,
+    mcp: Arc<Mcp>,
 }
 
 impl ApiEngines {
@@ -178,7 +180,14 @@ impl ApiEngines {
             config,
             cwd,
             provider,
+            mcp: Arc::new(Mcp::none()),
         }
+    }
+
+    /// Offers the tools of these MCP servers in every channel.
+    pub fn with_mcp(mut self, mcp: Arc<Mcp>) -> Self {
+        self.mcp = mcp;
+        self
     }
 
     /// Uses `provider` for the model calls (tests).
@@ -213,6 +222,7 @@ impl Engines for ApiEngines {
             tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
         }
         skills::register(&mut tools, config.home.as_deref(), true);
+        self.mcp.register(&mut tools);
         let mut agent = Agent::new(
             (self.provider)()?,
             tools,
@@ -234,6 +244,7 @@ impl Engines for ApiEngines {
                 &config.tools,
                 Workspace::new(&self.cwd).with_temp_dirs(),
             )
+            .with_external_tools(self.mcp.external_tools())
             .asking(ask);
             agent = agent.with_gate(Box::new(gate));
         }

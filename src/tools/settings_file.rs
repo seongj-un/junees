@@ -1,6 +1,8 @@
 //! Keeps the model's tools away from the user's settings file
 //! (`$JUNEES_HOME/config.toml`). It holds the API key, and writing it could
-//! turn the command rules off for the next run (`allow_dangerous`).
+//! turn the command rules off for the next run (`allow_dangerous`). The MCP
+//! server list next to it (`mcp.json`) gets the same protection: it may
+//! hold tokens, and writing it would start programs in the next session.
 //!
 //! read_file, write_file and edit_file refuse it; the command policy refuses
 //! bash commands that name it (also through a glob or braces) or that use
@@ -187,8 +189,8 @@ impl SettingsFile {
     /// The error a file tool returns for `path`.
     pub fn refusal(&self, path: &str) -> String {
         format!(
-            "{path} is the user's private Junees settings file (it holds the API key). \
-             Junees tools do not read or change it; ask the user to change settings \
+            "{path} is the user's private Junees settings file (it holds the API key and \
+             other secrets). Junees tools do not read or change it; ask the user to change settings \
              with `junees setup` instead."
         )
     }
@@ -196,8 +198,8 @@ impl SettingsFile {
     /// Why the command policy refuses a command that names it as `word`.
     pub fn named_reason(&self, word: &str) -> String {
         format!(
-            "`{word}` is the user's private Junees settings file (it holds the API key); \
-             commands may not read or change it. Ask the user to change settings with \
+            "`{word}` is the user's private Junees settings file (it holds the API key and \
+             other secrets); commands may not read or change it. Ask the user to change settings with \
              `junees setup` instead."
         )
     }
@@ -251,20 +253,25 @@ impl SettingsFile {
                 )
             })
         };
-        [(&*self.path, Named::File), (folder, Named::Folder)]
-            .into_iter()
-            .find_map(|(target, named)| {
-                let target = resolve(target).unwrap_or_else(|| target.to_path_buf());
-                matches(&target, true).then_some(named)
-            })
-            .or_else(|| {
-                (0..DATA_FOLDERS.len())
-                    .find(|&index| {
-                        self.data_dir(index)
-                            .is_some_and(|dir| prefix.starts_with(&dir) || matches(&dir, false))
-                    })
-                    .map(Named::Data)
-            })
+        let mcp = self.mcp_path();
+        [
+            (&*self.path, Named::File),
+            (&*mcp, Named::File),
+            (folder, Named::Folder),
+        ]
+        .into_iter()
+        .find_map(|(target, named)| {
+            let target = resolve(target).unwrap_or_else(|| target.to_path_buf());
+            matches(&target, true).then_some(named)
+        })
+        .or_else(|| {
+            (0..DATA_FOLDERS.len())
+                .find(|&index| {
+                    self.data_dir(index)
+                        .is_some_and(|dir| prefix.starts_with(&dir) || matches(&dir, false))
+                })
+                .map(Named::Data)
+        })
     }
 
     /// The data folder `index` of [`DATA_FOLDERS`], absolute and resolved.
@@ -333,9 +340,20 @@ impl SettingsFile {
         }
     }
 
-    /// Whether the absolute `path` leads to the settings file.
+    /// The MCP server list next to the settings file.
+    fn mcp_path(&self) -> PathBuf {
+        self.path.with_file_name(crate::mcp::config::FILE_NAME)
+    }
+
+    /// Whether the absolute `path` leads to the settings file or the MCP
+    /// server list.
     fn same(&self, path: &Path) -> bool {
-        let target = resolve(&self.path).unwrap_or_else(|| self.path.clone());
+        self.same_as(path, &self.path) || self.same_as(path, &self.mcp_path())
+    }
+
+    /// Whether the absolute `path` leads to the file `file`.
+    fn same_as(&self, path: &Path, file: &Path) -> bool {
+        let target = resolve(file).unwrap_or_else(|| file.to_path_buf());
         let mut path = path.to_path_buf();
         for _ in 0..MAX_LINKS {
             match resolve(&path) {
@@ -349,7 +367,7 @@ impl SettingsFile {
                 },
             }
         }
-        match (std::fs::metadata(&path), std::fs::metadata(&self.path)) {
+        match (std::fs::metadata(&path), std::fs::metadata(file)) {
             (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
             _ => false,
         }

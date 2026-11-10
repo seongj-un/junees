@@ -10,6 +10,7 @@ pub mod config_file;
 pub mod context;
 pub mod flock;
 pub mod gateway;
+pub mod mcp;
 pub mod memory;
 pub mod message;
 pub mod notify;

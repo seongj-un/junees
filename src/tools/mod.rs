@@ -38,6 +38,23 @@ pub const SECRET_ENV_VARS: &[&str] = &[
     "JUNEES_DISCORD_TOKEN",
 ];
 
+/// Claude Code's own credentials, as its documentation names them
+/// (code.claude.com/docs/en/env-vars and authentication): the subscription
+/// token `junees setup` tells headless users to export, its refresh token,
+/// the mTLS key passphrase, the cloud provider keys and the MCP OAuth client
+/// secret. The `claude` child of the claude-code backend needs them, so they
+/// are not in [`SECRET_ENV_VARS`]; bash and MCP servers never see them.
+pub const CLAUDE_CODE_SECRET_ENV_VARS: &[&str] = &[
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+    "ANTHROPIC_AWS_API_KEY",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "MCP_CLIENT_SECRET",
+];
+
 /// User settings for the default tools, read by [`crate::config::Config`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolSettings {
@@ -292,6 +309,53 @@ mod tests {
                 .unwrap()
                 .contains("1. other step")
         );
+    }
+
+    #[tokio::test]
+    async fn the_mcp_server_list_is_as_private_as_the_settings_file() {
+        let (_dir, root, file) = settings_file::testing::home();
+        let list = root.join(".junees").join(crate::mcp::config::FILE_NAME);
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        // Not there yet: writing it would start programs next session.
+        let write = WriteFile::with_settings(&settings);
+        let servers = r#"{"servers": {"x": {"command": "sh"}}}"#;
+        let output = write.run(json!({"path": list, "content": servers})).await;
+        assert!(output.is_error, "{}", output.content);
+        assert!(!list.exists());
+        std::fs::write(
+            &list,
+            r#"{"servers": {"x": {"command": "x", "env": {"T": "tok"}}}}"#,
+        )
+        .unwrap();
+        let read = ReadFile::with_settings(&settings);
+        for path in [list.clone(), settings_file::testing::relative(&list)] {
+            let output = read.run(json!({"path": path})).await;
+            assert!(output.is_error, "{}", output.content);
+            assert!(output.content.contains("private Junees settings file"));
+            assert!(!output.content.contains("tok"));
+        }
+        let edit = EditFile::with_settings(&settings);
+        let output = edit
+            .run(json!({"path": list, "old_string": "x", "new_string": "sh"}))
+            .await;
+        assert!(output.is_error, "{}", output.content);
+        let policy = CommandPolicy::with_settings(&settings);
+        for command in [
+            "cat ~/.junees/mcp.json",
+            "echo '{}' > $JUNEES_HOME/mcp.json",
+            "cp /tmp/evil.json ~/.junees/mcp.*",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("private Junees settings file"),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
     }
 
     #[tokio::test]

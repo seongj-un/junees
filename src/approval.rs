@@ -2,7 +2,7 @@
 //! (`JUNEES_APPROVAL`). Only the conversation mode asks: `-p` and task mode
 //! have no one to ask and run tool calls under the command policy alone.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ pub enum ApprovalMode {
     /// `write_file`/`edit_file` outside the working folder.
     #[default]
     Risky,
-    /// Every bash, `write_file` and `edit_file` call.
+    /// Every bash, `write_file`, `edit_file` and external (MCP) tool call.
     All,
 }
 
@@ -120,6 +120,18 @@ pub struct Approval {
     asker: Option<Box<dyn Ask>>,
     /// Kinds the person allowed for the rest of the session.
     always: HashSet<String>,
+    /// Tools of MCP servers, by the name the model calls them.
+    external: HashMap<String, ExternalTool>,
+}
+
+/// A tool an MCP server runs ([`crate::mcp`]). `risky` asks before each
+/// call unless the server is trusted; `all` asks about trusted ones too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalTool {
+    pub server: String,
+    /// Its name on the server.
+    pub tool: String,
+    pub trusted: bool,
 }
 
 impl Approval {
@@ -131,7 +143,17 @@ impl Approval {
             workspace,
             asker: None,
             always: HashSet::new(),
+            external: HashMap::new(),
         }
+    }
+
+    /// Asks about these external tools too.
+    pub fn with_external_tools(
+        mut self,
+        tools: impl IntoIterator<Item = (String, ExternalTool)>,
+    ) -> Self {
+        self.external.extend(tools);
+        self
     }
 
     pub fn asking(mut self, asker: Box<dyn Ask>) -> Self {
@@ -161,7 +183,7 @@ impl Approval {
                     }
                 }
                 let reasons = cautions.into_iter().map(|caution| caution.reason).collect();
-                (command, reasons, kinds, None)
+                (command.to_string(), reasons, kinds, None)
             }
             "write_file" | "edit_file" => {
                 let path = input.get("path")?.as_str()?;
@@ -171,17 +193,40 @@ impl Approval {
                     write_preview(input, &self.workspace.root().join(path))
                 };
                 if self.workspace.contains(path) {
-                    (path, Vec::new(), Vec::new(), preview)
+                    (path.to_string(), Vec::new(), Vec::new(), preview)
                 } else {
                     (
-                        path,
+                        path.to_string(),
                         vec![format!("writes to `{path}` outside the working folder")],
                         vec![format!("{tool}: {OUTSIDE}")],
                         preview,
                     )
                 }
             }
-            _ => return None,
+            name => {
+                let external = self.external.get(name)?;
+                let target = format!(
+                    "tool `{}` of the MCP server `{}`",
+                    external.tool, external.server
+                );
+                let mut preview = String::new();
+                let arguments = serde_json::to_string_pretty(input).unwrap_or_default();
+                preview_lines(&mut preview, "  ", &arguments);
+                if external.trusted {
+                    (target, Vec::new(), Vec::new(), Some(preview))
+                } else {
+                    (
+                        target,
+                        vec![format!(
+                            "an external tool: the MCP server `{}` runs it with these arguments, \
+                             outside Junees's command rules",
+                            external.server
+                        )],
+                        vec![format!("{tool}: external tool")],
+                        Some(preview),
+                    )
+                }
+            }
         };
         let kinds = match (kinds.is_empty(), self.mode) {
             (false, _) => kinds,
@@ -190,7 +235,7 @@ impl Approval {
         };
         Some(Request {
             tool: tool.to_string(),
-            target: target.to_string(),
+            target,
             reasons,
             preview,
             kinds,
