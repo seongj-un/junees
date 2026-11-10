@@ -1370,23 +1370,34 @@ impl Repl {
     }
 
     /// `/sessions`: lists recent sessions and continues the one picked by
-    /// number. Returns whether SIGTERM came while it asked.
+    /// number. Sessions of the Discord gateway's channels are only shown:
+    /// the gateway continues them. Returns whether SIGTERM came while it
+    /// asked.
     async fn sessions(&mut self) -> bool {
-        let listed = self
-            .config
-            .require_home()
-            .and_then(|home| session::list_recent(home, SESSIONS_LISTED));
-        let list = match listed {
-            Ok(list) if list.is_empty() => {
-                println!("(no saved sessions)");
-                return false;
-            }
-            Ok(list) => list,
+        let listed = self.config.require_home().and_then(|home| {
+            Ok((
+                session::list_recent(home, SESSIONS_LISTED)?,
+                session::list_channel_sessions(home, SESSIONS_LISTED)?,
+            ))
+        });
+        let (list, channels) = match listed {
+            Ok(listed) => listed,
             Err(err) => {
                 report(&err);
                 return false;
             }
         };
+        if !channels.is_empty() {
+            println!("channel sessions (the Discord gateway continues them):");
+            for summary in &channels {
+                let current = self.session_id.as_deref() == Some(summary.id.as_str());
+                println!("    {}", cli::session_line(summary, current));
+            }
+        }
+        if list.is_empty() {
+            println!("(no saved sessions)");
+            return false;
+        }
         for (n, summary) in list.iter().enumerate() {
             let current = self.session_id.as_deref() == Some(summary.id.as_str());
             println!("{:>3} {}", n + 1, cli::session_line(summary, current));

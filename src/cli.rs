@@ -412,7 +412,8 @@ pub fn positive(text: &str) -> Option<u64> {
     text.trim().parse().ok().filter(|&n| n > 0)
 }
 
-/// One `/sessions` line: id, last write (UTC), first input.
+/// One `/sessions` line: id, last write (UTC), backend and channel tags,
+/// first input.
 pub fn session_line(summary: &Summary, current: bool) -> String {
     let marker = if current { '*' } else { ' ' };
     let first = if summary.first_input.trim().is_empty() {
@@ -420,14 +421,18 @@ pub fn session_line(summary: &Summary, current: bool) -> String {
     } else {
         preview(&summary.first_input, SESSION_PREVIEW_CHARS)
     };
+    let mut tags = String::new();
+    if let Some(backend) = &summary.backend {
+        tags.push_str(&format!("[{backend}] "));
+    }
+    if let Some(source) = &summary.source {
+        let channel = summary.channel.as_deref().unwrap_or("?");
+        tags.push_str(&format!("[{source} {channel}] "));
+    }
     format!(
-        "{marker} {}  {} UTC  {}{first}",
+        "{marker} {}  {} UTC  {tags}{first}",
         summary.id,
         format_utc(summary.updated),
-        match summary.backend.as_deref() {
-            Some(backend) => format!("[{backend}] "),
-            None => String::new(),
-        }
     )
 }
 
@@ -738,6 +743,8 @@ mod tests {
             cwd: "/work".into(),
             first_input: "이 폴더에\n뭐가 있어? ".repeat(10),
             backend: None,
+            source: None,
+            channel: None,
         };
         let line = session_line(&summary, true);
         assert!(
@@ -757,6 +764,13 @@ mod tests {
             ..summary
         };
         assert!(session_line(&claude, false).ends_with("UTC  [claude-code] hi"));
+        // So does a conversation of a Discord channel.
+        let channel = Summary {
+            source: Some("discord".into()),
+            channel: Some("505".into()),
+            ..claude
+        };
+        assert!(session_line(&channel, false).ends_with("UTC  [claude-code] [discord 505] hi"));
     }
 
     #[test]
