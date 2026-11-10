@@ -11,7 +11,7 @@ use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
 use crate::provider::{
     CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent, ToolSpec,
 };
-use crate::session::{Entry, Journal, Transcript};
+use crate::session::{self, Entry, Journal, Transcript};
 use crate::tools::{ToolOutput, ToolRegistry};
 use crate::web_search;
 
@@ -230,8 +230,9 @@ impl Agent {
     pub fn context_tokens(&self) -> u64 {
         let mut size = self.transcript.context_size();
         if self.transcript.context_tokens == 0 && !self.transcript.messages.is_empty() {
-            let tools = serde_json::to_string(&self.tools.specs()).map_or(0, |json| json.len());
-            size += (self.options.system.len() + tools).div_ceil(4) as u64;
+            let tools = serde_json::to_string(&self.tools.specs())
+                .map_or(0, |json| session::estimate_text_tokens(&json));
+            size += session::estimate_text_tokens(&self.options.system) + tools;
         }
         size
     }

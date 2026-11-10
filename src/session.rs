@@ -562,14 +562,44 @@ impl Transcript {
 /// Block types of calls to tools the API runs itself.
 const SERVER_CALL_TYPES: [&str; 2] = ["server_tool_use", "mcp_tool_use"];
 
-/// A rough token count of content blocks: a token per 4 bytes of their
-/// JSON. Keys and quotes make it err high for plain text, and so do the
-/// base64 `encrypted_content` of web search results; Hangul, at 3 bytes a
-/// character, comes out near its real count. Erring high only compacts a
-/// little early.
+/// A rough token count of content blocks: [`estimate_text_tokens`] of
+/// their JSON.
 pub fn estimate_tokens(content: &[ContentBlock]) -> u64 {
-    let bytes = serde_json::to_string(content).map_or(0, |json| json.len());
-    bytes.div_ceil(4) as u64
+    serde_json::to_string(content).map_or(0, |json| estimate_text_tokens(&json))
+}
+
+/// A rough token count of `text`, counted per character: a quarter token
+/// for each ASCII character (4 characters a token), a whole token for each
+/// Hangul, CJK ideograph or kana character (see [`is_wide`]), and for any
+/// other character a quarter token per byte of its UTF-8 (2 to 4 bytes:
+/// accented Latin, Greek and Cyrillic come to 2 characters a token).
+///
+/// A token per 4 bytes undercounts Korean: a Hangul syllable is 3 bytes
+/// but takes about a token or more. English and other ASCII text estimate
+/// exactly as by bytes, and no text estimates lower than by bytes. Keys and
+/// quotes make the JSON of blocks err high, and so do the base64
+/// `encrypted_content` of web search results. Erring high only compacts a
+/// little early.
+pub fn estimate_text_tokens(text: &str) -> u64 {
+    let quarters: usize = text
+        .chars()
+        .map(|c| if is_wide(c) { 4 } else { c.len_utf8() })
+        .sum();
+    quarters.div_ceil(4) as u64
+}
+
+/// Hangul (syllables and jamo), CJK ideographs, radicals, symbols and
+/// punctuation, kana, bopomofo, and full-width forms: scripts whose
+/// characters take about a token each.
+fn is_wide(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{11FF}'
+        | '\u{2E80}'..='\u{9FFF}'
+        | '\u{A960}'..='\u{A97F}'
+        | '\u{AC00}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FF00}'..='\u{FFEF}'
+        | '\u{20000}'..='\u{3FFFF}')
 }
 
 fn has_tool_result(message: &Message) -> bool {
@@ -2034,6 +2064,71 @@ mod tests {
         // The next measurement replaces the estimate.
         transcript.apply(Entry::Usage(plain));
         assert_eq!(transcript.context_size(), 100);
+    }
+
+    #[test]
+    fn estimates_korean_at_a_token_a_character_and_english_by_bytes() {
+        let korean = "한국어 테스트 문장입니다. ".repeat(100);
+        let hangul = korean
+            .chars()
+            .filter(|c| ('\u{AC00}'..='\u{D7A3}').contains(c))
+            .count() as u64;
+        assert_eq!(hangul, 1100);
+        let block = [ContentBlock::text(korean.clone())];
+        let json = serde_json::to_string(&block).unwrap();
+        // A token per 4 bytes came to less than a token per syllable.
+        assert!((json.len() as u64).div_ceil(4) < hangul);
+        assert!(
+            estimate_tokens(&block) >= hangul,
+            "{}",
+            estimate_tokens(&block)
+        );
+        // Hangul a token each, the spaces and dots and the JSON a quarter.
+        let ascii = json.chars().filter(char::is_ascii).count() as u64;
+        assert_eq!(estimate_tokens(&block), hangul + ascii.div_ceil(4));
+
+        // ASCII text estimates by bytes, as before.
+        let english = "The quick brown fox jumps over the lazy dog. ".repeat(100);
+        let block = [ContentBlock::text(english)];
+        let json = serde_json::to_string(&block).unwrap();
+        assert_eq!(estimate_tokens(&block), (json.len() as u64).div_ceil(4));
+
+        // Japanese and Chinese count like Korean; nothing counts below
+        // a token per 4 bytes.
+        assert_eq!(estimate_text_tokens("日本語のテキスト中文"), 10);
+        for text in [
+            "Привет, мир",
+            "café ñandú",
+            "emoji 😀🚀",
+            "สวัสดี",
+            "한글 and ASCII",
+        ] {
+            assert!(
+                estimate_text_tokens(text) >= (text.len() as u64).div_ceil(4),
+                "{text}"
+            );
+        }
+        assert_eq!(estimate_text_tokens("Привет"), 3);
+        assert_eq!(estimate_text_tokens(""), 0);
+    }
+
+    #[test]
+    fn replay_estimates_korean_input_per_character() {
+        // Sizes are computed while applying entries, never stored, so a
+        // journal written before this estimate replays with it.
+        let mut transcript = Transcript::default();
+        transcript.apply(Entry::Message(Message::user_text("hi")));
+        transcript.apply(Entry::Usage(Usage {
+            input_tokens: 100,
+            ..Default::default()
+        }));
+        transcript.apply(Entry::Message(assistant("ok")));
+        transcript.apply(Entry::Message(Message::user_text("가".repeat(1000))));
+        assert!(
+            transcript.context_size() >= 1100,
+            "{}",
+            transcript.context_size()
+        );
     }
 
     fn server_call(id: &str) -> ContentBlock {
