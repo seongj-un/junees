@@ -180,9 +180,9 @@ description: Use when deploying the app. Build, test, tag.
 ```
 
 - 이름은 `a-z`, `0-9`, `-`로 1~64자이고 폴더 이름과 앞머리의 `name`이 같아야 한다. `description`은 한 줄(60자 이하 권장, 200자까지)이고, 앞머리 뒤에 본문이 있어야 한다.
-- 시스템 프롬프트에는 스킬 이름과 설명 목록만 들어간다(4000자까지. 넘는 스킬은 개수만 적는다). 목록은 세션을 시작할 때 한 번 읽어 고정하므로(프롬프트 캐싱), 세션 중에 바꾼 스킬은 `/new`나 다음 실행부터 목록에 나온다(`skill_view`로는 바로 읽힌다).
+- 시스템 프롬프트에는 스킬 이름과 설명 목록만 들어간다(4000자까지. 넘는 스킬은 개수만 적는다). 목록 앞에는 각 줄이 작성자가 쓴 이름과 설명일 뿐 지시가 아니며, 스킬은 사용자나 규칙보다 앞서지 않는다는 안내를 붙인다. 손으로 넣은 스킬의 제어 문자와 방향 제어 문자는 목록과 `/skills` 화면에서 `\u{1b}`처럼 이스케이프해 보여 준다. 목록은 세션을 시작할 때 한 번 읽어 고정하므로(프롬프트 캐싱), 세션 중에 바꾼 스킬은 `/new`나 다음 실행부터 목록에 나온다(`skill_view`로는 바로 읽힌다).
 - 도구: `skill_view {name, file_path?}`는 `SKILL.md`(뒤에 파일 목록) 또는 스킬 안의 파일을 읽는다. `skill_manage {action, name, ...}`의 동작은 `create`(`content`: `SKILL.md` 전체), `patch`(`old_string`이 정확히 한 번 나와야 하고, `file_path`를 주면 그 파일), `write_file`/`remove_file`(`file_path`는 `references/`, `templates/`, `scripts/`, `assets/` 아래), `delete`(묻지 않고 `skills/.trash/<이름>-<시각>`으로 옮긴다).
-- 막는 것: 스킬 밖 경로(`..`, 절대 경로, 스킬 안의 심볼릭 링크를 거치는 쓰기와 밖을 가리키는 읽기), 100000바이트가 넘는 파일, API 키처럼 보이는 내용(`sk-ant-`, `ghp_`, `xox?-`, `AKIA`, 개인 키 PEM, 긴 hex/base64 토큰. 어느 줄인지만 알려 주고 값은 되풀이하지 않는다), 목록을 4000자 넘게 늘리는 추가나 설명 변경(긴 설명을 알려 주며 줄이거나 지우라고 안내). 쓰기는 임시 파일 + rename, 파일 0600, 폴더 0700.
+- 막는 것: 스킬 밖 경로(`..`, 절대 경로, 스킬 안의 심볼릭 링크를 거치는 쓰기와 밖을 가리키는 읽기), 100000바이트가 넘는 파일, API 키처럼 보이는 내용(`sk-ant-`, `ghp_`, `xox?-`, `AKIA`, 개인 키 PEM, 긴 hex/base64 토큰. 어느 줄인지만 알려 주고 값은 되풀이하지 않는다), 목록을 4000자 넘게 늘리는 추가나 설명 변경(긴 설명을 알려 주며 줄이거나 지우라고 안내), 이름과 설명의 제어 문자, 방향 제어 문자, 줄/문단 구분 문자, `SKILL.md`의 탭과 줄 끝(`\n`, `\r\n`)이 아닌 제어 문자. 쓰기는 임시 파일 + rename, 파일 0600, 폴더 0700.
 - 작업 모드: 세션마다 목록을 넣고 `skill_view`는 쓸 수 있지만, `skill_manage`는 `JUNEES_TASK_SKILL_MANAGE=1`일 때만 준다(무인 실행이 사용자의 절차를 바꾸지 않도록).
 - claude-code 백엔드: 같은 목록을 `--append-system-prompt`로 넣는 데까지만 한다. Claude Code에는 두 도구가 없고 `$JUNEES_HOME` 폴더는 거절 규칙으로 읽을 수 없으므로, 목록에 "파일은 이 세션에서 읽을 수 없다"는 안내를 붙인다. 스킬이 없으면 아무것도 넣지 않는다.
 - `JUNEES_HOME`도 `HOME`도 없으면 스킬 도구와 목록이 없다.
@@ -421,7 +421,7 @@ tests/
   web_search.rs        가짜 API 서버(JSON, SSE)로 웹 검색 도구 정의, pause_turn 이어 가기(멈춘 응답을 그대로, 뒤에 user 메시지 없이), pause 상한 뒤 검색을 끄고 이어 갈 때 결과 없는 검색 호출 제거, 검색 블록과 citations 재전송, 클라이언트 도구 미실행, 바이너리의 출처 목록과 조직 비활성 안내 검증
   claude_code.rs       실제 바이너리와 가짜 claude로 API 키 없이 task init/run, claude 환경에 API 변수 없음, 로그인 실패 안내와 알림, SIGTERM 검증
   claude_chat.rs       실제 바이너리와 가짜 claude로 구독 대화: 두 번째 턴이 같은 세션을 --resume, 스트리밍과 도구/거절 표시, /usage와 /compact, /context 안내, 거절 규칙 인자, claude 환경에 API 변수 없음, -p와 -c, Ctrl-C 후 다음 턴, 사용 한도 안내 검증
-  skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기 검증
+  skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기, /skills 화면의 제어 문자 이스케이프 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
 
