@@ -17,6 +17,8 @@ pub use read_file::ReadFile;
 pub use settings_file::SettingsFile;
 pub use write_file::WriteFile;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -87,7 +89,8 @@ pub trait Tool: Send + Sync {
 
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    /// Shared, so subagents get the same tools ([`ToolRegistry::without`]).
+    tools: Vec<Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -110,7 +113,19 @@ impl ToolRegistry {
     /// Adds a tool. A tool with the same name replaces the earlier one.
     pub fn register(&mut self, tool: impl Tool + 'static) {
         self.tools.retain(|existing| existing.name() != tool.name());
-        self.tools.push(Box::new(tool));
+        self.tools.push(Arc::new(tool));
+    }
+
+    /// The same tools, sharing their state, except those named in `names`.
+    pub fn without(&self, names: &[&str]) -> Self {
+        Self {
+            tools: self
+                .tools
+                .iter()
+                .filter(|tool| !names.contains(&tool.name()))
+                .cloned()
+                .collect(),
+        }
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -292,6 +307,19 @@ mod tests {
         let output = ToolRegistry::new().dispatch("nope", json!({})).await;
         assert!(output.is_error);
         assert!(output.content.contains("unknown tool `nope`"));
+    }
+
+    #[test]
+    fn without_leaves_out_the_named_tools() {
+        let registry = ToolRegistry::with_defaults(&ToolSettings::default());
+        let names: Vec<String> = registry
+            .without(&["bash", "edit_file", "nope"])
+            .specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(names, ["read_file", "write_file"]);
+        assert_eq!(registry.specs().len(), 4);
     }
 
     #[test]
