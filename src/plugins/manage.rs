@@ -201,10 +201,9 @@ fn enable(dir: &Path, name: &str, trust: bool) -> Result<String> {
 fn runs(folder: &Path, manifest: &Manifest) -> String {
     let mut text = String::new();
     let mut line = |what: String, command: &manifest::Command| {
-        text.push_str(&format!(
-            "  {what}: {}\n",
-            escape_hidden(&command.program(folder).display().to_string())
-        ));
+        let mut words = vec![command.program(folder).display().to_string()];
+        words.extend(command.argv[1..].iter().cloned());
+        text.push_str(&format!("  {what}: {}\n", escape_hidden(&words.join(" "))));
     };
     for tool in &manifest.tools {
         line(format!("tool {}", tool.name), &tool.command);
