@@ -9,3 +9,4 @@
 //! `discord_allowed_users` are listened to.
 
 pub mod config;
+pub mod split;
