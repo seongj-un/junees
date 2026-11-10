@@ -17,6 +17,7 @@ use super::state::{State, StopReason};
 use super::{features, git, progress_path, sessions_dir};
 use crate::agent::Event;
 use crate::cancel::Cancel;
+use crate::memory::{Change, Limits, Memory, Target};
 use crate::notify::Notifier;
 use crate::provider::Provider;
 use crate::tools::{SettingsFile, ToolSettings};
@@ -52,6 +53,7 @@ fn env<'a>(root: &Path, factory: &'a ProviderFactory<'a>, bin: &Path) -> TaskEnv
             grace: Duration::from_millis(300),
             scrub: true,
         }),
+        memory: None,
     }
 }
 
@@ -221,6 +223,39 @@ async fn claude_code_sessions_get_the_skill_list() {
             ),
             "{system}"
         );
+    }
+}
+
+#[tokio::test]
+async fn claude_code_sessions_get_the_memory_without_the_tool() {
+    let fake = planned(|_| {
+        vec![format!(
+            "echo a > a.txt\necho b > b.txt\n{}",
+            answered("done", 5)
+        )]
+    });
+    let repo = repo();
+    let root = repo.path();
+    let home = tempfile::tempdir().unwrap();
+    let memory = Memory::new(home.path(), root, Limits::default());
+    memory
+        .change(Target::Project, Change::Add("Build with make.".into()))
+        .unwrap();
+    let factory = no_provider;
+    let mut env = env(root, &factory, &fake.bin);
+    env.memory = Some(memory);
+    init(&env, "build a and b", &mut |_| {}).await.unwrap();
+    run(&env, 1, &mut |_| {}).await.unwrap();
+    for n in [1, 2] {
+        let args = fake.args(n);
+        let system = after(&args, "--append-system-prompt");
+        assert!(
+            system.starts_with("You are running inside Junees"),
+            "{system}"
+        );
+        assert!(system.contains("\nMEMORY (persistent notes)\n"), "{system}");
+        assert!(system.contains("They cannot be changed in this session"));
+        assert!(system.contains("\nBuild with make.\n"), "{system}");
     }
 }
 

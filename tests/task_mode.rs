@@ -320,6 +320,7 @@ async fn init_then_run_builds_the_features_and_commits() {
             "read_file",
             "write_file",
             "edit_file",
+            "memory",
             "mark_feature_passing",
             "skill_view"
         ]

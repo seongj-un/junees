@@ -104,6 +104,9 @@ pub const REPL_HELP: &str = "\
                    Claude Code compacts its own)
 /context           show the context size and its limit (api backend)
 /usage             show token usage of this session
+/memory            show what the persistent memory holds
+/memory clear user|notes|project
+                   empty one memory (asks first)
 /skills            list the skills ($JUNEES_HOME/skills)
 /skill <name>      show a skill
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)

@@ -160,6 +160,11 @@ mod tests {
             .run(json!({"path": root.join(".junees/sessions/s.jsonl")}))
             .await;
         assert!(!output.is_error, "{}", output.content);
+        // The data folders are only write-protected.
+        let output = tool
+            .run(json!({"path": root.join(".junees/memory/user.md")}))
+            .await;
+        assert!(output.content.contains("Name: J"), "{}", output.content);
     }
 
     #[tokio::test]

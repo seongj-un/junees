@@ -27,13 +27,14 @@ pub struct Chat {
     settings: ToolSettings,
     /// `--max-turns` of each turn.
     max_turns: usize,
-    /// Appended to Claude Code's system prompt (`--append-system-prompt`)
-    /// when not empty: the skill list.
-    system: String,
     /// The turns so far and Claude Code's session id.
     transcript: Transcript,
     journal: Option<Box<dyn Journal>>,
     cancel: Cancel,
+    /// What Junees adds to Claude Code's system prompt
+    /// (`--append-system-prompt`): its memory and skill list; empty for
+    /// nothing.
+    system: String,
 }
 
 impl Chat {
@@ -49,11 +50,18 @@ impl Chat {
             cwd,
             settings,
             max_turns,
-            system: String::new(),
             transcript: Transcript::default(),
             journal: None,
             cancel,
+            system: String::new(),
         }
+    }
+
+    /// Adds `system` to Claude Code's system prompt from the next turn on
+    /// (empty for nothing). Every turn passes it again: `--resume` does not
+    /// keep it.
+    pub fn set_system(&mut self, system: String) {
+        self.system = system;
     }
 
     /// Continues the Claude Code conversation of a saved session and
@@ -66,12 +74,6 @@ impl Chat {
     /// Starts a new conversation, recorded to `journal` (or nowhere).
     pub fn reset(&mut self, journal: Option<Box<dyn Journal>>) {
         self.resume(Transcript::default(), journal);
-    }
-
-    /// What the next turns append to Claude Code's system prompt; empty
-    /// appends nothing.
-    pub fn set_system(&mut self, system: String) {
-        self.system = system;
     }
 
     pub fn claude(&self) -> &ClaudeCode {
@@ -405,6 +407,17 @@ mod tests {
             ["--resume", "c-1", "--model", "opus", "--disallowedTools"]
         );
 
+        // Memory goes on top of Claude Code's own system prompt, each turn.
+        chat.set_system("\nMEMORY (persistent notes)\n...".into());
+        let args = chat.arguments();
+        assert_eq!(
+            args[22..25],
+            [
+                "--append-system-prompt",
+                "\nMEMORY (persistent notes)\n...",
+                "--disallowedTools"
+            ]
+        );
         // The skill list goes to Claude Code's system prompt.
         chat.set_system("\n# Skills\n- deploy: Use when deploying\n".into());
         let args = chat.arguments();

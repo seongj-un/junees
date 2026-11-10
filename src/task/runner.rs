@@ -22,6 +22,7 @@ use super::{
 use crate::agent::{Agent, AgentOptions, Cancelled, Event, Limit, LimitReached, TurnLimit};
 use crate::cancel::Cancel;
 use crate::cli::preview;
+use crate::memory::{Memory, MemoryTool, Mode};
 use crate::message::Usage;
 use crate::notify::Notifier;
 use crate::provider::Provider;
@@ -125,6 +126,10 @@ pub struct TaskEnv<'a> {
     /// Sessions may change skills (`JUNEES_TASK_SKILL_MANAGE`); otherwise
     /// they only read them.
     pub skill_manage: bool,
+    /// The persistent memory of the task's project. Every session reads it
+    /// into its system prompt when it starts; the API sessions' memory tool
+    /// changes only the project notes.
+    pub memory: Option<Memory>,
 }
 
 /// What the runner tells the user: its own status lines and the events of
@@ -141,7 +146,20 @@ impl TaskEnv<'_> {
     /// task session gets its tools from here and every verify command runs
     /// through [`TaskEnv::verifier`], so tool settings belong in these two.
     fn tools(&self) -> ToolRegistry {
-        session_tools(&self.tool_settings)
+        let mut tools = session_tools(&self.tool_settings);
+        if let Some(memory) = &self.memory {
+            tools.register(MemoryTool::new(memory.clone(), Mode::Task));
+        }
+        tools
+    }
+
+    /// `system` and the memory section for `mode`, read now: a session
+    /// sees the memory as it was when the session started.
+    fn with_memory(&self, mut system: String, mode: Mode) -> String {
+        if let Some(memory) = &self.memory {
+            system.push_str(&memory.snapshot().section(mode));
+        }
+        system
     }
 
     fn verifier(&self) -> Verifier {
@@ -198,7 +216,7 @@ impl TaskEnv<'_> {
             (self.provider)()?,
             tools,
             AgentOptions {
-                system,
+                system: self.with_memory(system, Mode::Task),
                 max_tokens: self.max_tokens,
                 max_turns: self.max_turns,
                 context_window: self.context_window,
@@ -320,7 +338,7 @@ async fn plan_with_claude(
     report: &mut Reporter<'_>,
 ) -> Result<(usize, Usage)> {
     let root = &env.root;
-    let system = prompt::claude_init_system()
+    let system = env.with_memory(prompt::claude_init_system(), Mode::ReadOnly)
         + &skills::system_section(env.home.as_deref(), skills::Mode::ClaudeCode);
     let verifier = env.verifier();
     let mut usage = Usage::default();
@@ -1012,6 +1030,7 @@ async fn claude_session(
             + &skills::system_section(env.home.as_deref(), skills::Mode::ClaudeCode);
         (system, ledger.passing(), ledger.total())
     };
+    let system = env.with_memory(system, Mode::ReadOnly);
     let output = sessions_dir(root).join(format!("session-{n}.jsonl"));
     line(
         report,
@@ -1383,6 +1402,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::memory::{Change, Target};
     use crate::message::{ContentBlock, Message, StopReason as ModelStop};
     use crate::provider::{CompletionRequest, CompletionResponse, ProviderError};
     use crate::task::git::testing::{repo, subjects};
@@ -1503,6 +1523,7 @@ mod tests {
             budget: Budget::default(),
             cancel: Cancel::new(),
             claude: None,
+            memory: None,
         }
     }
 
@@ -2095,6 +2116,69 @@ mod tests {
         let again = run_task(root, &provider, 5, &mut Collected::default()).await;
         assert_eq!(again.reason, StopReason::Complete);
         assert_eq!(State::load(root).unwrap().sessions, 2);
+    }
+
+    #[tokio::test]
+    async fn sessions_read_memory_at_start_and_change_only_project_notes() {
+        let repo = task_repo(&["true", "test -f b.txt"]);
+        let root = repo.path();
+        let home = tempfile::tempdir().unwrap();
+        let memory = Memory::new(home.path(), root, crate::memory::Limits::default());
+        memory
+            .change(Target::User, Change::Add("Name: 성준".into()))
+            .unwrap();
+        let provider = Scripted::new(vec![
+            calls(&[
+                (
+                    "memory",
+                    json!({"target": "project", "action": "add", "content": "Use make, not cargo."}),
+                ),
+                (
+                    "memory",
+                    json!({"target": "user", "action": "add", "content": "Likes tea."}),
+                ),
+                mark("F1"),
+            ]),
+            text("F1 works"),
+            calls(&[write(&root.join("b.txt"), "b"), mark("F2")]),
+            text("F2 works"),
+        ]);
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        env.memory = Some(memory.clone());
+        let stop = run(&env, 5, &mut Collected::default().reporter())
+            .await
+            .unwrap();
+        assert_eq!(stop.reason, StopReason::Complete);
+
+        assert_eq!(
+            memory.entries(Target::Project).unwrap(),
+            ["Use make, not cargo."]
+        );
+        assert_eq!(memory.entries(Target::User).unwrap(), ["Name: 성준"]);
+        let seen = provider.seen.lock().unwrap();
+        let results = &seen[1].1.last().unwrap().content;
+        let ContentBlock::ToolResult {
+            is_error, content, ..
+        } = &results[1]
+        else {
+            panic!("{results:?}");
+        };
+        assert!(*is_error, "{content:?}");
+        // Session 1 kept the memory it started with, all the way through.
+        let first = &seen[0].0;
+        assert!(first.contains("\nMEMORY (persistent notes)\n"), "{first}");
+        assert!(first.contains("you can only change the notes on this project"));
+        assert!(first.contains("\nName: 성준\n"));
+        assert!(!first.contains("Use make"));
+        assert_eq!(seen[1].0, *first);
+        // Session 2 started with the note session 1 saved.
+        assert!(
+            seen[2].0.contains("\nUse make, not cargo.\n"),
+            "{}",
+            seen[2].0
+        );
+        assert!(!seen[2].0.contains("Likes tea."));
     }
 
     #[tokio::test]

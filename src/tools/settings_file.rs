@@ -8,6 +8,12 @@
 //! a sandbox: paths built from other variables or at run time
 //! (`cat $(echo ~/.junees)/config.toml`), commands on a folder above it
 //! (`grep -r api_key ~`) and scripts written to a file first still reach it.
+//!
+//! The same checks keep writes out of the folders Junees changes only
+//! through its own tools ([`DATA_FOLDERS`]: memory, project memory,
+//! skills): write_file and edit_file refuse paths in them, and the command
+//! policy refuses commands that name them unless the command only reads
+//! ([`Named::Data`]). Reading them stays allowed.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -28,6 +34,62 @@ pub enum Named {
     File,
     /// The folder holding it, `$JUNEES_HOME` itself.
     Folder,
+    /// One of the [`DATA_FOLDERS`] (by index) or a path in it.
+    Data(usize),
+}
+
+/// A folder under `$JUNEES_HOME` that Junees changes only through one of
+/// its tools, which check what is written (task sessions change only
+/// project memory, no secrets, no hidden characters). The model may read
+/// it, but write_file, edit_file and bash may not change it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DataFolder {
+    /// The folder name under `$JUNEES_HOME`.
+    pub name: &'static str,
+    /// What it holds, for messages.
+    pub holds: &'static str,
+    /// The tool that changes it.
+    pub tool: &'static str,
+}
+
+/// The folders under `$JUNEES_HOME` the model may read but not write.
+pub const DATA_FOLDERS: &[DataFolder] = &[
+    DataFolder {
+        name: "memory",
+        holds: "the saved memory",
+        tool: "memory",
+    },
+    DataFolder {
+        name: "projects",
+        holds: "the saved project memory",
+        tool: "memory",
+    },
+    DataFolder {
+        name: "skills",
+        holds: "the saved skills",
+        tool: "skill_manage",
+    },
+];
+
+impl DataFolder {
+    /// The error write_file and edit_file return for `path`.
+    pub fn refusal(&self, path: &str) -> String {
+        format!(
+            "{path} is in `$JUNEES_HOME/{}/`, {} of Junees. The file tools may read it \
+             but not change it; use the `{}` tool instead.",
+            self.name, self.holds, self.tool
+        )
+    }
+
+    /// Why the command policy refuses a command that may write to `word`.
+    pub fn reason(&self, word: &str) -> String {
+        format!(
+            "`{word}` is in `$JUNEES_HOME/{}/`, {} of Junees. Commands may read it (cat, \
+             grep, ls and the like) but not change, move or copy it; use the `{}` tool \
+             instead.",
+            self.name, self.holds, self.tool
+        )
+    }
 }
 
 /// The settings file the tools must leave alone. The rest of
@@ -72,8 +134,21 @@ impl SettingsFile {
         std::env::current_dir().is_ok_and(|cwd| self.same(&cwd.join(path)))
     }
 
-    /// Whether the shell word `word` names the settings file or its folder
-    /// (the file wins), relative paths taken from `cwd` (`None`: unknown,
+    /// The [`DATA_FOLDERS`] entry `path` is in (relative paths start from
+    /// the current folder), once `.`, `..` and symbolic links are resolved
+    /// and dangling links followed to where writing would create the file.
+    pub fn data_folder(&self, path: &Path) -> Option<&'static DataFolder> {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().ok()?.join(path)
+        };
+        self.data_index(&self.lands(&path)?)
+            .map(|index| &DATA_FOLDERS[index])
+    }
+
+    /// Whether the shell word `word` names the settings file, its folder
+    /// or a data folder (in that order of precedence), relative paths taken from `cwd` (`None`: unknown,
     /// not checked). `~`, `$HOME`, `${HOME}`, `$JUNEES_HOME` and
     /// `${JUNEES_HOME}` at the start and `/proc/self/cwd` are expanded, so
     /// are braces (`{a,b}`); a glob (`*`, `?`, `[...]`) counts when it can
@@ -138,7 +213,7 @@ impl SettingsFile {
     }
 
     /// Whether the absolute `path` (possibly holding glob patterns) leads
-    /// to the settings file or its folder.
+    /// to the settings file, its folder or into a data folder.
     fn points_at(&self, path: &Path) -> Option<Named> {
         let folder = self.path.parent()?;
         let Some(first_glob) = path
@@ -149,25 +224,78 @@ impl SettingsFile {
                 return Some(Named::File);
             }
             let target = resolve(folder).unwrap_or_else(|| folder.to_path_buf());
-            return (resolve(path) == Some(target)).then_some(Named::Folder);
+            if resolve(path) == Some(target) {
+                return Some(Named::Folder);
+            }
+            return self.data_index(&self.lands(path)?).map(Named::Data);
         };
         let prefix: PathBuf = path.components().take(first_glob).collect();
         let prefix = resolve(&prefix)?;
         let patterns: Vec<_> = path.components().skip(first_glob).collect();
+        // Whether the patterns match the components of `target` below the
+        // prefix: all of them (`whole`), or the first ones (`target` is a
+        // folder the path may lead into).
+        let matches = |target: &Path, whole: bool| {
+            let Ok(rest) = target.strip_prefix(&prefix) else {
+                return false;
+            };
+            let rest: Vec<_> = rest.components().collect();
+            (if whole {
+                rest.len() == patterns.len()
+            } else {
+                rest.len() <= patterns.len()
+            }) && rest.iter().zip(&patterns).all(|(name, pattern)| {
+                glob_match(
+                    &pattern.as_os_str().to_string_lossy(),
+                    &name.as_os_str().to_string_lossy(),
+                )
+            })
+        };
         [(&*self.path, Named::File), (folder, Named::Folder)]
             .into_iter()
             .find_map(|(target, named)| {
                 let target = resolve(target).unwrap_or_else(|| target.to_path_buf());
-                let rest: Vec<_> = target.strip_prefix(&prefix).ok()?.components().collect();
-                (rest.len() == patterns.len()
-                    && rest.iter().zip(&patterns).all(|(name, pattern)| {
-                        glob_match(
-                            &pattern.as_os_str().to_string_lossy(),
-                            &name.as_os_str().to_string_lossy(),
-                        )
-                    }))
-                .then_some(named)
+                matches(&target, true).then_some(named)
             })
+            .or_else(|| {
+                (0..DATA_FOLDERS.len())
+                    .find(|&index| {
+                        self.data_dir(index)
+                            .is_some_and(|dir| prefix.starts_with(&dir) || matches(&dir, false))
+                    })
+                    .map(Named::Data)
+            })
+    }
+
+    /// The data folder `index` of [`DATA_FOLDERS`], absolute and resolved.
+    fn data_dir(&self, index: usize) -> Option<PathBuf> {
+        let dir = std::path::absolute(self.path.parent()?.join(DATA_FOLDERS[index].name)).ok()?;
+        Some(resolve(&dir).unwrap_or(dir))
+    }
+
+    /// The index in [`DATA_FOLDERS`] of the folder the resolved absolute
+    /// `path` is in (or is).
+    fn data_index(&self, path: &Path) -> Option<usize> {
+        (0..DATA_FOLDERS.len()).find(|&index| {
+            self.data_dir(index)
+                .is_some_and(|dir| path.starts_with(dir))
+        })
+    }
+
+    /// Where writing to the absolute `path` lands: `.`, `..` and symbolic
+    /// links resolved, a dangling link followed to where it points.
+    fn lands(&self, path: &Path) -> Option<PathBuf> {
+        let mut path = path.to_path_buf();
+        for _ in 0..MAX_LINKS {
+            match resolve(&path) {
+                Some(resolved) => return Some(resolved),
+                None => match (std::fs::read_link(&path), path.parent()) {
+                    (Ok(link), Some(parent)) => path = parent.join(link),
+                    _ => return None,
+                },
+            }
+        }
+        None
     }
 
     /// The absolute path `word` names from `cwd`, without resolving it.
@@ -369,11 +497,14 @@ pub(crate) mod testing {
 
     /// A home folder (the second value, canonical) with
     /// `.junees/config.toml` holding the key `secret-key`, a session file
-    /// `.junees/sessions/s.jsonl`, and the [`SettingsFile`] for it.
+    /// `.junees/sessions/s.jsonl`, a memory file `.junees/memory/user.md`
+    /// holding `Name: J`, and the [`SettingsFile`] for it.
     pub fn home() -> (tempfile::TempDir, PathBuf, SettingsFile) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir_all(root.join(".junees/sessions")).unwrap();
+        std::fs::create_dir_all(root.join(".junees/memory")).unwrap();
+        std::fs::write(root.join(".junees/memory/user.md"), "Name: J\n").unwrap();
         std::fs::write(
             root.join(".junees/config.toml"),
             "api_key = \"secret-key\"\n",
@@ -544,6 +675,84 @@ mod tests {
         assert_eq!(expand("{a}b"), ["{a}b"]);
         assert_eq!(expand("{a,b"), ["{a,b"]);
         assert_eq!(expand(&"{a,b}".repeat(20)).len(), super::MAX_BRACE_WORDS);
+    }
+
+    #[test]
+    fn knows_the_data_folders_by_any_path() {
+        let (_dir, root, file) = home();
+        let junees = root.join(".junees");
+        symlink(junees.join("memory/user.md"), root.join("link")).unwrap();
+        symlink(junees.join("memory"), root.join("dirlink")).unwrap();
+        symlink(junees.join("skills/new/SKILL.md"), root.join("dangling")).unwrap();
+        let data = |path: &str| file.data_folder(&root.join(path)).map(|folder| folder.name);
+        for (path, name) in [
+            (".junees/memory/user.md", "memory"),
+            (".junees/memory", "memory"),
+            (".junees/memory/new.md", "memory"),
+            (".junees/sessions/../memory/./user.md", "memory"),
+            (".junees/projects/0123/notes.md", "projects"),
+            (".junees/skills/new/SKILL.md", "skills"),
+            ("link", "memory"),
+            ("dirlink/notes.md", "memory"),
+            ("dangling", "skills"),
+        ] {
+            assert_eq!(data(path), Some(name), "{path}");
+        }
+        assert_eq!(
+            file.data_folder(&relative(&junees.join("memory/user.md")))
+                .map(|folder| folder.tool),
+            Some("memory")
+        );
+        for path in [
+            ".junees/sessions/s.jsonl",
+            ".junees/memoryx",
+            ".junees/config.toml",
+            ".junees",
+            "memory/user.md",
+        ] {
+            assert_eq!(data(path), None, "{path}");
+        }
+
+        for (word, index) in [
+            ("~/.junees/memory/user.md", 0),
+            ("$HOME/.junees/memory", 0),
+            ("${JUNEES_HOME}/memory/", 0),
+            ("$JUNEES_HOME/projects/x/notes.md", 1),
+            ("~/.junees/skills/a/SKILL.md", 2),
+            ("memory/user.md", 0),
+            ("sessions/../memory/notes.md", 0),
+            ("/proc/self/cwd/memory", 0),
+            ("--file=~/.junees/memory/user.md", 0),
+            ("~/dirlink/user.md", 0),
+            // Globs and braces that can lead into one.
+            ("~/.junees/memory/*", 0),
+            ("~/.junees/mem*", 0),
+            ("~/.junees/m*/user.md", 0),
+            ("~/*/memory/x", 0),
+            ("~/.junees/{sessions,projects}/x", 1),
+            ("~/.junees/s*", 2),
+        ] {
+            assert_eq!(
+                file.names(word, Some(&junees)),
+                Some(Named::Data(index)),
+                "{word}"
+            );
+        }
+        // The settings file and its folder come first.
+        assert_eq!(file.names("~/.junees/*", Some(&junees)), Some(Named::File));
+        assert_eq!(
+            file.names("~/.junees/memory/..", Some(&junees)),
+            Some(Named::Folder)
+        );
+        for word in [
+            "~/.junees/sessions/s.jsonl",
+            "~/.junees/memoryx",
+            "~/.junees/se*",
+            "~/memory/user.md",
+            "$DIR/memory",
+        ] {
+            assert_eq!(file.names(word, Some(&junees)), None, "{word}");
+        }
     }
 
     #[test]

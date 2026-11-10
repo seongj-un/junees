@@ -90,6 +90,13 @@ impl Tool for EditFile {
         {
             return ToolOutput::error(file.refusal(path));
         }
+        if let Some(folder) = self
+            .settings_file
+            .as_ref()
+            .and_then(|file| file.data_folder(Path::new(path)))
+        {
+            return ToolOutput::error(folder.refusal(path));
+        }
         match edit(path, old, new, replace_all).await {
             Ok(output) | Err(output) => output,
         }
@@ -589,6 +596,32 @@ mod tests {
             .run(json!({"path": session, "old_string": "{}", "new_string": "[]"}))
             .await;
         assert!(!output.is_error, "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn refuses_junees_data_folders() {
+        let (_dir, root, file) = crate::tools::settings_file::testing::home();
+        let user = root.join(".junees/memory/user.md");
+        std::os::unix::fs::symlink(root.join(".junees/memory"), root.join("dirlink")).unwrap();
+        let tool = EditFile {
+            settings_file: Some(file),
+        };
+        for path in [
+            user.clone(),
+            root.join("dirlink/user.md"),
+            crate::tools::settings_file::testing::relative(&user),
+        ] {
+            let output = tool
+                .run(json!({"path": path, "old_string": "J", "new_string": "K"}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(
+                output.content.contains("use the `memory` tool instead"),
+                "{}",
+                output.content
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), "Name: J\n");
     }
 
     fn entries(dir: &tempfile::TempDir) -> Vec<String> {

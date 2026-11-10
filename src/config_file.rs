@@ -51,6 +51,9 @@ pub const KEYS: &[(&str, &str)] = &[
         "web_search_blocked_domains",
         "JUNEES_WEB_SEARCH_BLOCKED_DOMAINS",
     ),
+    ("memory_user_chars", "JUNEES_MEMORY_USER_CHARS"),
+    ("memory_notes_chars", "JUNEES_MEMORY_NOTES_CHARS"),
+    ("memory_project_chars", "JUNEES_MEMORY_PROJECT_CHARS"),
 ];
 
 const HEADER: &str = "\

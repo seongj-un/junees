@@ -14,6 +14,7 @@ use junees::claude_code::{BACKEND_ENV, Backend, ClaudeCode, MODEL_ENV, UsageLimi
 use junees::cli::{self, Command, SessionMode, TaskCommand, TaskRun};
 use junees::config::Config;
 use junees::config_file::Settings;
+use junees::memory::{Memory, MemoryTool, Mode, Target};
 use junees::notify::Notifier;
 use junees::prompt;
 use junees::provider::anthropic::AnthropicProvider;
@@ -32,6 +33,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const PREVIEW_CHARS: usize = 120;
 const SESSIONS_LISTED: usize = 10;
+const NO_MEMORY: &str = "memory is off: neither JUNEES_HOME nor HOME is set";
 
 fn main() -> ExitCode {
     protect_environment();
@@ -314,13 +316,17 @@ fn api_agent(
     cancel: &Cancel,
     input: Option<&SharedLines>,
 ) -> Result<Agent> {
+    let memory = conversation_memory(config, cwd);
     let mut tools = ToolRegistry::with_defaults(&config.tools);
+    if let Some(memory) = &memory {
+        tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
+    }
     skills::register(&mut tools, config.home.as_deref(), true);
     let mut agent = Agent::new(
         make_provider(config)?,
         tools,
         AgentOptions {
-            system: conversation_system(config, cwd),
+            system: api_system(config, cwd, memory.as_ref()),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
             context_window: config.context_window,
@@ -334,17 +340,31 @@ fn api_agent(
     Ok(agent)
 }
 
-/// The system prompt of a conversation on the API backend, with the
-/// skills as they are now.
-fn conversation_system(config: &Config, cwd: &Path) -> String {
-    prompt::system_prompt(cwd)
-        + &skills::system_section(config.home.as_deref(), skills::Mode::Manage)
+/// The persistent memory of a conversation in `cwd`, if there is a state
+/// folder to keep it in.
+fn conversation_memory(config: &Config, cwd: &Path) -> Option<Memory> {
+    let home = config.home.as_deref()?;
+    Some(Memory::for_folder(home, cwd, config.memory))
 }
 
-/// What a conversation on the claude-code backend appends to Claude
-/// Code's system prompt: the skill list as it is now.
-fn claude_system(config: &Config) -> String {
-    skills::system_section(config.home.as_deref(), skills::Mode::ClaudeCode)
+/// The system prompt of Junees's own agent: the memory and the skill list
+/// are read now and stay as they are for the session, so the prompt cache
+/// holds.
+fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>) -> String {
+    let mut system = prompt::system_prompt(cwd);
+    if let Some(memory) = memory {
+        system.push_str(&memory.snapshot().section(Mode::Conversation));
+    }
+    system + &skills::system_section(config.home.as_deref(), skills::Mode::Manage)
+}
+
+/// What the conversation adds to Claude Code's system prompt: the memory,
+/// to read only (the memory tool is Junees's own), and the skill list.
+fn claude_system(config: &Config, memory: Option<&Memory>) -> String {
+    let memory = memory.map_or_else(String::new, |memory| {
+        memory.snapshot().section(Mode::ReadOnly)
+    });
+    memory + &skills::system_section(config.home.as_deref(), skills::Mode::ClaudeCode)
 }
 
 /// Claude Code for the conversation, once `claude --version` and its
@@ -373,7 +393,10 @@ async fn claude_chat(
         config.max_turns,
         cancel.clone(),
     );
-    chat.set_system(claude_system(config));
+    chat.set_system(claude_system(
+        config,
+        conversation_memory(config, cwd).as_ref(),
+    ));
     Ok((chat, version))
 }
 
@@ -446,6 +469,7 @@ async fn conversation(
             println!("junees {VERSION} ({banner}). /help for commands, /exit to quit.");
             println!("{}", opened.status);
             let mut repl = Repl {
+                memory: conversation_memory(&config, &cwd),
                 engine,
                 config,
                 settings,
@@ -579,6 +603,10 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         ),
     };
     let root = task::git::toplevel(&std::env::current_dir()?)?;
+    let memory = config
+        .home
+        .as_deref()
+        .map(|home| Memory::new(home, &root, config.memory));
     // The tools resolve relative paths from the process's folder.
     std::env::set_current_dir(&root)
         .with_context(|| format!("cannot change to {}", root.display()))?;
@@ -606,6 +634,7 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         notify: Notifier::from_lookup(lookup)?,
         claude,
         skill_manage: config.task_skill_manage,
+        memory,
     };
     let mut printer = Printer::new();
     let mut reporter = |report: Report<'_>| match report {
@@ -780,6 +809,9 @@ struct Repl {
     cancel: Cancel,
     signals: Signals,
     input: SharedLines,
+    /// What `/memory` shows and `/new` reads again; `None` without a state
+    /// folder.
+    memory: Option<Memory>,
 }
 
 impl Repl {
@@ -901,6 +933,11 @@ impl Repl {
                      used"
                 ),
             },
+            Slash::Memory => match &self.memory {
+                Some(memory) => print!("{}", memory.overview()),
+                None => eprintln!("{NO_MEMORY}"),
+            },
+            Slash::MemoryClear(target) => return self.clear_memory(target).await,
             Slash::Skills => self.skills(),
             Slash::Skill(name) => self.skill(&name),
             Slash::Bad(message) => eprintln!("{message}"),
@@ -1094,12 +1131,64 @@ impl Repl {
         Ok(())
     }
 
-    fn reset(&mut self) {
-        // A new session reads the skills again.
-        match &mut self.engine {
-            Engine::Api(agent) => agent.set_system(conversation_system(&self.config, &self.cwd)),
-            Engine::Claude(chat) => chat.set_system(claude_system(&self.config)),
+    /// `/memory clear <target>`: empties one memory once the user says
+    /// yes. Returns whether SIGTERM came while it asked.
+    async fn clear_memory(&mut self, target: Target) -> bool {
+        let Some(memory) = &self.memory else {
+            eprintln!("{NO_MEMORY}");
+            return false;
+        };
+        let name = target.name();
+        let count = match memory.entries(target) {
+            Ok(entries) => entries.len(),
+            Err(err) => {
+                report(&err);
+                return false;
+            }
+        };
+        if count == 0 {
+            println!("({name} memory is already empty)");
+            return false;
         }
+        print!("clear {name} memory ({count} entries)? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let answer = tokio::select! {
+            line = self.input.next_line() => line.ok().flatten(),
+            signal = self.signals.next() => {
+                println!();
+                return signal == libc::SIGTERM;
+            }
+        };
+        let yes = answer.is_some_and(|answer| {
+            matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        });
+        if !yes {
+            println!("({name} memory kept)");
+            return false;
+        }
+        match memory.clear(target) {
+            Ok(count) => println!(
+                "cleared {name} memory ({count} entries); this session still shows what it \
+                 started with, /new starts one without it"
+            ),
+            Err(err) => report(&err),
+        }
+        false
+    }
+
+    /// Gives the conversation the memory and the skills as they are now,
+    /// for a new session.
+    fn reread_system(&mut self) {
+        let memory = self.memory.as_ref();
+        match &mut self.engine {
+            Engine::Api(agent) => agent.set_system(api_system(&self.config, &self.cwd, memory)),
+            Engine::Claude(chat) => chat.set_system(claude_system(&self.config, memory)),
+        }
+    }
+
+    fn reset(&mut self) {
+        // A new session reads the memory and the skills again.
+        self.reread_system();
         if !self.saving {
             self.engine.reset(None);
             println!("(new conversation, not saved)");

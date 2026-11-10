@@ -1,6 +1,7 @@
 //! The slash commands of the conversation mode.
 
 use crate::claude_code::Backend;
+use crate::memory::Target;
 
 /// One command typed at the conversation prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +20,10 @@ pub enum Slash {
     Compact,
     Context,
     Usage,
+    /// `/memory` shows what the persistent memory holds.
+    Memory,
+    /// `/memory clear <target>` empties one store, after asking.
+    MemoryClear(Target),
     /// `/skills` lists the skills.
     Skills,
     /// `/skill <name>` shows one.
@@ -69,6 +74,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "compact" => plain(Slash::Compact),
         "context" => plain(Slash::Context),
         "usage" => plain(Slash::Usage),
+        "memory" => memory(arg.as_deref()),
         "skills" => plain(Slash::Skills),
         "skill" => match arg {
             None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
@@ -81,6 +87,23 @@ pub fn parse(line: &str) -> Option<Slash> {
         "exit" | "quit" => plain(Slash::Exit),
         _ => Slash::Bad(format!("unknown command /{name}; /help lists the commands")),
     })
+}
+
+/// `/memory` and `/memory clear <target>`.
+fn memory(arg: Option<&str>) -> Slash {
+    const USAGE: &str = "use /memory, or /memory clear user|notes|project";
+    let Some(arg) = arg else {
+        return Slash::Memory;
+    };
+    let mut words = arg.split_whitespace();
+    match (words.next(), words.next(), words.next()) {
+        (Some("clear"), Some(name), None) => match Target::parse(name) {
+            Some(target) => Slash::MemoryClear(target),
+            None => Slash::Bad(format!("unknown memory `{name}`; {USAGE}")),
+        },
+        (Some("clear"), None, _) => Slash::Bad(format!("which memory? {USAGE}")),
+        _ => Slash::Bad(USAGE.into()),
+    }
 }
 
 /// The session picked from a numbered list of `count`: `Ok(None)` for an
@@ -137,6 +160,10 @@ mod tests {
             ("/compact", Slash::Compact),
             ("/context", Slash::Context),
             ("/usage", Slash::Usage),
+            ("/memory", Slash::Memory),
+            ("/memory clear user", Slash::MemoryClear(Target::User)),
+            ("/memory  clear   notes ", Slash::MemoryClear(Target::Notes)),
+            ("/memory clear project", Slash::MemoryClear(Target::Project)),
             ("/skills", Slash::Skills),
             ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),
@@ -160,6 +187,21 @@ mod tests {
         assert_eq!(bad("/status now"), "/status takes no argument");
         assert!(bad("/backend codex").contains("unknown backend `codex`"));
         assert!(bad("/model two words").contains("no spaces"));
+        assert_eq!(
+            bad("/memory clear"),
+            "which memory? use /memory, or /memory clear user|notes|project"
+        );
+        assert_eq!(
+            bad("/memory clear all"),
+            "unknown memory `all`; use /memory, or /memory clear user|notes|project"
+        );
+        for line in ["/memory show", "/memory clear user notes"] {
+            assert_eq!(
+                bad(line),
+                "use /memory, or /memory clear user|notes|project",
+                "{line}"
+            );
+        }
         assert_eq!(
             bad("/skill"),
             "/skill takes a skill name; /skills lists them"
