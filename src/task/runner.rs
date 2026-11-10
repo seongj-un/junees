@@ -153,13 +153,11 @@ impl TaskEnv<'_> {
         tools
     }
 
-    /// `system` and the memory section for `mode`, read now: a session
-    /// sees the memory as it was when the session started.
-    fn with_memory(&self, mut system: String, mode: Mode) -> String {
-        if let Some(memory) = &self.memory {
-            system.push_str(&memory.snapshot().section(mode));
-        }
-        system
+    /// What a Claude Code session appends to its system prompt: `base`,
+    /// then the memory and the skill list as they are now
+    /// ([`crate::prompt::claude_append`]).
+    fn claude_system(&self, base: String) -> String {
+        crate::prompt::claude_append(base, self.memory.as_ref(), self.home.as_deref())
     }
 
     fn verifier(&self) -> Verifier {
@@ -211,12 +209,15 @@ impl TaskEnv<'_> {
         } else {
             skills::Mode::ReadOnly
         };
-        let system = system + &skills::system_section(home, mode);
+        // Read now: a session sees the memory and the skills as they were
+        // when it started.
+        let system =
+            system + &crate::prompt::data_sections(self.memory.as_ref(), Mode::Task, home, mode);
         let agent = Agent::new(
             (self.provider)()?,
             tools,
             AgentOptions {
-                system: self.with_memory(system, Mode::Task),
+                system,
                 max_tokens: self.max_tokens,
                 max_turns: self.max_turns,
                 context_window: self.context_window,
@@ -338,8 +339,7 @@ async fn plan_with_claude(
     report: &mut Reporter<'_>,
 ) -> Result<(usize, Usage)> {
     let root = &env.root;
-    let system = env.with_memory(prompt::claude_init_system(), Mode::ReadOnly)
-        + &skills::system_section(env.home.as_deref(), skills::Mode::ClaudeCode);
+    let system = env.claude_system(prompt::claude_init_system());
     let verifier = env.verifier();
     let mut usage = Usage::default();
     let mut input = prompt::init_input(goal);
@@ -1026,11 +1026,10 @@ async fn claude_session(
     let git_log = git::recent_log(root, GIT_LOG_LINES);
     let (system, passing, total) = {
         let ledger = ledger.lock().unwrap();
-        let system = prompt::claude_work_system(n, ledger.features(), &progress, &git_log)
-            + &skills::system_section(env.home.as_deref(), skills::Mode::ClaudeCode);
+        let system = prompt::claude_work_system(n, ledger.features(), &progress, &git_log);
         (system, ledger.passing(), ledger.total())
     };
-    let system = env.with_memory(system, Mode::ReadOnly);
+    let system = env.claude_system(system);
     let output = sessions_dir(root).join(format!("session-{n}.jsonl"));
     line(
         report,

@@ -351,20 +351,19 @@ fn conversation_memory(config: &Config, cwd: &Path) -> Option<Memory> {
 /// are read now and stay as they are for the session, so the prompt cache
 /// holds.
 fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>) -> String {
-    let mut system = prompt::system_prompt(cwd);
-    if let Some(memory) = memory {
-        system.push_str(&memory.snapshot().section(Mode::Conversation));
-    }
-    system + &skills::system_section(config.home.as_deref(), skills::Mode::Manage)
+    prompt::system_prompt(cwd)
+        + &prompt::data_sections(
+            memory,
+            Mode::Conversation,
+            config.home.as_deref(),
+            skills::Mode::Manage,
+        )
 }
 
-/// What the conversation adds to Claude Code's system prompt: the memory,
-/// to read only (the memory tool is Junees's own), and the skill list.
+/// What the conversation adds to Claude Code's system prompt: the memory
+/// and the skill list ([`prompt::claude_append`]).
 fn claude_system(config: &Config, memory: Option<&Memory>) -> String {
-    let memory = memory.map_or_else(String::new, |memory| {
-        memory.snapshot().section(Mode::ReadOnly)
-    });
-    memory + &skills::system_section(config.home.as_deref(), skills::Mode::ClaudeCode)
+    prompt::claude_append(String::new(), memory, config.home.as_deref())
 }
 
 /// Claude Code for the conversation, once `claude --version` and its
