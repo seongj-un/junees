@@ -912,6 +912,7 @@ async fn subagents_share_the_servers_and_ask_through_the_same_gate() {
                 tool_use_id: id.into(),
                 content: format!("echo: from {goal}"),
                 is_error: false,
+                images: Vec::new(),
             }]
         );
     }

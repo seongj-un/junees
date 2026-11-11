@@ -228,6 +228,7 @@ impl Tool for Bash {
         ToolOutput {
             content: truncate_middle(&text, MAX_OUTPUT_CHARS),
             is_error: !status.is_some_and(|status| status.success()),
+            images: Vec::new(),
         }
     }
 }

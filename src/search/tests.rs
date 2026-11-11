@@ -34,6 +34,7 @@ fn result(id: &str, content: &str) -> ContentBlock {
         tool_use_id: id.into(),
         content: content.into(),
         is_error: false,
+        images: Vec::new(),
     }
 }
 

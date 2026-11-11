@@ -795,6 +795,7 @@ mod tests {
                         tool_use_id: "toolu_1".into(),
                         content: "a\nb".into(),
                         is_error: false,
+                        images: Vec::new(),
                     },
                     ContentBlock::text("and then?"),
                 ],
@@ -892,6 +893,7 @@ mod tests {
                     tool_use_id: "toolu_1".into(),
                     content: "ok".into(),
                     is_error: false,
+                    images: Vec::new(),
                 }],
             },
         ];

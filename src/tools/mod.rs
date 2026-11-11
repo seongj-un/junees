@@ -200,6 +200,9 @@ impl ToolSettings {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    /// Images for the model to look at, after `content` (`read_file` of a
+    /// picture).
+    pub images: Vec<crate::images::Image>,
 }
 
 impl ToolOutput {
@@ -207,6 +210,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            images: Vec::new(),
         }
     }
 
@@ -214,6 +218,15 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            images: Vec::new(),
+        }
+    }
+
+    /// A successful output of `content` and one image.
+    pub fn image(content: impl Into<String>, image: crate::images::Image) -> Self {
+        Self {
+            images: vec![image],
+            ..Self::ok(content)
         }
     }
 }

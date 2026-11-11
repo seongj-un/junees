@@ -457,11 +457,7 @@ impl Agent {
                 on_event(Event::Warning(reason));
                 let results = tool_calls
                     .into_iter()
-                    .map(|(id, _, _)| ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content: reason.to_string(),
-                        is_error: true,
-                    })
+                    .map(|(id, _, _)| ContentBlock::tool_result(id, reason, true))
                     .collect();
                 let results = Message {
                     role: Role::User,
@@ -503,6 +499,7 @@ impl Agent {
                     tool_use_id: id,
                     content: output.content,
                     is_error: output.is_error,
+                    images: output.images,
                 });
             }
             let results = Message {
@@ -1301,7 +1298,7 @@ mod tests {
                 "TextEnd",
                 "ToolCall { name: \"upper\", input: Object {\"text\": String(\"abc\")} }",
                 "ToolResult { name: \"upper\", output: ToolOutput { content: \"ABC\", \
-                 is_error: false } }",
+                 is_error: false, images: [] } }",
                 "TextDelta(\"it is ABC\")",
                 "TextEnd",
             ]
@@ -1316,6 +1313,7 @@ mod tests {
                 tool_use_id: "toolu_1".into(),
                 content: "ABC".into(),
                 is_error: false,
+                images: Vec::new(),
             }]
         );
         // The second model call saw the tool result.
@@ -1524,6 +1522,7 @@ mod tests {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(tool_use_id, "toolu_1");
                 assert!(content.starts_with("not executed"));
@@ -1967,6 +1966,7 @@ mod tests {
                     tool_use_id,
                     content,
                     is_error,
+                    ..
                 } => Some((tool_use_id.as_str(), content.as_str(), *is_error)),
                 _ => None,
             })

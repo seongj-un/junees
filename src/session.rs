@@ -312,8 +312,13 @@ impl Transcript {
             } => {
                 for message in self.messages.iter_mut().take(upto) {
                     for block in &mut message.content {
-                        if let ContentBlock::ToolResult { content, .. } = block {
+                        // Images a tool gave back go with its output.
+                        if let ContentBlock::ToolResult {
+                            content, images, ..
+                        } = block
+                        {
                             *content = CLEARED.to_string();
+                            images.clear();
                         }
                     }
                 }
@@ -337,16 +342,20 @@ impl Transcript {
                     _ => {
                         // The cut was inside the turn of the first message's
                         // input. That input is the task the turn works on,
-                        // so it stays as typed rather than only summarized.
+                        // so it stays as typed rather than only summarized,
+                        // with the images it came with.
                         let mut content = vec![block];
                         if let Some(input) = dropped.first() {
                             content.extend(
                                 input
                                     .content
                                     .iter()
-                                    .filter(|block| {
-                                        matches!(block, ContentBlock::Text { text, .. }
-                                            if !text.starts_with(SUMMARY_HEADER))
+                                    .filter(|block| match block {
+                                        ContentBlock::Text { text, .. } => {
+                                            !text.starts_with(SUMMARY_HEADER)
+                                        }
+                                        ContentBlock::Image(_) => true,
+                                        _ => false,
                                     })
                                     .cloned(),
                             );
@@ -635,11 +644,9 @@ impl Transcript {
             .content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::ToolUse { id, .. } => Some(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: INTERRUPTED.to_string(),
-                    is_error: true,
-                }),
+                ContentBlock::ToolUse { id, .. } => {
+                    Some(ContentBlock::tool_result(id.clone(), INTERRUPTED, true))
+                }
                 _ => None,
             })
             .collect();
@@ -654,9 +661,39 @@ impl Transcript {
 const SERVER_CALL_TYPES: [&str; 2] = ["server_tool_use", "mcp_tool_use"];
 
 /// A rough token count of content blocks: [`estimate_text_tokens`] of
-/// their JSON.
+/// their JSON, but images by their size in pixels
+/// ([`crate::images::Image::estimate_tokens`]), not by their base64.
 pub fn estimate_tokens(content: &[ContentBlock]) -> u64 {
-    serde_json::to_string(content).map_or(0, |json| estimate_text_tokens(&json))
+    if content.iter().all(|block| block.images().is_empty()) {
+        return json_tokens(content);
+    }
+    content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Image(image) => image.estimate_tokens(),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                images,
+            } => {
+                json_tokens(&ContentBlock::tool_result(
+                    tool_use_id.as_str(),
+                    content.as_str(),
+                    *is_error,
+                )) + images
+                    .iter()
+                    .map(|image| image.estimate_tokens())
+                    .sum::<u64>()
+            }
+            block => json_tokens(block),
+        })
+        .sum()
+}
+
+/// [`estimate_text_tokens`] of the JSON of `value`.
+fn json_tokens<T: Serialize + ?Sized>(value: &T) -> u64 {
+    serde_json::to_string(value).map_or(0, |json| estimate_text_tokens(&json))
 }
 
 /// A rough token count of `text`, counted per character: a quarter token
@@ -1373,6 +1410,74 @@ mod tests {
         assert_eq!(transcript.messages[0].text(), "first\nsecond");
     }
 
+    fn picture(width: u32) -> crate::images::Image {
+        crate::images::Image::from_bytes(&crate::images::testing::png(width, 10))
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn clearing_drops_the_images_of_cleared_results() {
+        let mut transcript = tool_rounds(4);
+        if let ContentBlock::ToolResult { images, .. } = &mut transcript.messages[2].content[0] {
+            images.push(picture(3));
+        }
+        let entry = transcript.clear_entry(false).unwrap();
+        transcript.apply(entry);
+        assert_eq!(
+            transcript.messages[2].content[0],
+            ContentBlock::tool_result("toolu_0", CLEARED, true)
+        );
+    }
+
+    #[test]
+    fn compacting_inside_a_turn_keeps_the_input_images() {
+        let mut transcript = tool_rounds(4);
+        transcript.messages[0]
+            .content
+            .insert(0, ContentBlock::Image(picture(8)));
+        let keep_from = transcript.compact_point(false).unwrap();
+        transcript.apply(Entry::Compact {
+            summary: "did 0 to 1".into(),
+            keep_from,
+            keep_thinking: false,
+        });
+        assert_eq!(
+            transcript.messages[0].content,
+            [
+                ContentBlock::text(format!("{SUMMARY_HEADER}did 0 to 1")),
+                ContentBlock::Image(picture(8)),
+                ContentBlock::text("go"),
+            ]
+        );
+    }
+
+    #[test]
+    fn images_are_estimated_by_their_size_not_their_base64() {
+        let mut bytes = crate::images::testing::png(100, 100);
+        // Megabytes of data a small picture can still have.
+        bytes.resize(3 * 1024 * 1024, 0);
+        let image = crate::images::Image::from_bytes(&bytes).unwrap().0;
+        let content = [ContentBlock::Image(image.clone()), ContentBlock::text("hi")];
+        let estimate = estimate_tokens(&content);
+        // 4x4 patches, plus the JSON of the text block.
+        assert!((16..40).contains(&estimate), "{estimate}");
+        let result = [ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "Image".into(),
+            is_error: false,
+            images: vec![image],
+        }];
+        let estimate = estimate_tokens(&result);
+        assert!((16..60).contains(&estimate), "{estimate}");
+        // Text alone as before.
+        let text = [ContentBlock::text("hello")];
+        assert_eq!(
+            estimate_tokens(&text),
+            estimate_text_tokens(&serde_json::to_string(&text).unwrap())
+        );
+    }
+
     #[test]
     fn writes_and_loads_a_session() {
         let home = tempfile::tempdir().unwrap();
@@ -1682,6 +1787,7 @@ mod tests {
                 tool_use_id: id.into(),
                 content: output.into(),
                 is_error,
+                images: Vec::new(),
             }],
         }
     }
@@ -2557,6 +2663,7 @@ mod tests {
                 tool_use_id: "toolu_9".into(),
                 content: INTERRUPTED.into(),
                 is_error: true,
+                images: Vec::new(),
             }],
         };
         assert_eq!(session.transcript.messages.len(), 3);

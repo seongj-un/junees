@@ -739,6 +739,7 @@ async fn subagents_borrow_plugin_tools_and_hooks() {
                 tool_use_id: "a1".into(),
                 content: "said hello".into(),
                 is_error: false,
+                images: Vec::new(),
             },
             &ContentBlock::ToolResult {
                 tool_use_id: "a2".into(),
@@ -746,6 +747,7 @@ async fn subagents_borrow_plugin_tools_and_hooks() {
                           forbidden\\u{1b}[2K words"
                     .into(),
                 is_error: true,
+                images: Vec::new(),
             },
         ]
     );
