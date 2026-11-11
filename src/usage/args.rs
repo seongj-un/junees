@@ -20,7 +20,9 @@ Junees names its source and date); a model without a price is counted but
 left out of the cost and named below the table. Set or replace prices with
 `prices` in config.toml (JUNEES_PRICES): comma-separated
 <model>=<input>/<output>[/<cache write>/<cache read>] in dollars per
-million tokens, for example \"claude-opus-4-7=5/25, my-model=1/4\". Claude
+million tokens, for example \"claude-opus-4-7=5/25, my-model=1/4\".
+Without cache prices a model of the table keeps the table's cache rates
+relative to input; other models write at 1.25x input and read at 0.1x. Claude
 Code turns (the claude-code backend) run on your subscription: tokens
 only. Cache hit is cache read / (cache read + cache write + input).
 ";

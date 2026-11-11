@@ -203,6 +203,61 @@ fn the_prices_setting_adds_and_replaces_models() {
 }
 
 #[test]
+fn two_prices_keep_the_cache_rates_of_the_table() {
+    let rates = |setting: &str, model: &str| {
+        Prices::from_setting(Some(setting))
+            .unwrap()
+            .get(model)
+            .unwrap()
+            .rates
+    };
+    // Writing the table's own prices changes nothing: Opus 5.5 reads the
+    // cache at 0.05x input, not 0.1x.
+    assert_eq!(
+        rates("claude-opus-5-5=4/20", "claude-opus-5-5"),
+        Prices::default().get("claude-opus-5-5").unwrap().rates
+    );
+    // New prices keep the table's ratios: 1.25x write, 0.025x read.
+    assert_eq!(
+        rates("claude-fable-5-2=16/80", "claude-fable-5-2"),
+        prices::Rates {
+            input: 16_000,
+            output: 80_000,
+            cache_write: 20_000,
+            cache_read: 400
+        }
+    );
+    // A dated id finds its row too.
+    assert_eq!(
+        rates(
+            "claude-sonnet-5-5-20261001=1/5",
+            "claude-sonnet-5-5-20261001"
+        ),
+        prices::Rates {
+            input: 1_000,
+            output: 5_000,
+            cache_write: 1_250,
+            cache_read: 50
+        }
+    );
+    // A model the table does not know: 1.25x and 0.1x.
+    assert_eq!(
+        rates("my-proxy-model=1/4", "my-proxy-model"),
+        prices::Rates {
+            input: 1_000,
+            output: 4_000,
+            cache_write: 1_250,
+            cache_read: 100
+        }
+    );
+    // Four prices are taken as written.
+    assert_eq!(
+        rates("claude-opus-5-5=4/20/5/0.4", "claude-opus-5-5").cache_read,
+        400
+    );
+}
+
+#[test]
 fn dollars_round_to_a_hundredth_of_a_cent() {
     assert_eq!(dollars(0), "$0.0000");
     assert_eq!(dollars(49_999), "$0.0000");
