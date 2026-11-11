@@ -315,9 +315,17 @@ fn config_entries(bytes: Option<&[u8]>) -> Option<std::collections::BTreeMap<Str
 }
 
 /// The test command: `sh -c` in `worktree`, in a process group of its
-/// own, without the repository variables, Junees's credentials and the
-/// variables in `hidden`.
-fn test_command(worktree: &Path, command: &str, hidden: &[String]) -> tokio::process::Command {
+/// own, without the repository variables, Junees's credentials, the
+/// variables in `hidden`, and the user's git and GitHub CLI credentials
+/// like the model's shell ([`crate::tools::strip_git_credentials`], with
+/// `gh_config` as the GitHub CLI folder): it runs code of the pull request
+/// and of the model.
+fn test_command(
+    worktree: &Path,
+    command: &str,
+    hidden: &[String],
+    gh_config: &Path,
+) -> tokio::process::Command {
     let mut child = tokio::process::Command::new("sh");
     child
         .arg("-c")
@@ -336,6 +344,7 @@ fn test_command(worktree: &Path, command: &str, hidden: &[String]) -> tokio::pro
     for name in hidden {
         child.env_remove(name);
     }
+    crate::tools::strip_git_credentials(&mut child, Some(gh_config));
     child
 }
 
@@ -357,6 +366,7 @@ pub async fn test(
     command: &str,
     log: &Path,
     hidden: &[String],
+    gh_config: &Path,
     limit: Duration,
 ) -> Result<Tested> {
     if let Some(dir) = log.parent() {
@@ -370,7 +380,7 @@ pub async fn test(
         .mode(0o600)
         .open(log)
         .with_context(|| format!("cannot write {}", log.display()))?;
-    let mut child = test_command(worktree, command, hidden);
+    let mut child = test_command(worktree, command, hidden, gh_config);
     child.stdout(out.try_clone()?).stderr(out.try_clone()?);
     let mut child = child.spawn().context("cannot start the test command")?;
     let pid = child.id().map(|pid| pid as i32);
@@ -590,7 +600,8 @@ pub(crate) mod tests {
     #[test]
     fn the_test_command_gets_no_credentials() {
         let hidden = vec!["DB_PASSWORD".to_string()];
-        let command = test_command(Path::new("/"), "true", &hidden);
+        let gh = Path::new("/run/gh-config");
+        let command = test_command(Path::new("/"), "true", &hidden, gh);
         let removed: Vec<String> = command
             .as_std()
             .get_envs()
@@ -603,9 +614,66 @@ pub(crate) mod tests {
             "CLAUDE_CODE_OAUTH_TOKEN",
             "GIT_DIR",
             "DB_PASSWORD",
+            "SSH_AUTH_SOCK",
+            "GIT_ASKPASS",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
         ] {
             assert!(removed.iter().any(|r| r == name), "{name}: {removed:?}");
         }
+        let set = |name: &str| {
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().to_string())
+        };
+        assert_eq!(set("GH_CONFIG_DIR").as_deref(), Some("/run/gh-config"));
+        assert_eq!(set("GIT_CONFIG_COUNT").as_deref(), Some("1"));
+        assert_eq!(
+            set("GIT_CONFIG_KEY_0").as_deref(),
+            Some("credential.helper")
+        );
+        assert_eq!(set("GIT_CONFIG_VALUE_0").as_deref(), Some(""));
+        assert_eq!(set("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
+    }
+
+    #[tokio::test]
+    async fn the_test_command_reaches_no_credential_helper() {
+        // A clone whose own config has a helper that hands out a password,
+        // as the user's helper would: the test command (code of the pull
+        // request) must not get it.
+        let (_root, clone, _bare, _head) = remote_and_clone();
+        sh_git(
+            &clone,
+            &[
+                "config",
+                "credential.helper",
+                "!f() { echo username=u; echo password=test-cmd-pw; }; f",
+            ],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("t.log");
+        let gh = crate::tools::GhConfigDir::new().unwrap();
+        let tested = test(
+            &clone,
+            "printf 'protocol=https\\nhost=git.invalid\\n\\n' | git credential fill; \
+             echo \"gh=[$GH_CONFIG_DIR] agent=[$SSH_AUTH_SOCK]\"",
+            &log,
+            &[],
+            gh.path(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        assert!(!tested.tail.contains("test-cmd-pw"), "{tested:?}");
+        assert!(
+            tested
+                .tail
+                .contains(&format!("gh=[{}] agent=[]", gh.path().display())),
+            "{tested:?}"
+        );
     }
 
     #[tokio::test]
@@ -613,11 +681,13 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("logs/t.log");
         let hidden = vec!["PATH_SECRET_X".to_string()];
+        let gh = Path::new("/nonexistent/gh");
         let passed = test(
             dir.path(),
             "pwd; echo \"key=[$ANTHROPIC_API_KEY] gh=[$JUNEES_GITHUB_TOKEN] x=[$PATH_SECRET_X]\"",
             &log,
             &hidden,
+            gh,
             Duration::from_secs(30),
         )
         .await
@@ -633,6 +703,7 @@ pub(crate) mod tests {
             "echo 실패 >&2; exit 3",
             &log,
             &[],
+            gh,
             Duration::from_secs(30),
         )
         .await
@@ -646,6 +717,7 @@ pub(crate) mod tests {
             "sleep 30",
             &log,
             &[],
+            gh,
             Duration::from_millis(300),
         )
         .await

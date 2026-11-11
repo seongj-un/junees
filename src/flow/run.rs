@@ -706,7 +706,7 @@ async fn address_run(
                 .join(format!("{}-pr{n}.log", cx.route.name));
             let limit = Duration::from_secs(cx.limits.max_time.as_secs().max(60));
             Some(
-                address::test(&tree.path, command, &log, cx.hidden, limit)
+                address::test(&tree.path, command, &log, cx.hidden, cx.gh_config, limit)
                     .await
                     .map_err(|err| (format!("{err:#}"), true))?,
             )
