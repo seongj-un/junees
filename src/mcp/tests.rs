@@ -60,6 +60,7 @@ impl Fake {
             trust: false,
             call_timeout: DEFAULT_CALL_TIMEOUT,
             cwd: None,
+            http: None,
         }
     }
 
