@@ -900,6 +900,32 @@ async fn merge_step(
         }
     };
     let conditions = merge::conditions(&facts, sha, cx.flow, owner);
+    if let Some(workflows) = conditions
+        .iter()
+        .find(|condition| condition.name == merge::WORKFLOWS_CONDITION && !condition.ok)
+    {
+        // Never merged by the flow, whatever else holds: say so once per
+        // head commit.
+        if let Err(line) = claim(cx, n, action, sha) {
+            return step_line(cx, report, n, action, &line);
+        }
+        report.quiet = false;
+        let body = format!(
+            "Junees는 `{}`를 바꾸는 pull request를 자동으로 merge하지 않습니다({}). 워크플로를 바꾸면 \
+             항상 통과하는 체크를 스스로 만들 수 있기 때문입니다. 사람이 확인한 뒤 merge해 주세요.\n\n{}",
+            merge::WORKFLOWS,
+            workflows.detail,
+            merge::table(&conditions)
+        );
+        let posted = post(cx, r, n, &body).await;
+        let line = format!(
+            "not merged at {}: {}: {}{posted}",
+            short(sha),
+            workflows.name,
+            workflows.detail
+        );
+        return step_line(cx, report, n, action, &line);
+    }
     if !merge::ready(&conditions) {
         let line = format!(
             "not ready at {}: {}",

@@ -729,6 +729,11 @@ fn ready(github: &FakeGithub) {
     permission(github, "carol", "write");
     permission(github, "bob", "maintain");
     github.set(
+        "GET /repos/o/n/pulls/7/files",
+        200,
+        json!([{"filename": "src/lib.rs", "status": "modified"}]),
+    );
+    github.set(
         &format!("GET /repos/o/n/commits/{HEAD}/check-runs"),
         200,
         json!({"check_runs": [{"name": "ci", "status": "completed", "conclusion": "success"}]}),
@@ -1309,4 +1314,114 @@ async fn does_not_push_after_git_config_changed() {
         "{report:?}"
     );
     assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
+}
+
+#[tokio::test]
+async fn never_merges_workflow_changes_and_says_so_once() {
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    ready(&github);
+    github.set(
+        "GET /repos/o/n/pulls/7/files",
+        200,
+        json!([
+            {"filename": "src/lib.rs", "status": "modified"},
+            {"filename": "ci/always-green.yml", "previous_filename": ".github/workflows/ci.yml", "status": "renamed"},
+        ]),
+    );
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert_eq!(
+        report.lines,
+        ["#7 merge: not merged at 1111111: workflows: changes .github/workflows/ci.yml; commented"]
+    );
+    let writes = github.writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "POST /repos/o/n/issues/7/comments");
+    let body = writes[0].1["body"].as_str().unwrap();
+    assert!(
+        body.contains("`.github/workflows/`를 바꾸는 pull request를 자동으로 merge하지 않습니다"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- [ ] workflows: changes .github/workflows/ci.yml"),
+        "{body}"
+    );
+    // The next event of the same commit: no second comment, no merge.
+    github.clear();
+    let report = run(&setup, &suite(HEAD), 1001).await;
+    assert_eq!(
+        report.lines,
+        ["#7 merge: skipped: done for 1111111 already"]
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+}
+
+#[tokio::test]
+async fn required_checks_decide_the_merge() {
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    ready(&github);
+    github.set(
+        &format!("GET /repos/o/n/commits/{HEAD}/check-runs"),
+        200,
+        json!({"check_runs": [
+            {"name": "ci", "status": "completed", "conclusion": "success"},
+            {"name": "test", "status": "completed", "conclusion": "neutral"},
+        ]}),
+    );
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        required_checks: vec!["test".into(), "deploy-preview".into()],
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert!(
+        report.lines[0]
+            .contains("required checks: not succeeded: test neutral, deploy-preview missing"),
+        "{report:?}"
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+    github.set(
+        &format!("GET /repos/o/n/commits/{HEAD}/check-runs"),
+        200,
+        json!({"check_runs": [
+            {"name": "ci", "status": "completed", "conclusion": "success"},
+            {"name": "test", "status": "completed", "conclusion": "success"},
+        ]}),
+    );
+    github.set(
+        &format!("GET /repos/o/n/commits/{HEAD}/status"),
+        200,
+        json!({"state": "success", "statuses": [{"context": "deploy-preview", "state": "success"}]}),
+    );
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert_eq!(report.lines, ["#7 merge: merged 1111111; commented"]);
 }

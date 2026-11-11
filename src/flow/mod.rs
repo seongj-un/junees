@@ -78,6 +78,10 @@ pub struct FlowConfig {
     /// write access ([`access`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvers: Vec<String>,
+    /// `--require-check`: checks (check run names or status contexts)
+    /// that must be there and end `success` for a merge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_checks: Vec<String>,
 }
 
 fn one() -> u32 {
@@ -165,6 +169,20 @@ impl FlowConfig {
         if !self.approvers.is_empty() && !(self.address_reviews || self.merge_when_ready) {
             bail!("--approver is for --address-reviews and --merge-when-ready");
         }
+        if !self.required_checks.is_empty() && !self.merge_when_ready {
+            bail!("--require-check is for --merge-when-ready");
+        }
+        for name in &self.required_checks {
+            if name.trim().is_empty() || name.chars().count() > 200 {
+                bail!("--require-check takes a check name (1 to 200 characters)");
+            }
+            if let Some(c) = name.chars().find(|&c| crate::prompt_text::is_hidden(c)) {
+                bail!(
+                    "--require-check contains U+{:04X}, a control or bidirectional formatting character",
+                    c as u32
+                );
+            }
+        }
         if let Some(command) = &self.test_cmd {
             if command.trim().is_empty() {
                 bail!("--test-cmd is empty; leave it out to push without a test");
@@ -205,5 +223,6 @@ pub(crate) fn config(repo: &str) -> FlowConfig {
         re_review: false,
         max_runs_per_hour: DEFAULT_RUNS_PER_HOUR,
         approvers: Vec::new(),
+        required_checks: Vec::new(),
     }
 }
