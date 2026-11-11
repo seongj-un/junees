@@ -36,6 +36,10 @@ pub struct Bash {
     webhook: bool,
     /// The run's GitHub CLI configuration folder ([`super::GhConfigDir`]).
     gh_config_dir: Option<std::path::PathBuf>,
+    /// Tests only: the folder commands run in and keep their user state
+    /// in ([`testing::confine`]).
+    #[cfg(test)]
+    sandbox: Option<std::path::PathBuf>,
 }
 
 impl Default for Bash {
@@ -46,6 +50,8 @@ impl Default for Bash {
             policy: CommandPolicy::default(),
             webhook: false,
             gh_config_dir: None,
+            #[cfg(test)]
+            sandbox: None,
         }
     }
 }
@@ -98,6 +104,12 @@ impl Bash {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
+        // First, so the settings under test (hidden variables, a webhook
+        // run's credentials) still apply on top of it.
+        #[cfg(test)]
+        if let Some(dir) = &self.sandbox {
+            testing::confine(&mut cmd, dir);
+        }
         for name in &self.hidden_env {
             cmd.env_remove(name);
         }
@@ -351,10 +363,89 @@ impl HeadTail {
     }
 }
 
-/// Process checks shared by the tests that kill tool processes.
+/// Process checks shared by the tests that kill tool processes, and the
+/// test sandbox for commands.
 #[cfg(test)]
 pub(crate) mod testing {
+    use std::ffi::OsString;
+    use std::path::Path;
     use std::time::Duration;
+
+    use super::Bash;
+
+    /// A proxy nothing listens on: commands in a sandbox reach no web
+    /// server (github.com included) through HTTP(S).
+    const NO_PROXY_PORT: &str = "http://127.0.0.1:9";
+
+    impl Bash {
+        /// A default bash for tests whose commands run in `dir` with their
+        /// user state there ([`confine`]).
+        pub fn for_test(dir: &Path) -> Self {
+            Self::default().sandboxed(dir)
+        }
+
+        /// Runs this bash's commands in `dir` with their user state there
+        /// ([`confine`]); every other setting stays.
+        pub fn sandboxed(mut self, dir: &Path) -> Self {
+            self.sandbox = Some(dir.to_path_buf());
+            self
+        }
+    }
+
+    /// Points a test command at `dir` instead of the user's state, so a
+    /// policy rule a test (or a mutation run) breaks cannot reach the real
+    /// home folder, the repository the tests run in, its remotes or
+    /// GitHub: the working folder, HOME and the XDG folders, the GitHub CLI
+    /// login and Junees's own folder are in `dir`; git reads no global or
+    /// system configuration, finds no repository above `dir`, gets no
+    /// repository from the environment and cannot use ssh; HTTP goes to a
+    /// closed local port; programs installed under the real home (a
+    /// `cargo install`ed junees, say) are off PATH.
+    pub fn confine(command: &mut tokio::process::Command, dir: &Path) {
+        command
+            .current_dir(dir)
+            .env("HOME", dir)
+            .env("XDG_CONFIG_HOME", dir.join(".config"))
+            .env("XDG_DATA_HOME", dir.join(".local/share"))
+            .env("XDG_STATE_HOME", dir.join(".local/state"))
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env("GH_CONFIG_DIR", dir.join(".config/gh"))
+            .env("JUNEES_HOME", dir.join(".junees"))
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap_or(dir))
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_SSH_COMMAND", "false")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy");
+        for name in crate::task::git::REPO_ENV_VARS {
+            command.env_remove(name);
+        }
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            command.env(name, NO_PROXY_PORT);
+        }
+        command.env("PATH", path_without_home());
+    }
+
+    /// The test process's PATH without the folders under its home folder.
+    fn path_without_home() -> OsString {
+        let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let kept = std::env::split_paths(&path).filter(|dir| {
+            dir.is_absolute()
+                && home
+                    .as_ref()
+                    .is_none_or(|home| !dir.starts_with(Path::new(home)))
+        });
+        std::env::join_paths(kept).unwrap_or_default()
+    }
 
     /// Whether the process runs: it exists and is not a zombie (a killed
     /// child stays a zombie until its parent or init reaps it).
@@ -564,7 +655,9 @@ mod tests {
             "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR; git init -q {repo} && \
              git -C {repo} config credential.helper '!f() {{ echo username=u; echo password=leaked-pw; }}; f'"
         );
-        let output = Bash::default().run(json!({"command": setup})).await;
+        let output = Bash::for_test(dir.path())
+            .run(json!({"command": setup}))
+            .await;
         assert!(!output.is_error, "{}", output.content);
         let fill = format!(
             "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR; \
@@ -579,6 +672,7 @@ mod tests {
                 ..ToolSettings::default()
             })
             .policy(CommandPolicy::default())
+            .sandboxed(dir.path())
         };
         let plain = tools(false).run(json!({"command": fill})).await;
         assert!(
@@ -623,9 +717,11 @@ mod tests {
     #[tokio::test]
     async fn gh_has_no_login_in_a_webhook_runs_shell() {
         // The review's probe with a real `gh`: it reads its login from
-        // ~/.config/gh/hosts.yml by itself. A fake HOME holds one with a
-        // fake token; nothing here reaches the network (no login means no
-        // API call, and `gh auth token` only reads the file).
+        // ~/.config/gh/hosts.yml by itself. The sandbox's HOME holds one
+        // with a fake token; nothing here reaches the network: `gh auth
+        // token` only reads the file, the sandbox sends HTTP to a closed
+        // local port, and the shell gets no token variable even should
+        // the webhook environment break.
         let Some(gh) = gh_program() else {
             eprintln!("skipped: no gh on PATH");
             return;
@@ -646,6 +742,14 @@ mod tests {
                 .env("GH_NO_UPDATE_NOTIFIER", "1")
                 .env("GH_PROMPT_DISABLED", "1")
                 .env_remove("GH_HOST");
+            for name in [
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN",
+            ] {
+                command.env_remove(name);
+            }
         };
         // Control: this fake login is one gh reads.
         let mut plain = Command::new(&gh);
@@ -666,11 +770,9 @@ mod tests {
             webhook: true,
             gh_config_dir: Some(dir.path().to_path_buf()),
             ..ToolSettings::default()
-        });
-        let script = format!(
-            "{gh} auth token; echo \"token exit=$?\"; {gh} auth status 2>&1; echo \"status exit=$?\"",
-            gh = gh.display()
-        );
+        })
+        .sandboxed(home.path());
+        let script = format!("{gh} auth token; echo \"token exit=$?\"", gh = gh.display());
         let mut command = bash.command(&script);
         fake_home(&mut command);
         let out = command.output().await.unwrap();
@@ -681,38 +783,60 @@ mod tests {
         );
         assert!(!text.contains(token), "{text}");
         assert!(!text.contains("token exit=0"), "{text}");
-        assert!(text.contains("not logged in"), "{text}");
-        assert!(!text.contains("status exit=0"), "{text}");
+        assert!(text.contains("no oauth token found"), "{text}");
     }
 
     #[tokio::test]
     async fn denied_commands_are_not_run() {
+        // The denied part would empty a folder inside the sandbox, never
+        // anything of the user's, should the policy fail to refuse it.
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("ran");
-        let output = Bash::default()
-            .run(json!({"command": format!("touch {}; ls && rm -rf ~", marker.display())}))
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(victim.join("inner")).unwrap();
+        std::fs::write(victim.join("keep"), "x").unwrap();
+        let command = format!(
+            "touch {}; cd {} && rm -rf ..",
+            marker.display(),
+            victim.join("inner").display()
+        );
+        let output = Bash::for_test(dir.path())
+            .run(json!({ "command": command }))
             .await;
         assert_eq!(
             output,
-            ToolOutput::error("blocked by policy: recursive `rm` of `~`")
+            ToolOutput::error("blocked by policy: recursive `rm` of `..`")
         );
         assert!(!marker.exists(), "part of a blocked command ran");
+        assert!(victim.join("keep").exists(), "the denied `rm` ran");
+    }
+
+    #[test]
+    fn the_home_folder_form_is_denied_by_the_policy_alone() {
+        // Never run for real: a broken rule would empty the real home.
+        assert_eq!(
+            CommandPolicy::default().check("touch /tmp/x; ls && rm -rf ~"),
+            Verdict::Deny("recursive `rm` of `~`".into())
+        );
     }
 
     #[tokio::test]
     async fn policy_can_be_replaced() {
+        let dir = tempfile::tempdir().unwrap();
         // A function named like a denied program, so nothing real runs.
         let command = "shutdown() { echo fake shutdown; }; shutdown";
-        let output = Bash::default().run(json!({"command": command})).await;
+        let output = Bash::for_test(dir.path())
+            .run(json!({"command": command}))
+            .await;
         assert!(output.content.starts_with("blocked by policy:"));
 
-        let output = Bash::default()
+        let output = Bash::for_test(dir.path())
             .policy(CommandPolicy::default().allow_dangerous(true))
             .run(json!({"command": command}))
             .await;
         assert_eq!(output, ToolOutput::ok("fake shutdown\n[exit code 0]"));
 
-        let output = Bash::default()
+        let output = Bash::for_test(dir.path())
             .policy(CommandPolicy::default().deny_prefixes(["echo secret"]))
             .run(json!({"command": "echo secret"}))
             .await;
@@ -722,6 +846,35 @@ mod tests {
                 "blocked by policy: matches JUNEES_DENY_COMMANDS entry `echo secret`"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn the_test_sandbox_keeps_commands_in_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "pwd; echo \"home=$HOME\"; echo \"gh=$GH_CONFIG_DIR\"; \
+                      echo \"path=$PATH\"; echo \"proxy=$HTTPS_PROXY\"; \
+                      git rev-parse --git-dir 2>/dev/null || echo no-repo; \
+                      git config --global --list 2>/dev/null | wc -l";
+        let output = Bash::for_test(dir.path())
+            .run(json!({ "command": script }))
+            .await;
+        assert!(!output.is_error, "{}", output.content);
+        let lines: Vec<&str> = output.content.lines().collect();
+        let root = dir.path().display().to_string();
+        assert_eq!(lines[0], root);
+        assert_eq!(lines[1], format!("home={root}"));
+        assert_eq!(lines[2], format!("gh={root}/.config/gh"));
+        if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+            let home = std::path::PathBuf::from(home);
+            let path = lines[3].strip_prefix("path=").unwrap();
+            assert!(
+                std::env::split_paths(path).all(|entry| !entry.starts_with(&home)),
+                "{path}"
+            );
+        }
+        assert_eq!(lines[4], "proxy=http://127.0.0.1:9");
+        assert_eq!(lines[5], "no-repo");
+        assert_eq!(lines[6].trim(), "0");
     }
 
     #[tokio::test]

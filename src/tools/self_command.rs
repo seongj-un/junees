@@ -293,8 +293,16 @@ mod tests {
         use crate::tools::{Bash, Tool, ToolSettings};
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
-        let command = format!("touch {} && junees cron add 'every 1m' x", marker.display());
+        let ran = dir.path().join("junees-ran");
+        // A shell function named like the program, in a sandbox: should
+        // the rule fail, no real `junees` schedules anything.
+        let command = format!(
+            "touch {} && junees() {{ touch {}; }}; junees cron add 'every 1m' x",
+            marker.display(),
+            ran.display()
+        );
         let output = Bash::with_settings(&ToolSettings::default())
+            .sandboxed(dir.path())
             .run(serde_json::json!({ "command": command }))
             .await;
         assert!(output.is_error, "{}", output.content);
@@ -304,6 +312,7 @@ mod tests {
             output.content
         );
         assert!(!marker.exists());
+        assert!(!ran.exists());
     }
 
     #[test]

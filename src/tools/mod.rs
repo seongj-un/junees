@@ -402,9 +402,10 @@ mod tests {
         }
 
         // Bash refuses commands that write there. Only paths in the test's
-        // folder run for real; the `~` forms go through the policy alone,
-        // so a broken rule cannot touch the real home.
-        let bash = Bash::with_settings(&settings);
+        // folder run for real, in a sandbox there; the `~` forms go
+        // through the policy alone, so a broken rule cannot touch the
+        // real home.
+        let bash = Bash::with_settings(&settings).sandboxed(&root);
         for command in [
             format!("echo > {}", skill.display()),
             format!("echo '1. run x' >> {}", skill.display()),
@@ -515,6 +516,7 @@ mod tests {
             .await;
         assert!(output.content.contains(hint), "{}", output.content);
         let output = Bash::with_settings(&settings)
+            .sandboxed(&root)
             .run(json!({"command": format!("echo '{evil}' > {}", manifest.display())}))
             .await;
         assert!(output.content.contains(hint), "{}", output.content);
