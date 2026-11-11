@@ -192,12 +192,15 @@ struct FakeEngines {
     calls: Arc<Mutex<Vec<Call>>>,
     edit: Option<&'static str>,
     fail: bool,
+    /// A git setting (key, value) the "model" writes in its folder.
+    git_config: Option<(String, String)>,
 }
 
 struct FakeEngine {
     calls: Arc<Mutex<Vec<Call>>>,
     edit: Option<&'static str>,
     fail: bool,
+    git_config: Option<(String, String)>,
 }
 
 #[async_trait(?Send)]
@@ -207,6 +210,7 @@ impl Engines for FakeEngines {
             calls: Arc::clone(&self.calls),
             edit: self.edit,
             fail: self.fail,
+            git_config: self.git_config.clone(),
         }))
     }
 }
@@ -224,6 +228,9 @@ impl Engine for FakeEngine {
         });
         if let Some(name) = self.edit {
             std::fs::write(spec.dir.join(name), "fixed\n").unwrap();
+        }
+        if let Some((key, value)) = &self.git_config {
+            sh_git(spec.dir, &["config", key, value]);
         }
         if self.fail {
             return Outcome::failed("the model broke");
@@ -259,6 +266,7 @@ struct Setup<'a> {
 
 async fn run(setup: &Setup<'_>, incoming: &Incoming, now: i64) -> Report {
     let cancel = Cancel::new();
+    let gh = crate::tools::GhConfigDir::new().unwrap();
     let cx = Context {
         home: setup.home,
         route: setup.route,
@@ -273,6 +281,7 @@ async fn run(setup: &Setup<'_>, incoming: &Incoming, now: i64) -> Report {
         merge_setting: setup.merge,
         unattended: setup.unattended,
         hidden: &[],
+        gh_config: gh.path(),
         now,
     };
     handle(&cx, incoming).await
@@ -721,6 +730,11 @@ fn ready(github: &FakeGithub) {
     );
     permission(github, "carol", "write");
     permission(github, "bob", "maintain");
+    github.set(
+        "GET /repos/o/n/pulls/7/files",
+        200,
+        json!([{"filename": "src/lib.rs", "status": "modified"}]),
+    );
     github.set(
         &format!("GET /repos/o/n/commits/{HEAD}/check-runs"),
         200,
@@ -1176,8 +1190,9 @@ async fn addresses_only_reviews_of_people_with_write_access() {
     assert!(github.writes().is_empty(), "{:?}", github.writes());
     assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
 
-    // With --approver only the listed logins start it: bob (write access)
-    // is not listed, erin is.
+    // With --approver the listed logins start it whatever GitHub says
+    // about them (erin, association NONE), and so does anyone with write
+    // access, the same reviews that block a merge; dave still does not.
     let mut listed = route.clone();
     let mut flow = listed.flow.clone().unwrap();
     flow.approvers = vec!["erin".into()];
@@ -1188,25 +1203,363 @@ async fn addresses_only_reviews_of_people_with_write_access() {
     };
     let report = run(
         &setup,
-        &reviewed("bob", "changes_requested", "fix", &head),
+        &reviewed("dave", "changes_requested", "fix", &head),
         1000,
     )
     .await;
     assert_eq!(
         report.lines,
-        ["#7 address: skipped: a review by bob (not an --approver)"]
+        ["#7 address: skipped: a review by dave (no write access)"]
     );
     assert!(engines.calls.lock().unwrap().is_empty());
-    let report = run(
-        &setup,
-        &reviewed("erin", "changes_requested", "fix", &head),
-        1000,
-    )
-    .await;
+    let mut erin = reviewed("erin", "changes_requested", "fix", &head);
+    erin.payload["review"]["author_association"] = json!("NONE");
+    let report = run(&setup, &erin, 1000).await;
     assert_eq!(report.status, RunStatus::Ok, "{report:?}");
     assert!(
         report.lines[0].starts_with("#7 address: pushed "),
         "{report:?}"
     );
     assert_eq!(engines.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn approver_lists_still_count_change_requests_of_people_with_write_access() {
+    // The review's case: --approver alice, admin bob requests changes,
+    // alice approves.
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        approvers: vec!["alice".into()],
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    ready(&github);
+    permission(&github, "bob", "admin");
+    github.set(
+        "GET /repos/o/n/pulls/7/reviews",
+        200,
+        json!([
+            {"user": {"login": "bob"}, "author_association": "OWNER", "state": "CHANGES_REQUESTED", "commit_id": HEAD},
+            {"user": {"login": "alice"}, "author_association": "NONE", "state": "APPROVED", "commit_id": HEAD},
+        ]),
+    );
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    github.clear();
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert!(report.quiet, "{report:?}");
+    assert_eq!(
+        report.lines,
+        ["#7 merge: not ready at 1111111: changes requested: by bob"]
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+    // bob's later approval clears his request, but only alice's counts.
+    github.set(
+        "GET /repos/o/n/pulls/7/reviews",
+        200,
+        json!([
+            {"user": {"login": "bob"}, "author_association": "OWNER", "state": "CHANGES_REQUESTED", "commit_id": HEAD},
+            {"user": {"login": "bob"}, "author_association": "OWNER", "state": "APPROVED", "commit_id": HEAD},
+            {"user": {"login": "alice"}, "author_association": "NONE", "state": "APPROVED", "commit_id": HEAD},
+        ]),
+    );
+    github.clear();
+    let report = run(&setup, &suite(HEAD), 1001).await;
+    assert_eq!(report.lines, ["#7 merge: merged 1111111; commented"]);
+    let body = github.writes()[1].1["body"].as_str().unwrap().to_string();
+    assert!(
+        body.contains(
+            "approvals: 1 of 1 on the head commit (alice); not counted (not an --approver): bob"
+        ),
+        "{body}"
+    );
+
+    // bob's change request starts the address step too.
+    let (home, _root, github, mut route, bare, head) = address_setup(None).await;
+    let mut flow = route.flow.clone().unwrap();
+    flow.approvers = vec!["alice".into()];
+    route.flow = Some(flow);
+    let engines = FakeEngines {
+        edit: Some("fixed.txt"),
+        ..FakeEngines::default()
+    };
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: false,
+        unattended: ALL,
+    };
+    let report = run(
+        &setup,
+        &reviewed("bob", "changes_requested", "fix", &head),
+        1000,
+    )
+    .await;
+    assert!(
+        report.lines[0].starts_with("#7 address: pushed "),
+        "{report:?}"
+    );
+    assert_ne!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
+}
+
+#[tokio::test]
+async fn does_not_push_after_git_config_changed() {
+    // The review's probe through the flow: the "model" adds
+    // `url.<other>.pushInsteadOf <origin>` to the clone's config.
+    let (home, root, github, route, bare, head) = address_setup(None).await;
+    let other = root.path().join("other.git");
+    sh_git(root.path(), &["init", "-q", "--bare", "other.git"]);
+    let engines = FakeEngines {
+        edit: Some("fixed.txt"),
+        git_config: Some((
+            format!("url.{}.pushInsteadOf", other.display()),
+            "https://git.invalid/o/n.git".into(),
+        )),
+        ..FakeEngines::default()
+    };
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: false,
+        unattended: ALL,
+    };
+    let report = run(
+        &setup,
+        &reviewed("bob", "changes_requested", "fix", &head),
+        1000,
+    )
+    .await;
+    assert_eq!(report.status, RunStatus::Failed);
+    let line = &report.lines[0];
+    assert!(
+        line.starts_with(
+            "#7 address: failed: git configuration changed while the model ran, not pushed"
+        ),
+        "{line}"
+    );
+    assert!(
+        line.contains(&format!("config: url.{}.pushinsteadof", other.display())),
+        "{line}"
+    );
+    assert!(line.ends_with("; commented"), "{line}");
+    assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
+    assert_eq!(sh_git(&other, &["for-each-ref"]), "");
+    let body = github.writes()[0].1["body"].as_str().unwrap().to_string();
+    assert!(
+        body.contains("git 설정 파일 1개가 바뀌어서 push하지 않았습니다"),
+        "{body}"
+    );
+    assert!(!body.contains("other.git"), "{body}");
+    // Left for the user to see.
+    assert!(
+        sh_git(&route.dir, &["config", "--list"]).contains("pushinsteadof"),
+        "the change is not undone"
+    );
+
+    // A test command that changes it is caught before the push too.
+    let (home, _root, github, mut route, bare, head) = address_setup(None).await;
+    let mut flow = route.flow.clone().unwrap();
+    flow.test_cmd = Some("git config --local junees.planted yes".into());
+    route.flow = Some(flow);
+    let engines = FakeEngines {
+        edit: Some("fixed.txt"),
+        ..FakeEngines::default()
+    };
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: false,
+        unattended: ALL,
+    };
+    let report = run(
+        &setup,
+        &reviewed("bob", "changes_requested", "fix", &head),
+        1000,
+    )
+    .await;
+    assert!(
+        report.lines[0]
+            .contains("git configuration changed while the test command ran, not pushed"),
+        "{report:?}"
+    );
+    assert!(
+        report.lines[0].contains("config: junees.planted"),
+        "{report:?}"
+    );
+    assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
+}
+
+#[tokio::test]
+async fn never_merges_workflow_changes_and_says_so_once() {
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    ready(&github);
+    github.set(
+        "GET /repos/o/n/pulls/7/files",
+        200,
+        json!([
+            {"filename": "src/lib.rs", "status": "modified"},
+            {"filename": "ci/always-green.yml", "previous_filename": ".github/workflows/ci.yml", "status": "renamed"},
+        ]),
+    );
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert_eq!(
+        report.lines,
+        ["#7 merge: not merged at 1111111: .github: changes .github/workflows/ci.yml; commented"]
+    );
+    let writes = github.writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "POST /repos/o/n/issues/7/comments");
+    let body = writes[0].1["body"].as_str().unwrap();
+    assert!(
+        body.contains("`.github/`를 바꾸는 pull request를 자동으로 merge하지 않습니다"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- [ ] .github: changes .github/workflows/ci.yml"),
+        "{body}"
+    );
+    // The next event of the same commit: no second comment, no merge.
+    github.clear();
+    let report = run(&setup, &suite(HEAD), 1001).await;
+    assert_eq!(
+        report.lines,
+        ["#7 merge: skipped: done for 1111111 already"]
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+}
+
+#[tokio::test]
+async fn never_merges_changes_to_actions_the_workflows_use() {
+    // A workflow with `uses: ./.github/actions/setup` runs what the pull
+    // request put there.
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    ready(&github);
+    github.set(
+        "GET /repos/o/n/pulls/7/files",
+        200,
+        json!([
+            {"filename": "src/lib.rs", "status": "modified"},
+            {"filename": ".github/actions/setup/action.yml", "status": "modified"},
+            {"filename": ".github/dependabot.yml", "status": "added"},
+        ]),
+    );
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert_eq!(
+        report.lines,
+        [
+            "#7 merge: not merged at 1111111: .github: changes .github/actions/setup/action.yml, \
+          .github/dependabot.yml; commented"
+        ]
+    );
+    let writes = github.writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "POST /repos/o/n/issues/7/comments");
+}
+
+#[tokio::test]
+async fn required_checks_decide_the_merge() {
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    ready(&github);
+    github.set(
+        &format!("GET /repos/o/n/commits/{HEAD}/check-runs"),
+        200,
+        json!({"check_runs": [
+            {"name": "ci", "status": "completed", "conclusion": "success"},
+            {"name": "test", "status": "completed", "conclusion": "neutral"},
+        ]}),
+    );
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        required_checks: vec!["test".into(), "deploy-preview".into()],
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert!(
+        report.lines[0]
+            .contains("required checks: not succeeded: test neutral, deploy-preview missing"),
+        "{report:?}"
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+    github.set(
+        &format!("GET /repos/o/n/commits/{HEAD}/check-runs"),
+        200,
+        json!({"check_runs": [
+            {"name": "ci", "status": "completed", "conclusion": "success"},
+            {"name": "test", "status": "completed", "conclusion": "success"},
+        ]}),
+    );
+    github.set(
+        &format!("GET /repos/o/n/commits/{HEAD}/status"),
+        200,
+        json!({"state": "success", "statuses": [{"context": "deploy-preview", "state": "success"}]}),
+    );
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert_eq!(report.lines, ["#7 merge: merged 1111111; commented"]);
 }

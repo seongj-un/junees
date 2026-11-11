@@ -19,6 +19,7 @@ Usage:
                      [--merge-when-ready] [--dir <clone>] [--deliver ...]
                      [--test-cmd \"<command>\"] [--min-approvals N] [--allow-self-review]
                      [--re-review] [--max-runs-per-hour N] [--approver <login>]...
+                     [--require-check <name>]...
                                    a pull request flow (below)
   junees webhook list              the routes and their last runs
   junees webhook remove <name>     (also rm)
@@ -73,10 +74,17 @@ $JUNEES_HOME/secrets/webhook-<name> and the events its steps need.
   --min-approvals (default 1) approved the head commit (or with
   --allow-self-review Junees's own review says 머지 가능 with no 필수 item)
   and GitHub says mergeable; it also needs github_flow_merge = true.
+  --require-check <name> (repeatable): that check run or status must be
+  there and end success (neutral or skipped do not count). A pull request
+  that changes anything under .github/ (workflows, the actions they use) is
+  never merged by the flow (it gets a comment saying so): it could write
+  its own passing checks.
 Only reviews by people with write access count (author_association OWNER,
-MEMBER or COLLABORATOR and write, maintain or admin permission now), or,
-with --approver (repeatable, comma-separated), only those logins' reviews:
-for approvals, change requests and starting --address-reviews. A Junees
+MEMBER or COLLABORATOR and write, maintain or admin permission now) and by
+the --approver logins (repeatable, comma-separated): for approvals, change
+requests and starting --address-reviews. With --approver only those logins'
+approvals count toward --min-approvals; a change request of anyone with
+write access still blocks the merge. A Junees
 review of the head commit that is not 머지 가능 or lists 필수 items blocks
 the merge.
 Each step runs once per pull request and head commit; the token user's own
@@ -285,6 +293,7 @@ fn add_github(rest: Vec<String>) -> Result<crate::flow::setup::AddGithubArgs> {
             "--min-approvals",
             "--max-runs-per-hour",
             "--approver",
+            "--require-check",
         ],
         &[
             "--review",
@@ -305,6 +314,7 @@ fn add_github(rest: Vec<String>) -> Result<crate::flow::setup::AddGithubArgs> {
             "--min-approvals" => args.min_approvals = Some(value),
             "--max-runs-per-hour" => args.max_runs_per_hour = Some(value),
             "--approver" => args.approvers.push(value),
+            "--require-check" => args.required_checks.push(value),
             "--review" => args.review = true,
             "--address-reviews" => args.address_reviews = true,
             "--merge-when-ready" => args.merge_when_ready = true,
@@ -446,6 +456,9 @@ mod tests {
                 "--approver",
                 "alice,bob",
                 "--approver=carol",
+                "--require-check",
+                "test (ubuntu, stable)",
+                "--require-check=lint",
                 "--dir",
                 "/srv",
                 "--deliver",
@@ -466,6 +479,7 @@ mod tests {
                 re_review: true,
                 max_runs_per_hour: Some("3".into()),
                 approvers: vec!["alice,bob".into(), "carol".into()],
+                required_checks: vec!["test (ubuntu, stable)".into(), "lint".into()],
             })
         );
         assert_eq!(

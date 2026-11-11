@@ -62,6 +62,40 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
         rules.push(format!("Bash({command})"));
         rules.push(format!("Bash({command} *)"));
     }
+    if settings.webhook {
+        // A webhook run (anyone's text): no push, no change of git's
+        // configuration, no credentials, no aliases from `-c`, no GitHub
+        // CLI login (`gh auth`, or GH_CONFIG_DIR pointed back at the
+        // user's folder).
+        //
+        // `git config *` also refuses reads, unlike Junees's own bash,
+        // which allows `git config --get`, `--list` and a lone key. No
+        // narrower set of these rules is safe: a rule only sees the text,
+        // and `*` matches any characters, so `git config * *` (a key and
+        // a value) also matches `git config --get user.email`, and writes
+        // it does not foresee (a single-word form such as `--edit`, maybe
+        // a tab between key and value) would get past it. The model can
+        // still read the repository's settings with the Read tool
+        // (`.git/config`).
+        for rule in [
+            "gh auth",
+            "gh auth *",
+            "gh alias *",
+            "*GH_CONFIG_DIR*",
+            "git push",
+            "git push *",
+            "git -C * push*",
+            "git send-pack *",
+            "git subtree push *",
+            "git config *",
+            "git -C * config *",
+            "git credential*",
+            "git-credential*",
+            "git -c *",
+        ] {
+            rules.push(format!("Bash({rule})"));
+        }
+    }
     for prefix in &settings.deny_commands {
         rules.push(format!("Bash({prefix} *)"));
     }
@@ -99,6 +133,16 @@ pub fn settings_rules(file: &SettingsFile, root: &Path) -> Vec<String> {
         format!("Read(/{})", gitignore_escape(text)),
         format!("Edit(/{})", gitignore_escape(text)),
     ];
+    // git's and the GitHub CLI's credentials (a file or a folder).
+    for path in file.resolved_credentials() {
+        if let Some(path) = path.to_str() {
+            let path = gitignore_escape(path);
+            for tool in ["Read", "Edit"] {
+                rules.push(format!("{tool}(/{path})"));
+                rules.push(format!("{tool}(/{path}/**)"));
+            }
+        }
+    }
     let secrets: Vec<String> = file
         .resolved_secrets()
         .as_deref()
@@ -210,5 +254,29 @@ mod tests {
         let mut settings = settings;
         settings.allow_dangerous = false;
         assert_eq!(deny_rules(&settings).last().unwrap(), "Bash(docker rm *)");
+        assert!(
+            !deny_rules(&settings)
+                .iter()
+                .any(|rule| rule == "Bash(git push *)")
+        );
+        // Webhook runs: no push, git configuration or credentials, even
+        // with the built-in rules off.
+        settings.webhook = true;
+        settings.allow_dangerous = true;
+        let rules = deny_rules(&settings);
+        for rule in [
+            "Bash(git push)",
+            "Bash(git push *)",
+            "Bash(git -C * push*)",
+            "Bash(git send-pack *)",
+            "Bash(git config *)",
+            "Bash(git credential*)",
+            "Bash(git -c *)",
+            "Bash(gh auth *)",
+            "Bash(gh alias *)",
+            "Bash(*GH_CONFIG_DIR*)",
+        ] {
+            assert!(rules.iter().any(|r| r == rule), "{rule} missing");
+        }
     }
 }

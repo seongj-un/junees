@@ -12,6 +12,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 use super::access::Access;
+use super::address::ConfigSnapshot;
 use super::merge::{self, short};
 use super::prompts::{self, ADDRESS_FILE, REVIEW_FILE, Review};
 use super::state::{self, Action, Claim, Handled};
@@ -62,6 +63,10 @@ pub struct Context<'a> {
     pub unattended: &'a [Write],
     /// Variables the test command does not get (`hidden_env`).
     pub hidden: &'a [String],
+    /// The run's empty GitHub CLI configuration folder
+    /// ([`crate::tools::GhConfigDir`]) for the model's commands and the
+    /// test command.
+    pub gh_config: &'a Path,
     pub now: i64,
 }
 
@@ -414,6 +419,7 @@ async fn model_run(
         trigger: Trigger::Webhook {
             route: &cx.route.name,
             github_allow: allow,
+            gh_config: cx.gh_config,
         },
     };
     let outcome = engine.run(&spec, cx.cancel, cx.limits).await;
@@ -564,19 +570,14 @@ async fn address_step(
         );
     }
     // Only reviews of people with write access (or --approver) start a
-    // model run with bash and a push.
+    // model run with bash and a push, the same reviews that block a merge.
     let association = review["author_association"].as_str().unwrap_or_default();
     match access.counts(reviewer, association).await {
         Ok(true) => {}
         Ok(false) => {
             let line = format!(
-                "skipped: a review by {} ({})",
+                "skipped: a review by {} (no write access)",
                 crate::prompt_text::escape_hidden(reviewer),
-                if cx.flow.approvers.is_empty() {
-                    "no write access"
-                } else {
-                    "not an --approver"
-                }
             );
             return step_line(cx, report, n, action, &line);
         }
@@ -648,6 +649,11 @@ async fn address_run(
     .await
     .map_err(|err| (err.to_string(), false))?
     .map_err(|err| (format!("{err:#}"), false))?;
+    let path = tree.path.clone();
+    let snapshot = tokio::task::spawn_blocking(move || ConfigSnapshot::take(&path))
+        .await
+        .map_err(|err| (err.to_string(), false))?
+        .map_err(|err| (format!("{err:#}"), false))?;
     let review = &incoming.payload["review"];
     let mut data = pr_data(r, pr, sha);
     data["review"] = json!({
@@ -669,6 +675,8 @@ async fn address_run(
     .await
     .map_err(|err| (err, false))?;
     let reviewer = review["user"]["login"].as_str().unwrap_or("?");
+    // Before git runs anything the model may have configured.
+    config_unchanged(cx, r, n, review, &snapshot, Changer::Model).await?;
     let message = format!(
         "fix: address review {} on #{n}\n\nReview by {reviewer}; changes made by junees \
          (webhook route {}).",
@@ -693,7 +701,7 @@ async fn address_run(
                 .join(format!("{}-pr{n}.log", cx.route.name));
             let limit = Duration::from_secs(cx.limits.max_time.as_secs().max(60));
             Some(
-                address::test(&tree.path, command, &log, cx.hidden, limit)
+                address::test(&tree.path, command, &log, cx.hidden, cx.gh_config, limit)
                     .await
                     .map_err(|err| (format!("{err:#}"), true))?,
             )
@@ -714,6 +722,9 @@ async fn address_run(
             format!("tests failed ({}), not pushed{posted}", tested.how),
             true,
         ));
+    }
+    if tested.is_some() {
+        config_unchanged(cx, r, n, review, &snapshot, Changer::Test).await?;
     }
     let (path, origin, branch_owned) = (tree.path.clone(), tree.origin.clone(), branch.to_string());
     tokio::task::spawn_blocking(move || address::push(&path, &origin, &branch_owned))
@@ -742,6 +753,56 @@ async fn address_run(
         "no test command"
     };
     Ok(format!("pushed {} ({tests}){posted}", short(&new)))
+}
+
+/// What ran while git's configuration changed.
+#[derive(Clone, Copy)]
+enum Changer {
+    Model,
+    Test,
+}
+
+/// `Err` (with the claim kept) when a git config file the push reads is
+/// not as `snapshot` saw it: `url.<x>.pushInsteadOf` or a credential
+/// helper there would take the flow's push elsewhere. The change stays
+/// for the user to look at; the line and the comment name the keys'
+/// files, the line the keys too (never values).
+async fn config_unchanged(
+    cx: &Context<'_>,
+    r: &str,
+    n: u64,
+    review: &Value,
+    snapshot: &ConfigSnapshot,
+    changer: Changer,
+) -> Result<(), (String, bool)> {
+    let snapshot = snapshot.clone();
+    let changes = tokio::task::spawn_blocking(move || snapshot.changes())
+        .await
+        .map_err(|err| (err.to_string(), true))?
+        .map_err(|err| (format!("{err:#}"), true))?;
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let (during, korean) = match changer {
+        Changer::Model => ("while the model ran", "모델이 실행되는 동안"),
+        Changer::Test => ("while the test command ran", "테스트 명령이 실행되는 동안"),
+    };
+    let reviewer = review["user"]["login"].as_str().unwrap_or("?");
+    let body = format!(
+        "Junees가 리뷰 {}(@{reviewer})를 반영하던 중 {korean} git 설정 파일 {}개가 바뀌어서 \
+         push하지 않았습니다. 바뀐 설정은 되돌리지 않았으니 서버에서 확인해 주세요 \
+         (`junees webhook list`의 결과에 키 이름이 있습니다).",
+        review["id"],
+        changes.len()
+    );
+    let posted = comment(cx, r, n, &body).await;
+    Err((
+        format!(
+            "git configuration changed {during}, not pushed (Junees left it as it is; check it): {}{posted}",
+            changes.join("; ")
+        ),
+        true,
+    ))
 }
 
 /// The model's answer for a comment, or why it is left out.
@@ -839,6 +900,33 @@ async fn merge_step(
         }
     };
     let conditions = merge::conditions(&facts, sha, cx.flow, owner);
+    if let Some(blocked) = conditions
+        .iter()
+        .find(|condition| condition.name == merge::GITHUB_CONDITION && !condition.ok)
+    {
+        // Never merged by the flow, whatever else holds: say so once per
+        // head commit.
+        if let Err(line) = claim(cx, n, action, sha) {
+            return step_line(cx, report, n, action, &line);
+        }
+        report.quiet = false;
+        let body = format!(
+            "Junees는 `{}`를 바꾸는 pull request를 자동으로 merge하지 않습니다({}). 워크플로나 \
+             워크플로가 쓰는 저장소 안의 action을 바꾸면 항상 통과하는 체크를 스스로 만들 수 있기 \
+             때문입니다. 사람이 확인한 뒤 merge해 주세요.\n\n{}",
+            merge::GITHUB_DIR,
+            blocked.detail,
+            merge::table(&conditions)
+        );
+        let posted = post(cx, r, n, &body).await;
+        let line = format!(
+            "not merged at {}: {}: {}{posted}",
+            short(sha),
+            blocked.name,
+            blocked.detail
+        );
+        return step_line(cx, report, n, action, &line);
+    }
     if !merge::ready(&conditions) {
         let line = format!(
             "not ready at {}: {}",

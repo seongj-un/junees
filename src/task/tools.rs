@@ -255,6 +255,8 @@ mod tests {
             allow_dangerous: false,
             settings_file: None,
             approval_gate: false,
+            webhook: false,
+            gh_config_dir: None,
         };
         let verifier = Verifier::new(root.path().to_path_buf(), &settings);
         let output = verifier.run("test -z \"$HOME\"").await;

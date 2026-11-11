@@ -49,15 +49,24 @@ async fn bash_cannot_read_hidden_variables_from_any_ancestor() {
         (200, text_reply("done")),
     ])
     .await;
+    // Junees and its bash keep off the user's state: their own
+    // JUNEES_HOME (no settings file, MCP servers or plugins of the user's)
+    // and HOME, run from a folder in there instead of the crate.
+    let home = tempfile::tempdir().unwrap();
+    let work = home.path().join("work");
+    std::fs::create_dir(&work).unwrap();
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"))
         .args(["--no-session", "-p", "probe"])
+        .current_dir(&work)
+        .env("HOME", home.path())
+        .env("JUNEES_HOME", home.path().join(".junees"))
+        .env_remove("XDG_CONFIG_HOME")
         .env("ANTHROPIC_API_KEY", KEY)
         .env("ANTHROPIC_BASE_URL", &url)
         .env(
             "JUNEES_NOTIFY_WEBHOOK",
             format!("https://discord.invalid/api/webhooks/1/{HOOK_TOKEN}"),
         )
-        .env_remove("JUNEES_HOME")
         .env_remove("JUNEES_HIDDEN_ENV")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -60,6 +60,87 @@ pub const CLAUDE_CODE_SECRET_ENV_VARS: &[&str] = &[
     "MCP_CLIENT_SECRET",
 ];
 
+/// Variables a webhook run's shell does not inherit ([`strip_git_credentials`]):
+/// the ssh agent, the programs git and ssh ask for passwords, `-c` settings
+/// passed down by a calling git, and GitHub CLI tokens.
+pub const WEBHOOK_REMOVED_ENV: &[&str] = &[
+    "SSH_AUTH_SOCK",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_CONFIG_PARAMETERS",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// Variables set on a webhook run's shell ([`strip_git_credentials`]): an
+/// empty `credential.helper` with command-line scope, which empties the
+/// list of helpers every config file set (git-config(1), "credential.helper";
+/// gitcredentials(7)), and no terminal prompt for a password.
+pub const WEBHOOK_SET_ENV: &[(&str, &str)] = &[
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "credential.helper"),
+    ("GIT_CONFIG_VALUE_0", ""),
+    ("GIT_TERMINAL_PROMPT", "0"),
+];
+
+/// The GitHub CLI configuration folder of a webhook run's commands when
+/// the run has no [`GhConfigDir`] of its own (tests): a folder that does
+/// not exist, so `gh` has no login either.
+pub const NO_GH_CONFIG_DIR: &str = "/nonexistent/junees-webhook-run";
+
+/// An empty, private (0700) GitHub CLI configuration folder for one
+/// webhook run, removed when dropped. `gh` reads its login (hosts.yml)
+/// from `GH_CONFIG_DIR`, so with this folder it has none: `gh auth token`,
+/// `gh auth git-credential` and every API call run without the user's
+/// token ([`strip_git_credentials`]).
+#[derive(Debug)]
+pub struct GhConfigDir(std::path::PathBuf);
+
+impl GhConfigDir {
+    /// A new folder `junees-gh-<random>` in the temporary folder.
+    pub fn new() -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        let path =
+            std::env::temp_dir().join(format!("junees-gh-{}", crate::cron::store::random_hex(16)));
+        // Fails when the name is taken: never a folder someone else made.
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self(path))
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for GhConfigDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Takes the user's git and GitHub CLI credentials away from `command`, a
+/// shell, the claude-code backend or the test command of a webhook run:
+/// the flow pushes with them itself, the model and the code it changed
+/// must not. `gh_config_dir` is the run's [`GhConfigDir`]
+/// ([`NO_GH_CONFIG_DIR`] when `None`).
+pub fn strip_git_credentials(
+    command: &mut tokio::process::Command,
+    gh_config_dir: Option<&std::path::Path>,
+) {
+    for name in WEBHOOK_REMOVED_ENV {
+        command.env_remove(name);
+    }
+    for (name, value) in WEBHOOK_SET_ENV {
+        command.env(name, value);
+    }
+    command.env(
+        "GH_CONFIG_DIR",
+        gh_config_dir.unwrap_or(std::path::Path::new(NO_GH_CONFIG_DIR)),
+    );
+}
+
 /// User settings for the default tools, read by [`crate::config::Config`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolSettings {
@@ -81,6 +162,17 @@ pub struct ToolSettings {
     /// of refusing them. Off for `-p`, task mode and
     /// scheduled runs, where no one is asked.
     pub approval_gate: bool,
+    /// The run was started by a webhook request, a GitHub flow step
+    /// included: anyone's text drives it. bash refuses `git push` and
+    /// the other git commands that publish commits, change the
+    /// repository's git configuration or reach git credentials
+    /// ([`CommandPolicy::webhook_run`]), and runs without the user's git
+    /// and GitHub CLI credentials ([`strip_git_credentials`]); the flow
+    /// code pushes by itself.
+    pub webhook: bool,
+    /// The webhook run's empty GitHub CLI configuration folder
+    /// ([`GhConfigDir`]), set by [`crate::cron::run::Trigger::tool_settings`].
+    pub gh_config_dir: Option<std::path::PathBuf>,
 }
 
 /// What a tool hands back to the model. Failures are reported as output with
@@ -310,9 +402,10 @@ mod tests {
         }
 
         // Bash refuses commands that write there. Only paths in the test's
-        // folder run for real; the `~` forms go through the policy alone,
-        // so a broken rule cannot touch the real home.
-        let bash = Bash::with_settings(&settings);
+        // folder run for real, in a sandbox there; the `~` forms go
+        // through the policy alone, so a broken rule cannot touch the
+        // real home.
+        let bash = Bash::with_settings(&settings).sandboxed(&root);
         for command in [
             format!("echo > {}", skill.display()),
             format!("echo '1. run x' >> {}", skill.display()),
@@ -423,6 +516,7 @@ mod tests {
             .await;
         assert!(output.content.contains(hint), "{}", output.content);
         let output = Bash::with_settings(&settings)
+            .sandboxed(&root)
             .run(json!({"command": format!("echo '{evil}' > {}", manifest.display())}))
             .await;
         assert!(output.content.contains(hint), "{}", output.content);
@@ -452,6 +546,55 @@ mod tests {
             .run(json!({"path": manifest}))
             .await;
         assert!(!output.is_error, "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn git_and_gh_credentials_are_as_private_as_the_settings_file() {
+        let (_dir, root, file) = settings_file::testing::home();
+        let store = root.join(".git-credentials");
+        std::fs::write(&store, "https://u:ghp_secret@github.com\n").unwrap();
+        let hosts = root.join(".config/gh/hosts.yml");
+        std::fs::create_dir_all(hosts.parent().unwrap()).unwrap();
+        std::fs::write(&hosts, "github.com:\n  oauth_token: gho_secret\n").unwrap();
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        let read = ReadFile::with_settings(&settings);
+        for path in [
+            store.clone(),
+            hosts.clone(),
+            settings_file::testing::relative(&store),
+        ] {
+            let output = read.run(json!({"path": path})).await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(
+                output.content.contains("git or GitHub CLI credential file"),
+                "{}",
+                output.content
+            );
+            assert!(!output.content.contains("secret@"), "{}", output.content);
+        }
+        let output = WriteFile::with_settings(&settings)
+            .run(json!({"path": store, "content": "https://x:y@evil\n"}))
+            .await;
+        assert!(output.is_error, "{}", output.content);
+        let policy = CommandPolicy::with_settings(&settings);
+        for command in [
+            "cat ~/.git-credentials",
+            "grep -r oauth_token $HOME/.config/gh",
+            "cp ~/.git-cred* /tmp/x",
+            "base64 ~/.config/gh/hosts.yml",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("git or GitHub CLI credential file"),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        assert_eq!(policy.check("cat ~/.gitconfig"), Verdict::Allow);
     }
 
     #[tokio::test]

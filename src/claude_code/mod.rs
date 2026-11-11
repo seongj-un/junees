@@ -483,6 +483,10 @@ impl ClaudeCode {
         {
             command.env_remove(name);
         }
+        if settings.webhook {
+            // Claude Code's Bash tool inherits this environment.
+            crate::tools::strip_git_credentials(&mut command, settings.gh_config_dir.as_deref());
+        }
         command
     }
 
@@ -930,6 +934,43 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{claude, fake_claude, fake_claude_auth};
     use super::*;
+
+    #[test]
+    fn webhook_sessions_get_no_git_credentials() {
+        let claude = claude(PathBuf::from("/nonexistent/claude"));
+        let envs = |webhook| -> Vec<(String, Option<String>)> {
+            let settings = ToolSettings {
+                webhook,
+                ..ToolSettings::default()
+            };
+            claude
+                .command(Path::new("/"), &settings)
+                .as_std()
+                .get_envs()
+                .map(|(name, value)| {
+                    (
+                        name.to_string_lossy().to_string(),
+                        value.map(|value| value.to_string_lossy().to_string()),
+                    )
+                })
+                .collect()
+        };
+        let webhook = envs(true);
+        assert!(
+            webhook.contains(&("SSH_AUTH_SOCK".into(), None)),
+            "{webhook:?}"
+        );
+        assert!(
+            webhook.contains(&("GIT_CONFIG_KEY_0".into(), Some("credential.helper".into()))),
+            "{webhook:?}"
+        );
+        assert!(webhook.contains(&("GIT_TERMINAL_PROMPT".into(), Some("0".into()))));
+        assert!(
+            !envs(false)
+                .iter()
+                .any(|(name, _)| name == "GIT_CONFIG_KEY_0")
+        );
+    }
 
     #[test]
     fn reads_the_backend_and_the_claude_settings() {

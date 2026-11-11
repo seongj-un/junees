@@ -5,7 +5,9 @@
 //! hold tokens, and writing it would start programs in the next session.
 //! So does everything in the secrets folder next to it
 //! ([`SECRETS_FOLDER`]): webhook secret files, which `junees webhook add`
-//! only takes from there, and the user's environment files.
+//! only takes from there, and the user's environment files. And so do
+//! the user's git and GitHub CLI credentials ([`CREDENTIALS`]): git's
+//! credential store and `gh`'s login, which push and merge as the user.
 //!
 //! read_file, write_file and edit_file refuse it; the command policy refuses
 //! bash commands that name it (also through a glob or braces) or that use
@@ -33,6 +35,12 @@ pub const SECRETS_FOLDER: &str = "secrets";
 pub fn secrets_dir(junees_home: &Path) -> PathBuf {
     junees_home.join(SECRETS_FOLDER)
 }
+
+/// The git and GitHub CLI credential files and folders under the home
+/// folder (`~/.git-credentials`, `~/.config/git/credentials`,
+/// `~/.config/gh`); `$XDG_CONFIG_HOME/git/credentials` and
+/// `$XDG_CONFIG_HOME/gh` come from [`SettingsFile::with_config_home`].
+pub const CREDENTIALS: &[&str] = &[".git-credentials", ".config/git/credentials", ".config/gh"];
 
 /// How many symbolic links a dangling chain may have before giving up.
 const MAX_LINKS: usize = 40;
@@ -143,16 +151,47 @@ pub struct SettingsFile {
     path: PathBuf,
     /// What `~` and `$HOME` mean in bash commands.
     home: Option<PathBuf>,
+    /// The git and GitHub CLI credentials ([`CREDENTIALS`]), as given.
+    credentials: Vec<PathBuf>,
 }
 
 impl SettingsFile {
     /// `path` is the settings file ([`crate::config_file::path`]), `home`
     /// the `HOME` bash commands see.
     pub fn new(path: impl Into<PathBuf>, home: Option<PathBuf>) -> Self {
+        let credentials = home
+            .iter()
+            .flat_map(|home| CREDENTIALS.iter().map(|name| home.join(name)))
+            .collect();
         Self {
             path: path.into(),
             home,
+            credentials,
         }
+    }
+
+    /// Also protects git's and the GitHub CLI's credentials under `dir`,
+    /// the `XDG_CONFIG_HOME` bash commands see (only an absolute one
+    /// counts, as for git and gh).
+    pub fn with_config_home(mut self, dir: Option<PathBuf>) -> Self {
+        if let Some(dir) = dir.filter(|dir| dir.is_absolute()) {
+            for path in [dir.join("git/credentials"), dir.join("gh")] {
+                if !self.credentials.contains(&path) {
+                    self.credentials.push(path);
+                }
+            }
+        }
+        self
+    }
+
+    /// The protected credential files and folders, absolute and resolved
+    /// like [`Self::resolved_path`].
+    pub fn resolved_credentials(&self) -> Vec<PathBuf> {
+        self.credentials
+            .iter()
+            .filter_map(|path| std::path::absolute(path).ok())
+            .map(|path| resolve(&path).unwrap_or(path))
+            .collect()
     }
 
     /// The file as an absolute path (relative ones start from the current
@@ -178,7 +217,8 @@ impl SettingsFile {
     /// the current folder): it is the settings file once `.`, `..` and
     /// symbolic links are resolved, a dangling link to where it would be,
     /// or a hard link to it; the MCP server list the same way; or the
-    /// secrets folder or a path in it.
+    /// secrets folder, a git or GitHub CLI credential file or folder
+    /// ([`CREDENTIALS`]), or a path in one.
     pub fn is(&self, path: &Path) -> bool {
         if path.is_absolute() {
             return self.same(path);
@@ -239,18 +279,18 @@ impl SettingsFile {
     /// The error a file tool returns for `path`.
     pub fn refusal(&self, path: &str) -> String {
         format!(
-            "{path} is the user's private Junees settings file or a secret next to it (it holds \
-             the API key and other secrets). Junees tools do not read or change it; ask the user to \
-             change settings with `junees setup` instead."
+            "{path} is the user's private Junees settings file, a secret next to it, or a git or \
+             GitHub CLI credential file (it holds the API key and other secrets). Junees tools do \
+             not read or change it; ask the user to change settings with `junees setup` instead."
         )
     }
 
     /// Why the command policy refuses a command that names it as `word`.
     pub fn named_reason(&self, word: &str) -> String {
         format!(
-            "`{word}` is the user's private Junees settings file or a secret next to it (it \
-             holds the API key and other secrets); commands may not read or change it. Ask the user \
-             to change settings with `junees setup` instead."
+            "`{word}` is the user's private Junees settings file, a secret next to it, or a git \
+             or GitHub CLI credential file (it holds the API key and other secrets); commands may \
+             not read or change it. Ask the user to change settings with `junees setup` instead."
         )
     }
 
@@ -315,9 +355,17 @@ impl SettingsFile {
             matches(&target, true).then_some(named)
         })
         .or_else(|| {
-            self.resolved_secrets()
-                .is_some_and(|dir| prefix.starts_with(&dir) || matches(&dir, false))
-                .then_some(Named::File)
+            let secrets = self
+                .resolved_secrets()
+                .is_some_and(|dir| prefix.starts_with(&dir) || matches(&dir, false));
+            // A credential folder (`gh`'s) may be what the pattern leads
+            // into; a file (or a path not there yet) only what it
+            // matches whole.
+            let credentials = self
+                .resolved_credentials()
+                .into_iter()
+                .any(|path| prefix.starts_with(&path) || matches(&path, !path.is_dir()));
+            (secrets || credentials).then_some(Named::File)
         })
         .or_else(|| {
             (0..DATA_FOLDERS.len())
@@ -405,10 +453,12 @@ impl SettingsFile {
     fn same(&self, path: &Path) -> bool {
         self.same_as(path, &self.path)
             || self.same_as(path, &self.mcp_path())
-            || self
-                .lands(path)
-                .zip(self.resolved_secrets())
-                .is_some_and(|(path, dir)| path.starts_with(dir))
+            || self.lands(path).is_some_and(|path| {
+                self.resolved_secrets()
+                    .into_iter()
+                    .chain(self.resolved_credentials())
+                    .any(|dir| path.starts_with(dir))
+            })
     }
 
     /// Whether the absolute `path` leads to the file `file`.
@@ -609,6 +659,8 @@ pub(crate) mod testing {
 mod tests {
     use std::os::unix::fs::symlink;
 
+    use std::path::PathBuf;
+
     use super::testing::{home, relative};
     use super::{Named, expand_braces};
 
@@ -633,6 +685,47 @@ mod tests {
         for path in [".junees/sessions/s.jsonl", ".junees", "config.toml", "x"] {
             assert!(!file.is(&root.join(path)), "{path}");
         }
+    }
+
+    #[test]
+    fn knows_git_and_gh_credentials() {
+        let (_dir, root, file) = home();
+        std::fs::write(root.join(".git-credentials"), "https://u:t@github.com\n").unwrap();
+        std::fs::create_dir_all(root.join(".config/gh")).unwrap();
+        std::fs::write(root.join(".config/gh/hosts.yml"), "oauth_token: t\n").unwrap();
+        symlink(root.join(".git-credentials"), root.join("creds-link")).unwrap();
+        for path in [
+            ".git-credentials",
+            "creds-link",
+            ".config/gh",
+            ".config/gh/hosts.yml",
+            ".config/./gh/../gh/hosts.yml",
+            // Not there yet: writing it would plant a credential.
+            ".config/git/credentials",
+        ] {
+            assert!(file.is(&root.join(path)), "{path}");
+        }
+        for path in [".gitconfig", ".config", ".config/git/config"] {
+            assert!(!file.is(&root.join(path)), "{path}");
+        }
+        for word in [
+            "~/.git-credentials",
+            "$HOME/.config/gh/hosts.yml",
+            "~/.config/g?/hosts.yml",
+            "~/.git-cred*",
+            "~/.config/gh",
+        ] {
+            assert_eq!(file.names(word, Some(&root)), Some(Named::File), "{word}");
+        }
+        assert_eq!(file.names("~/.gitconfig", Some(&root)), None);
+        // $XDG_CONFIG_HOME's too, when set.
+        let xdg = root.join("xdg");
+        assert!(!file.is(&xdg.join("gh/hosts.yml")));
+        let file = file.with_config_home(Some(xdg.clone()));
+        assert!(file.is(&xdg.join("gh/hosts.yml")));
+        assert!(file.is(&xdg.join("git/credentials")));
+        let file = file.with_config_home(Some(PathBuf::from("relative")));
+        assert!(!file.is(&root.join("relative/gh")));
     }
 
     #[test]

@@ -31,7 +31,7 @@ use crate::provider::anthropic::AnthropicProvider;
 use crate::session::{self, SessionWriter};
 use crate::skills;
 use crate::task::budget::{format_duration, tokens};
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ToolSettings};
 
 /// Added to the system prompt of every job.
 pub const CRON_NOTE: &str = "\n\nYou are running a scheduled job (`junees cron`), \
@@ -47,10 +47,32 @@ pub enum Trigger<'a> {
     Cron,
     /// A request to webhook route `route`, which is anyone's text: only
     /// the writes both its `github_allow` and the user's list allow.
+    /// `gh_config` is the run's empty GitHub CLI configuration folder
+    /// ([`crate::tools::GhConfigDir`]).
     Webhook {
         route: &'a str,
         github_allow: &'a [crate::github::Write],
+        gh_config: &'a Path,
     },
+}
+
+impl Trigger<'_> {
+    /// The tool settings of a run with this trigger: a webhook run's bash
+    /// gets the webhook rules ([`ToolSettings::webhook`]) and the run's
+    /// GitHub CLI configuration folder.
+    pub fn tool_settings(&self, settings: &ToolSettings) -> ToolSettings {
+        match self {
+            Trigger::Cron => ToolSettings {
+                webhook: false,
+                ..settings.clone()
+            },
+            Trigger::Webhook { gh_config, .. } => ToolSettings {
+                webhook: true,
+                gh_config_dir: Some(gh_config.to_path_buf()),
+                ..settings.clone()
+            },
+        }
+    }
 }
 
 /// What one unattended run does.
@@ -199,6 +221,11 @@ fn failure_note(err: &anyhow::Error, deadline: &Deadline, limits: Limits) -> Str
 pub struct ApiEngine {
     config: Arc<Config>,
     provider: ProviderFactory,
+    /// Tests only: bash runs in the run's folder, in a sandbox there
+    /// ([`crate::tools::Bash::sandboxed`]). A real run's process is
+    /// already in that folder; a test's is in the crate.
+    #[cfg(test)]
+    sandbox: bool,
 }
 
 impl ApiEngine {
@@ -217,7 +244,19 @@ impl ApiEngine {
                 .with_web_search(settings.web_search.clone()),
             ) as Box<dyn Provider>)
         });
-        Self { config, provider }
+        Self {
+            config,
+            provider,
+            #[cfg(test)]
+            sandbox: false,
+        }
+    }
+
+    /// Runs bash in the run's folder with its user state there (tests).
+    #[cfg(test)]
+    pub fn sandboxed(mut self) -> Self {
+        self.sandbox = true;
+        self
     }
 
     /// Uses `provider` for the model calls (tests).
@@ -231,7 +270,12 @@ impl ApiEngine {
         let dir = spec.dir;
         let home = config.home.as_deref();
         let memory = home.map(|home| Memory::for_folder(home, dir, config.memory));
-        let mut tools = ToolRegistry::with_defaults(&config.tools);
+        let settings = spec.trigger.tool_settings(&config.tools);
+        let mut tools = ToolRegistry::with_defaults(&settings);
+        #[cfg(test)]
+        if self.sandbox {
+            tools.register(crate::tools::Bash::with_settings(&settings).sandboxed(dir));
+        }
         skills::register(&mut tools, home, false);
         mcp.register(&mut tools);
         match spec.trigger {
@@ -239,6 +283,7 @@ impl ApiEngine {
             Trigger::Webhook {
                 route,
                 github_allow,
+                ..
             } => crate::github::register_webhook(
                 &mut tools,
                 &config.github,
@@ -369,7 +414,7 @@ impl Engine for ClaudeEngine {
         let mut chat = Chat::new(
             self.claude.clone(),
             spec.dir.to_path_buf(),
-            config.tools.clone(),
+            spec.trigger.tool_settings(&config.tools),
             config.max_turns,
             cancel.clone(),
         );
@@ -492,7 +537,10 @@ mod tests {
                 delay,
             }) as Box<dyn Provider>)
         });
-        (ApiEngine::new(config).with_provider(provider), seen)
+        (
+            ApiEngine::new(config).with_provider(provider).sandboxed(),
+            seen,
+        )
     }
 
     fn limits() -> Limits {
@@ -606,6 +654,64 @@ mod tests {
         cancel.cancel();
         let outcome = slow.run(&job.spec(), &cancel, limits()).await;
         assert_eq!(outcome.note, "interrupted");
+    }
+
+    #[tokio::test]
+    async fn webhook_runs_refuse_git_push_in_bash() {
+        let home = tempfile::tempdir().unwrap();
+        let call = |id: &str| ContentBlock::ToolUse {
+            id: id.into(),
+            name: "bash".into(),
+            // A remote that does not exist: harmless should the rule fail.
+            input: serde_json::json!({"command": "git push /nonexistent-junees-remote HEAD:main"}),
+        };
+        let replies = || {
+            vec![
+                reply(vec![call("t1")], StopReason::ToolUse),
+                reply(vec![ContentBlock::text("done")], StopReason::EndTurn),
+            ]
+        };
+        let allow: &[crate::github::Write] = &[];
+        let webhook = Spec {
+            prompt: "push it",
+            dir: home.path(),
+            source: session::WEBHOOK,
+            channel: "flow",
+            note: "",
+            trigger: Trigger::Webhook {
+                route: "flow",
+                github_allow: allow,
+                gh_config: Path::new("/run/gh-config"),
+            },
+        };
+        let (engine, _) = self::engine(home.path(), replies(), Duration::ZERO);
+        let outcome = engine.run(&webhook, &Cancel::new(), limits()).await;
+        assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
+        let session = outcome.session.unwrap();
+        let path = session::sessions_dir(home.path()).join(format!("{session}.jsonl"));
+        let journal = std::fs::read_to_string(path).unwrap();
+        assert!(
+            journal.contains(
+                "blocked by policy: `git push` is not allowed: this run was started by a webhook"
+            ),
+            "{journal}"
+        );
+        // A scheduled job's tools keep the user's settings.
+        let settings = ToolSettings::default();
+        let webhook = Trigger::Webhook {
+            route: "flow",
+            github_allow: allow,
+            gh_config: Path::new("/run/gh-config"),
+        }
+        .tool_settings(&settings);
+        assert!(webhook.webhook);
+        assert_eq!(
+            webhook.gh_config_dir.as_deref(),
+            Some(Path::new("/run/gh-config"))
+        );
+        let cron = Trigger::Cron.tool_settings(&settings);
+        assert!(!cron.webhook);
+        assert_eq!(cron.gh_config_dir, None);
     }
 
     #[test]

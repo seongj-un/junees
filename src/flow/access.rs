@@ -5,11 +5,13 @@
 //! address step.
 //!
 //! A review counts when its author is one of the route's `--approver`
-//! logins, or, without that list, when the review's `author_association`
-//! is OWNER, MEMBER or COLLABORATOR and
-//! `GET /repos/{repo}/collaborators/{user}/permission` says write,
-//! maintain or admin now (the association is the one at review time). The
-//! answer is kept for the run.
+//! logins, or when the review's `author_association` is OWNER, MEMBER or
+//! COLLABORATOR and `GET /repos/{repo}/collaborators/{user}/permission`
+//! says write, maintain or admin now (the association is the one at review
+//! time). The answer is kept for the run. `--approver` only narrows whose
+//! approvals count toward the number needed ([`Access::approves`]): like
+//! branch protection, a change request of anyone with write access still
+//! blocks the merge and starts the address step.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -43,17 +45,30 @@ impl<'a> Access<'a> {
         }
     }
 
-    /// Whether the reviews of `login` count; `association` is the
-    /// review's `author_association`. `Err` when GitHub cannot say.
+    /// Whether `login` is one of the `--approver` logins.
+    fn listed(&self, login: &str) -> bool {
+        self.approvers
+            .iter()
+            .any(|approver| approver.eq_ignore_ascii_case(login))
+    }
+
+    /// Whether an approval by `login`, whose reviews [`Access::counts`],
+    /// counts toward the approvals needed: without `--approver` every such
+    /// approval does, with it only the listed logins'.
+    pub fn approves(&self, login: &str) -> bool {
+        self.approvers.is_empty() || self.listed(login)
+    }
+
+    /// Whether the reviews (approvals, change requests, dismissals) of
+    /// `login` count: an `--approver`, or someone with write access;
+    /// `association` is the review's `author_association`. `Err` when
+    /// GitHub cannot say.
     pub async fn counts(&self, login: &str, association: &str) -> Result<bool, String> {
         if login.is_empty() {
             return Ok(false);
         }
-        if !self.approvers.is_empty() {
-            return Ok(self
-                .approvers
-                .iter()
-                .any(|approver| approver.eq_ignore_ascii_case(login)));
+        if self.listed(login) {
+            return Ok(true);
         }
         if !WRITE_ASSOCIATIONS.contains(&association.to_ascii_uppercase().as_str()) {
             return Ok(false);

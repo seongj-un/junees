@@ -106,11 +106,13 @@ pub fn prompt(route: &Route, incoming: &Incoming) -> Result<String> {
 }
 
 /// Runs `prompt` for `route` with `engine` (already in the route's
-/// folder).
+/// folder); `gh_config` is the run's empty GitHub CLI configuration folder
+/// ([`crate::tools::GhConfigDir`]).
 pub async fn execute(
     engine: &dyn Engine,
     route: &Route,
     prompt: &str,
+    gh_config: &Path,
     cancel: &Cancel,
     limits: Limits,
 ) -> Outcome {
@@ -123,6 +125,7 @@ pub async fn execute(
         trigger: Trigger::Webhook {
             route: &route.name,
             github_allow: &route.github_allow,
+            gh_config,
         },
     };
     engine.run(&spec, cancel, limits).await
@@ -390,7 +393,8 @@ mod tests {
             max_time: std::time::Duration::from_secs(60),
             max_tokens: 0,
         };
-        let outcome = execute(&engine, &route, &prompt, &Cancel::new(), limits).await;
+        let gh = crate::tools::GhConfigDir::new().unwrap();
+        let outcome = execute(&engine, &route, &prompt, gh.path(), &Cancel::new(), limits).await;
         assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
         assert_eq!(outcome.answer, "리뷰 끝");
 
@@ -537,7 +541,16 @@ mod tests {
         let (engine, last) = github_engine(home.path(), &url);
         let mut route = route.clone();
         route.dir = home.path().to_path_buf();
-        let outcome = execute(&engine, &route, "comment on #7", &Cancel::new(), limits()).await;
+        let gh = crate::tools::GhConfigDir::new().unwrap();
+        let outcome = execute(
+            &engine,
+            &route,
+            "comment on #7",
+            gh.path(),
+            &Cancel::new(),
+            limits(),
+        )
+        .await;
         assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
         let requests = seen.lock().unwrap().iter().map(|r| r.0.clone()).collect();
         let result = last.lock().unwrap()[1].clone();

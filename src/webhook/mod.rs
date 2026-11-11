@@ -194,6 +194,12 @@ fn flow_settings(flow: &crate::flow::FlowConfig) -> String {
             parts.push("own review counts".to_string());
         }
     }
+    if !flow.required_checks.is_empty() {
+        parts.push(format!(
+            "required checks {}",
+            escape_hidden(&flow.required_checks.join(", "))
+        ));
+    }
     if !flow.approvers.is_empty() {
         parts.push(format!("approvers {}", flow.approvers.join(",")));
     }

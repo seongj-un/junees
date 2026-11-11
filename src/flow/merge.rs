@@ -7,20 +7,26 @@
 //! 1. it is open and not a draft;
 //! 2. its head is still the commit the event was about;
 //! 3. it has at least one check (check run or commit status) and every
-//!    one passed (`success`, `neutral`, `skipped`);
-//! 4. no reviewer's last review (APPROVED, CHANGES_REQUESTED or DISMISSED;
+//!    one passed (`success`, `neutral`, `skipped`), and every
+//!    `--require-check` is there and ended `success`;
+//! 4. it changes nothing under `.github/` (workflows, the actions and
+//!    settings they use in the repository: such a pull request could write
+//!    its own passing checks; the flow comments instead);
+//! 5. no reviewer's last review (APPROVED, CHANGES_REQUESTED or DISMISSED;
 //!    comments do not count) requests changes;
-//! 5. the flow's own last review of the head commit, if there is one,
+//! 6. the flow's own last review of the head commit, if there is one,
 //!    says "머지 가능" with no 필수 item;
-//! 6. at least `--min-approvals` reviewers approved the head commit, or,
+//! 7. at least `--min-approvals` reviewers approved the head commit, or,
 //!    with `--allow-self-review`, the flow's own last review of the head
 //!    commit says "머지 가능" with no 필수 item;
-//! 7. GitHub says it is mergeable (`true`; `null` means not computed yet).
+//! 8. GitHub says it is mergeable (`true`; `null` means not computed yet).
 //!
 //! Approvals of older commits do not count: the address step pushes
 //! commits no person has seen. Only the reviews of people with write
 //! access (or of the route's `--approver` logins) count, approvals and
-//! change requests alike ([`super::access`]).
+//! change requests alike ([`super::access`]); with `--approver`, only the
+//! listed logins' approvals count toward `--min-approvals`, while anyone
+//! with write access still blocks with a change request.
 
 use std::collections::BTreeMap;
 
@@ -34,8 +40,14 @@ use crate::github::Client;
 
 /// Check conclusions that pass.
 const PASSING: &[&str] = &["success", "neutral", "skipped"];
-/// Reviews and check runs read at most.
+/// Reviews, check runs and changed files read at most.
 const MAX_ITEMS: usize = 300;
+/// GitHub's folder: Actions workflows, and the composite actions,
+/// scripts and settings a workflow may use from the repository
+/// (`uses: ./.github/actions/x`).
+pub const GITHUB_DIR: &str = ".github/";
+/// The name of the condition on files under [`GITHUB_DIR`].
+pub const GITHUB_CONDITION: &str = ".github";
 
 /// A check run or commit status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +68,10 @@ pub struct ReviewFact {
     /// Whether the reviewer's approvals and change requests count (write
     /// access, or an `--approver`).
     pub counts: bool,
+    /// Whether the reviewer's approval counts toward `--min-approvals`
+    /// (it counts, and there is no `--approver` list or the reviewer is on
+    /// it).
+    pub approver: bool,
 }
 
 /// What the merge step reads about a pull request.
@@ -68,6 +84,10 @@ pub struct Facts {
     pub checks: Vec<Check>,
     /// Oldest first.
     pub reviews: Vec<ReviewFact>,
+    /// The changed files under [`GITHUB_DIR`] (new or old name).
+    pub github_files: Vec<String>,
+    /// More files changed than were read: changes under `.github/` unknown.
+    pub more_files: bool,
 }
 
 /// One condition and whether it holds.
@@ -151,9 +171,54 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
             format!("not passed: {}", names.join(", "))
         },
     ));
+    if !config.required_checks.is_empty() {
+        let mut wrong = Vec::new();
+        for name in &config.required_checks {
+            let found: Vec<&Check> = facts
+                .checks
+                .iter()
+                .filter(|check| check.name == *name)
+                .collect();
+            if found.is_empty() {
+                wrong.push(format!("{name} missing"));
+            } else if let Some(check) = found.iter().find(|check| check.outcome != "success") {
+                wrong.push(format!("{name} {}", check.outcome));
+            }
+        }
+        out.push(condition(
+            "required checks",
+            wrong.is_empty(),
+            if wrong.is_empty() {
+                format!("{} succeeded", config.required_checks.join(", "))
+            } else {
+                format!("not succeeded: {}", wrong.join(", "))
+            },
+        ));
+    }
+    out.push(condition(
+        GITHUB_CONDITION,
+        facts.github_files.is_empty() && !facts.more_files,
+        if !facts.github_files.is_empty() {
+            let mut shown: Vec<String> = facts
+                .github_files
+                .iter()
+                .take(5)
+                .map(|file| crate::prompt_text::escape_hidden(file))
+                .collect();
+            if facts.github_files.len() > 5 {
+                shown.push(format!("{} more", facts.github_files.len() - 5));
+            }
+            format!("changes {}", shown.join(", "))
+        } else if facts.more_files {
+            format!("more than {MAX_ITEMS} files changed; not read")
+        } else {
+            format!("no change under {GITHUB_DIR}")
+        },
+    ));
     // Per reviewer the last review that sets a state, of the reviewers
     // whose reviews count.
     let mut last: BTreeMap<&str, &ReviewFact> = BTreeMap::new();
+    // Reviewers whose reviews do not count at all.
     let mut ignored: Vec<&str> = Vec::new();
     for review in &facts.reviews {
         if matches!(
@@ -183,7 +248,15 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
     ));
     let approvers: Vec<&str> = last
         .values()
-        .filter(|review| review.state == "APPROVED" && review.commit == facts.head_sha)
+        .filter(|review| {
+            review.state == "APPROVED" && review.commit == facts.head_sha && review.approver
+        })
+        .map(|review| review.user.as_str())
+        .collect();
+    // Approvals that block nothing but are not an --approver's.
+    let unlisted: Vec<&str> = last
+        .values()
+        .filter(|review| review.state == "APPROVED" && !review.approver)
         .map(|review| review.user.as_str())
         .collect();
     let enough = approvers.len() >= config.min_approvals as usize;
@@ -213,14 +286,15 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
     if !approvers.is_empty() {
         detail.push_str(&format!(" ({})", approvers.join(", ")));
     }
+    if !unlisted.is_empty() {
+        detail.push_str(&format!(
+            "; not counted (not an --approver): {}",
+            unlisted.join(", ")
+        ));
+    }
     if !ignored.is_empty() {
         detail.push_str(&format!(
-            "; not counted ({}): {}",
-            if config.approvers.is_empty() {
-                "no write access"
-            } else {
-                "not an --approver"
-            },
+            "; not counted (no write access): {}",
             ignored.join(", ")
         ));
     }
@@ -341,15 +415,29 @@ pub async fn facts(
             }
             _ => false,
         };
+        let approver = counts && access.approves(&user);
         facts.push(ReviewFact {
             user,
             state,
             commit: text(&review["commit_id"]),
             body: text(&review["body"]),
             counts,
+            approver,
         });
     }
     let reviews = facts;
+    let files = client
+        .list(&format!("repos/{repo}/pulls/{n}/files"), None, MAX_ITEMS)
+        .await?;
+    let mut github_files: Vec<String> = Vec::new();
+    for file in &files.items {
+        for key in ["filename", "previous_filename"] {
+            let name = text(&file[key]);
+            if name.starts_with(GITHUB_DIR) && !github_files.contains(&name) {
+                github_files.push(name);
+            }
+        }
+    }
     Ok(Facts {
         open: pr["state"].as_str() == Some("open") && pr["merged"].as_bool() != Some(true),
         draft: pr["draft"].as_bool() == Some(true),
@@ -357,6 +445,8 @@ pub async fn facts(
         mergeable: pr["mergeable"].as_bool(),
         checks,
         reviews,
+        github_files,
+        more_files: files.more,
     })
 }
 
@@ -392,6 +482,7 @@ mod tests {
             commit: commit.into(),
             body: body.into(),
             counts: true,
+            approver: true,
         }
     }
 
@@ -412,6 +503,8 @@ mod tests {
                 },
             ],
             reviews: vec![review("alice", "APPROVED", HEAD, "")],
+            github_files: Vec::new(),
+            more_files: false,
         }
     }
 
@@ -584,6 +677,7 @@ mod tests {
         facts.checks.truncate(1);
         let mut drive_by = review("drive-by-account", "APPROVED", HEAD, "");
         drive_by.counts = false;
+        drive_by.approver = false;
         facts.reviews = vec![
             review(
                 "junees-bot",
@@ -615,18 +709,86 @@ mod tests {
         let mut facts = green();
         let mut request = review("mallory", "CHANGES_REQUESTED", HEAD, "### 필수\n- x\n");
         request.counts = false;
+        request.approver = false;
         facts.reviews.push(request);
         assert!(failing(&facts, &config).is_empty());
-        // The wording follows --approver.
+        // With --approver, the approval of someone with write access who
+        // is not listed blocks nothing and does not count.
         let listed = FlowConfig {
             approvers: vec!["alice".into()],
             ..config.clone()
         };
-        let detail = missing(&conditions(&probe(), HEAD, &listed, "junees-bot"));
-        assert!(
-            detail.contains("not counted (not an --approver)"),
-            "{detail}"
+        let mut facts = green();
+        facts.reviews[0].approver = false;
+        let detail = missing(&conditions(&facts, HEAD, &listed, "junees-bot"));
+        assert_eq!(
+            detail,
+            "approvals: 0 of 1 on the head commit; not counted (not an --approver): alice"
         );
+        // A change request of such a reviewer blocks: --approver narrows
+        // only whose approvals count.
+        let mut request = review("bob", "CHANGES_REQUESTED", HEAD, "");
+        request.approver = false;
+        facts.reviews = vec![review("alice", "APPROVED", HEAD, ""), request];
+        assert_eq!(failing(&facts, &listed), ["changes requested"]);
+    }
+
+    #[test]
+    fn required_checks_must_be_there_and_succeed() {
+        let config = FlowConfig {
+            required_checks: vec!["ci".into(), "test (ubuntu, stable)".into()],
+            ..super::super::config("o/n")
+        };
+        let mut facts = green();
+        // `test (ubuntu, stable)` is not there; `lint` (skipped) is not
+        // required.
+        let list = conditions(&facts, HEAD, &config, "junees-bot");
+        assert_eq!(
+            missing(&list),
+            "required checks: not succeeded: test (ubuntu, stable) missing"
+        );
+        facts.checks.push(Check {
+            name: "test (ubuntu, stable)".into(),
+            outcome: "success".into(),
+        });
+        assert!(failing(&facts, &config).is_empty());
+        // Neutral and skipped pass as checks but not as required ones.
+        for outcome in ["neutral", "skipped"] {
+            facts.checks[0].outcome = outcome.into();
+            let list = conditions(&facts, HEAD, &config, "junees-bot");
+            assert_eq!(
+                missing(&list),
+                format!("required checks: not succeeded: ci {outcome}")
+            );
+        }
+        // A second run of the same name that failed counts.
+        facts.checks[0].outcome = "success".into();
+        facts.checks.push(Check {
+            name: "ci".into(),
+            outcome: "skipped".into(),
+        });
+        assert_eq!(failing(&facts, &config), ["required checks"]);
+        // Without --require-check the condition is not there.
+        let plain = super::super::config("o/n");
+        assert!(
+            !conditions(&facts, HEAD, &plain, "junees-bot")
+                .iter()
+                .any(|condition| condition.name == "required checks")
+        );
+    }
+
+    #[test]
+    fn changes_under_dot_github_are_not_merged() {
+        let config = super::super::config("o/n");
+        let mut facts = green();
+        facts.github_files = vec![".github/workflows/ci.yml".into()];
+        let list = conditions(&facts, HEAD, &config, "junees-bot");
+        assert_eq!(missing(&list), ".github: changes .github/workflows/ci.yml");
+        facts.github_files.clear();
+        facts.more_files = true;
+        assert_eq!(failing(&facts, &config), [GITHUB_CONDITION]);
+        facts.more_files = false;
+        assert!(failing(&facts, &config).is_empty());
     }
 
     #[test]

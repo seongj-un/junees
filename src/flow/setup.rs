@@ -34,6 +34,8 @@ pub struct AddGithubArgs {
     pub max_runs_per_hour: Option<String>,
     /// `--approver` values as given (repeatable, comma-separated).
     pub approvers: Vec<String>,
+    /// `--require-check` values (repeatable; names may hold commas).
+    pub required_checks: Vec<String>,
 }
 
 /// A flow route just added.
@@ -94,6 +96,7 @@ pub fn add(store: &Store, lookup: &Lookup, args: AddGithubArgs, now: i64) -> Res
             super::DEFAULT_RUNS_PER_HOUR,
         )?,
         approvers: list(&args.approvers),
+        required_checks: args.required_checks.clone(),
     };
     flow.check()?;
     if flow.allow_self_review && !(flow.merge_when_ready && flow.review) {
@@ -471,6 +474,17 @@ mod tests {
             (
                 Box::new(|a: &mut AddGithubArgs| a.approvers = vec!["alice".into()]),
                 "--approver is for",
+            ),
+            (
+                Box::new(|a: &mut AddGithubArgs| a.required_checks = vec!["ci".into()]),
+                "--require-check is for",
+            ),
+            (
+                Box::new(|a: &mut AddGithubArgs| {
+                    a.merge_when_ready = true;
+                    a.required_checks = vec![" ".into()];
+                }),
+                "--require-check takes a check name",
             ),
             (
                 Box::new(|a: &mut AddGithubArgs| a.deliver = Some("slack".into())),
