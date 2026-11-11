@@ -59,106 +59,127 @@ const EXECUTES: &[&str] = &[".run(", "dispatch(", ".output()", ".spawn()"];
 /// the sandbox (`git push` is checked as two words).
 const RISKY: &[&str] = &["rm", "gh", "curl", "junees"];
 
-/// Tests that run commands through a real bash outside the sandbox, as
-/// (file, test, its command). Each command is harmless should a policy
-/// rule break; these tests may not run anything in [`RISKY`].
-/// An empty command: the test builds the default tools but its model calls
-/// no bash, or it calls bash without a command.
-pub(super) const UNSANDBOXED: &[(&str, &str, &str)] = &[
-    ("src/tools/bash.rs", "captures_stdout_and_exit_code", "echo"),
+/// A test that runs commands through a real bash outside the sandbox:
+/// (file, module path of the test in that file, its command). `None`
+/// says the test runs no command (it builds the default tools but its
+/// model calls no bash, or it calls bash without a command); the scan
+/// fails once its strings show a command.
+type Unsandboxed = (&'static str, &'static str, Option<&'static str>);
+
+/// The tests that run commands through a real bash outside the sandbox.
+/// Each command is harmless should a policy rule break; these tests may
+/// not run anything in [`RISKY`].
+pub(super) const UNSANDBOXED: &[Unsandboxed] = &[
     (
         "src/tools/bash.rs",
-        "nonzero_exit_is_an_error_with_stderr",
-        "echo",
-    ),
-    ("src/tools/bash.rs", "timeout_keeps_partial_output", "sleep"),
-    (
-        "src/tools/bash.rs",
-        "timeout_kills_the_whole_process_group",
-        "sleep",
+        "tests::captures_stdout_and_exit_code",
+        Some("echo"),
     ),
     (
         "src/tools/bash.rs",
-        "dropping_the_call_kills_the_whole_process_group",
-        "sleep",
+        "tests::nonzero_exit_is_an_error_with_stderr",
+        Some("echo"),
     ),
     (
         "src/tools/bash.rs",
-        "background_processes_do_not_block_the_call",
-        "sleep",
+        "tests::timeout_keeps_partial_output",
+        Some("sleep"),
     ),
-    ("src/tools/bash.rs", "huge_output_is_bounded", "head -c"),
     (
         "src/tools/bash.rs",
-        "hidden_env_vars_are_removed",
-        "printenv",
+        "tests::timeout_kills_the_whole_process_group",
+        Some("sleep"),
     ),
-    ("src/tools/bash.rs", "stdin_is_closed", "cat"),
-    ("src/tools/bash.rs", "missing_command_is_an_error", ""),
+    (
+        "src/tools/bash.rs",
+        "tests::dropping_the_call_kills_the_whole_process_group",
+        Some("sleep"),
+    ),
+    (
+        "src/tools/bash.rs",
+        "tests::background_processes_do_not_block_the_call",
+        Some("sleep"),
+    ),
+    (
+        "src/tools/bash.rs",
+        "tests::huge_output_is_bounded",
+        Some("head -c"),
+    ),
+    (
+        "src/tools/bash.rs",
+        "tests::hidden_env_vars_are_removed",
+        Some("printenv"),
+    ),
+    ("src/tools/bash.rs", "tests::stdin_is_closed", Some("cat")),
+    (
+        "src/tools/bash.rs",
+        "tests::missing_command_is_an_error",
+        None,
+    ),
     (
         "src/tools/mod.rs",
-        "defaults_apply_the_command_settings",
-        "shutdown() {",
+        "tests::defaults_apply_the_command_settings",
+        Some("shutdown() {"),
     ),
     (
         "src/agent.rs",
-        "cancelling_a_running_tool_stops_it_and_the_next_input_works",
-        "sleep",
+        "tests::cancelling_a_running_tool_stops_it_and_the_next_input_works",
+        Some("sleep"),
     ),
     (
         "tests/anthropic_client.rs",
         "agent_runs_bash_through_the_real_client",
-        "echo junees-e2e",
+        Some("echo junees-e2e"),
     ),
     (
         "tests/anthropic_client.rs",
         "thinking_blocks_go_back_with_the_tool_results_unchanged",
-        "echo junees-think",
+        Some("echo junees-think"),
     ),
     (
         "tests/context_management.rs",
         "clears_then_compacts_over_the_threshold_and_replays",
-        "echo junees-a",
+        Some("echo junees-a"),
     ),
     (
         "tests/hidden_env.rs",
         "junees_hidden_env_hides_extra_variables_from_bash",
-        "printenv",
+        Some("printenv"),
     ),
     (
         "tests/secret_env.rs",
         "default_bash_cannot_read_the_api_key",
-        "printenv",
+        Some("printenv"),
     ),
     (
         "tests/task_git_env.rs",
         "git_dir_in_the_environment_does_not_redirect_task_mode",
-        "git log",
+        Some("git log"),
     ),
     (
         "tests/web_search.rs",
         "a_paused_search_turn_goes_on_and_its_blocks_go_back_unchanged",
-        "",
+        None,
     ),
     (
         "tests/web_search.rs",
         "the_same_holds_for_a_streamed_turn",
-        "",
+        None,
     ),
     (
         "tests/web_search.rs",
         "going_on_after_the_pause_limit_with_search_off_sends_no_open_search",
-        "",
+        None,
     ),
 ];
 
-/// Test helpers that push with git itself, as (file, name). Each
+/// Test helpers that push with git itself, as (file, module path). Each
 /// pushes only from a repository in the system temp folder to a bare
 /// repository there named by its path (so no remote or upstream counts),
 /// and checks both paths before running git: its text must name every
 /// check of [`SAFE_PUSH_CHECKS`]. The scan does not follow them, so a test
 /// may push through them and nowhere else.
-const SAFE_PUSH: &[(&str, &str)] = &[("src/flow/address.rs", "push_to_temp_bare")];
+const SAFE_PUSH: &[(&str, &str)] = &[("src/flow/address.rs", "tests::push_to_temp_bare")];
 
 /// What a [`SAFE_PUSH`] helper must check.
 const SAFE_PUSH_CHECKS: &[&str] = &["temp_dir()", "CARGO_MANIFEST_DIR"];
@@ -169,29 +190,46 @@ struct Item {
     line: usize,
     indent: usize,
     name: Option<String>,
+    /// The name with the modules around it in its file (`tests::name`).
+    path: Option<String>,
     test: bool,
     text: String,
 }
 
 impl Item {
-    fn new(line: usize, indent: usize, name: Option<String>, test: bool) -> Self {
+    fn new(line: usize, indent: usize, test: bool) -> Self {
         Self {
             line,
             indent,
-            name,
+            name: None,
+            path: None,
             test,
             text: String::new(),
         }
     }
 
+    fn named(mut self, name: String, modules: &[(usize, String)]) -> Self {
+        self.set_name(name, modules);
+        self
+    }
+
+    fn set_name(&mut self, name: String, modules: &[(usize, String)]) {
+        let mut path: Vec<&str> = modules.iter().map(|(_, module)| module.as_str()).collect();
+        path.push(&name);
+        self.path = Some(path.join("::"));
+        self.name = Some(name);
+    }
+
     fn label(&self) -> &str {
-        self.name.as_deref().unwrap_or("?")
+        self.path.as_deref().unwrap_or("?")
     }
 }
 
 enum Start {
     Test,
     Named(String),
+    /// A module with its body here (`mod name {`).
+    Module(String),
     Other,
 }
 
@@ -205,6 +243,11 @@ fn start(trimmed: &str) -> Option<Start> {
         if let Some(after) = rest.strip_prefix(visibility) {
             rest = after;
         }
+    }
+    if let Some(after) = rest.strip_prefix("mod ")
+        && let Some(name) = after.strip_suffix('{')
+    {
+        return Some(Start::Module(name.trim().to_string()));
     }
     for keyword in ["async fn ", "const fn ", "fn ", "const ", "static "] {
         if let Some(after) = rest.strip_prefix(keyword) {
@@ -229,30 +272,50 @@ fn start(trimmed: &str) -> Option<Start> {
 }
 
 /// Splits source text into items. Items nested deeper than the current
-/// one (a function inside a test) stay part of it.
+/// one (a function inside a test) stay part of it; lines inside a string
+/// literal start nothing.
 fn items(text: &str) -> Vec<Item> {
+    let in_literal = lex(text).1;
     let mut done = Vec::new();
     let mut current: Option<Item> = None;
+    // The modules around the line, as (indent, name).
+    let mut modules: Vec<(usize, String)> = Vec::new();
     for (number, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
+        let code = !in_literal.get(number).copied().unwrap_or(false) && !trimmed.is_empty();
+        if code && trimmed.starts_with('}') {
+            // A module ends with its closing brace at its own indent.
+            if modules.last().is_some_and(|(at, _)| *at == indent) {
+                done.extend(current.take());
+                modules.pop();
+            }
+        }
         let nested = current.as_ref().is_some_and(|item| indent > item.indent);
-        if !nested && let Some(kind) = start(trimmed) {
+        if code
+            && !nested
+            && let Some(kind) = start(trimmed)
+        {
+            modules.retain(|(at, _)| *at < indent);
             match kind {
                 Start::Test => {
                     done.extend(current.take());
-                    current = Some(Item::new(number + 1, indent, None, true));
+                    current = Some(Item::new(number + 1, indent, true));
                 }
                 Start::Named(name) => match current.as_mut() {
                     // The function under a test attribute.
                     Some(item) if item.test && item.name.is_none() && item.indent == indent => {
-                        item.name = Some(name)
+                        item.set_name(name, &modules)
                     }
                     _ => {
                         done.extend(current.take());
-                        current = Some(Item::new(number + 1, indent, Some(name), false));
+                        current = Some(Item::new(number + 1, indent, false).named(name, &modules));
                     }
                 },
+                Start::Module(name) => {
+                    done.extend(current.take());
+                    modules.push((indent, name));
+                }
                 Start::Other => done.extend(current.take()),
             }
         }
@@ -268,12 +331,32 @@ fn items(text: &str) -> Vec<Item> {
 /// The contents of the string literals in Rust source text, unescaped,
 /// one per line. Comments and code are left out.
 fn literals(text: &str) -> String {
+    lex(text).0
+}
+
+/// Reads Rust source text like the compiler: the contents of its string
+/// literals (unescaped, one per line), and for each line whether it
+/// starts inside a string literal.
+fn lex(text: &str) -> (String, Vec<bool>) {
     let chars: Vec<char> = text.chars().collect();
     let at = |i: usize| chars.get(i).copied();
     let mut out = String::new();
+    let mut in_literal = vec![false; text.lines().count() + 1];
+    let mut line = 0;
+    // A line break inside a literal: the next line starts in it.
+    let mut broken = |line: &mut usize| {
+        *line += 1;
+        if let Some(mark) = in_literal.get_mut(*line) {
+            *mark = true;
+        }
+    };
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
+            '\n' => {
+                line += 1;
+                i += 1;
+            }
             '/' if at(i + 1) == Some('/') => {
                 while i < chars.len() && chars[i] != '\n' {
                     i += 1;
@@ -313,6 +396,9 @@ fn literals(text: &str) -> String {
                 while j < chars.len()
                     && !(chars[j] == '"' && (1..=hashes).all(|k| at(j + k) == Some('#')))
                 {
+                    if chars[j] == '\n' {
+                        broken(&mut line);
+                    }
                     out.push(chars[j]);
                     j += 1;
                 }
@@ -327,8 +413,12 @@ fn literals(text: &str) -> String {
                             // A line continuation drops the next line's
                             // leading space.
                             Some('\n') => {
+                                broken(&mut line);
                                 i += 2;
-                                while at(i).is_some_and(char::is_whitespace) {
+                                while let Some(space) = at(i).filter(|c| c.is_whitespace()) {
+                                    if space == '\n' {
+                                        broken(&mut line);
+                                    }
                                     i += 1;
                                 }
                                 continue;
@@ -341,6 +431,9 @@ fn literals(text: &str) -> String {
                         i += 2;
                         continue;
                     }
+                    if chars[i] == '\n' {
+                        broken(&mut line);
+                    }
                     out.push(chars[i]);
                     i += 1;
                 }
@@ -350,7 +443,7 @@ fn literals(text: &str) -> String {
             _ => i += 1,
         }
     }
-    out
+    (out, in_literal)
 }
 
 /// The simple commands of command text: lines cut at `;`, `&`, `|`, `(`,
@@ -497,6 +590,14 @@ fn git_arguments_push(code: &str, strings: &str) -> bool {
     RUNS_GIT.iter().any(|mark| code.contains(mark)) && strings.lines().any(|s| s.trim() == "push")
 }
 
+/// Whether the strings of a test show it running a command: a bash input
+/// with a `command` field.
+fn runs_a_command(strings: &str) -> bool {
+    strings
+        .lines()
+        .any(|line| line == "command" || line.contains("\"command\""))
+}
+
 /// The first program of [`RISKY`] (or `git push`) named in `text`.
 fn risky(text: &str) -> Option<String> {
     simple_commands(text).find_map(|command| {
@@ -585,7 +686,7 @@ fn test_code(path: &str, text: &str) -> String {
 /// Scans `files` (path relative to the crate, text) and returns what it
 /// found. `allowed` lists the tests that may run a real bash outside the
 /// sandbox ([`UNSANDBOXED`]).
-fn scan(files: &[(String, String)], allowed: &[(&str, &str, &str)]) -> Vec<String> {
+fn scan(files: &[(String, String)], allowed: &[Unsandboxed]) -> Vec<String> {
     let common: Vec<Item> = files
         .iter()
         .find(|(path, _)| path == "tests/common/mod.rs")
@@ -653,12 +754,17 @@ fn scan(files: &[(String, String)], allowed: &[(&str, &str, &str)]) -> Vec<Strin
             }
             let listed = allowed
                 .iter()
-                .find(|(file, test, _)| file == path && Some(*test) == item.name.as_deref());
+                .find(|(file, test, _)| file == path && *test == item.label());
             match listed {
-                Some((_, _, command)) if strings.contains(command) => {}
-                Some((_, _, command)) => found.push(format!(
+                Some((_, _, Some(command))) if strings.contains(command) => {}
+                Some((_, _, Some(command))) => found.push(format!(
                     "{at} is listed as running `{command}`, which it no longer does"
                 )),
+                Some((_, _, None)) if runs_a_command(&strings) => found.push(format!(
+                    "{at} is listed as running no command, but it runs one: list it \
+                     with its harmless command"
+                )),
+                Some((_, _, None)) => {}
                 None => found.push(format!(
                     "{at} runs a real bash outside the sandbox: use `Bash::for_test` \
                      or `.sandboxed`, or list it in UNSANDBOXED with its harmless command"
@@ -856,7 +962,7 @@ mod tests {
     );
     let found = scan(&runner, &[]);
     assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].starts_with("src/sample.rs:4 `wipe`"));
+    assert!(found[0].starts_with("src/sample.rs:4 `tests::wipe`"));
 
     // The same command checked by the policy alone, or only in a comment.
     let policy_only = sample(
@@ -900,7 +1006,7 @@ mod tests {{
             ),
         )
     };
-    let listed = [("src/sample.rs", "runs_it", "echo")];
+    let listed = [("src/sample.rs", "tests::runs_it", Some("echo"))];
     // Sandboxed: anything goes, as far as this rule is concerned.
     for build in ["Bash::for_test(dir)", "Bash::default().sandboxed(dir)"] {
         assert_eq!(scan(&file("curl https://x.invalid", build), &[]).len(), 0);
@@ -937,7 +1043,7 @@ mod tests {{
     let found = scan(&file("printenv HOME", "Bash::default()"), &listed);
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("no longer"), "{found:?}");
-    let stale = [("src/sample.rs", "gone", "echo")];
+    let stale = [("src/sample.rs", "tests::gone", Some("echo"))];
     let found = scan(&file("echo hi", "Bash::for_test(dir)"), &stale);
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("UNSANDBOXED lists"), "{found:?}");
@@ -967,7 +1073,7 @@ mod tests {
     assert!(
         found
             .iter()
-            .any(|line| line.contains("`schedules` runs `junees`")),
+            .any(|line| line.contains("`tests::schedules` runs `junees`")),
         "{found:?}"
     );
 }
@@ -1183,7 +1289,7 @@ mod tests {{
     // A push next to the helper still counts.
     let found = scan(&file(checked, r#"sh_git(dir, &["push", "origin"]);"#), &[]);
     assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("`seeds_a_remote` runs `git push` itself"));
+    assert!(found[0].contains("`tests::seeds_a_remote` runs `git push` itself"));
     // A helper of the same name elsewhere is not trusted.
     let mut elsewhere = file(checked, "");
     elsewhere[0].0 = "src/flow/other.rs".to_string();
@@ -1191,7 +1297,7 @@ mod tests {{
     assert!(
         found
             .iter()
-            .any(|line| line.contains("`push_to_temp_bare` runs `git push` itself")),
+            .any(|line| line.contains("`tests::push_to_temp_bare` runs `git push` itself")),
         "{found:?}"
     );
     // The entry goes stale with the helper.
@@ -1199,4 +1305,79 @@ mod tests {{
     let found = scan(&gone, &[]);
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("SAFE_PUSH lists"), "{found:?}");
+}
+
+#[test]
+fn allow_list_entries_name_the_module_path() {
+    let files = sample(
+        "src/sample.rs",
+        r##"
+#[cfg(test)]
+mod tests {
+    const SAMPLE: &str = r#"{
+}
+"#;
+
+    mod a {
+        #[tokio::test]
+        async fn runs_it() {
+            Bash::default().run(json!({"command": "echo a"})).await;
+        }
+    }
+
+    mod b {
+        #[tokio::test]
+        async fn runs_it() {
+            Bash::default().run(json!({"command": "echo b"})).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn runs_it() {
+        Bash::default().run(json!({"command": "echo c"})).await;
+    }
+}
+"##,
+    );
+    let all: [Unsandboxed; 3] = [
+        ("src/sample.rs", "tests::a::runs_it", Some("echo a")),
+        ("src/sample.rs", "tests::b::runs_it", Some("echo b")),
+        // After a string with a brace at the module's indent.
+        ("src/sample.rs", "tests::runs_it", Some("echo c")),
+    ];
+    assert_eq!(scan(&files, &all), Vec::<String>::new());
+    // One entry covers one test, not every test of that name.
+    let found = scan(&files, &all[..1]);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|line| line.contains("outside the sandbox"))
+    );
+    assert!(found[0].contains("`tests::b::runs_it`"), "{found:?}");
+    // The bare name matches none of them.
+    let found = scan(&files, &[("src/sample.rs", "runs_it", Some("echo"))]);
+    assert_eq!(found.len(), 4, "{found:?}");
+    assert!(found[3].contains("UNSANDBOXED lists"), "{found:?}");
+}
+
+#[test]
+fn an_entry_without_a_command_fails_once_the_test_runs_one() {
+    let file = |input: &str| {
+        sample(
+            "tests/sample.rs",
+            &format!(
+                "\n#[tokio::test]\nasync fn calls_bash() {{\n    \
+                 Bash::default().run(json!({input})).await;\n}}\n"
+            ),
+        )
+    };
+    let none: [Unsandboxed; 1] = [("tests/sample.rs", "calls_bash", None)];
+    assert_eq!(scan(&file("{}"), &none), Vec::<String>::new());
+    let found = scan(&file(r#"{"command": "echo hi"}"#), &none);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("listed as running no command"),
+        "{found:?}"
+    );
 }
