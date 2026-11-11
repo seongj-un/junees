@@ -91,6 +91,14 @@ struct Running {
 /// pull_request.opened and issue_comment), `open` (generic, no secret)
 /// and `off` (paused).
 async fn start(loopback: bool, read_timeout: Duration) -> Running {
+    start_with(loopback, move |server| {
+        server.with_read_timeout(read_timeout)
+    })
+    .await
+}
+
+/// [`start`] with the server changed by `configure`.
+async fn start_with(loopback: bool, configure: impl FnOnce(Server) -> Server) -> Running {
     let home = tempfile::tempdir().unwrap();
     let mut pr = route("pr");
     pr.events = vec!["pull_request.opened".into(), "issue_comment".into()];
@@ -118,16 +126,13 @@ async fn start(loopback: bool, read_timeout: Duration) -> Running {
     } else {
         SocketAddr::from(([0, 0, 0, 0], local.port()))
     };
-    let server = Arc::new(
-        Server::new(
-            home.path(),
-            listen,
-            Arc::clone(&runner) as Arc<dyn Runner>,
-            env,
-            Arc::new(|_: &str| {}),
-        )
-        .with_read_timeout(read_timeout),
-    );
+    let server = Arc::new(configure(Server::new(
+        home.path(),
+        listen,
+        Arc::clone(&runner) as Arc<dyn Runner>,
+        env,
+        Arc::new(|_: &str| {}),
+    )));
     let (stop, force) = (Cancel::new(), Cancel::new());
     let served = tokio::spawn(server.serve(listener, stop.clone(), force.clone()));
     Running {
@@ -634,6 +639,43 @@ async fn refuses_before_asking_for_the_body() {
     stream.read_to_string(&mut text).await.unwrap();
     assert!(text.starts_with("HTTP/1.1 401 "), "{text}");
     assert_eq!(server.runner.started(), 0);
+}
+
+#[tokio::test]
+async fn refuses_connections_past_the_limit() {
+    let server = start_with(true, |server| server.with_max_connections(2)).await;
+    let url = &server.url;
+    let addr = url.trim_start_matches("http://");
+    // Two clients that connect and send nothing hold both places.
+    let first = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let second = tokio::net::TcpStream::connect(addr).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut third = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(3), third.read_to_string(&mut text))
+        .await
+        .expect("an answer without waiting for the others")
+        .unwrap();
+    assert!(text.starts_with("HTTP/1.1 503 "), "{text}");
+    assert!(
+        text.ends_with("too many connections; try again later\n"),
+        "{text}"
+    );
+    // A connection that ends frees its place.
+    drop(first);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, text) = post(url, "open", &[], "{}").await;
+        if status == 202 {
+            break;
+        }
+        assert_eq!(status, 503, "{text}");
+        assert!(tokio::time::Instant::now() < deadline, "no place was freed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(second);
+    server.runner.wait_started(1).await;
+    server.runner.gate.add_permits(10);
 }
 
 #[tokio::test]

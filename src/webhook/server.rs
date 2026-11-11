@@ -15,6 +15,9 @@
 //! 429 when [`MAX_WAITING`] requests already wait for the route, else 202
 //! `queued`.
 //!
+//! At most [`MAX_CONNECTIONS`] connections are read or answered at once;
+//! one more gets 503 at once and is closed.
+//!
 //! Stopping (SIGINT or SIGTERM): no new connections, the waiting requests
 //! are dropped, the runs going on finish (within their time limit); a
 //! second signal interrupts them.
@@ -31,7 +34,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 
 use super::http::{self, Head};
 use super::run::{Ended, Incoming};
@@ -52,6 +55,8 @@ pub const MAX_WAITING: usize = 20;
 pub const REMEMBERED: usize = 1000;
 /// How long a client may take to send its request.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections read or answered at once (each may take [`READ_TIMEOUT`]).
+pub const MAX_CONNECTIONS: usize = 64;
 /// Headers a proxy or tunnel adds to say who sent a request; a route
 /// without a secret refuses requests carrying one.
 pub const PROXY_HEADERS: &[&str] = &[
@@ -130,6 +135,7 @@ pub struct Server {
     env: Env,
     log: Log,
     read_timeout: Duration,
+    max_connections: usize,
     state: Mutex<State>,
     /// Routes with a run going on (their workers), for stopping.
     busy: watch::Sender<usize>,
@@ -152,6 +158,7 @@ impl Server {
             env,
             log,
             read_timeout: READ_TIMEOUT,
+            max_connections: MAX_CONNECTIONS,
             state: Mutex::default(),
             busy: watch::Sender::new(0),
         }
@@ -163,17 +170,36 @@ impl Server {
         self
     }
 
+    /// Reads or answers at most `max` connections at once (tests).
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max;
+        self
+    }
+
     /// Answers connections on `listener` until `stop`, then waits for the
     /// runs going on (interrupting them on `force`).
     pub async fn serve(self: Arc<Self>, listener: TcpListener, stop: Cancel, force: Cancel) {
+        let places = Arc::new(Semaphore::new(self.max_connections));
         loop {
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
                 accepted = listener.accept() => match accepted {
-                    Ok((stream, _)) => {
-                        tokio::spawn(Arc::clone(&self).connection(stream));
-                    }
+                    Ok((stream, _)) => match Arc::clone(&places).try_acquire_owned() {
+                        Ok(place) => {
+                            let server = Arc::clone(&self);
+                            tokio::spawn(async move {
+                                server.connection(stream).await;
+                                drop(place);
+                            });
+                        }
+                        // Answered without waiting (no task, no read): the
+                        // connection closes even if the client never reads.
+                        Err(_) => {
+                            let busy = http::render(503, "too many connections; try again later");
+                            let _ = stream.try_write(busy.as_bytes());
+                        }
+                    },
                     Err(err) => {
                         (self.log)(&format!("cannot accept a connection: {err}"));
                         tokio::time::sleep(Duration::from_millis(100)).await;
