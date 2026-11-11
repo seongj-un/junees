@@ -158,9 +158,15 @@ pub(super) fn webhooks(report: &mut Report, home: &Path, settings: &Settings) {
     }
 }
 
-/// The servers of mcp.json: the file reads, and each enabled server's
-/// command is there (none is started).
-pub(super) fn mcp(report: &mut Report, home: &Path, path: Option<&OsStr>) {
+/// The servers of mcp.json: the file reads, each enabled server's command
+/// is there (none is started), and each HTTP server's header variables
+/// are set in `env` (no request is sent; values are never shown).
+pub(super) fn mcp(
+    report: &mut Report,
+    home: &Path,
+    path: Option<&OsStr>,
+    env: &dyn Fn(&str) -> Option<String>,
+) {
     const AREA: &str = "mcp";
     let file = home.join(crate::mcp::config::FILE_NAME);
     if !file.exists() {
@@ -186,6 +192,27 @@ pub(super) fn mcp(report: &mut Report, home: &Path, path: Option<&OsStr>) {
         let name = format!("server {}", server.name);
         if !server.enabled {
             report.skip(AREA, &name, "disabled");
+            continue;
+        }
+        if let Some(http) = &server.http {
+            let missing = http.missing(env);
+            let place = format!("Streamable HTTP `{}`", http.origin());
+            if missing.is_empty() {
+                let headers = if http.headers.is_empty() {
+                    String::new()
+                } else {
+                    format!(", headers {}", http.describe_headers())
+                };
+                report.ok(AREA, &name, format!("{place}{headers} (not contacted)"));
+            } else {
+                report.fail(
+                    AREA,
+                    &name,
+                    format!("{place}: {}", missing.join("; ")),
+                    "set the variable in the environment junees runs in, or change `headers` \
+                     in mcp.json",
+                );
+            }
             continue;
         }
         if let Some(cwd) = &server.cwd

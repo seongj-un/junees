@@ -60,6 +60,7 @@ impl Fake {
             trust: false,
             call_timeout: DEFAULT_CALL_TIMEOUT,
             cwd: None,
+            http: None,
         }
     }
 
@@ -632,7 +633,7 @@ async fn the_overview_shows_no_secrets() {
     let overview = mcp.overview();
     assert!(
         overview.starts_with(
-            "  fake: running, MCP 2026-07-28, 12 tools\n     command `python3`, env \
+            "  fake: running, MCP 2026-07-28, 12 tools\n     stdio, command `python3`, env \
              FAKE_MCP_LOG, FAKE_MCP_MODE, GITHUB_TOKEN; 12 tools offered to the model, \
              trusted (no approval questions), calls time out after 9 s\n"
         ),

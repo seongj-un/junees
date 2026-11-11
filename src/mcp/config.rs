@@ -3,8 +3,13 @@
 //! ```json
 //! { "servers": { "github": { "command": "github-mcp", "args": ["stdio"],
 //!   "env": {"GITHUB_TOKEN": "..."}, "enabled": true, "trust": false,
-//!   "timeout_secs": 120, "cwd": "/home/me/servers" } } }
+//!   "timeout_secs": 120, "cwd": "/home/me/servers" },
+//!   "docs": { "url": "https://mcp.example.com/mcp",
+//!   "headers": {"Authorization": "Bearer env:DOCS_TOKEN"} } } }
 //! ```
+//!
+//! A server has either a `command` (stdio) or a `url` (Streamable HTTP,
+//! [`super::http::target`]).
 //!
 //! Servers run in `cwd`, or in `/` without one, never in the folder Junees
 //! works in: a server started there may run files from it (`python -m`
@@ -23,6 +28,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+
+use super::http::HttpConfig;
 
 /// The file's name inside the state folder, next to `config.toml`.
 pub const FILE_NAME: &str = "mcp.json";
@@ -56,6 +63,9 @@ pub struct ServerConfig {
     pub call_timeout: Duration,
     /// The folder it runs in (absolute); `None` runs it in `/`.
     pub cwd: Option<PathBuf>,
+    /// `Some` for a server reached over Streamable HTTP; `command` is then
+    /// empty and `args`, `env` and `cwd` are unused.
+    pub http: Option<HttpConfig>,
 }
 
 #[derive(Deserialize)]
@@ -68,7 +78,11 @@ struct RawFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawServer {
-    command: String,
+    #[serde(default)]
+    command: Option<String>,
+    url: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
@@ -149,7 +163,38 @@ pub fn parse(text: &str) -> Result<Vec<ServerConfig>> {
 }
 
 fn server_config(name: String, raw: RawServer) -> Result<ServerConfig> {
-    if raw.command.trim().is_empty() {
+    let call_timeout = match raw.timeout_secs {
+        None => DEFAULT_CALL_TIMEOUT,
+        Some(secs @ 1..=MAX_CALL_TIMEOUT_SECS) => Duration::from_secs(secs),
+        Some(secs) => {
+            bail!("`timeout_secs` must be from 1 to {MAX_CALL_TIMEOUT_SECS}, got {secs}")
+        }
+    };
+    let command = match (raw.command, &raw.url) {
+        (Some(_), Some(_)) => bail!("give either `command` (stdio) or `url` (HTTP), not both"),
+        (None, None) => bail!("needs a `command` to run or a `url` to connect to"),
+        (Some(command), None) => command,
+        (None, Some(url)) => {
+            if !raw.args.is_empty() || !raw.env.is_empty() || raw.cwd.is_some() {
+                bail!("`args`, `env` and `cwd` are for `command` servers, not `url` ones");
+            }
+            return Ok(ServerConfig {
+                name,
+                command: String::new(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                enabled: raw.enabled,
+                trust: raw.trust,
+                call_timeout,
+                cwd: None,
+                http: Some(HttpConfig::parse(url, &raw.headers)?),
+            });
+        }
+    };
+    if !raw.headers.is_empty() {
+        bail!("`headers` are for `url` servers");
+    }
+    if command.trim().is_empty() {
         bail!("`command` is empty");
     }
     for (key, value) in &raw.env {
@@ -160,7 +205,7 @@ fn server_config(name: String, raw: RawServer) -> Result<ServerConfig> {
             bail!("`env` value of {key} holds a NUL character");
         }
     }
-    if raw.args.iter().any(|arg| arg.contains('\0')) || raw.command.contains('\0') {
+    if raw.args.iter().any(|arg| arg.contains('\0')) || command.contains('\0') {
         bail!("`command` or `args` holds a NUL character");
     }
     if let Some(cwd) = &raw.cwd
@@ -168,22 +213,16 @@ fn server_config(name: String, raw: RawServer) -> Result<ServerConfig> {
     {
         bail!("`cwd` must be an absolute path");
     }
-    let call_timeout = match raw.timeout_secs {
-        None => DEFAULT_CALL_TIMEOUT,
-        Some(secs @ 1..=MAX_CALL_TIMEOUT_SECS) => Duration::from_secs(secs),
-        Some(secs) => {
-            bail!("`timeout_secs` must be from 1 to {MAX_CALL_TIMEOUT_SECS}, got {secs}")
-        }
-    };
     Ok(ServerConfig {
         name,
-        command: raw.command,
+        command,
         args: raw.args,
         env: raw.env,
         enabled: raw.enabled,
         trust: raw.trust,
         call_timeout,
         cwd: raw.cwd.map(PathBuf::from),
+        http: None,
     })
 }
 
@@ -213,7 +252,7 @@ impl ServerConfig {
     /// relative `command` that leads into it would run a file the model may
     /// write without a question. `trust` allows it.
     pub fn check_workdir(&self, workdir: &Path) -> std::result::Result<(), String> {
-        if self.trust || !self.has_relative_path() {
+        if self.trust || self.http.is_some() || !self.has_relative_path() {
             return Ok(());
         }
         if inside(&self.program(), workdir) {
@@ -227,6 +266,82 @@ impl ServerConfig {
         }
         Ok(())
     }
+}
+
+/// The environment variables the HTTP servers of `<home>/mcp.json` read
+/// their header values from. Junees hides them from bash, MCP servers and
+/// plugins, so this reads leniently: a file [`load`] refuses (open to
+/// other users, too large, a broken entry) still names the variables the
+/// user keeps tokens in. Every string in the JSON that is a header
+/// reference counts, wherever it sits; text that is no JSON at all is
+/// scanned for `env:NAME`. Only the first 16 MiB are read.
+pub fn header_env_names(home: &Path) -> Vec<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Non-blocking, so a FIFO in its place cannot hang the start.
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(home.join(FILE_NAME))
+    else {
+        return Vec::new();
+    };
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    // A read error keeps what was read.
+    let _ = file.take(MAX_SCAN_BYTES).read_to_end(&mut bytes);
+    let mut names = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(value) => {
+            let mut names = Vec::new();
+            json_references(&value, &mut names);
+            names
+        }
+        Err(_) => text_references(&String::from_utf8_lossy(&bytes)),
+    };
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// A larger file is scanned this far for header variables.
+const MAX_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The variables of every string in `value` that is a header reference.
+fn json_references(value: &serde_json::Value, names: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some((_, var)) = super::http::target::env_reference(text) {
+                names.push(var.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                json_references(item, names);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                json_references(item, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every `env:NAME` in `text`.
+fn text_references(text: &str) -> Vec<String> {
+    text.match_indices("env:")
+        .filter_map(|(at, _)| {
+            let rest = &text[at + "env:".len()..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            super::http::target::is_var_name(name).then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// Whether the absolute `path` lies in `folder`, resolving links and `..`
@@ -355,6 +470,114 @@ mod tests {
         assert!(!message.contains("ghp_secret"), "{message}");
         let message = err(r#"{"servers": {"a": {"command": "x", "env": {"T": 12345}}}}"#);
         assert!(!message.contains("12345"), "{message}");
+    }
+
+    #[test]
+    fn url_servers_take_headers_and_no_process_settings() {
+        let servers = parse(
+            r#"{"servers": {"docs": {"url": "https://mcp.example.com/mcp",
+                "headers": {"Authorization": "Bearer env:DOCS_TOKEN"},
+                "trust": true, "timeout_secs": 9}}}"#,
+        )
+        .unwrap();
+        let docs = &servers[0];
+        let http = docs.http.as_ref().unwrap();
+        assert_eq!(http.origin(), "https://mcp.example.com");
+        assert_eq!(
+            http.describe_headers(),
+            "Authorization (from env DOCS_TOKEN)"
+        );
+        assert!(docs.trust && docs.enabled && docs.command.is_empty());
+        assert_eq!(docs.call_timeout, Duration::from_secs(9));
+        assert_eq!(docs.check_workdir(Path::new("/")), Ok(()));
+
+        let err = |text: &str| format!("{:#}", parse(text).err().unwrap());
+        assert!(
+            err(r#"{"servers": {"a": {"url": "https://x.dev/", "command": "x"}}}"#)
+                .contains("not both")
+        );
+        assert!(err(r#"{"servers": {"a": {}}}"#).contains("needs a `command`"));
+        assert!(
+            err(r#"{"servers": {"a": {"url": "https://x.dev/", "env": {"A": "b"}}}}"#)
+                .contains("not `url` ones")
+        );
+        assert!(
+            err(r#"{"servers": {"a": {"command": "x", "headers": {"A": "env:B"}}}}"#)
+                .contains("are for `url` servers")
+        );
+        let message =
+            err(r#"{"servers": {"a": {"url": "https://x.dev/", "headers": {"A": "s3cret"}}}}"#);
+        assert!(message.contains("server `a`"), "{message}");
+        assert!(!message.contains("s3cret"), "{message}");
+        assert!(err(r#"{"servers": {"a": {"url": "http://x.dev/"}}}"#).contains("https"));
+    }
+
+    #[test]
+    fn header_variables_are_listed_for_hiding() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(header_env_names(dir.path()).is_empty());
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(
+            &path,
+            r#"{"servers": {
+                "a": {"url": "https://a.dev/", "headers": {"Authorization": "Bearer env:A_TOKEN", "X-Team": "env:TEAM"}},
+                "b": {"url": "https://b.dev/", "headers": {"X-Key": "env:A_TOKEN"}, "enabled": false},
+                "c": {"command": "x", "env": {"NOT_THIS": "v"}}
+            }}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(header_env_names(dir.path()), ["A_TOKEN", "TEAM"]);
+    }
+
+    #[test]
+    fn header_variables_are_hidden_even_when_the_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let write = |text: &str, mode: u32| {
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let names = || header_env_names(dir.path());
+        // Open to other users: load refuses it.
+        write(
+            r#"{"servers": {"a": {"url": "https://a.dev/",
+                "headers": {"Authorization": "Bearer env:A_TOKEN"}}}}"#,
+            0o644,
+        );
+        assert!(load(&path).is_err());
+        assert_eq!(names(), ["A_TOKEN"]);
+        // A broken entry next to a good one; a misspelt key still counts.
+        write(
+            r#"{"servers": {
+                "a": {"url": "https://a.dev/", "headers": {"X-Key": "env:A_TOKEN"}},
+                "b": {"url": "https://b.dev/", "header": {"X-Key": "Token env:B_TOKEN"}},
+                "c": {"url": "https://c.dev/", "headers": {"X-Key": "s3cret"}}
+            }}"#,
+            0o600,
+        );
+        assert!(load(&path).is_err());
+        assert_eq!(names(), ["A_TOKEN", "B_TOKEN"]);
+        // Not JSON at all.
+        write(
+            r#"{"servers": {"a": {"url": "https://a.dev/", "headers": {"A": "Bearer env:CUT_TOKEN"#,
+            0o600,
+        );
+        assert_eq!(names(), ["CUT_TOKEN"]);
+        // Over the 1 MiB load reads.
+        let mut big =
+            r#"{"servers": {"a": {"url": "https://a.dev/", "headers": {"A": "env:BIG"}}}}"#
+                .to_string();
+        big.push_str(&" ".repeat(MAX_FILE_BYTES as usize));
+        write(&big, 0o600);
+        assert!(load(&path).is_err());
+        assert_eq!(names(), ["BIG"]);
+        // A FIFO in its place is not waited on.
+        std::fs::remove_file(&path).unwrap();
+        let fifo = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo reads the NUL-terminated path only.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(names().is_empty());
     }
 
     #[test]

@@ -771,9 +771,33 @@ async fn mcp_commands_are_looked_up_without_starting_them() {
         "off": {"command": "no-such-mcp", "enabled": false},
         "local": {"command": "./srv", "cwd": fixture.root.display().to_string()},
         "gone": {"command": "fake-mcp", "cwd": fixture.root.join("nope").display().to_string()},
+        "web": {"url": "https://mcp.example.com/s3cret-path/mcp",
+                "headers": {"Authorization": "Bearer env:WEB_TOKEN"}},
+        "unset": {"url": "https://mcp.example.com/mcp",
+                  "headers": {"X-Key": "env:UNSET_TOKEN"}},
     }});
     fixture.write("mcp.json", &servers.to_string(), 0o600);
+    let mut fixture = fixture;
+    fixture.set("WEB_TOKEN", "web-token-value");
     let report = fixture.run(false).await;
+    expect(
+        &report,
+        "mcp",
+        "server web",
+        Status::Ok,
+        "Streamable HTTP `https://mcp.example.com`, headers Authorization (from env WEB_TOKEN) \
+         (not contacted)",
+    );
+    expect(
+        &report,
+        "mcp",
+        "server unset",
+        Status::Fail,
+        "header `X-Key` takes its value from the variable UNSET_TOKEN, which is not set",
+    );
+    for secret in ["s3cret", "web-token-value"] {
+        assert!(!report.text().contains(secret), "{}", report.text());
+    }
     expect(
         &report,
         "mcp",

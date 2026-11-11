@@ -220,7 +220,7 @@ async fn slash_mcp_shows_the_servers() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains(
-            "  fake: running, MCP 2026-07-28, 12 tools\n     command `python3`, env \
+            "  fake: running, MCP 2026-07-28, 12 tools\n     stdio, command `python3`, env \
              FAKE_MCP_LOG, FAKE_MCP_MODE, FAKE_TOKEN; 12 tools offered to the model\n"
         ),
         "{stdout}"

@@ -48,7 +48,8 @@ each check, with one line on how to fix it:
   programs      git and gh on PATH
   and the Discord settings, the cron daemon, the webhook routes, their
   secrets and server, the size of the saved sessions, the MCP servers'
-  commands (not started) and the enabled plugins' manifests.
+  commands (not started) and HTTP header variables (not contacted) and
+  the enabled plugins' manifests.
 
 Nothing is written or started, and the network is not used, unless:
   --online   also ask the API whether it takes the key (GET /v1/models,
@@ -321,7 +322,7 @@ pub async fn run_with(
         services::cron(&mut report, home);
         services::webhooks(&mut report, home, settings);
         files::sessions(&mut report, home);
-        services::mcp(&mut report, home, path);
+        services::mcp(&mut report, home, path, &|key| settings.env(key));
         services::plugins(&mut report, home);
     }
     if online {
