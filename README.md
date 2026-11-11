@@ -1082,6 +1082,7 @@ tests/
 5. 게이트웨이: 디스코드 봇 (`junees gateway`, 위 디스코드 게이트웨이) (완료)
 6. 확장: 서브에이전트(`delegate`), 예약 작업(`junees cron`), 플러그인(`junees plugin`), MCP 클라이언트(stdio) (완료)
 7. 웹훅과 GitHub: 웹훅 수신 서버(`junees webhook`), GitHub 도구(PR, 리뷰, merge), 웹훅으로 PR 리뷰·리뷰 반영·merge를 맡기는 흐름(`junees webhook add-github`) (완료)
+8. 일상 사용 다듬기: 프로젝트 지침 파일(AGENTS.md, JUNEES.md, CLAUDE.md), 세션 검색(`session_search`, `/search`), 사용량과 비용(`/usage`, `junees usage`), 점검(`junees doctor`) (완료)
 
 ## 개발
 
