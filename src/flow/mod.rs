@@ -18,6 +18,7 @@
 //! commit, an hourly cap of model runs per PR, the commits the flow pushed,
 //! and the recent results for listings.
 
+pub mod prompts;
 pub mod state;
 
 
