@@ -373,8 +373,9 @@ pub(crate) mod testing {
 
     use super::Bash;
 
-    /// A proxy nothing listens on: commands in a sandbox reach no web
-    /// server (github.com included) through HTTP(S).
+    /// A proxy nothing listens on: programs in a sandbox that honor the
+    /// proxy variables reach no web server (github.com included) through
+    /// HTTP(S).
     const NO_PROXY_PORT: &str = "http://127.0.0.1:9";
 
     impl Bash {
@@ -393,14 +394,23 @@ pub(crate) mod testing {
     }
 
     /// Points a test command at `dir` instead of the user's state, so a
-    /// policy rule a test (or a mutation run) breaks cannot reach the real
-    /// home folder, the repository the tests run in, its remotes or
-    /// GitHub: the working folder, HOME and the XDG folders, the GitHub CLI
-    /// login and Junees's own folder are in `dir`; git reads no global or
-    /// system configuration, finds no repository above `dir`, gets no
-    /// repository from the environment and cannot use ssh; HTTP goes to a
-    /// closed local port; programs installed under the real home (a
-    /// `cargo install`ed junees, say) are off PATH.
+    /// policy rule a test (or a mutation run) breaks reaches nothing real
+    /// through the working folder, `~`/`$HOME`, or HTTP of a program that
+    /// honors the proxy variables:
+    /// - the working folder, HOME and the XDG folders, the GitHub CLI
+    ///   login and Junees's own folder are in `dir`;
+    /// - git reads no global or system configuration, finds no repository
+    ///   above `dir`, gets no repository from the environment and cannot
+    ///   use ssh, so `git push origin` has no origin;
+    /// - the HTTP(S) proxy variables point at a closed local port;
+    /// - programs installed under the real home (a `cargo install`ed
+    ///   junees, say) are off PATH.
+    ///
+    /// It only sets environment variables: the filesystem and the network
+    /// stay the real ones. An absolute path (a command built from the test
+    /// process's own `HOME`, say) still reaches the real folder, and a
+    /// program that ignores the proxy variables still reaches the network.
+    /// Keep test commands to paths inside `dir`.
     pub fn confine(command: &mut tokio::process::Command, dir: &Path) {
         command
             .current_dir(dir)
