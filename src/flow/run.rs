@@ -240,7 +240,9 @@ pub async fn handle(cx: &Context<'_>, incoming: &Incoming) -> Report {
         }
         match step {
             Step::Review { pr } => review(cx, incoming, &r, &owner, pr, &mut report).await,
-            Step::Address { pr } => address_step(cx, incoming, &r, &owner, pr, &mut report).await,
+            Step::Address { pr } => {
+                address_step(cx, incoming, &r, &owner, &access, pr, &mut report).await
+            }
             Step::Merge { pr, sha } => {
                 merge_step(cx, &r, &owner, &access, pr, &sha, &mut report).await
             }
@@ -531,6 +533,7 @@ async fn address_step(
     incoming: &Incoming,
     r: &str,
     owner: &str,
+    access: &Access<'_>,
     n: u64,
     report: &mut Report,
 ) {
@@ -559,6 +562,29 @@ async fn address_step(
             action,
             "skipped: the review asks for no change",
         );
+    }
+    // Only reviews of people with write access (or --approver) start a
+    // model run with bash and a push.
+    let association = review["author_association"].as_str().unwrap_or_default();
+    match access.counts(reviewer, association).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let line = format!(
+                "skipped: a review by {} ({})",
+                crate::prompt_text::escape_hidden(reviewer),
+                if cx.flow.approvers.is_empty() {
+                    "no write access"
+                } else {
+                    "not an --approver"
+                }
+            );
+            return step_line(cx, report, n, action, &line);
+        }
+        Err(err) => {
+            report.status = RunStatus::Failed;
+            report.quiet = false;
+            return step_line(cx, report, n, action, &format!("failed: {err}"));
+        }
     }
     let pr = match cx.client.get(&format!("repos/{r}/pulls/{n}")).await {
         Ok(pr) => pr,
