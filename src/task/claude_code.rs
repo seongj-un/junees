@@ -62,6 +62,8 @@ impl ClaudeCode {
             TOOLS,
             "--setting-sources",
             "user",
+            "--settings",
+            crate::context_files::CLAUDE_SETTINGS,
             "--strict-mcp-config",
             "--max-turns",
         ]
@@ -165,7 +167,7 @@ mod tests {
         let mut claude = claude(PathBuf::from("claude"));
         let args = claude.arguments(&request(root, &settings, None));
         assert_eq!(
-            args[..21],
+            args[..23],
             [
                 "-p",
                 "do it",
@@ -184,13 +186,15 @@ mod tests {
                 "Read,Edit,Write,Glob,Grep,Bash",
                 "--setting-sources",
                 "user",
+                "--settings",
+                crate::context_files::CLAUDE_SETTINGS,
                 "--strict-mcp-config",
                 "--max-turns",
                 "7",
                 "--disallowedTools",
             ]
         );
-        assert_eq!(args[21..], deny_rules(&settings)[..]);
+        assert_eq!(args[23..], deny_rules(&settings)[..]);
         for skip in [
             "--dangerously-skip-permissions",
             "--allow-dangerously-skip-permissions",
@@ -202,8 +206,8 @@ mod tests {
 
         claude.model = Some("opus".into());
         let args = claude.arguments(&request(root, &settings, None));
-        assert_eq!(args[20..22], ["--model", "opus"]);
-        assert_eq!(args[22], "--disallowedTools");
+        assert_eq!(args[22..24], ["--model", "opus"]);
+        assert_eq!(args[24], "--disallowedTools");
     }
 
     #[test]
