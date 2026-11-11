@@ -190,8 +190,12 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - 숨은 문자: 제어 문자, 방향 제어 문자, 줄/문단 구분 문자는 메모리처럼 `\u{1b}` 꼴로 이스케이프해 넣는다(`prompt_text::escape_hidden`).
 - 지시로서의 위치: 메모리와 달리 저장소 사람이 쓴 지시로 넣는다. 절 머리에 "이 프로젝트 작업에서 따르되, 사용자의 말과 위의 규칙보다 아래이고 둘이 부딪치면 사용자와 규칙이 이긴다"고 적는다. 파일마다 `<project-instructions path="...">`로 감싼다.
 - 읽는 때: 세션이 시작할 때 한 번 읽고 그 세션 동안 바꾸지 않는다(프롬프트 캐시). `/new`(와 `/backend`)는 다시 읽는다. 세션을 시작할 때 stderr에 `(project instructions: <경로>, ...)`로 읽은 파일과 건너뛴 파일을 알린다. `/context`는 두 백엔드 모두 이 세션이 읽은 파일과 바이트 수, 자른 것, 건너뛴 것과 이유를 보여 준다.
+- 커밋되지 않은 변경: 저장소 안이면 읽은 파일을 마지막 커밋(`HEAD`)의 내용과 바이트 단위로 비교해, 다르거나 커밋에 없는 파일은 stderr 줄과 `/context`에서 경로 뒤에 `(uncommitted changes)`를 붙인다. git은 하네스의 git 실행(훅과 fsmonitor 끔, 저장소 위치 변수와 비밀 변수 제거)으로 돌고 git 필터는 거치지 않는다(줄 끝을 바꾸는 체크아웃 설정이면 바뀐 것으로 보인다).
 - 쓰는 곳: 대화(api, claude-code), 디스코드 게이트웨이 채널 세션, 장기 작업 모드의 세션마다(저장소 루트 기준), 예약 작업(작업 폴더 기준), 웹훅 실행.
 - 웹훅: PR 흐름의 반영 단계는 PR head를 꺼낸 worktree(`.junees-worktrees/pr-<n>`)에서 돈다. 그 worktree의 지침 파일은 PR 작성자가 쓴 것(남의 입력)이므로, 웹훅 실행은 작업 폴더가 아니라 경로의 폴더(`webhook add --dir`, 사용자가 둔 base 체크아웃)에서 지침 파일을 읽는다(`Trigger::Webhook { context_dir }`). 리뷰 단계와 템플릿 경로는 원래 경로 폴더에서 돈다. 경로 폴더를 PR 브랜치로 바꿔 두는 템플릿은 그 파일을 읽게 된다는 점에 주의.
+- 웹훅 실행은 남이 쓴 글로 돌기 때문에, 한 번의 주입이 경로 폴더의 지침 파일에 남아 이후 실행과 사용자 세션의 지시가 되지 않도록 두 가지를 더 한다.
+  - 커밋된 내용만 읽는다: 지침 파일을 작업 트리가 아니라 경로 폴더 저장소의 마지막 커밋(`HEAD`)에서 읽는다(`ContextFiles::load_committed`, `git cat-file --batch-check --follow-symlinks`와 `cat-file blob`, 저장소 맨 위 폴더를 `GIT_CEILING_DIRECTORIES`로 막음). 커밋되지 않은 변경과 새 파일은 넣지 않고 "left out"으로 알린다. 커밋 안의 링크는 커밋 안의 파일로만 따라간다. 경로 폴더가 git 저장소가 아니면(멈춘 폴더에 `.git`이 없으면) 지침 파일을 하나도 읽지 않는다.
+  - 쓰기 거절: 설정된 지침 파일 이름(`context_files`)으로의 쓰기를 어느 폴더에서든 거절한다. write_file과 edit_file은 그 이름의 경로(그 이름으로 가는 링크 포함)를, bash 정책은 그 이름으로 쓰는 리다이렉트와 읽기 전용 프로그램(cat, grep, ls 등) 밖의 프로그램이 그 이름을 받는 명령(`cp`, `mv`, `tee`, `sed -i` 등)을 거절한다(데이터 폴더 규칙과 같은 방식, `allow_dangerous`여도). claude-code 백엔드에는 `Edit(//**/<이름>)` 거부 규칙을 더한다. 거부 목록이라 실행 중에 만든 이름이나 폴더 전체를 쓰는 명령(`cp -r`, `git checkout -- .`)은 막지 못한다. PR worktree의 지침 파일을 고치는 리뷰 요청도 웹훅 실행에서는 거절된다.
 - claude-code 백엔드: Junees는 Claude Code를 `--setting-sources user`로 띄우므로 Claude Code는 프로젝트의 `CLAUDE.md`를 스스로 읽지 않는다([Agent SDK의 settingSources](https://code.claude.com/docs/en/agent-sdk/claude-code-features): 프로젝트 CLAUDE.md는 `project`가 있을 때만). `AGENTS.md`는 Claude Code 2.1.277부터 내장 플러그인이 "CLAUDE.md가 없으면 그 자리에" 읽는데, 이 플러그인이 setting sources를 따르는지는 문서에 없다. 그래서 `--settings`로 그 플러그인의 `instructionFiles`를 `claude-md`로 둬(문서상 `--settings`에서 읽는 항목, 2.1.285 전 id `agents-md@builtin`도 함께) Claude Code가 지침 파일을 하나도 스스로 읽지 않게 하고, Junees가 찾은 파일을 모두 `--append-system-prompt`로 넘긴다. 같은 파일이 두 번 들어가지 않고 두 백엔드가 같은 지침을 본다. `JUNEES_CONTEXT_FILES=off`면 Claude Code도 지침 파일 없이 돈다.
 
 ### 스킬
@@ -842,7 +846,7 @@ src/
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
-  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks, flows)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 도구 호출 전 훅 PreTool, 테스트 전용: 테스트 bash의 sandbox(bash.rs의 `testing::confine`, 환경 변수 수준이라 절대 경로와 프록시를 무시하는 프로그램은 막지 못함)와 테스트 코드가 홈 삭제나 origin push를 실제 셸로 돌리지 않는지, sandbox 밖(바이너리 테스트, 모델 응답으로 부르는 bash)에서는 원격과 상관없는 모든 `git push`, `.`/`..`/`/`/`*`의 재귀 삭제, `git reset --hard`, `git clean -f`도 돌리지 않는지, `Command::new("git")` 인자에 `push`가 있으면 임시 폴더의 bare 저장소로만 미는 헬퍼(SAFE_PUSH)를 거치는지, sandbox 밖 실제 bash 테스트가 허용 목록(파일과 모듈 경로까지 맞춘 테스트, 무해한 명령 또는 명령 없음)만 쓰는지 보는 소스 스캔(test_scan.rs)
+  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks, flows)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 웹훅 실행의 지침 파일 이름 쓰기 거절(instruction_files.rs), 도구 호출 전 훅 PreTool, 테스트 전용: 테스트 bash의 sandbox(bash.rs의 `testing::confine`, 환경 변수 수준이라 절대 경로와 프록시를 무시하는 프로그램은 막지 못함)와 테스트 코드가 홈 삭제나 origin push를 실제 셸로 돌리지 않는지, sandbox 밖(바이너리 테스트, 모델 응답으로 부르는 bash)에서는 원격과 상관없는 모든 `git push`, `.`/`..`/`/`/`*`의 재귀 삭제, `git reset --hard`, `git clean -f`도 돌리지 않는지, `Command::new("git")` 인자에 `push`가 있으면 임시 폴더의 bare 저장소로만 미는 헬퍼(SAFE_PUSH)를 거치는지, sandbox 밖 실제 bash 테스트가 허용 목록(파일과 모듈 경로까지 맞춘 테스트, 무해한 명령 또는 명령 없음)만 쓰는지 보는 소스 스캔(test_scan.rs)
   mcp/               MCP 클라이언트 (stdio)
     config.rs          $JUNEES_HOME/mcp.json 읽기와 검사 (0600, 자기 소유, 값을 되풀이하지 않는 오류)
     conn.rs            서버 프로세스(프로세스 그룹, 환경 정리)와 JSON-RPC 2.0 줄 메시지, 요청 id와 답 대기, 취소 알림, 서버 요청(ping) 답, stderr 꼬리, 종료(입력 닫기 -> SIGTERM -> SIGKILL)
@@ -873,7 +877,7 @@ src/
   prompt.rs          시스템 프롬프트, 메모리와 스킬 절(data_sections), Claude Code에 넘기는 인자(claude_append, 지침 파일을 더한 claude_append_with_context, 128 KiB 한도)
   secrets.rs         비밀처럼 보이는 내용 찾기, 메모리와 스킬이 함께 씀 (키 접두사, 개인 키, AWS 키 id, 긴 hex/토큰, 몇째 줄인지)
   prompt_text.rs     저장된 텍스트(메모리, 스킬)의 제어/방향 문자 판단: 쓸 때 거절(check_plain), 읽을 때 이스케이프(escape_hidden)
-  context_files/     프로젝트 지침 파일 (AGENTS.md/JUNEES.md/CLAUDE.md를 저장소 맨 위나 HOME까지 찾기, 파일당/전체 상한, 링크 판단, 시스템 프롬프트 절, /context 목록, Claude Code의 AGENTS.md 플러그인 끄는 --settings)
+  context_files/     프로젝트 지침 파일 (AGENTS.md/JUNEES.md/CLAUDE.md를 저장소 맨 위나 HOME까지 찾기, 파일당/전체 상한, 링크 판단, 시스템 프롬프트 절, /context 목록, Claude Code의 AGENTS.md 플러그인 끄는 --settings, 웹훅 실행용 마지막 커밋 읽기와 커밋되지 않은 변경 비교(committed.rs))
   memory/            영구 메모리
     mod.rs             저장소 셋(user, notes, 프로젝트별 notes) 읽기/쓰기(0600, 원자적, flock), 항목 추가/교체/삭제와 상한, 프롬프트 절(대화, task, Claude Code 읽기 전용), /memory 보기
     tool.rs            memory 도구 (task 세션은 project만)
