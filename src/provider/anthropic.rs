@@ -534,6 +534,10 @@ impl Provider for AnthropicProvider {
     fn manual_thinking(&self) -> bool {
         self.thinking_budget > 0
     }
+
+    fn model(&self) -> Option<&str> {
+        Some(&self.model)
+    }
 }
 
 fn is_retryable(status: StatusCode) -> bool {

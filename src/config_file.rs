@@ -24,6 +24,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("api_key", "ANTHROPIC_API_KEY"),
     ("base_url", "ANTHROPIC_BASE_URL"),
     ("model", "JUNEES_MODEL"),
+    ("prices", "JUNEES_PRICES"),
     ("task_max_time", "JUNEES_TASK_MAX_TIME"),
     ("task_max_tokens", "JUNEES_TASK_MAX_TOKENS"),
     ("task_skill_manage", "JUNEES_TASK_SKILL_MANAGE"),
