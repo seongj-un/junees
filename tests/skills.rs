@@ -89,17 +89,13 @@ async fn the_conversation_reads_and_keeps_skills() {
         (200, text_reply("Second session.")),
     ])
     .await;
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary(&cwd, dir.path());
     command
         .arg("--no-session")
-        .current_dir(&cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", &url)
-        .env("HOME", dir.path())
         .env("JUNEES_HOME", &home)
         .env("JUNEES_STREAM", "0")
-        .env_remove("JUNEES_BACKEND")
-        .env_remove("JUNEES_WEB_SEARCH")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -200,15 +196,12 @@ async fn the_skills_screen_escapes_hidden_characters() {
     }
     let cwd = dir.path().join("work");
     std::fs::create_dir(&cwd).unwrap();
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary(&cwd, dir.path());
     command
         .arg("--no-session")
-        .current_dir(&cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
-        .env("HOME", dir.path())
         .env("JUNEES_HOME", &home)
-        .env_remove("JUNEES_BACKEND")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

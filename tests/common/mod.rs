@@ -1,13 +1,87 @@
-//! A fake Anthropic API server shared by the integration tests.
+//! Helpers shared by the integration tests: the junees binary without the
+//! test's own settings and credentials, and a fake Anthropic API server.
 
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+
+/// Variables that change what the binary does or which account it uses:
+/// all of Junees's own settings, the API's, Claude Code's, the GitHub
+/// tokens and `gh`'s own login folder. A developer's
+/// `JUNEES_BACKEND=claude-code` would otherwise make a test call the real
+/// `claude`, and their `GH_CONFIG_DIR` would give a test's `gh` their
+/// login even under a temporary HOME.
+pub const SCRUBBED_PREFIXES: &[&str] = &["JUNEES_", "ANTHROPIC_", "CLAUDE_CODE_"];
+pub const SCRUBBED_NAMES: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_CONFIG_DIR",
+];
+
+/// Whether a binary test must not pass on the variable `name`.
+pub fn scrubbed(name: &str) -> bool {
+    SCRUBBED_NAMES.contains(&name)
+        || SCRUBBED_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// Removes from `command` each of `names` that [`scrubbed`] matches.
+pub fn scrub_env<I, S>(command: &mut tokio::process::Command, names: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    for name in names {
+        let name = name.as_ref();
+        if scrubbed(&name.to_string_lossy()) {
+            command.env_remove(name);
+        }
+    }
+}
+
+/// The junees binary run in `cwd` with `home` as its `HOME`, without any
+/// variable of the test's environment that [`scrubbed`] matches. Every
+/// binary test starts here and sets what else it needs afterwards.
+///
+/// Both folders must lie outside the crate (see [`outside_the_crate`]), so
+/// a binary test's bash never runs in the crate's repository (where a bare
+/// `git push` reaches its upstream) or in the real home that holds it.
+pub fn junees_binary(cwd: &Path, home: &Path) -> tokio::process::Command {
+    for (what, path) in [("cwd", cwd), ("HOME", home)] {
+        assert!(
+            outside_the_crate(path),
+            "a binary test's {what} must be a temporary folder, not {}",
+            path.display()
+        );
+    }
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    scrub_env(&mut command, std::env::vars_os().map(|(name, _)| name));
+    command.current_dir(cwd).env("HOME", home);
+    command
+}
+
+/// Whether `path` is an existing folder that is neither the crate's
+/// folder, inside it, nor above it (the real home, `/`). A relative path
+/// counts from the test's own cwd, the crate, so it never passes.
+pub fn outside_the_crate(path: &Path) -> bool {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .unwrap();
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    path.is_dir() && !path.starts_with(&crate_dir) && !crate_dir.starts_with(&path)
+}
 
 /// Serves the given (status, body) pairs to consecutive connections and
 /// returns every raw request it received. Error responses carry

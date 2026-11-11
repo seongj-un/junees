@@ -311,19 +311,11 @@ async fn cancelling_closes_the_stream_at_once() {
 /// session.
 async fn junees(url: &str, extra_env: &[(&str, &str)]) -> Output {
     let cwd = tempfile::tempdir().unwrap();
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary(cwd.path(), cwd.path());
     command
         .args(["--no-session", "-p", "go"])
-        .current_dir(cwd.path())
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", url)
-        .env("HOME", cwd.path())
-        .env_remove("JUNEES_HOME")
-        .env_remove("JUNEES_STREAM")
-        .env_remove("JUNEES_MODEL")
-        .env_remove("JUNEES_MAX_TOKENS")
-        .env_remove("JUNEES_MAX_TURNS")
-        .env_remove("JUNEES_THINKING_BUDGET")
         .envs(extra_env.iter().copied())
         .stdin(Stdio::null());
     let output = command.output().await.unwrap();

@@ -11,6 +11,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
+mod common;
+
 /// A fake `claude` playing `turns` in order (after answering `--version`,
 /// and `auth status` as signed in with the subscription), saving each
 /// run's arguments as `args-<n>`, environment as `env-<n>` and stdin (the
@@ -143,10 +145,9 @@ fn with_tools(id: &str, text: &str) -> Vec<Value> {
 /// `claude`, and API credentials in its environment that must not reach
 /// `claude`.
 fn junees(cwd: &Path, home: &Path, bin: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(args)
-        .current_dir(cwd)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", home)
