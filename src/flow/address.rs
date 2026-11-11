@@ -6,8 +6,14 @@
 //! fsmonitor, without the repository variables or any credential Junees
 //! holds. The push uses the user's own git credentials (credential helper,
 //! ssh agent): Junees never hands its GitHub token to git. It pushes to the
-//! `origin` URL read before the model ran, so a changed remote in the
-//! repository's config cannot send the commit elsewhere.
+//! `origin` URL read before the model ran, so a changed `remote.origin.url`
+//! cannot send the commit elsewhere. Other settings still apply to a URL
+//! given on the command line (`url.<x>.pushInsteadOf`, `credential.helper`),
+//! so the flow takes a [`ConfigSnapshot`] of every git config file the
+//! push reads before the model runs and pushes nothing when one changed
+//! ([`ConfigSnapshot::changes`]). It does not undo the change: it names
+//! the keys for the user to check. The model's bash may not write git's
+//! configuration in the first place ([`crate::tools::CommandPolicy::webhook_run`]).
 
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write as _};
@@ -171,6 +177,141 @@ pub fn push(worktree: &Path, origin: &str, branch: &str) -> Result<()> {
         ],
     )
     .map(|_| ())
+}
+
+/// The git config files a push from a worktree reads, besides the
+/// system's (root's to change), with their contents at one moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSnapshot {
+    /// Each file and its bytes (`None`: not there).
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
+}
+
+impl ConfigSnapshot {
+    /// The repository's `config` and `config.worktree`, the worktree's own
+    /// `config.worktree`, and the user's `~/.gitconfig` and
+    /// `$XDG_CONFIG_HOME/git/config` (`~/.config/git/config`) as they are
+    /// now.
+    pub fn take(worktree: &Path) -> Result<Self> {
+        let folder = |args: &[&str]| -> Result<PathBuf> {
+            Ok(worktree.join(run_git(worktree, args)?.trim()))
+        };
+        let common = folder(&["rev-parse", "--git-common-dir"])?;
+        let own = folder(&["rev-parse", "--git-dir"])?;
+        let mut paths = vec![
+            common.join("config"),
+            common.join("config.worktree"),
+            own.join("config.worktree"),
+        ];
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if let Some(home) = &home {
+            paths.push(home.join(".gitconfig"));
+        }
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .or_else(|| home.map(|home| home.join(".config")));
+        if let Some(xdg) = xdg {
+            paths.push(xdg.join("git/config"));
+        }
+        paths.dedup();
+        let files = paths
+            .into_iter()
+            .map(|path| {
+                let bytes = read_config(&path)?;
+                Ok((path, bytes))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self { files })
+    }
+
+    /// What changed since: `<file>: <key>, <key>` per changed file (key
+    /// names, never values, which may hold credentials); empty when
+    /// nothing did.
+    pub fn changes(&self) -> Result<Vec<String>> {
+        let mut changed = Vec::new();
+        for (path, before) in &self.files {
+            let now = read_config(path)?;
+            if now == *before {
+                continue;
+            }
+            let keys = match (
+                config_entries(before.as_deref()),
+                config_entries(now.as_deref()),
+            ) {
+                (Some(before), Some(now)) => {
+                    let mut keys: Vec<&String> = before
+                        .keys()
+                        .chain(now.keys())
+                        .filter(|key| before.get(*key) != now.get(*key))
+                        .collect();
+                    keys.sort();
+                    keys.dedup();
+                    if keys.is_empty() {
+                        "no setting (layout or comments only)".to_string()
+                    } else {
+                        keys.iter()
+                            .map(|key| crate::prompt_text::escape_hidden(key))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                }
+                _ => "the file is no longer readable as git config".to_string(),
+            };
+            changed.push(format!("{}: {keys}", path.display()));
+        }
+        Ok(changed)
+    }
+}
+
+/// The bytes of config file `path`, `None` when it is not there.
+fn read_config(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// The settings in config text `bytes` (key -> values in order), read by
+/// git itself (`git config --file - --list --null`, includes not
+/// followed); `None` when git cannot read it.
+fn config_entries(bytes: Option<&[u8]>) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+    use std::io::Write as _;
+    let mut entries = std::collections::BTreeMap::new();
+    let Some(bytes) = bytes else {
+        return Some(entries);
+    };
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["config", "--file", "-", "--list", "--null"])
+        .current_dir("/")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    git::hide_env(&mut command);
+    let mut child = command.spawn().ok()?;
+    let mut stdin = child.stdin.take()?;
+    let input = bytes.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child.wait_with_output().ok()?;
+    let _ = writer.join();
+    if !output.status.success() {
+        return None;
+    }
+    for entry in output
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let text = String::from_utf8_lossy(entry);
+        let (key, value) = text.split_once('\n').unwrap_or((&text, ""));
+        entries
+            .entry(key.to_string())
+            .or_insert_with(Vec::new)
+            .push(value.to_string());
+    }
+    Some(entries)
 }
 
 /// The test command: `sh -c` in `worktree`, in a process group of its
@@ -375,6 +516,75 @@ pub(crate) mod tests {
         commit(&tree.path, "diverge").unwrap().unwrap();
         assert!(push(&tree.path, &tree.origin, "feature").is_err());
         assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), new);
+    }
+
+    #[test]
+    fn a_changed_git_config_is_found_by_key() {
+        // The review's probe: `url.<other>.pushInsteadOf <origin>` in the
+        // repository's config sends this module's push elsewhere.
+        let (root, clone, bare, head) = remote_and_clone();
+        let repo = Repo::parse("o/n").unwrap();
+        let tree = prepare(&clone, &repo, 7, "feature", &head).unwrap();
+        let snapshot = ConfigSnapshot::take(&tree.path).unwrap();
+        assert_eq!(snapshot.changes().unwrap(), Vec::<String>::new());
+        let other = root.path().join("other.git");
+        sh_git(root.path(), &["init", "-q", "--bare", "other.git"]);
+        let other_text = other.to_string_lossy().to_string();
+        sh_git(
+            &tree.path,
+            &[
+                "config",
+                &format!("url.{other_text}.pushInsteadOf"),
+                &tree.origin,
+            ],
+        );
+        let changes = snapshot.changes().unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(
+            changes[0].ends_with(&format!("config: url.{other_text}.pushinsteadof")),
+            "{changes:?}"
+        );
+        // Unchecked, the push goes to the other repository: this is what
+        // the snapshot guards.
+        std::fs::write(tree.path.join("lib.txt"), "changed\n").unwrap();
+        commit(&tree.path, "fix").unwrap().unwrap();
+        push(&tree.path, &tree.origin, "feature").unwrap();
+        assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
+        assert_ne!(sh_git(&other, &["rev-parse", "refs/heads/feature"]), head);
+
+        // A value changed, a key removed, the worktree's own file, and a
+        // file git cannot read.
+        let snapshot = ConfigSnapshot::take(&tree.path).unwrap();
+        sh_git(&clone, &["config", "user.email", "other@example.com"]);
+        sh_git(&clone, &["config", "--unset", "user.name"]);
+        let changes = snapshot.changes().unwrap();
+        assert!(
+            changes[0].ends_with("config: user.email, user.name"),
+            "{changes:?}"
+        );
+        assert!(!changes[0].contains("other@example.com"), "{changes:?}");
+        let common = clone.join(".git");
+        let snapshot = ConfigSnapshot::take(&tree.path).unwrap();
+        std::fs::write(
+            common.join("worktrees/pr-7/config.worktree"),
+            "[core]\n\tsshCommand = sh -c id\n",
+        )
+        .unwrap();
+        let changes = snapshot.changes().unwrap();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(
+            changes[0].ends_with("pr-7/config.worktree: core.sshcommand"),
+            "{changes:?}"
+        );
+        let snapshot = ConfigSnapshot::take(&tree.path).unwrap();
+        let mut text = std::fs::read_to_string(common.join("config")).unwrap();
+        text.push_str("[broken\n");
+        std::fs::write(common.join("config"), text).unwrap();
+        let changes = snapshot.changes().unwrap();
+        assert!(
+            changes[0].ends_with("config: the file is no longer readable as git config"),
+            "{changes:?}"
+        );
     }
 
     #[test]

@@ -192,12 +192,15 @@ struct FakeEngines {
     calls: Arc<Mutex<Vec<Call>>>,
     edit: Option<&'static str>,
     fail: bool,
+    /// A git setting (key, value) the "model" writes in its folder.
+    git_config: Option<(String, String)>,
 }
 
 struct FakeEngine {
     calls: Arc<Mutex<Vec<Call>>>,
     edit: Option<&'static str>,
     fail: bool,
+    git_config: Option<(String, String)>,
 }
 
 #[async_trait(?Send)]
@@ -207,6 +210,7 @@ impl Engines for FakeEngines {
             calls: Arc::clone(&self.calls),
             edit: self.edit,
             fail: self.fail,
+            git_config: self.git_config.clone(),
         }))
     }
 }
@@ -224,6 +228,9 @@ impl Engine for FakeEngine {
         });
         if let Some(name) = self.edit {
             std::fs::write(spec.dir.join(name), "fixed\n").unwrap();
+        }
+        if let Some((key, value)) = &self.git_config {
+            sh_git(spec.dir, &["config", key, value]);
         }
         if self.fail {
             return Outcome::failed("the model broke");
@@ -1209,4 +1216,97 @@ async fn addresses_only_reviews_of_people_with_write_access() {
         "{report:?}"
     );
     assert_eq!(engines.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn does_not_push_after_git_config_changed() {
+    // The review's probe through the flow: the "model" adds
+    // `url.<other>.pushInsteadOf <origin>` to the clone's config.
+    let (home, root, github, route, bare, head) = address_setup(None).await;
+    let other = root.path().join("other.git");
+    sh_git(root.path(), &["init", "-q", "--bare", "other.git"]);
+    let engines = FakeEngines {
+        edit: Some("fixed.txt"),
+        git_config: Some((
+            format!("url.{}.pushInsteadOf", other.display()),
+            "https://git.invalid/o/n.git".into(),
+        )),
+        ..FakeEngines::default()
+    };
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: false,
+        unattended: ALL,
+    };
+    let report = run(
+        &setup,
+        &reviewed("bob", "changes_requested", "fix", &head),
+        1000,
+    )
+    .await;
+    assert_eq!(report.status, RunStatus::Failed);
+    let line = &report.lines[0];
+    assert!(
+        line.starts_with(
+            "#7 address: failed: git configuration changed while the model ran, not pushed"
+        ),
+        "{line}"
+    );
+    assert!(
+        line.contains(&format!("config: url.{}.pushinsteadof", other.display())),
+        "{line}"
+    );
+    assert!(line.ends_with("; commented"), "{line}");
+    assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
+    assert_eq!(sh_git(&other, &["for-each-ref"]), "");
+    let body = github.writes()[0].1["body"].as_str().unwrap().to_string();
+    assert!(
+        body.contains("git 설정 파일 1개가 바뀌어서 push하지 않았습니다"),
+        "{body}"
+    );
+    assert!(!body.contains("other.git"), "{body}");
+    // Left for the user to see.
+    assert!(
+        sh_git(&route.dir, &["config", "--list"]).contains("pushinsteadof"),
+        "the change is not undone"
+    );
+
+    // A test command that changes it is caught before the push too.
+    let (home, _root, github, mut route, bare, head) = address_setup(None).await;
+    let mut flow = route.flow.clone().unwrap();
+    flow.test_cmd = Some("git config --local junees.planted yes".into());
+    route.flow = Some(flow);
+    let engines = FakeEngines {
+        edit: Some("fixed.txt"),
+        ..FakeEngines::default()
+    };
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: false,
+        unattended: ALL,
+    };
+    let report = run(
+        &setup,
+        &reviewed("bob", "changes_requested", "fix", &head),
+        1000,
+    )
+    .await;
+    assert!(
+        report.lines[0]
+            .contains("git configuration changed while the test command ran, not pushed"),
+        "{report:?}"
+    );
+    assert!(
+        report.lines[0].contains("config: junees.planted"),
+        "{report:?}"
+    );
+    assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
 }
