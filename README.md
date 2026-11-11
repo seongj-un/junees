@@ -70,6 +70,7 @@ junees -p "이 폴더에 뭐가 있어?"        # 한 번만 실행 (위치 인�
 junees -c -p "계속"                     # 이어서 한 번만 실행 (junees -c "계속"도 됨)
 junees --resume 20261109-0617           # 지정한 세션 (id 앞부분만 써도 유일하면 됨)
 junees --no-session                     # 기록하지 않음
+junees --image shot.png "이 오류는 뭐야?"   # 이미지와 함께 한 번만 실행 (--image 여러 번 가능)
 junees task init "할 일 관리 웹 앱을 만들어"   # 계획만 (git 저장소 안에서)
 junees task run --max-sessions 5        # 기능 하나씩 작업 세션 반복 (junees task 와 같음)
 junees task --max-tokens 2000000 --max-time 2h   # 토큰/시간 예산 안에서만 (task run 도 같은 옵션)
@@ -98,13 +99,14 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - `--resume`으로 다른 폴더에서 시작한 세션을 열면 `resumed <id> (N messages, started in <폴더>)`로 알려 준다(claude-code 세션은 `N Claude Code turns`). 기록 속 상대 경로는 그 폴더 기준이다.
 - 세션 파일은 그 세션을 쓰는 Junees가 `flock`으로 잠근다. 아직 실행 중인 세션을 다른 터미널에서 `-c`나 `--resume`으로 열면 "session <id> is in use by another Junees" 오류로 끝나고 파일은 건드리지 않는다. 프로세스가 죽으면 잠금은 커널이 풀어 준다.
 - 이어 갈 때 마지막 줄이 줄바꿈 없이 끝나고 읽히지 않으면(쓰는 도중 죽은 흔적) 그 줄만 버린다. 줄바꿈까지 있는 줄이 읽히지 않으면 위치와 상관없이 오류로 멈추고 파일을 고치지 않는다. 도구 실행 중에 끊겨서 결과가 없는 도구 호출은 `interrupted` 오류 결과로 채우고 그것도 기록한다.
-- 첫 줄(`meta`)에 기록 형식 버전 `format`(현재 6)이 있고, 각 줄에 기록 시각 `ts`(unix 초)가 붙는다. 이 버전보다 새 형식의 세션은 "written by a newer Junees" 오류로 열지 않는다. 형식 1(L1) 세션도 그대로 읽고 이어 쓴다.
+- 첫 줄(`meta`)에 기록 형식 버전 `format`(현재 7)이 있고, 각 줄에 기록 시각 `ts`(unix 초)가 붙는다. 이 버전보다 새 형식의 세션은 "written by a newer Junees" 오류로 열지 않는다. 형식 1(L1) 세션도 그대로 읽고 이어 쓴다.
 - 이어 쓸 때 첫 줄은 바꾸지 않으므로(덧붙이기만 함), 형식 1 세션을 이 버전으로 이어 쓴 뒤 L1 바이너리로 열면 "newer Junees"가 아니라 `line N is corrupt` 오류가 난다(파일은 그대로). 이 버전부터는 모르는 종류의 항목을 만나면 "continued by a newer Junees" 오류로 원인을 알려 준다.
 - 항목 종류: `meta`, `message`, `append_text`, `usage`, 그리고 형식 2에서 추가된 `clear_tool_results`, `compact`, `summary_usage`(아래 컨텍스트 관리).
 - 형식 3: 메시지 안의 thinking, redacted_thinking, 서버 도구 블록처럼 Junees가 직접 다루지 않는 블록을 API가 보낸 JSON 그대로 저장한다(아래 확장 사고). 이전 버전은 이런 블록을 API가 거절하는 자리표시로 읽기 때문에 형식을 올렸고, 이전 바이너리는 형식 3 세션을 "newer Junees" 오류로 열지 않는다. 형식 1, 2 세션도 그대로 읽는다. 이런 세션을 이 버전으로 이어 쓰면 첫 새 줄 앞에 `{"type":"format","format":4}` 항목을 한 번 덧붙인다. 이전 바이너리는 이 모르는 항목에서 "continued by a newer Junees" 오류로 멈추므로, thinking 블록을 자리표시로 잘못 읽어 400을 받는 일이 없다. 기록을 바꾸는 일도 항목으로 덧붙이기만 하고 파일을 새로 쓰지 않으므로, 재생 결과가 실행 중 기록과 같다.
 - 형식 4: 결과 없이 남은 서버 도구 호출을 지우는 `drop_server_calls { ids }` 항목(아래 웹 검색). 이전 바이너리는 이 항목을 모르고 지운 호출을 다시 보내 400을 받으므로 형식을 올렸다.
 - 형식 5: Claude Code가 돌린 대화(아래 구독 모드). meta 줄에 `backend: "claude-code"`(api 대화는 이 필드가 없다)가 있고, 턴마다 `claude_turn { claude_session, input, text, usage, end }` 항목이 붙는다(Claude Code 세션 id, 입력, 최종 답, 사용량, 끝난 방식). 메시지 기록은 Claude Code가 자기 세션에 들고 있으므로 Junees 기록에는 메시지가 없다. 형식 4 바이너리는 이런 파일을 빈 API 대화로 잘못 열기 때문에 형식을 올렸다(이제 "newer Junees" 오류).
 - 형식 6: 서브에이전트가 쓴 토큰을 세는 `subagent_usage` 항목(아래 서브에이전트). `summary_usage`처럼 사용량에만 더하고 컨텍스트 크기에는 쓰지 않는다. 서브에이전트의 기록은 `sessions/<id>/sub-<n>.jsonl`에 따로 있다.
+- 형식 7: 이미지(위 이미지 입력). `image` 블록과 이미지가 든 도구 결과(`content`가 목록)를 쓰고, 이미지는 세션 폴더의 파일을 가리킨다(`junees_file` 소스). 이미지가 든 입력을 실패한 턴 뒤 user 메시지에 붙이는 `append_content { content }` 항목도 생겼다. 형식 6 바이너리는 파일을 가리키는 소스를 API에 그대로 보내거나 목록인 `content`를 깨진 줄로 보므로 형식을 올렸다.
 - 세션 파일에는 도구 출력이 그대로 들어가므로 파일은 `0600`, 새로 만드는 `$JUNEES_HOME`과 `sessions` 폴더는 `0700`으로 만든다.
 - `JUNEES_HOME`과 `HOME`이 둘 다 없으면(cron, 일부 서비스와 컨테이너) 기록 없이 실행하고 "session not saved" 한 줄로 알린다. 이때 `-c`와 `--resume`만 오류다.
 - 토큰 사용량도 기록되고, 이어 가면 그 세션의 누적값부터 다시 센다.
@@ -208,6 +210,22 @@ junees usage --by source           # 터미널, discord, cron, webhook별
 - 사용량: `usage.server_tool_use.web_search_requests`를 세션마다 더해 `/usage`에 `web searches N`으로, `task run`의 실행 로그(run.log) 정지 줄에 `web searches N`으로 보여 준다. 토큰 예산(`--max-tokens`)에는 들어가지 않는다.
 - 컨텍스트: 검색한 호출의 사용량은 컨텍스트 크기로 쓰지 않는다. 그 호출의 캐시 읽기에는 API의 검색 반복 단계마다 읽은 양이 모두 들어 있어 실제보다 훨씬 커서, 압축이 너무 일찍 일어난다(context editing 문서의 서버 도구 주의). 대신 그 응답(검색 결과 포함)은 아래 추정치로 크기에 더해지므로, 매 호출이 검색하는 세션도 제때 압축된다. 검색하지 않은 다음 호출이 다시 잰다. 도구 결과 비우기는 검색 결과 블록을 건드리지 않는다. `encrypted_content`는 바꾸면 400이고, Junees가 대신 넣을 수 있는 유효한 자리표시가 없으며, 블록 짝을 지우면 뒤 텍스트의 인용이 가리킬 곳이 사라진다. 검색 결과는 압축 때 요약으로 정리된다(요약 텍스트에는 검색어와 앞 5개 결과의 제목/URL만 넣는다). 검색을 클라이언트 도구와 같은 응답에서 부르면 검색은 그 도구 결과를 보낸 다음 요청에서 실행되어 결과 블록이 다음 응답에 오는데, 턴 안 압축은 이 둘 사이를 자르지 않는다(검색 호출 없이 결과만 남지 않도록).
 - 조직에서 웹 검색이 꺼져 있다는 400이 오면 오류 끝에 `JUNEES_WEB_SEARCH=off`로 하거나 관리자에게 켜 달라는 안내가 붙는다.
+
+### 이미지 입력
+
+모델에게 그림을 보여 준다. 방법은 넷이고 모두 api 백엔드에서만 된다.
+
+- 모델이 `read_file`로 PNG, JPEG, GIF, WebP 파일을 읽으면 내용 대신 이미지 자체가 도구 결과로 간다(결과 `content`가 텍스트 블록 + `image` 블록 목록, [도구 결과 문서](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)). 형식은 파일 이름이 아니라 앞부분 바이트(매직 바이트)로 알아본다. `offset`/`limit`은 이미지에 쓰이지 않는다.
+- 대화에서 `/image <경로> [질문]`: 이미지와 질문을 한 입력으로 보낸다. 공백이 든 경로는 `/image "내 사진.png" 이건 뭐야?`처럼 큰따옴표로, `~/`는 홈. 질문이 없으면 `(sent with no text)`가 텍스트로 간다.
+- `-p`에 `--image <경로>`(여러 번): `junees --image a.png --image b.png "둘의 차이는?"`. 프롬프트 없는 `--image`는 오류. 잘못된 이미지는 서버를 띄우거나 세션을 만들기 전에 오류로 끝난다.
+- 디스코드: 허용된 사용자의 메시지에 붙은 이미지(아래 디스코드 게이트웨이).
+- 입력의 이미지는 텍스트 앞에 둔다([vision 문서](https://platform.claude.com/docs/en/build-with-claude/vision): "Claude works best when images come before text"). API에는 base64 소스(`{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ...}}`)로 보낸다.
+- 상한: 파일 5 MB(base64로 약 7 MB. API는 이미지당 base64 10 MB, Bedrock/Vertex는 5 MB)와 가로세로 8000 px(문서의 최대). 넘으면 이유와 줄이는 방법(ImageMagick 예)을 알려 주고 보내지 않는다. 크기는 헤더(PNG IHDR, GIF 화면 크기, WebP VP8/VP8L/VP8X, JPEG SOF)에서 읽고 픽셀은 디코딩하지 않는다. 리사이즈는 하지 않는다(이미지 라이브러리가 필요해서).
+- 세션 기록: 이미지는 세션 폴더의 파일 `$JUNEES_HOME/sessions/<id>/images/<sha256>.<확장자>`(폴더 0700, 파일 0600, 같은 이미지는 한 번만)에 두고 기록 줄에는 그 파일을 가리키는 블록(`"source": {"type": "junees_file", "media_type": ..., "sha256": ...}`)만 남긴다. 이어 갈 때 파일을 다시 읽어 붙이고, 파일이 없거나 내용이 바뀌었으면(해시가 다르면) 그 자리에 `[image ... could not be read ...]` 같은 한 줄을 넣고 이어 간다. 기록 형식 7(위 세션 기록).
+- 컨텍스트: 이미지 크기는 base64 길이가 아니라 픽셀로 추정한다(`ceil(가로/28) x ceil(세로/28)`, 긴 변 2576 px로 줄인 뒤, 최대 4784토큰: 문서의 고해상도 등급 기준이라 다른 모델에서는 크게 잡힌다). 도구 결과를 비우면 그 결과의 이미지도 지운다. 압축 요약 호출에는 이미지 대신 `[user: image, image/png, 640x480 px]` 같은 줄이 가고, 한 턴 안에서 자를 때 그 턴의 입력에 붙은 이미지는 입력 글과 함께 남긴다.
+- 세션 검색은 이미지 블록을 건너뛰고 글만 찾고, `junees usage`는 이미지가 든 기록도 그대로 센다.
+- claude-code 백엔드: `/image`, `--image`, 디스코드 이미지는 "images are sent on the api backend only"로 거절한다. Claude Code에는 텍스트만 넘기므로, 파일을 읽으라고 하면 Claude Code의 Read 도구가 이미지를 연다.
+- 한계: 한 요청에 이미지가 20개를 넘으면 API가 이미지마다 더 작은 크기 제한을 둔다(문서: 각 변 3000 px 이하 권장). Junees는 이를 세지 않으므로, 큰 스크린샷을 많이 읽은 긴 세션은 400을 받을 수 있다(그때는 `/compact`나 `/new`). MCP 서버가 돌려준 이미지는 지금처럼 한 줄 설명으로만 간다.
 
 ### 메모리
 
@@ -434,6 +452,7 @@ loginctl enable-linger "$USER"             # 로그아웃해도 계속 돌게
 - 같은 채널의 메시지는 받은 순서대로 하나씩 처리한다(턴 중에 온 메시지는 대기열). 다른 채널은 동시에 돌고, 동시에 턴을 돌리는 채널은 `discord_parallel`(기본 2)까지다. 자리가 없으면 `(waiting for a free slot: ...)`을 알리고 기다린다(이때 `!stop`이면 시작하지 않는다). 모든 채널의 대화는 한 스레드에서 비동기로 돈다(에이전트의 future가 `Send`가 아니라서 `LocalSet`).
 - 출력: 턴 중에는 타이핑 표시(8초마다 갱신, 승인 질문을 기다리는 동안은 멈춤). 응답은 메시지 편집으로 스트리밍하지 않고 **완성된 텍스트 블록마다** 보낸다(편집은 레이트 리밋을 빨리 쓰고, 끊긴 응답의 재시도 처리가 복잡해진다). 다음 텍스트 전까지의 도구 호출은 `-> bash ls -la` 같은 한 줄 요약(명령, 경로, 검색어 120자)을 코드 블록 하나로 묶어 보낸다. 2000자가 넘는 블록은 줄 단위로 나누고, 코드 블록이 잘리면 앞 메시지에서 닫고 다음 메시지에서 같은 언어로 다시 연다(다시 여는 줄은 펜스와 32자 이하의 언어만이고, ```` ```rm -rf build``` ````처럼 같은 줄에서 닫히는 펜스는 코드 블록으로 보지 않는다. 길이는 UTF-16 단위로 세어 어느 방식으로 세도 2000자를 넘지 않게 한다). 잘리거나 압축된 응답 같은 안내도 채널에 나온다. 오류는 `error: ...`와 터미널과 같은 힌트로 보낸다.
 - 시스템 프롬프트에 "디스코드로 대화 중이니 짧게, 표 없는 Markdown"이라는 한 문단을 더한다.
+- 이미지 첨부: 허용된 사용자의 메시지에 붙은 첨부 중 `content_type`이 `image/*`인 것(없으면 확장자)을 그 턴이 시작할 때 내려받아 메시지 글 앞에 이미지 블록으로 넣는다(api 백엔드, 위 이미지 입력). 글 없이 이미지만 보내도 된다. 디스코드 CDN(`https://cdn.discordapp.com`, `https://media.discordapp.net`)에서만, 리다이렉트는 그 호스트로 3번까지, 30초 안에, 5 MB까지 받고, 받은 바이트가 PNG/JPEG/GIF/WebP가 아니면 버린다. 한 메시지에 10개까지. 이미지가 아닌 파일, 큰 파일, CDN 밖 주소, 받지 못한 것은 `(attachments left out: ...)`로 채널에 알리고 같은 줄을 모델에게도 붙인다(못 받은 그림에 대해 지어내지 않게). 오류 문구와 로그에는 서명된 첨부 URL을 쓰지 않고, 로그에는 형식과 크기만 남긴다. 테스트용 다른 주소는 환경 변수 `JUNEES_DISCORD_CDN_URL`(https, http는 이 컴퓨터만)로만 준다.
 - 명령(슬래시 명령 등록 없이 텍스트로):
   - `!new`: 새 대화(새 세션, 메모리와 스킬 다시 읽음). 대기열 순서대로 처리된다.
   - `!stop`: 진행 중인 턴을 취소하고(도구의 프로세스 그룹까지, 기록은 터미널의 Ctrl-C와 같다) 대기열의 메시지를 버린다. 자리를 기다리던 턴도 멈춘다.
@@ -451,7 +470,7 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
 #### 범위 밖, 한계
 
 - `!task <목표>`(게이트웨이에서 장기 작업 시작)는 후속으로 미뤘다. 작업 모드는 프로세스의 현재 폴더를 저장소 루트로 옮기고 한 저장소에 하나만 돌기 때문에, 여러 채널이 동시에 도는 게이트웨이 안에서는 따로 설계해야 한다. 지금은 컴퓨터에서 `junees task`를 돌리고 진행 알림은 웹훅(`notify_webhook`)으로 받는다.
-- 디스코드 애플리케이션(슬래시) 명령 등록, 첨부 파일 읽기, 메시지 편집 스트리밍, 반응 이모지, 봇이 스스로 스레드를 만드는 것은 하지 않는다.
+- 디스코드 애플리케이션(슬래시) 명령 등록, 이미지가 아닌 첨부 파일 읽기, 메시지 편집 스트리밍, 반응 이모지, 봇이 스스로 스레드를 만드는 것은 하지 않는다.
 - 테스트는 테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST 서버로만 했다(`tests/discord_gateway.rs`). 실제 디스코드에는 연결해 보지 않았다.
 
 ### MCP 서버
@@ -738,7 +757,7 @@ github_api_url = "https://api.github.com"    # JUNEES_GITHUB_API_URL (GitHub Ent
 
 - 프롬프트 캐싱: 매 요청에서 도구 목록의 마지막 도구(웹 검색이 켜졌으면 `web_search`), 시스템 프롬프트의 마지막 블록, 마지막 메시지의 마지막 일반 블록(텍스트, 도구 호출, 도구 결과)에 `cache_control: ephemeral`을 붙인다. thinking 블록에는 붙일 수 없어서, 그런 블록은 건너뛰고 그 앞의 일반 블록에 붙인다. 한 번만 보내는 요약 호출에는 붙이지 않는다(캐시 쓰기는 일반 입력보다 비싸다). 응답의 캐시 쓰기/읽기 토큰은 `/usage`에 따로 나온다.
 - 컨텍스트 크기: 마지막으로 잰 크기(웹 검색을 하지 않은 마지막 응답의 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`, 위 웹 검색 참고) + 그 뒤 기록에 더해진 블록의 추정치(도구 결과, 입력, 검색한 호출의 응답). 잰 크기가 없으면(첫 호출 전, 압축 직후) 기록 전체와 시스템 프롬프트, 도구 정의를 추정한다. 추정은 블록 JSON을 글자 단위로 센다(`session::estimate_text_tokens`): ASCII는 4글자당 1토큰, 한글/한자/가나(전각 문자 포함)는 1글자당 1토큰, 그 밖의 비ASCII는 UTF-8 4바이트당 1토큰(라틴 악센트, 그리스, 키릴 문자는 2글자당 1토큰). 한글 한 글자는 3바이트지만 대개 1토큰 이상이라 4바이트당 1토큰으로는 낮게 잡혔다. 영어 등 ASCII는 예전(4바이트당 1토큰)과 같고, 어떤 텍스트도 예전보다 작게 잡히지 않는다. JSON 키와 base64 검색 결과 때문에 대개 실제보다 크게 잡히고, 그만큼 조금 일찍 압축될 뿐이다. 둘 다 세션 기록의 항목에서 재생으로 다시 계산되므로 새 항목 없이 이전 세션에도 그대로 적용되고, 이어 가도 유지된다. 한도는 `JUNEES_CONTEXT_WINDOW` x `JUNEES_COMPACT_THRESHOLD`(기본 200000 x 0.8 = 160000).
-- 1차 대응(오래된 도구 결과 비우기): 모델 호출 직전에 크기가 한도 이상이면, 도구 결과가 든 메시지 중 최근 3개를 뺀 이전 것들의 출력을 `[tool output cleared to save context]`로 바꾼다. `tool_use_id`와 `is_error`는 그대로라 호출/결과 짝이 유지된다. 기록 항목은 `clear_tool_results { upto }`(수동 thinking 모드면 `keep_thinking: true`, 위 확장 사고 참고).
+- 1차 대응(오래된 도구 결과 비우기): 모델 호출 직전에 크기가 한도 이상이면, 도구 결과가 든 메시지 중 최근 3개를 뺀 이전 것들의 출력을 `[tool output cleared to save context]`로 바꾼다(결과에 든 이미지도 지운다). `tool_use_id`와 `is_error`는 그대로라 호출/결과 짝이 유지된다. 기록 항목은 `clear_tool_results { upto }`(수동 thinking 모드면 `keep_thinking: true`, 위 확장 사고 참고).
 - 2차 대응(압축): 비울 것이 없거나, 비운 뒤 다음 응답에서도 한도 이상이면 앞부분을 같은 모델로 요약한다. 꼬리는 최근 두 사용자 입력(안 되면 마지막 입력)부터 끝까지이고, 도구 결과가 든 메시지나 도구 호출 바로 뒤에서는 자르지 않는다. 입력이 첫 메시지 하나뿐인 긴 턴(`-p` 한 번으로 끝까지 가는 작업 등)은 그 턴 안에서 자른다: 도구 결과만 든 user 메시지 바로 다음 assistant 메시지(앞의 호출이 모두 결과를 받은 지점)에서, 최근 도구 왕복 두 번(안 되면 한 번)을 남긴다. 이때는 요약과 그 턴의 원래 입력(원문 그대로)을 담은 user 메시지를 꼬리 앞에 새로 넣는다. 사용자 입력에서 자를 수 있으면 그쪽을 먼저 쓴다. 요약 호출은 도구 없이, 사고(thinking) 없이, 요약 전용 시스템 프롬프트로, 앞부분을 텍스트로 옮긴 user 메시지 하나를 보낸다(`max_tokens` 4096). 텍스트로 옮길 때 thinking 블록은 빼고, 웹 검색은 `[assistant: web search: <검색어>]`, 검색 결과는 앞 5개의 제목과 URL(`[assistant: web search results: 제목 (URL); ...; 15 more]`, 내용은 넣지 않음), 다른 원본 블록은 `[assistant: code_execution_tool_result block]`처럼 종류만 적는다. 요약은 꼬리 첫 user 메시지 맨 앞에 `[Summary of the earlier conversation]` 블록으로 들어가 역할 교대가 유지된다. 기록 항목은 `compact { summary, keep_from }`이고, 요약 호출의 사용량은 `summary_usage`로 남아 `/usage`에는 더해지지만 컨텍스트 크기에는 쓰이지 않는다. 압축하면 `(compacted the conversation: N messages -> M)` 한 줄이 나온다.
 - 요약 호출이 실패하거나, 빈 요약이 오거나, 요약이 출력 한도(`max_tokens`)에 걸려 잘리면 경고만 띄우고 기록은 그대로 둔다(요약 호출 사용량은 더한다).
 - `/compact`는 한도와 상관없이 지금 압축한다.
@@ -930,7 +949,11 @@ src/
     status.rs          task status (읽기 전용, 텍스트/JSON)
     prompt.rs          초기화/작업 세션 프롬프트
     git.rs             저장소 확인, 커밋, 로그
-  message.rs         대화 메시지 타입 (Messages API 형식, 모르는 블록은 원본 JSON 그대로, 텍스트의 citations 보존, 서버 도구 사용량)
+  message.rs         대화 메시지 타입 (Messages API 형식, 이미지 블록과 이미지가 든 도구 결과, 모르는 블록은 원본 JSON 그대로, 텍스트의 citations 보존, 서버 도구 사용량)
+  images/            이미지 입력
+    mod.rs             형식 판별(매직 바이트), 헤더에서 크기 읽기, 상한, base64, 토큰 추정, /image와 --image 파일 읽기
+    store.rs           세션 기록의 이미지를 세션 폴더 파일로 저장하고 이어 갈 때 다시 읽기(sha256 확인)
+    discord.rs         디스코드 첨부 중 이미지 고르기, CDN에서만 내려받기(리다이렉트 제한, 시간, 크기)
   web_search.rs      웹 검색 서버 도구 설정과 도구 정의, 인용 출처 목록, 압축용 검색 블록 요약
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
