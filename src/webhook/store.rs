@@ -126,6 +126,11 @@ pub struct Route {
     /// The event of the last run (`pull_request.opened`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event: Option<String>,
+    /// The GitHub writes its runs may make without a question
+    /// (`--github-allow`), on top of the user's
+    /// JUNEES_GITHUB_ALLOW_UNATTENDED, which must allow them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub github_allow: Vec<crate::github::Write>,
 }
 
 impl Route {
@@ -304,6 +309,7 @@ pub(crate) mod tests {
             created_at: 0,
             last: None,
             last_event: None,
+            github_allow: Vec::new(),
         }
     }
 

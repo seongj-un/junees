@@ -354,6 +354,7 @@ fn api_agent(
     skills::register(&mut tools, config.home.as_deref(), true);
     mcp.register(&mut tools);
     plugins.register(&mut tools);
+    junees::github::register(&mut tools, &config.github, cwd, gate.is_some());
     let mut agent = Agent::new(
         make_provider(config)?,
         tools,
@@ -1094,6 +1095,17 @@ impl Repl {
                 )
             ),
             Slash::Skill(name) => self.skill(&name),
+            Slash::Github => {
+                print!(
+                    "{}",
+                    junees::github::overview(&self.config.github, &self.cwd).await
+                );
+                if let Engine::Claude(_) = self.engine {
+                    println!(
+                        "(the claude-code backend has no github tool; Claude Code can use gh)"
+                    );
+                }
+            }
             Slash::Mcp => match &self.engine {
                 Engine::Api(_) => print!("{}", self.mcp.overview()),
                 Engine::Claude(_) => eprintln!(

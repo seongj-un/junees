@@ -34,6 +34,8 @@ pub enum Slash {
     Plugins,
     /// `/cron` lists the scheduled jobs.
     Cron,
+    /// `/github` shows the GitHub settings and the rate limit left.
+    Github,
     /// `/webhooks` lists the webhook routes.
     Webhooks,
     Help,
@@ -87,6 +89,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "mcp" => plain(Slash::Mcp),
         "plugins" => plain(Slash::Plugins),
         "cron" => plain(Slash::Cron),
+        "github" => plain(Slash::Github),
         "webhooks" => plain(Slash::Webhooks),
         "skill" => match arg {
             None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
@@ -178,6 +181,7 @@ mod tests {
             ("/memory clear project", Slash::MemoryClear(Target::Project)),
             ("/skills", Slash::Skills),
             ("/cron", Slash::Cron),
+            ("/github", Slash::Github),
             ("/webhooks", Slash::Webhooks),
             ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),

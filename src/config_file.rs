@@ -70,6 +70,10 @@ pub const KEYS: &[(&str, &str)] = &[
         "discord_approval_timeout",
         "JUNEES_DISCORD_APPROVAL_TIMEOUT",
     ),
+    ("github_token", "JUNEES_GITHUB_TOKEN"),
+    ("github_api_url", "JUNEES_GITHUB_API_URL"),
+    ("github_repos", "JUNEES_GITHUB_REPOS"),
+    ("github_allow_unattended", "JUNEES_GITHUB_ALLOW_UNATTENDED"),
 ];
 
 const HEADER: &str = "\

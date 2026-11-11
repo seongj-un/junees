@@ -240,6 +240,7 @@ impl Engines for ApiEngines {
         skills::register(&mut tools, config.home.as_deref(), true);
         self.mcp.register(&mut tools);
         self.plugins.register(&mut tools);
+        crate::github::register(&mut tools, &config.github, &self.cwd, self.asks());
         let mut agent = Agent::new(
             (self.provider)()?,
             tools,

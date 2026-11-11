@@ -101,6 +101,10 @@ pub trait Ask: Send {
     async fn ask(&mut self, request: &Request) -> Answer;
 }
 
+/// Kinds ending in this are asked about every time (a GitHub merge): an
+/// "always" answer runs the call but does not cover the next one.
+pub const ASKED_EVERY_TIME: &str = "(asked every time)";
+
 /// The result of a declined call; the model reads it and changes its plan.
 pub fn declined(reason: &str) -> ToolOutput {
     ToolOutput::error(format!("the user declined: {reason}"))
@@ -211,6 +215,7 @@ impl Approval {
                     )
                 }
             }
+            crate::github::TOOL_NAME => crate::github::question(input)?,
             name => {
                 let external = self.external.get(name)?;
                 let target = format!(
@@ -300,7 +305,12 @@ impl Approval {
                 self.always
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .extend(request.kinds);
+                    .extend(
+                        request
+                            .kinds
+                            .into_iter()
+                            .filter(|kind| !kind.ends_with(ASKED_EVERY_TIME)),
+                    );
                 None
             }
             Answer::No => Some(declined("no reason given")),
@@ -630,6 +640,33 @@ mod tests {
                 .is_some()
         );
         assert_eq!(gate.request("bash", &bash("junees cron list")), None);
+    }
+
+    #[test]
+    fn github_writes_through_gh_are_asked_about_even_when_risky() {
+        let (_dir, workspace) = workspace();
+        let gate = approval(ApprovalMode::Risky, &workspace);
+        let request = gate
+            .request("bash", &bash("gh pr review 7 --approve"))
+            .unwrap();
+        assert_eq!(
+            request.reasons,
+            [
+                "`gh pr review` submits a review (approval, change request or comment) on GitHub \
+              as you"
+            ]
+        );
+        assert_eq!(request.kinds, ["bash: write to GitHub through gh"]);
+        // A merge, like the github tool's, is asked about every time.
+        let request = gate
+            .request("bash", &bash("gh api -X PUT repos/o/n/pulls/7/merge"))
+            .unwrap();
+        assert_eq!(
+            request.kinds,
+            ["bash: merge on GitHub through gh (asked every time)"]
+        );
+        assert!(request.kinds[0].ends_with(ASKED_EVERY_TIME));
+        assert_eq!(gate.request("bash", &bash("gh pr view 7")), None);
     }
 
     #[test]

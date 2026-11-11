@@ -18,7 +18,7 @@ use super::store::{Route, Store, event_label};
 use super::template::{self, Data};
 use crate::cancel::Cancel;
 use crate::cron::deliver::{self, Lookup, Report};
-use crate::cron::run::{Engine, Limits, Outcome, Spec};
+use crate::cron::run::{Engine, Limits, Outcome, Spec, Trigger};
 use crate::cron::store::{LastRun, RunStatus, random_hex};
 use crate::cron::tz::TimeZone;
 use crate::cron::unix_now;
@@ -120,6 +120,10 @@ pub async fn execute(
         source: session::WEBHOOK,
         channel: &route.name,
         note: WEBHOOK_NOTE,
+        trigger: Trigger::Webhook {
+            route: &route.name,
+            github_allow: &route.github_allow,
+        },
     };
     engine.run(&spec, cancel, limits).await
 }
@@ -279,6 +283,7 @@ mod tests {
     use crate::cron::deliver::tests::{fake_http, lookup};
     use crate::cron::run::ApiEngine;
     use crate::gateway::engine::ProviderFactory;
+    use crate::github::Write;
     use crate::message::{ContentBlock, StopReason, Usage};
     use crate::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
     use crate::webhook::store::tests::route;
@@ -423,5 +428,141 @@ mod tests {
             posts[0].1["content"],
             "**junees webhook** `pr`: ok\n리뷰 끝"
         );
+    }
+
+    /// The last message of each request, as JSON.
+    type Last = Arc<Mutex<Vec<String>>>;
+
+    /// Replies in order; records the last message of each request.
+    struct Recording {
+        replies: Mutex<VecDeque<CompletionResponse>>,
+        last: Last,
+    }
+
+    #[async_trait]
+    impl Provider for Recording {
+        async fn complete(
+            &self,
+            request: CompletionRequest<'_>,
+        ) -> Result<CompletionResponse, ProviderError> {
+            self.last
+                .lock()
+                .unwrap()
+                .push(serde_json::to_string(request.messages.last().unwrap()).unwrap());
+            Ok(self.replies.lock().unwrap().pop_front().expect("a reply"))
+        }
+    }
+
+    /// An engine whose model comments on o/n#7 through the `github` tool,
+    /// then answers; GitHub is at `github_url` and the user's settings
+    /// allow comments and reviews unattended.
+    fn github_engine(home: &Path, github_url: &str) -> (ApiEngine, Last) {
+        let mut config = Config::from_lookup(|key| match key {
+            "ANTHROPIC_API_KEY" => Some("sk-test".into()),
+            "JUNEES_GITHUB_TOKEN" => Some("gh-test-token".into()),
+            "JUNEES_GITHUB_API_URL" => Some(github_url.into()),
+            "JUNEES_GITHUB_REPOS" => Some("o/n".into()),
+            "JUNEES_GITHUB_ALLOW_UNATTENDED" => Some("comment,review".into()),
+            _ => None,
+        })
+        .unwrap();
+        config.home = Some(home.to_path_buf());
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 2,
+            ..Usage::default()
+        };
+        let replies = vec![
+            CompletionResponse {
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "github".into(),
+                    input: json!({"action": "pr_comment", "repo": "o/n", "number": 7, "body": "looks fine"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage,
+            },
+            CompletionResponse {
+                content: vec![ContentBlock::text("done")],
+                stop_reason: StopReason::EndTurn,
+                usage,
+            },
+        ];
+        let last = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&last);
+        let replies = Arc::new(Mutex::new(Some(replies)));
+        let provider: ProviderFactory = Arc::new(move || {
+            Ok(Box::new(Recording {
+                replies: Mutex::new(replies.lock().unwrap().take().unwrap_or_default().into()),
+                last: Arc::clone(&record),
+            }) as Box<dyn Provider>)
+        });
+        (ApiEngine::new(config).with_provider(provider), last)
+    }
+
+    fn limits() -> Limits {
+        Limits {
+            max_time: std::time::Duration::from_secs(60),
+            max_tokens: 0,
+        }
+    }
+
+    /// Runs route `route` with the [`github_engine`]: the requests GitHub
+    /// got and the tool result the model saw.
+    async fn webhook_comment(route: &Route) -> (Vec<String>, String) {
+        let home = tempfile::tempdir().unwrap();
+        let (url, seen) = fake_http(201).await;
+        let (engine, last) = github_engine(home.path(), &url);
+        let mut route = route.clone();
+        route.dir = home.path().to_path_buf();
+        let outcome = execute(&engine, &route, "comment on #7", &Cancel::new(), limits()).await;
+        assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
+        let requests = seen.lock().unwrap().iter().map(|r| r.0.clone()).collect();
+        let result = last.lock().unwrap()[1].clone();
+        (requests, result)
+    }
+
+    #[tokio::test]
+    async fn webhook_runs_write_to_github_only_where_the_route_allows_it() {
+        // The user's list allows comments, but the route does not: the
+        // request that started the run is anyone's text.
+        let (requests, result) = webhook_comment(&route("pr")).await;
+        assert!(requests.is_empty(), "{requests:?}");
+        assert!(result.contains("\"is_error\":true"), "{result}");
+        assert!(result.contains("this is a webhook run"), "{result}");
+        assert!(result.contains("webhook route `pr`"), "{result}");
+
+        // A route that allows other writes only still cannot comment.
+        let mut reviews = route("pr");
+        reviews.github_allow = vec![Write::Review, Write::Merge];
+        let (requests, result) = webhook_comment(&reviews).await;
+        assert!(requests.is_empty(), "{requests:?}");
+        assert!(result.contains("now: review, merge"), "{result}");
+
+        let mut comments = route("pr");
+        comments.github_allow = vec![Write::Comment];
+        let (requests, result) = webhook_comment(&comments).await;
+        assert_eq!(requests, ["POST /repos/o/n/issues/7/comments HTTP/1.1"]);
+        assert!(!result.contains("\"is_error\":true"), "{result}");
+        assert!(result.contains("posted comment"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn scheduled_jobs_keep_the_users_github_list() {
+        let home = tempfile::tempdir().unwrap();
+        let (url, seen) = fake_http(201).await;
+        let (engine, last) = github_engine(home.path(), &url);
+        let mut job = crate::cron::store::tests::job(
+            "0123abcd",
+            crate::cron::schedule::Schedule::Once { at: 5 },
+            None,
+        );
+        job.dir = home.path().to_path_buf();
+        let outcome = engine.run(&job.spec(), &Cancel::new(), limits()).await;
+        assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
+        let requests: Vec<String> = seen.lock().unwrap().iter().map(|r| r.0.clone()).collect();
+        assert_eq!(requests, ["POST /repos/o/n/issues/7/comments HTTP/1.1"]);
+        let result = last.lock().unwrap()[1].clone();
+        assert!(result.contains("posted comment"), "{result}");
     }
 }

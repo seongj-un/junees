@@ -11,6 +11,7 @@ pub mod context;
 pub mod cron;
 pub mod flock;
 pub mod gateway;
+pub mod github;
 pub mod mcp;
 pub mod memory;
 pub mod message;

@@ -11,9 +11,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::self_command;
 use super::settings_file::{DATA_FOLDERS, Named};
 use super::{SettingsFile, ToolSettings};
+use super::{gh_command, self_command};
 
 /// Whether a command may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,8 +33,9 @@ pub enum Verdict {
 /// other privilege escalation. Extra denied
 /// prefixes, the settings file rule
 /// ([`CommandPolicy::protect_settings_file`]) and the refusal of Junees's
-/// own state-changing subcommands ([`self_command`], unless
-/// [`CommandPolicy::ask_self_commands`]) always apply, even with
+/// own state-changing subcommands ([`self_command`]) and of GitHub writes
+/// through `gh` ([`gh_command`]), both unless
+/// [`CommandPolicy::ask_self_commands`], always apply, even with
 /// [`CommandPolicy::allow_dangerous`].
 #[derive(Debug, Clone, Default)]
 pub struct CommandPolicy {
@@ -136,7 +137,8 @@ impl CommandPolicy {
     }
 
     /// Lets Junees's own state-changing subcommands (`junees cron add`,
-    /// see [`self_command`]) through, for an approval gate that asks about
+    /// see [`self_command`]) and GitHub writes through `gh` (`gh pr merge`,
+    /// see [`gh_command`]) through, for an approval gate that asks about
     /// them first. Without it they are refused.
     pub fn ask_self_commands(mut self, ask: bool) -> Self {
         self.ask_self_commands = ask;
@@ -385,6 +387,11 @@ impl CommandPolicy {
         {
             return Some(command.refusal());
         }
+        if !self.ask_self_commands
+            && let Some(write) = gh_command::find(words)
+        {
+            return Some(write.refusal());
+        }
 
         if SHELLS.contains(&name)
             && let Some(script) = shell_script(args)
@@ -453,8 +460,9 @@ impl CommandPolicy {
     /// deleting files, `git push`, throwing git work away (`git reset
     /// --hard`, `git checkout -- .`, `git restore`, `git stash drop`,
     /// `git branch -D`), `git clean`, installing packages, downloading files, changing permissions,
-    /// writing outside `workspace`, and Junees's own state-changing
-    /// subcommands ([`self_command`]). With [`CommandPolicy::allow_dangerous`],
+    /// writing outside `workspace`, Junees's own state-changing
+    /// subcommands ([`self_command`]) and GitHub writes through `gh`
+    /// ([`gh_command`], a merge asked every time). With [`CommandPolicy::allow_dangerous`],
     /// whatever the built-in rules would refuse is a caution too.
     ///
     /// It looks at the same parts of a command line as [`CommandPolicy::check`]
@@ -570,6 +578,9 @@ impl CommandPolicy {
         };
         if let Some(command) = self_command::find(words) {
             found.push(caution(self_command::KIND, command.caution()));
+        }
+        if let Some(write) = gh_command::find(words) {
+            found.push(caution(write.kind(), write.caution()));
         }
         let name = basename(first);
         let args = &words[1..];
@@ -2986,5 +2997,79 @@ mod tests {
                 .cautions("junees cron list && junees status", &workspace)
                 .is_empty()
         );
+    }
+
+    /// GitHub writes through `gh`, in the forms the policy sees through.
+    const GH_WRITES: &[&str] = &[
+        // The PR #42 review's probe: the github tool asks, bash did not.
+        "gh pr merge 7 --merge",
+        "gh pr review 7 --approve",
+        "gh pr close 7",
+        "gh pr comment 7 -b hi",
+        "gh pr create --fill",
+        "gh api -X PUT repos/o/n/pulls/7/merge",
+        "gh api --method DELETE repos/o/n/git/refs/heads/main",
+        "gh api repos/o/n/issues/7/comments -f body=x",
+        "gh release create v1.0",
+        "env GH_TOKEN=x gh pr merge 7",
+        "timeout 30 /usr/bin/gh pr review --approve 7",
+        "bash -c 'gh pr merge 7 --squash'",
+        "git push && gh pr create --fill",
+        "echo $(gh pr merge 7)",
+        "echo 'gh pr merge 7' | sh",
+    ];
+
+    #[test]
+    fn github_writes_through_gh_are_refused_unattended_and_asked_otherwise() {
+        let policy = CommandPolicy::default();
+        let gate = CommandPolicy::with_settings(&ToolSettings {
+            approval_gate: true,
+            ..ToolSettings::default()
+        });
+        let workspace = Workspace::new(Path::new("/nonexistent/work"));
+        for &command in GH_WRITES {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("on GitHub as the user: no one is here to approve it"),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+            // Like Junees's own commands, also with the built-in rules off.
+            assert!(
+                matches!(
+                    policy.clone().allow_dangerous(true).check(command),
+                    Verdict::Deny(_)
+                ),
+                "{command}"
+            );
+            assert_eq!(gate.check(command), Verdict::Allow, "{command}");
+            let found = kinds(&gate, command, &workspace);
+            assert!(
+                found
+                    .iter()
+                    .any(|kind| [gh_command::KIND, gh_command::MERGE_KIND].contains(kind)),
+                "{command}: {found:?}"
+            );
+        }
+        assert_eq!(
+            gate.cautions("gh pr merge 7", &workspace),
+            [Caution {
+                kind: gh_command::MERGE_KIND,
+                reason: "`gh pr merge` merges a pull request on GitHub as you".into(),
+            }]
+        );
+        for command in [
+            "gh pr view 7",
+            "gh pr diff 7 | head",
+            "gh pr checks 7",
+            "gh api repos/o/n/pulls",
+            "gh api -X GET search/issues -f q=x",
+            "echo gh pr merge 7",
+            "grep 'gh pr merge' README.md",
+        ] {
+            assert_eq!(policy.check(command), Verdict::Allow, "{command}");
+            assert!(gate.cautions(command, &workspace).is_empty(), "{command}");
+        }
     }
 }

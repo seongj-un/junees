@@ -2,6 +2,7 @@
 
 mod bash;
 mod edit_file;
+pub mod gh_command;
 mod policy;
 mod read_file;
 pub mod self_command;
@@ -32,12 +33,14 @@ const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Credentials Junees reads that the model's shell commands must not see.
 /// The notification webhook URL carries its own token; the Discord bot
-/// token lets anyone act as the gateway's bot.
+/// token lets anyone act as the gateway's bot, the GitHub token as the
+/// user on GitHub.
 pub const SECRET_ENV_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "JUNEES_NOTIFY_WEBHOOK",
     "JUNEES_DISCORD_TOKEN",
+    "JUNEES_GITHUB_TOKEN",
 ];
 
 /// Claude Code's own credentials, as its documentation names them
@@ -73,8 +76,9 @@ pub struct ToolSettings {
     pub settings_file: Option<SettingsFile>,
     /// An approval gate asks the user before risky calls (the conversation
     /// or the Discord gateway with `JUNEES_APPROVAL` risky or all), so bash
-    /// leaves Junees's own state-changing subcommands ([`self_command`]) to
-    /// its question instead of refusing them. Off for `-p`, task mode and
+    /// leaves Junees's own state-changing subcommands ([`self_command`]) and
+    /// GitHub writes through `gh` ([`gh_command`]) to its question instead
+    /// of refusing them. Off for `-p`, task mode and
     /// scheduled runs, where no one is asked.
     pub approval_gate: bool,
 }

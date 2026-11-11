@@ -131,6 +131,7 @@ pub const REPL_HELP: &str = "\
 /mcp               show the MCP servers ($JUNEES_HOME/mcp.json) and their tools
 /plugins           show the plugins this session uses and the installed ones
 /cron              list the scheduled jobs (`junees cron` manages them)
+/github            show the GitHub token state, repositories and rate limit
 /webhooks          list the webhook routes (`junees webhook` manages them)
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an

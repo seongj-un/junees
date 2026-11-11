@@ -67,9 +67,26 @@ const MIXED_RUN: usize = 32;
 /// What kind of secret `text` seems to hold and on which line (1-based),
 /// if any. Lines are checked in order.
 pub fn find_secret(text: &str) -> Option<(&'static str, usize)> {
+    find(text, false)
+}
+
+/// Like [`find_secret`], for text Junees sends for others to read (GitHub
+/// comments, reviews and pull requests): a run of exactly 40 or 64 hex
+/// digits always passes, in any case and inside links
+/// (`https://github.com/o/n/commit/<sha>`, `#diff-<sha256>R12`), since
+/// such text names commits all the time. Key prefixes, private keys, AWS
+/// key ids, Discord tokens and other long hex or random-looking runs are
+/// still found.
+pub fn find_outgoing_secret(text: &str) -> Option<(&'static str, usize)> {
+    find(text, true)
+}
+
+/// `hashes`: whether 40- and 64-digit hex runs pass without a word naming
+/// them ([`find_outgoing_secret`]).
+fn find(text: &str, hashes: bool) -> Option<(&'static str, usize)> {
     let mut start = 0;
     for (index, line) in text.split('\n').enumerate() {
-        if let Some(kind) = line_secret(text, start, line) {
+        if let Some(kind) = line_secret(text, start, line, hashes) {
             return Some((kind, index + 1));
         }
         start += line.len() + 1;
@@ -83,8 +100,8 @@ pub fn secret_kind(text: &str) -> Option<&'static str> {
 }
 
 /// The secret in `line`, which starts at byte `start` of `text` (the words
-/// around a hash may sit on the lines next to it).
-fn line_secret(text: &str, start: usize, line: &str) -> Option<&'static str> {
+/// around a hash may sit on the lines next to it). `hashes` as in [`find`].
+fn line_secret(text: &str, start: usize, line: &str, hashes: bool) -> Option<&'static str> {
     if line.contains("-----BEGIN") && line.contains("PRIVATE KEY") {
         return Some("a private key");
     }
@@ -101,18 +118,51 @@ fn line_secret(text: &str, start: usize, line: &str) -> Option<&'static str> {
         return Some("a Discord bot token");
     }
     for (at, run) in runs(line) {
-        if has_hex_token(text, start + at, run) {
+        if has_hex_token(text, start + at, run, hashes) {
             return Some("a long hex token");
         }
-        if run.len() >= MIXED_RUN
-            && run.bytes().any(|b| b.is_ascii_uppercase())
-            && run.bytes().any(|b| b.is_ascii_lowercase())
-            && run.bytes().any(|b| b.is_ascii_digit())
-        {
+        // A hash glued to more characters (`diff-<sha256>R12`) is no
+        // random-looking run when hashes pass.
+        let pieces = if hashes {
+            without_hashes(run)
+        } else {
+            vec![run]
+        };
+        if pieces.iter().any(|piece| {
+            piece.len() >= MIXED_RUN
+                && piece.bytes().any(|b| b.is_ascii_uppercase())
+                && piece.bytes().any(|b| b.is_ascii_lowercase())
+                && piece.bytes().any(|b| b.is_ascii_digit())
+        }) {
             return Some("a long random-looking token");
         }
     }
     None
+}
+
+/// The parts of the token run `run` (ASCII) around its stretches of
+/// exactly 40 or 64 hex digits.
+fn without_hashes(run: &str) -> Vec<&str> {
+    let bytes = run.as_bytes();
+    let mut pieces = Vec::new();
+    let mut piece_start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_hexdigit() {
+            i += 1;
+            continue;
+        }
+        let begin = i;
+        while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+            i += 1;
+        }
+        if HASH_LENGTHS.contains(&(i - begin)) {
+            pieces.push(&run[piece_start..begin]);
+            piece_start = i;
+        }
+    }
+    pieces.push(&run[piece_start..]);
+    pieces
 }
 
 /// The maximal runs of token characters (`A-Za-z0-9+=_-`) in `text`, with
@@ -134,14 +184,15 @@ fn runs(text: &str) -> impl Iterator<Item = (usize, &str)> {
 
 /// Whether the token run `run` at byte `at` of `text` holds a hex token:
 /// a stretch of at least [`HEX_RUN`] hex digits (`KEY=<hex>` too), not one
-/// repeated digit, and not a named hash.
-fn has_hex_token(text: &str, at: usize, run: &str) -> bool {
+/// repeated digit, and not a named hash (with `hashes`, not any full hash).
+fn has_hex_token(text: &str, at: usize, run: &str, hashes: bool) -> bool {
     let mut offset = 0;
     run.split(|c: char| !c.is_ascii_hexdigit()).any(|hex| {
         let here = at + offset;
         offset += hex.len() + 1;
         hex.len() >= HEX_RUN
             && hex.bytes().any(|b| b != hex.as_bytes()[0])
+            && !(hashes && HASH_LENGTHS.contains(&hex.len()))
             && !is_named_hash(text, here, hex)
     })
 }
@@ -518,5 +569,65 @@ mod tests {
             Some(("a long hex token", 4))
         );
         assert_eq!(find_secret("one\ntwo"), None);
+    }
+
+    #[test]
+    fn outgoing_text_may_name_commits_but_not_keys() {
+        let sha1 = "cf302d7c3b6a4f0e9d1a2b3c4d5e6f708192a3b4";
+        let sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        // The PR #42 review's examples, which the stored-text rule refuses.
+        let review = [
+            format!("fixed in https://github.com/o/n/commit/{sha1}"),
+            format!("rebased onto {sha1}"),
+            format!("https://github.com/o/n/pull/7/commits/{sha1}"),
+            format!("commit {}", sha1.to_uppercase()),
+        ];
+        for text in &review {
+            assert_eq!(find_outgoing_secret(text), None, "{text}");
+            assert_eq!(secret_kind(text), Some("a long hex token"), "{text}");
+        }
+        for text in [
+            format!("see https://github.com/o/n/blob/{sha1}/src/main.rs#L10"),
+            format!("https://github.com/o/n/pull/7/files#diff-{sha256}R12"),
+            format!("https://github.com/o/n/compare/{sha1}...{sha1}"),
+            format!("image sha256:{sha256}, base {}", sha1.to_uppercase()),
+        ] {
+            assert_eq!(find_outgoing_secret(&text), None, "{text}");
+        }
+        // Keys are still found, also next to a commit id.
+        let filler = "a1B2c3".repeat(4);
+        for (text, kind) in [
+            (format!("{sha1} ghp_{filler}"), "a GitHub token"),
+            (format!("github_pat_{filler}"), "a GitHub token"),
+            (format!("key sk-ant-{filler}"), "an Anthropic API key"),
+            (
+                format!("-----BEGIN RSA {} KEY-----", "PRIVATE"),
+                "a private key",
+            ),
+            (
+                format!("AKIA{}", "ABCD1234EFGH5678"),
+                "an AWS access key id",
+            ),
+            (
+                format!("token {}", "0123456789abcdef".repeat(2)),
+                "a long hex token",
+            ),
+            (format!("token {}", &sha256[..48]), "a long hex token"),
+            (format!("commit {sha1}0"), "a long hex token"),
+            (
+                format!("Bearer {}", "Zm9vYmFyQmF6".repeat(3)),
+                "a long random-looking token",
+            ),
+            (
+                format!("diff-{sha1}{}", "Zm9vYmFyQmF6".repeat(3)),
+                "a long random-looking token",
+            ),
+        ] {
+            assert_eq!(
+                find_outgoing_secret(&text).map(|(k, _)| k),
+                Some(kind),
+                "{text}"
+            );
+        }
     }
 }

@@ -24,6 +24,7 @@ use crate::cron::store::{RunStatus, random_hex};
 use crate::cron::tz::TimeZone;
 use crate::cron::unix_now;
 use crate::gateway::config as discord;
+use crate::github::Write;
 use crate::prompt_text::{escape_hidden, is_hidden};
 use crate::tools::secrets_dir;
 
@@ -166,6 +167,16 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
             events
         }
     };
+    let github_allow = match &args.github_allow {
+        None => Vec::new(),
+        Some(text) => {
+            let writes = Write::parse_list(text, "--github-allow")?;
+            if writes.is_empty() {
+                bail!("--github-allow is empty; leave it out to allow no GitHub write");
+            }
+            writes
+        }
+    };
     let dir = match args.dir {
         Some(dir) => dir,
         None => std::env::current_dir().context("cannot read the current folder")?,
@@ -205,6 +216,9 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         }
         _ => {}
     }
+    if !github_allow.is_empty() {
+        warn_github(lookup, &github_allow);
+    }
     let mut locked = store.lock()?;
     if locked.routes.iter().any(|route| route.name == args.name) {
         bail!("a route named `{}` exists already", args.name);
@@ -221,10 +235,49 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         created_at: unix_now(),
         last: None,
         last_event: None,
+        github_allow,
     };
     locked.routes.push(route.clone());
     locked.save()?;
     Ok(route)
+}
+
+/// Says what a route's `--github-allow` means and what keeps its writes
+/// from running yet.
+fn warn_github(lookup: &Lookup, allow: &[Write]) {
+    eprintln!(
+        "  !! runs of this route may write to GitHub without a question ({}): the pull \
+         request bodies and comments that start them are anyone's text, and data tags do \
+         not stop prompt injection",
+        Write::join(allow)
+    );
+    match crate::github::Settings::read(|key| {
+        lookup(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }) {
+        Ok(settings) => {
+            let missing: Vec<Write> = allow
+                .iter()
+                .copied()
+                .filter(|write| !settings.unattended.contains(write))
+                .collect();
+            if !missing.is_empty() {
+                eprintln!(
+                    "  !! github_allow_unattended does not allow {}: those writes stay refused \
+                     until it does (a write needs both)",
+                    Write::join(&missing)
+                );
+            }
+            if settings.repos.is_empty() {
+                eprintln!(
+                    "  !! github_repos is not set: no GitHub write runs without a question \
+                     until it is"
+                );
+            }
+        }
+        Err(err) => eprintln!("  !! the GitHub settings are not readable: {err:#}"),
+    }
 }
 
 fn check_prompt(prompt: &str) -> Result<()> {
@@ -557,6 +610,14 @@ mod tests {
                 Box::new(|a: &mut AddArgs| a.dir = Some("/nonexistent/x".into())),
                 "not a folder",
             ),
+            (
+                Box::new(|a: &mut AddArgs| a.github_allow = Some("comment,delete".into())),
+                "--github-allow: unknown write `delete`",
+            ),
+            (
+                Box::new(|a: &mut AddArgs| a.github_allow = Some(" , ".into())),
+                "--github-allow is empty",
+            ),
         ] {
             let mut args = args("pr");
             if wanted != "exists already" {
@@ -567,6 +628,33 @@ mod tests {
             assert!(err.contains(wanted), "{wanted}: {err}");
         }
         assert_eq!(store.routes().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn routes_allow_no_github_write_unless_added_with_github_allow() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let settings = lookup(&[]);
+        let args = |name: &str| AddArgs {
+            name: name.into(),
+            prompt: "review {{payload.number}}".into(),
+            secret_env: Some("PR_HOOK_SECRET".into()),
+            dir: Some(home.path().to_path_buf()),
+            ..AddArgs::default()
+        };
+        let plain = new_route(&store, &settings, args("plain")).unwrap();
+        assert!(plain.github_allow.is_empty());
+        let mut allowing = args("review");
+        allowing.github_allow = Some("Review, comment".into());
+        new_route(&store, &settings, allowing).unwrap();
+        let routes = store.routes().unwrap();
+        assert_eq!(routes[1].github_allow, [Write::Review, Write::Comment]);
+        let text = std::fs::read_to_string(home.path().join("webhooks/routes.json")).unwrap();
+        assert!(
+            text.contains("\"github_allow\": [\n        \"review\",\n        \"comment\"\n      ]"),
+            "{text}"
+        );
+        assert_eq!(text.matches("github_allow").count(), 1, "{text}");
     }
 
     #[test]
