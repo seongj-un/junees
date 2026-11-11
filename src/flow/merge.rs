@@ -9,8 +9,9 @@
 //! 3. it has at least one check (check run or commit status) and every
 //!    one passed (`success`, `neutral`, `skipped`), and every
 //!    `--require-check` is there and ended `success`;
-//! 4. it changes nothing under `.github/workflows/` (such a pull request
-//!    could write its own passing checks; the flow comments instead);
+//! 4. it changes nothing under `.github/` (workflows, the actions and
+//!    settings they use in the repository: such a pull request could write
+//!    its own passing checks; the flow comments instead);
 //! 5. no reviewer's last review (APPROVED, CHANGES_REQUESTED or DISMISSED;
 //!    comments do not count) requests changes;
 //! 6. the flow's own last review of the head commit, if there is one,
@@ -41,10 +42,12 @@ use crate::github::Client;
 const PASSING: &[&str] = &["success", "neutral", "skipped"];
 /// Reviews, check runs and changed files read at most.
 const MAX_ITEMS: usize = 300;
-/// The folder of GitHub Actions workflows.
-pub const WORKFLOWS: &str = ".github/workflows/";
-/// The name of the condition on workflow files.
-pub const WORKFLOWS_CONDITION: &str = "workflows";
+/// GitHub's folder: Actions workflows, and the composite actions,
+/// scripts and settings a workflow may use from the repository
+/// (`uses: ./.github/actions/x`).
+pub const GITHUB_DIR: &str = ".github/";
+/// The name of the condition on files under [`GITHUB_DIR`].
+pub const GITHUB_CONDITION: &str = ".github";
 
 /// A check run or commit status.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,9 +84,9 @@ pub struct Facts {
     pub checks: Vec<Check>,
     /// Oldest first.
     pub reviews: Vec<ReviewFact>,
-    /// The changed files under [`WORKFLOWS`] (new or old name).
-    pub workflow_files: Vec<String>,
-    /// More files changed than were read: workflows unknown.
+    /// The changed files under [`GITHUB_DIR`] (new or old name).
+    pub github_files: Vec<String>,
+    /// More files changed than were read: changes under `.github/` unknown.
     pub more_files: bool,
 }
 
@@ -193,23 +196,23 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
         ));
     }
     out.push(condition(
-        WORKFLOWS_CONDITION,
-        facts.workflow_files.is_empty() && !facts.more_files,
-        if !facts.workflow_files.is_empty() {
+        GITHUB_CONDITION,
+        facts.github_files.is_empty() && !facts.more_files,
+        if !facts.github_files.is_empty() {
             let mut shown: Vec<String> = facts
-                .workflow_files
+                .github_files
                 .iter()
                 .take(5)
                 .map(|file| crate::prompt_text::escape_hidden(file))
                 .collect();
-            if facts.workflow_files.len() > 5 {
-                shown.push(format!("{} more", facts.workflow_files.len() - 5));
+            if facts.github_files.len() > 5 {
+                shown.push(format!("{} more", facts.github_files.len() - 5));
             }
             format!("changes {}", shown.join(", "))
         } else if facts.more_files {
             format!("more than {MAX_ITEMS} files changed; not read")
         } else {
-            format!("no change under {WORKFLOWS}")
+            format!("no change under {GITHUB_DIR}")
         },
     ));
     // Per reviewer the last review that sets a state, of the reviewers
@@ -426,12 +429,12 @@ pub async fn facts(
     let files = client
         .list(&format!("repos/{repo}/pulls/{n}/files"), None, MAX_ITEMS)
         .await?;
-    let mut workflow_files: Vec<String> = Vec::new();
+    let mut github_files: Vec<String> = Vec::new();
     for file in &files.items {
         for key in ["filename", "previous_filename"] {
             let name = text(&file[key]);
-            if name.starts_with(WORKFLOWS) && !workflow_files.contains(&name) {
-                workflow_files.push(name);
+            if name.starts_with(GITHUB_DIR) && !github_files.contains(&name) {
+                github_files.push(name);
             }
         }
     }
@@ -442,7 +445,7 @@ pub async fn facts(
         mergeable: pr["mergeable"].as_bool(),
         checks,
         reviews,
-        workflow_files,
+        github_files,
         more_files: files.more,
     })
 }
@@ -500,7 +503,7 @@ mod tests {
                 },
             ],
             reviews: vec![review("alice", "APPROVED", HEAD, "")],
-            workflow_files: Vec::new(),
+            github_files: Vec::new(),
             more_files: false,
         }
     }
@@ -775,18 +778,15 @@ mod tests {
     }
 
     #[test]
-    fn changes_to_workflows_are_not_merged() {
+    fn changes_under_dot_github_are_not_merged() {
         let config = super::super::config("o/n");
         let mut facts = green();
-        facts.workflow_files = vec![".github/workflows/ci.yml".into()];
+        facts.github_files = vec![".github/workflows/ci.yml".into()];
         let list = conditions(&facts, HEAD, &config, "junees-bot");
-        assert_eq!(
-            missing(&list),
-            "workflows: changes .github/workflows/ci.yml"
-        );
-        facts.workflow_files.clear();
+        assert_eq!(missing(&list), ".github: changes .github/workflows/ci.yml");
+        facts.github_files.clear();
         facts.more_files = true;
-        assert_eq!(failing(&facts, &config), [WORKFLOWS_CONDITION]);
+        assert_eq!(failing(&facts, &config), [GITHUB_CONDITION]);
         facts.more_files = false;
         assert!(failing(&facts, &config).is_empty());
     }

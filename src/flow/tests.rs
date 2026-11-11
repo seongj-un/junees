@@ -1441,18 +1441,18 @@ async fn never_merges_workflow_changes_and_says_so_once() {
     let report = run(&setup, &suite(HEAD), 1000).await;
     assert_eq!(
         report.lines,
-        ["#7 merge: not merged at 1111111: workflows: changes .github/workflows/ci.yml; commented"]
+        ["#7 merge: not merged at 1111111: .github: changes .github/workflows/ci.yml; commented"]
     );
     let writes = github.writes();
     assert_eq!(writes.len(), 1, "{writes:?}");
     assert_eq!(writes[0].0, "POST /repos/o/n/issues/7/comments");
     let body = writes[0].1["body"].as_str().unwrap();
     assert!(
-        body.contains("`.github/workflows/`를 바꾸는 pull request를 자동으로 merge하지 않습니다"),
+        body.contains("`.github/`를 바꾸는 pull request를 자동으로 merge하지 않습니다"),
         "{body}"
     );
     assert!(
-        body.contains("- [ ] workflows: changes .github/workflows/ci.yml"),
+        body.contains("- [ ] .github: changes .github/workflows/ci.yml"),
         "{body}"
     );
     // The next event of the same commit: no second comment, no merge.
@@ -1463,6 +1463,51 @@ async fn never_merges_workflow_changes_and_says_so_once() {
         ["#7 merge: skipped: done for 1111111 already"]
     );
     assert!(github.writes().is_empty(), "{:?}", github.writes());
+}
+
+#[tokio::test]
+async fn never_merges_changes_to_actions_the_workflows_use() {
+    // A workflow with `uses: ./.github/actions/setup` runs what the pull
+    // request put there.
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    ready(&github);
+    github.set(
+        "GET /repos/o/n/pulls/7/files",
+        200,
+        json!([
+            {"filename": "src/lib.rs", "status": "modified"},
+            {"filename": ".github/actions/setup/action.yml", "status": "modified"},
+            {"filename": ".github/dependabot.yml", "status": "added"},
+        ]),
+    );
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert_eq!(
+        report.lines,
+        [
+            "#7 merge: not merged at 1111111: .github: changes .github/actions/setup/action.yml, \
+          .github/dependabot.yml; commented"
+        ]
+    );
+    let writes = github.writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "POST /repos/o/n/issues/7/comments");
 }
 
 #[tokio::test]

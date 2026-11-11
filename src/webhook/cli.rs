@@ -76,8 +76,9 @@ $JUNEES_HOME/secrets/webhook-<name> and the events its steps need.
   and GitHub says mergeable; it also needs github_flow_merge = true.
   --require-check <name> (repeatable): that check run or status must be
   there and end success (neutral or skipped do not count). A pull request
-  that changes .github/workflows/ is never merged by the flow (it gets a
-  comment saying so): it could write its own passing checks.
+  that changes anything under .github/ (workflows, the actions they use) is
+  never merged by the flow (it gets a comment saying so): it could write
+  its own passing checks.
 Only reviews by people with write access count (author_association OWNER,
 MEMBER or COLLABORATOR and write, maintain or admin permission now) and by
 the --approver logins (repeatable, comma-separated): for approvals, change
