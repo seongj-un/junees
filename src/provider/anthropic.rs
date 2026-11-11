@@ -15,7 +15,7 @@ use super::{
 use crate::message::{ContentBlock, Role, StopReason, Usage};
 use crate::web_search::{self, WebSearch};
 
-const API_VERSION: &str = "2023-06-01";
+pub const API_VERSION: &str = "2023-06-01";
 const MAX_ATTEMPTS: u32 = 4;
 /// Bounds one whole model call that is not streamed.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);

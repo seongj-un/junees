@@ -296,8 +296,9 @@ pub fn write_private(path: &Path, text: &str) -> Result<()> {
     write().with_context(|| format!("cannot write {}", path.display()))
 }
 
-/// Reads jobs.json; a missing file is no jobs.
-fn read(path: &Path) -> Result<Vec<Job>> {
+/// Reads jobs.json; a missing file is no jobs. Takes no lock: a reader
+/// that only looks (`junees doctor`) calls it directly.
+pub fn read(path: &Path) -> Result<Vec<Job>> {
     let Some(text) = read_private(path)? else {
         return Ok(Vec::new());
     };
