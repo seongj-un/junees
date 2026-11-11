@@ -1,8 +1,10 @@
 //! The system prompt, and the sections Junees adds to it from its data
-//! folder (memory, skills).
+//! folder (memory, skills) and from the project (instruction files,
+//! [`crate::context_files`]).
 
 use std::path::Path;
 
+use crate::context_files::ContextFiles;
 use crate::memory::{self, Memory};
 use crate::skills;
 
@@ -56,6 +58,27 @@ pub fn claude_append(base: String, memory: Option<&Memory>, home: Option<&Path>)
         home,
         skills::Mode::ClaudeCode,
     )
+}
+
+/// [`claude_append`] with the project instruction files between `base`
+/// and the memory. Claude Code reads none of them itself
+/// ([`crate::context_files::CLAUDE_SETTINGS`]). They are cut further when
+/// the argument would not stay below [`MAX_ARG_BYTES`] otherwise.
+pub fn claude_append_with_context(
+    base: String,
+    context: &ContextFiles,
+    memory: Option<&Memory>,
+    home: Option<&Path>,
+) -> String {
+    let data = data_sections(
+        memory,
+        memory::Mode::ReadOnly,
+        home,
+        skills::Mode::ClaudeCode,
+    );
+    // The kernel counts the closing NUL too.
+    let room = MAX_ARG_BYTES.saturating_sub(base.len() + data.len() + 1);
+    base + &context.section_within(room) + &data
 }
 
 #[cfg(test)]
@@ -141,10 +164,56 @@ mod tests {
             .unwrap();
         }
         let base = crate::task::prompt::claude_init_system();
-        let argument = claude_append(base, Some(&memory), Some(home.path()));
+        let argument = claude_append(base.clone(), Some(&memory), Some(home.path()));
         assert!(argument.contains("more skills not listed"));
         assert!(argument.contains("cut at the 8000-character limit"));
         assert!(argument.len() > 100 * 1024, "{}", argument.len());
         assert!(argument.len() < MAX_ARG_BYTES, "{}", argument.len());
+
+        // With every project instruction file full as well, they are cut
+        // to the room that is left.
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        for name in crate::context_files::DEFAULT_NAMES {
+            std::fs::write(repo.path().join(name), "😀".repeat(5000)).unwrap();
+        }
+        let context = crate::context_files::Setting::with_home(None).load(repo.path());
+        let argument = claude_append_with_context(base, &context, Some(&memory), Some(home.path()));
+        assert!(argument.len() < MAX_ARG_BYTES, "{}", argument.len());
+        assert!(argument.contains("\n\n# Project instructions\n"));
+        assert!(argument.contains("[cut here: the file has 20000 bytes;"));
+        let project_at = argument.find("# Project instructions").unwrap();
+        assert!(project_at < argument.find("\nMEMORY (persistent notes)\n").unwrap());
+    }
+
+    #[test]
+    fn claude_code_gets_the_project_instructions_before_the_memory() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        let context = crate::context_files::Setting::with_home(None).load(repo.path());
+        // Nothing to add: the argument is the base alone.
+        assert_eq!(
+            claude_append_with_context("base".into(), &context, None, Some(home.path())),
+            "base"
+        );
+        std::fs::write(repo.path().join("CLAUDE.md"), "Run make check.\n").unwrap();
+        let context = crate::context_files::Setting::with_home(None).load(repo.path());
+        let memory = Memory::new(home.path(), Path::new("/p"), Limits::default());
+        memory
+            .change(Target::User, memory::Change::Add("Name: 성준".into()))
+            .unwrap();
+        let argument =
+            claude_append_with_context("base".into(), &context, Some(&memory), Some(home.path()));
+        assert!(
+            argument.starts_with(&format!("base{}", context.section())),
+            "{argument}"
+        );
+        assert!(argument.contains("Run make check.\n</project-instructions>\n"));
+        assert!(argument.ends_with(&claude_append(
+            String::new(),
+            Some(&memory),
+            Some(home.path())
+        )));
     }
 }

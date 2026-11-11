@@ -9,13 +9,17 @@ use super::{SettingsFile, Tool, ToolOutput, ToolSettings, str_arg};
 #[derive(Default)]
 pub struct WriteFile {
     settings_file: Option<SettingsFile>,
+    /// The instruction file names it refuses ([`ToolSettings::protected_instruction_files`]).
+    instruction_files: Vec<String>,
 }
 
 impl WriteFile {
-    /// Refuses the settings file of `settings`.
+    /// Refuses the settings file of `settings`, and in a webhook run the
+    /// project instruction files.
     pub fn with_settings(settings: &ToolSettings) -> Self {
         Self {
             settings_file: settings.settings_file.clone(),
+            instruction_files: settings.protected_instruction_files(),
         }
     }
 }
@@ -62,6 +66,11 @@ impl Tool for WriteFile {
             .and_then(|file| file.data_folder(Path::new(path)))
         {
             return ToolOutput::error(folder.refusal(path));
+        }
+        if let Some(name) =
+            super::instruction_files::path_named(Path::new(path), &self.instruction_files)
+        {
+            return ToolOutput::error(super::instruction_files::refusal(path, name));
         }
 
         if let Some(parent) = Path::new(path).parent()
@@ -111,6 +120,7 @@ mod tests {
         std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
         let tool = WriteFile {
             settings_file: Some(file),
+            ..WriteFile::default()
         };
         for path in [
             config.clone(),
@@ -148,6 +158,7 @@ mod tests {
         std::os::unix::fs::symlink(&user, root.join("link")).unwrap();
         let tool = WriteFile {
             settings_file: Some(file),
+            ..WriteFile::default()
         };
         for (path, tool_name) in [
             (user.clone(), "memory"),

@@ -134,6 +134,8 @@ impl Chat {
             TOOLS,
             "--setting-sources",
             "user",
+            "--settings",
+            crate::context_files::CLAUDE_SETTINGS,
             "--strict-mcp-config",
             "--max-turns",
         ]
@@ -361,7 +363,7 @@ mod tests {
         );
         let args = chat.arguments();
         assert_eq!(
-            args[..19],
+            args[..21],
             [
                 "-p",
                 "--output-format",
@@ -378,6 +380,8 @@ mod tests {
                 "Read,Edit,Write,Glob,Grep,Bash",
                 "--setting-sources",
                 "user",
+                "--settings",
+                crate::context_files::CLAUDE_SETTINGS,
                 "--strict-mcp-config",
                 "--max-turns",
                 "7",
@@ -386,7 +390,7 @@ mod tests {
         );
         let mut deny = deny_rules(&settings);
         deny.extend(settings_rules(&file, Path::new("/work")));
-        assert_eq!(args[19..], deny[..]);
+        assert_eq!(args[21..], deny[..]);
         assert!(args.contains(&"Read(//home/tester/.junees/config.toml)".to_string()));
         for skip in [
             "--dangerously-skip-permissions",
@@ -403,7 +407,7 @@ mod tests {
         chat.set_model(Some("opus".into()));
         let args = chat.arguments();
         assert_eq!(
-            args[18..23],
+            args[20..25],
             ["--resume", "c-1", "--model", "opus", "--disallowedTools"]
         );
 
@@ -411,7 +415,7 @@ mod tests {
         chat.set_system("\nMEMORY (persistent notes)\n...".into());
         let args = chat.arguments();
         assert_eq!(
-            args[22..25],
+            args[24..27],
             [
                 "--append-system-prompt",
                 "\nMEMORY (persistent notes)\n...",
@@ -422,7 +426,7 @@ mod tests {
         chat.set_system("\n# Skills\n- deploy: Use when deploying\n".into());
         let args = chat.arguments();
         assert_eq!(
-            args[18..25],
+            args[20..27],
             [
                 "--resume",
                 "c-1",

@@ -231,6 +231,8 @@ async fn a_conversation_continues_one_claude_code_session() {
             "Still here.\n",
             "input 25 tokens (cache write 0, cache read 0), output 7 tokens, \
              2 Claude Code turns, Claude Code session s-1\n",
+            // /context still lists the project instruction files.
+            "project instructions: none found",
             "model: of Claude Code's choice (Claude Code runs the conversation)\n",
         ],
     );
@@ -243,7 +245,7 @@ async fn a_conversation_continues_one_claude_code_session() {
             "  <- Bash ok: a.txt\n",
             "  !! Claude Code refused a tool call: Bash: Bash(sudo *) is in --disallowedTools\n",
             "/compact is not available on the claude-code backend",
-            "/context is not available on the claude-code backend",
+            "the context size is not shown on the claude-code backend",
         ],
     );
 

@@ -46,9 +46,8 @@ const SAFE_CONFIG: &[&str] = &[
 /// on `git add`, for one), so it gets neither the repository variables nor
 /// any credential, like the session's own bash.
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let mut command = Command::new("git");
-    command.args(SAFE_CONFIG).args(args).current_dir(dir);
-    hide_env(&mut command);
+    let mut command = command(dir);
+    command.args(args);
     let output = command.output().context("cannot run git")?;
     if !output.status.success() {
         bail!(
@@ -58,6 +57,16 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A git command in `dir` with the settings and environment of [`git`],
+/// for callers that need its pipes; the subcommand and its arguments
+/// still have to be added.
+pub(crate) fn command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.args(SAFE_CONFIG).current_dir(dir);
+    hide_env(&mut command);
+    command
 }
 
 /// Removes the repository variables, the credentials Junees reads and

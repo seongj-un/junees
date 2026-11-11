@@ -133,6 +133,9 @@ pub struct TaskEnv<'a> {
     /// Offers the API sessions `delegate` with these settings; their
     /// subagents' tokens count toward the budget.
     pub subagents: Option<crate::subagent::Settings>,
+    /// The project instruction files every session reads from the
+    /// repository when it starts ([`crate::context_files`]).
+    pub context_files: crate::context_files::Setting,
 }
 
 /// What the runner tells the user: its own status lines and the events of
@@ -157,10 +160,15 @@ impl TaskEnv<'_> {
     }
 
     /// What a Claude Code session appends to its system prompt: `base`,
-    /// then the memory and the skill list as they are now
-    /// ([`crate::prompt::claude_append`]).
+    /// then the project instruction files, the memory and the skill list
+    /// as they are now ([`crate::prompt::claude_append_with_context`]).
     fn claude_system(&self, base: String) -> String {
-        crate::prompt::claude_append(base, self.memory.as_ref(), self.home.as_deref())
+        crate::prompt::claude_append_with_context(
+            base,
+            &self.context_files.load(&self.root),
+            self.memory.as_ref(),
+            self.home.as_deref(),
+        )
     }
 
     fn verifier(&self) -> Verifier {
@@ -212,10 +220,11 @@ impl TaskEnv<'_> {
         } else {
             skills::Mode::ReadOnly
         };
-        // Read now: a session sees the memory and the skills as they were
-        // when it started.
+        // Read now: a session sees the instruction files, the memory and
+        // the skills as they were when it started.
         let system = system
             + crate::subagent::prompt_note(self.subagents)
+            + &self.context_files.load(&self.root).section()
             + &crate::prompt::data_sections(self.memory.as_ref(), Mode::Task, home, mode);
         let mut agent = Agent::new(
             (self.provider)()?,
@@ -1531,6 +1540,7 @@ mod tests {
             claude: None,
             memory: None,
             subagents: None,
+            context_files: crate::context_files::Setting::with_home(None),
         }
     }
 
