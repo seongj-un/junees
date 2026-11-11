@@ -10,6 +10,7 @@ pub mod config_file;
 pub mod context;
 pub mod context_files;
 pub mod cron;
+pub mod doctor;
 pub mod flock;
 pub mod flow;
 pub mod gateway;

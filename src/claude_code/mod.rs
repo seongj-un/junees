@@ -349,6 +349,15 @@ impl ClaudeCode {
     /// [`MIN_VERSION`], and that Claude Code signs in with the subscription
     /// ([`ClaudeCode::check_auth`]); returns what `--version` printed.
     pub async fn check(&self, root: &Path, settings: &ToolSettings) -> Result<String> {
+        let version = self.version(root, settings).await?;
+        self.check_auth(settings).await?;
+        Ok(version)
+    }
+
+    /// Checks that `claude --version` runs and is at least
+    /// [`MIN_VERSION`]; returns what it printed. Asks nothing about the
+    /// sign-in.
+    pub async fn version(&self, root: &Path, settings: &ToolSettings) -> Result<String> {
         let bin = self.bin.display();
         let mut command = self.command(root, settings);
         command.arg("--version").env_remove(SCRUB_ENV);
@@ -389,7 +398,6 @@ impl ClaudeCode {
                 preview(&stdout, 100)
             );
         }
-        self.check_auth(settings).await?;
         Ok(stdout)
     }
 
@@ -821,11 +829,20 @@ fn is_off(value: &str) -> bool {
 
 /// Whether an executable file `name` is in one of the folders of `path`.
 fn on_path(name: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    find_on_path(name, path).is_some()
+}
+
+/// The first executable file `name` in the folders of `path`, as a shell
+/// would find it.
+pub fn find_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    path.into_iter().flat_map(std::env::split_paths).any(|dir| {
-        fs::metadata(dir.join(name))
-            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-    })
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join(name))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
 }
 
 fn looks_like_login_failure(text: &str) -> bool {

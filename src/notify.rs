@@ -273,7 +273,7 @@ fn cut(text: &str, limit: usize) -> String {
 }
 
 /// What went wrong with a request, without its URL.
-fn describe(err: reqwest::Error, timeout: Duration) -> String {
+pub(crate) fn describe(err: reqwest::Error, timeout: Duration) -> String {
     if err.is_timeout() {
         return format!("no answer within {} s", timeout.as_secs_f64());
     }

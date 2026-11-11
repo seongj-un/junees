@@ -289,7 +289,9 @@ impl Locked {
     }
 }
 
-fn read(path: &Path) -> Result<Vec<Route>> {
+/// Reads routes.json; a missing file is no routes. Takes no lock: a reader
+/// that only looks (`junees doctor`) calls it directly.
+pub fn read(path: &Path) -> Result<Vec<Route>> {
     let Some(text) = read_private(path)? else {
         return Ok(Vec::new());
     };

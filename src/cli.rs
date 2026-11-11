@@ -23,6 +23,8 @@ Usage:
   junees gateway          run as a Discord bot (also `junees discord`; see README)
   junees cron             prompts that run on a schedule (`junees cron --help`)
   junees webhook          HTTP requests that start a run (`junees webhook --help`)
+  junees doctor           check the installation and the settings (--json,
+                          --online; see `junees doctor --help`)
   junees sessions search <words>
                           search the saved sessions (--all: every folder; see
                           `junees sessions --help`)
@@ -129,6 +131,7 @@ pub const REPL_HELP: &str = "\
 /backend [api|claude-code]
                    show what runs the conversation and /task, or switch both
                    for this session (a switch starts a new conversation)
+/doctor            check the installation and the settings (`junees doctor`)
 /compact           replace the earlier conversation with a summary (api backend;
                    Claude Code compacts its own)
 /context           show the context size and its limit (api backend) and the
@@ -168,6 +171,10 @@ pub enum Command {
     SessionsSearch(crate::search::args::HumanSearch),
     /// `junees sessions --help`.
     SessionsHelp,
+    /// `junees doctor`: check the installation and the settings.
+    Doctor(crate::doctor::Options),
+    /// `junees doctor --help`.
+    DoctorHelp,
     /// `junees usage ...`.
     Usage(crate::usage::args::UsageArgs),
     /// `junees usage --help`.
@@ -289,6 +296,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Some("sessions") => {
             args.next();
             return parse_sessions(args);
+        }
+        Some("doctor") => {
+            args.next();
+            return Ok(crate::doctor::parse(args)?.map_or(Command::DoctorHelp, Command::Doctor));
         }
         Some("usage") => {
             args.next();
@@ -572,6 +583,15 @@ mod tests {
         assert_eq!(parse(&["setup"]).unwrap(), Command::Setup);
         assert!(parse(&["setup", "now"]).is_err());
         assert_eq!(parse(&["gateway"]).unwrap(), Command::Gateway);
+        assert_eq!(
+            parse(&["doctor", "--online"]).unwrap(),
+            Command::Doctor(crate::doctor::Options {
+                json: false,
+                online: true
+            })
+        );
+        assert_eq!(parse(&["doctor", "--help"]).unwrap(), Command::DoctorHelp);
+        assert!(parse(&["doctor", "now"]).is_err());
         assert_eq!(parse(&["discord"]).unwrap(), Command::Gateway);
         assert_eq!(parse(&["gateway", "--help"]).unwrap(), Command::Help);
         assert!(parse(&["discord", "now"]).is_err());

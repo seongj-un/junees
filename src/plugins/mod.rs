@@ -272,6 +272,11 @@ impl Plugins {
         &self.prompt
     }
 
+    /// What kept enabled plugins (or their prompts) from loading.
+    pub fn problems(&self) -> &[String] {
+        &self.problems
+    }
+
     /// One line per enabled plugin for the start of a run, and the
     /// problems; empty without plugins.
     pub fn report(&self) -> Vec<String> {
