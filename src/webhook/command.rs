@@ -484,6 +484,17 @@ impl crate::flow::run::Engines for FlowEngines {
     }
 }
 
+/// The variables a flow's test command (PR code) does not get: the
+/// `hidden_env` of [`crate::config::Config`], which adds the header
+/// variables of mcp.json to the list in `lookup`.
+fn flow_hidden(lookup: &Lookup) -> Result<Vec<String>> {
+    Ok(
+        crate::config::Config::from_lookup_without_key(|key| lookup(key))?
+            .tools
+            .hidden_env,
+    )
+}
+
 /// Runs the GitHub flow `flow` of `route` for `incoming`.
 async fn flow_run(
     home: &Path,
@@ -517,12 +528,7 @@ async fn flow_run(
         let client = crate::github::Client::new(&settings.api_url, token)?;
         let merge = crate::flow::merge_enabled(&*lookup)?;
         let limits = super::limits(&*lookup)?;
-        let hidden: Vec<String> = lookup(HIDDEN_ENV)
-            .unwrap_or_default()
-            .split(',')
-            .map(|name| name.trim().to_string())
-            .filter(|name| !name.is_empty())
-            .collect();
+        let hidden = flow_hidden(&lookup)?;
         Ok((settings.unattended, client, merge, limits, hidden))
     })();
     let (unattended, client, merge_setting, limits, hidden) = match prepared {
@@ -811,6 +817,35 @@ mod tests {
         })
         .unwrap();
         assert_eq!(config.tools.hidden_env, ["A_SECRET", "C_SECRET"]);
+    }
+
+    #[test]
+    fn a_flow_test_command_gets_no_mcp_header_variable() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let mut locked = store.lock().unwrap();
+        let mut route = crate::webhook::store::tests::route("a");
+        route.secret = Some(Secret::Env("A_SECRET".into()));
+        locked.routes = vec![route];
+        locked.save().unwrap();
+        drop(locked);
+        let mcp = home.path().join(crate::mcp::config::FILE_NAME);
+        std::fs::write(
+            &mcp,
+            r#"{"servers": {"docs": {"url": "https://docs.example.com/mcp",
+                "headers": {"Authorization": "Bearer env:DOCS_TOKEN"}}}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&mcp, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let home_text = home.path().to_str().unwrap();
+        let lookup = hide_secrets(
+            home.path(),
+            &lookup(&[("JUNEES_HOME", home_text), (HIDDEN_ENV, "DB_PASSWORD")]),
+        );
+        assert_eq!(
+            flow_hidden(&lookup).unwrap(),
+            ["DB_PASSWORD", "A_SECRET", "DOCS_TOKEN"]
+        );
     }
 
     #[test]

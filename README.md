@@ -477,7 +477,7 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
 
 ### MCP 서버
 
-[MCP](https://modelcontextprotocol.io/specification/2026-07-28) 서버의 도구를 모델에게 줄 수 있다(api 백엔드). 1차는 stdio 전송만이다: Junees가 서버를 자식 프로세스로 띄우고 표준 입출력으로 JSON-RPC 메시지를 한 줄씩 주고받는다.
+[MCP](https://modelcontextprotocol.io/specification/2026-07-28) 서버의 도구를 모델에게 줄 수 있다(api 백엔드). 전송은 두 가지다: `command` 서버는 Junees가 자식 프로세스로 띄우고 표준 입출력으로 JSON-RPC 메시지를 한 줄씩 주고받고(stdio), `url` 서버는 이미 떠 있는 서버에 메시지마다 HTTP POST를 보낸다(Streamable HTTP, 아래 "HTTP 서버").
 
 `$JUNEES_HOME/mcp.json`(기본 `~/.junees/mcp.json`, 권한 0600):
 
@@ -492,6 +492,12 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
       "trust": false,
       "timeout_secs": 120,
       "cwd": "/home/me/mcp"
+    },
+    "docs": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {"Authorization": "Bearer env:DOCS_MCP_TOKEN"},
+      "trust": false,
+      "timeout_secs": 60
     }
   }
 }
@@ -508,11 +514,23 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
 - 서버가 죽으면 그 서버의 도구는 이유(종료 코드 포함)를 담은 오류 결과를 돌려준다. 대화의 `/new`가 멈춘 서버를 다시 띄운다(도구 이름은 그대로. 처음에 실패했던 서버의 도구는 다음 실행부터 모델에게 보인다). 게이트웨이는 다음 시작 때 다시 띄운다.
 - 종료: Junees가 끝날 때 각 서버의 표준 입력을 닫고 2초, SIGTERM 뒤 2초를 기다린 다음 SIGKILL을 그 프로세스 그룹에 보낸다. 서버가 스스로 끝나도 그룹에 남은 자식은 정리한다. 두 번째 Ctrl-C로 바로 끝내면 정리하지 못하지만 서버의 입력이 닫히므로 명세를 따르는 서버는 스스로 끝난다.
 - 서버가 보내는 요청 가운데 `ping`에만 답하고 나머지(sampling, roots, elicitation)는 `-32601`로 거절한다. 알림(진행, 로그, 목록 변경)은 쓰지 않는다.
-- `/mcp`: 서버마다 상태(실행 중이면 명세 버전과 도구 수, 아니면 이유), 명령 이름, `env` 변수 이름(값은 보이지 않는다), trust, 시간 한도. `args`도 토큰을 담을 수 있어 보여 주지 않는다.
+- `/mcp`: 서버마다 상태(실행 중이면 명세 버전과 도구 수, 아니면 이유), 전송(`stdio`면 명령 이름과 `env` 변수 이름, `Streamable HTTP`면 URL의 `scheme://호스트:포트`와 헤더 이름, 그 값을 읽는 변수 이름), trust, 시간 한도. 값, `args`, URL의 경로와 쿼리는 토큰을 담을 수 있어 보여 주지 않는다.
+
+HTTP 서버(`url`, MCP Streamable HTTP 전송):
+
+- `url`은 `https`만 받는다. `http`는 이 컴퓨터(`localhost`, `127.0.0.1` 등 루프백, `[::1]`)일 때만. URL에 사용자 이름과 비밀번호는 넣을 수 없다. `url` 서버에는 `args`, `env`, `cwd`를 쓰지 않고, `command`와 `url`을 같이 쓸 수 없다. `enabled`, `trust`, `timeout_secs`, 승인, 도구 이름 규칙은 stdio 서버와 같다.
+- `headers`: 요청마다 붙일 헤더. 값은 토큰 자체가 아니라 환경 변수 참조만 받는다: `env:NAME` 또는 `Bearer env:NAME`처럼 단어 하나와 참조. 그래서 `mcp.json`에는 비밀이 없다. Junees가 시작할 때 그 변수를 읽고, 없거나 비었으면 그 서버만 띄우지 않고 이유를 적는다(`header `Authorization` takes its value from the variable DOCS_MCP_TOKEN, which is not set`). 참조된 변수는 `JUNEES_HIDDEN_ENV`에 적은 것처럼 bash, stdio MCP 서버, 플러그인, Claude Code 자식에게 넘기지 않는다(모델이 `echo $DOCS_MCP_TOKEN`으로 읽지 못하게). 웹훅 flow의 `--test-cmd`(PR 코드)에도 넘기지 않는다. `mcp.json`이 검사에서 거절돼도(다른 사용자에게 열린 권한, 1 MiB 초과, 잘못된 항목) 숨길 변수는 느슨하게 모은다: JSON 안의 모든 문자열 중 참조 형식인 것, JSON이 아니면 글자 그대로의 `env:NAME`(앞 16 MiB까지). 서버는 뜨지 않아도 토큰 변수는 보이지 않는다. 같은 변수를 bash의 다른 프로그램이 써야 한다면 다른 이름의 변수를 쓴다. `Accept`, `Content-Type`, `Host`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` 같은 전송이 정하는 헤더는 설정할 수 없다.
+- 버전: 먼저 2026-07-28 방식으로 `server/discover`를 POST한다(헤더 `MCP-Protocol-Version`, `Mcp-Method`, 본문 `_meta`). 결과가 오면 2026-07-28로 쓰고, `UnsupportedProtocolVersion`(-32022)이나 다른 2026-07-28 오류(-32020 헤더 불일치, -32021 클라이언트 능력 부족)면 실패로 끝낸다. 4xx 응답이나 2026-07-28이 아닌 JSON-RPC 오류면 이전 명세의 `initialize` -> `notifications/initialized`로 간다(명세의 Streamable HTTP Backward Compatibility). 5xx나 연결 실패는 그대로 실패다. 2024-11-05의 옛 HTTP+SSE 전송은 지원하지 않는다(`initialize`도 4xx면 그렇게 적는다).
+- 2026-07-28: 요청마다 `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method`, `tools/call`에는 `Mcp-Name`(도구 이름)을 붙이고, 도구의 `inputSchema`에서 `x-mcp-header`로 표시한 매개변수 값을 `Mcp-Param-<이름>` 헤더로도 보낸다(평범한 ASCII가 아니면 `=?base64?...?=`). 표시가 명세 규칙(빈 이름, 헤더에 쓸 수 없는 문자, 대소문자만 다른 중복, 문자열/정수/불 외의 타입, `properties`로만 닿지 않는 위치)을 어긴 도구는 모델에게 주지 않고 시작 줄에 이유를 적는다.
+- 이전 명세(2025-03-26 ~ 2025-11-25): `initialize` 응답의 `Mcp-Session-Id`를 그 뒤 모든 요청에 붙이고, 정해진 버전을 `MCP-Protocol-Version`에 넣는다. 세션이 붙은 요청에 404가 오면(본문에 `-32001 Session not found` 같은 JSON-RPC 오류가 있어도) 서버가 세션을 끝낸 것이므로 새 세션을 열고(`initialize` 다시) 그 요청을 한 번 다시 보낸다. 종료 때 `DELETE`로 세션을 닫는다(405면 그대로 둔다). 응답 스트림 안의 서버 요청은 stdio처럼 `ping`에만 답하고 나머지는 `-32601`로 거절한다.
+- 응답: 요청마다 JSON 하나(`application/json`) 또는 그 요청의 SSE 스트림(`text/event-stream`)을 받는다. 스트림에서는 그 요청의 답이 올 때까지 읽고 진행/로그 알림은 넘긴다. 답 없이 스트림이 끝나면 그 호출은 실패다(`Last-Event-ID`로 이어 받지 않는다). 응답은 64 MiB까지 읽고 넘으면 그 호출을 실패로 끝낸다. 리다이렉트(3xx)는 따라가지 않고 실패로 적는다(`url`에 최종 주소를 쓰라는 안내). 연결은 10초까지 기다린다.
+- 시간 초과와 취소: `timeout_secs`를 넘거나 턴이 취소되면 연결을 닫는다. 2026-07-28에서는 그것이 취소이고, 이전 명세에서는 연결 끊김이 취소가 아니므로 `notifications/cancelled`를 따로 POST한다.
+- 오류 문장: URL은 경로와 쿼리에 토큰을 담을 수 있어 넣지 않고(연결 실패는 `cannot connect: ...`처럼 원인만), 헤더 값과 세션 id도 넣지 않는다. HTTP 서버는 Junees의 자식이 아니므로 서버 프로세스 환경을 통한 노출(위 stdio의 한계)은 없다.
+
 
 승인(`JUNEES_APPROVAL`, 아래 실행 전 승인 절): `risky`(기본)에서는 `trust`가 없는 서버의 도구를 부를 때마다 "외부 도구"로 묻는다. 질문에는 서버와 원래 도구 이름, 인자 JSON 앞부분(8줄)이 나오고, `a`는 그 도구 하나를 이번 실행 동안 허용한다. `all`은 trust 서버의 도구도 묻고, `off`는 묻지 않는다. 게이트웨이는 같은 질문을 채널에서 묻는다. `-p`는 사람이 없으므로 묻지 않는다(기존 정책 그대로).
 
-범위 밖: Streamable HTTP 전송(원격 서버. 후속 작업으로 제안: 같은 `Connection` 자리에 HTTP POST/SSE를 붙이고 OAuth는 따로), resources/prompts, 목록 변경 구독(`subscriptions/listen`), sampling/elicitation(MRTR), 작업 모드(`junees task`)와 claude-code 백엔드의 MCP. claude-code 백엔드는 지금처럼 `--strict-mcp-config`로 MCP 서버 없이 돈다. `--mcp-config`로 같은 목록을 넘기는 것은 문서상 가능하지만([CLI reference](https://code.claude.com/docs/en/cli-reference)) 간단하지 않아 미뤘다: `-p`는 `--permission-prompts none`이라 `--allowedTools`에 없는 MCP 도구는 모두 거절되므로 trust 서버만 쓸 수 있고, `env` 값이 인자나 임시 파일로 Claude Code에 넘어가야 하며, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 서버 환경에서 무엇을 지우는지와 서버 연결 대기(`MCP_TIMEOUT`)도 맞춰야 한다.
+범위 밖: HTTP 서버의 OAuth 인가 흐름(토큰은 환경 변수 참조 헤더로만), 이전 명세의 서버 알림 GET 스트림과 끊긴 스트림 이어 받기(`Last-Event-ID`), 2024-11-05 HTTP+SSE 전송, resources/prompts, 목록 변경 구독(`subscriptions/listen`), sampling/elicitation(MRTR), 작업 모드(`junees task`)와 claude-code 백엔드의 MCP. claude-code 백엔드는 지금처럼 `--strict-mcp-config`로 MCP 서버 없이 돈다. `--mcp-config`로 같은 목록을 넘기는 것은 문서상 가능하지만([CLI reference](https://code.claude.com/docs/en/cli-reference)) 간단하지 않아 미뤘다: `-p`는 `--permission-prompts none`이라 `--allowedTools`에 없는 MCP 도구는 모두 거절되므로 trust 서버만 쓸 수 있고, `env` 값이 인자나 임시 파일로 Claude Code에 넘어가야 하며, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 서버 환경에서 무엇을 지우는지와 서버 연결 대기(`MCP_TIMEOUT`)도 맞춰야 한다.
 
 ### 예약 작업
 
@@ -900,7 +918,7 @@ junees doctor --online    # API 키 확인 요청과 claude auth status까지
 - 디스코드: 토큰과 허용 사용자(게이트웨이가 시작할 때와 같은 검사). 둘 다 없으면 해당 없음.
 - 예약 작업과 웹훅: `jobs.json`/`routes.json`이 읽히는지, 기다리는 작업이나 멈추지 않은 경로가 있는데 `junees cron daemon`/`junees webhook serve`가 돌지 않으면 경고(잠금 파일이 잡혀 있는지로 판단한다. 비어 있으면 잠깐 잡았다 바로 놓는다). 경로마다 시크릿 파일이 있고 내 것이고 `0600`인지(값은 읽기만 하고 출력하지 않음), 환경 변수 시크릿은 지금 환경에 없으면 경고(서버의 환경은 다를 수 있다).
 - 세션: `$JUNEES_HOME/sessions`의 파일 수와 크기, 1 GiB를 넘으면 경고.
-- MCP: `mcp.json`이 읽히는지, 켜진 서버의 `command`가 PATH(서버 `env`에 PATH가 있으면 그것)나 그 경로에 실행 파일로 있는지, `cwd`가 폴더인지. 서버를 실행하지는 않는다.
+- MCP: `mcp.json`이 읽히는지(`url`과 `headers` 형식 포함), 켜진 서버의 `command`가 PATH(서버 `env`에 PATH가 있으면 그것)나 그 경로에 실행 파일로 있는지, `cwd`가 폴더인지, `url` 서버의 헤더가 참조하는 환경 변수가 있는지(값은 출력하지 않는다). 서버를 실행하거나 HTTP 서버에 연결하지는 않는다.
 - 플러그인: 켜진 플러그인의 폴더와 `plugin.json`이 실제 실행 때와 같은 검사(소유자, 권한, manifest 형식, 프롬프트 파일)를 통과하는지.
 - `--online`: 키가 있으면 `GET <base_url>/v1/models?limit=1`을 한 번 보낸다(토큰을 쓰지 않는다). 2xx면 ok, 401/403이면 실패, 그 밖이나 연결 실패는 경고(URL은 출력하지 않고 호스트만).
 
@@ -961,12 +979,19 @@ src/
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
   tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks, flows)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 웹훅 실행의 지침 파일 이름 쓰기 거절(instruction_files.rs), 도구 호출 전 훅 PreTool, 테스트 전용: 테스트 bash의 sandbox(bash.rs의 `testing::confine`, 환경 변수 수준이라 절대 경로와 프록시를 무시하는 프로그램은 막지 못함)와 테스트 코드가 홈 삭제나 origin push를 실제 셸로 돌리지 않는지, sandbox 밖(바이너리 테스트, 모델 응답으로 부르는 bash)에서는 원격과 상관없는 모든 `git push`, `.`/`..`/`/`/`*`의 재귀 삭제, `git reset --hard`, `git clean -f`도 돌리지 않는지, `Command::new("git")` 인자에 `push`가 있으면 임시 폴더의 bare 저장소로만 미는 헬퍼(SAFE_PUSH)를 거치는지, sandbox 밖 실제 bash 테스트가 허용 목록(파일과 모듈 경로까지 맞춘 테스트, 무해한 명령 또는 명령 없음)만 쓰는지 보는 소스 스캔(test_scan.rs)
-  mcp/               MCP 클라이언트 (stdio)
-    config.rs          $JUNEES_HOME/mcp.json 읽기와 검사 (0600, 자기 소유, 값을 되풀이하지 않는 오류)
+  mcp/               MCP 클라이언트 (stdio, Streamable HTTP)
+    config.rs          $JUNEES_HOME/mcp.json 읽기와 검사 (0600, 자기 소유, 값을 되풀이하지 않는 오류, command와 url 중 하나, 숨길 헤더 변수 목록)
     conn.rs            서버 프로세스(프로세스 그룹, 환경 정리)와 JSON-RPC 2.0 줄 메시지, 요청 id와 답 대기, 취소 알림, 서버 요청(ping) 답, stderr 꼬리, 종료(입력 닫기 -> SIGTERM -> SIGKILL)
     server.rs          server/discover 탐색과 initialize 대체(dual-era), tools/list 페이지, tools/call과 시간 한도, 상태와 다시 띄우기
     tool.rs            mcp__<서버>__<도구> 이름 정리와 충돌, 설명/스키마 이스케이프, 결과를 ToolOutput으로
-    mod.rs             Mcp: 서버 묶음 시작/보고/종료, 도구 등록, 승인용 외부 도구 목록, /mcp 보기
+    link.rs            Link: 실행 중인 서버에 닿는 전송(stdio Connection 또는 HttpConnection)
+    http/              Streamable HTTP 전송
+      mod.rs             HttpConnection: 요청마다 POST, JSON/SSE 응답, 두 세대 핸드셰이크(server/discover, 4xx면 initialize), 세션 id와 404 뒤 새 세션, 취소(스트림 닫기 / notifications/cancelled), 응답 크기 상한, 리다이렉트 거절, URL과 헤더 값 없는 오류, 종료 DELETE
+      target.rs          url(https, http는 루프백만, 사용자 정보 금지)과 headers(env:NAME 참조만, 전송 헤더 금지), 값 읽기(민감 표시), origin 표시
+      meta.rs            Mcp-Method/Mcp-Name, x-mcp-header 검사와 Mcp-Param-* 값, Base64 표시 인코딩
+      sse.rs             응답 스트림의 SSE 이벤트 읽기(조각 경계, CRLF, 주석, message 이벤트만)
+      tests.rs           루프백 가짜 HTTP MCP 서버(두 세대, JSON/SSE)로 핸드셰이크, 헤더, 세션, 404, 시간 초과와 취소, 크기 상한, 리다이렉트, 비노출 검증
+    mod.rs             Mcp: 서버 묶음 시작/보고/종료, 도구 등록, 승인용 외부 도구 목록, /mcp 보기(전송 종류)
   plugins/           플러그인 ($JUNEES_HOME/plugins/<이름>/plugin.json)
     manifest.rs        plugin.json 읽기와 검사 (도구, 훅, 프롬프트, 명령 경로, 시간 한도, 0600/자기 소유, 값을 되풀이하지 않는 오류)
     process.rs         명령 실행 (플러그인 폴더, 프로세스 그룹, 환경 정리, 표준 입력 JSON, 시간 한도와 그룹 종료, 출력 머리와 꼬리)
@@ -1086,6 +1111,7 @@ tests/
   memory.rs            실제 바이너리와 가짜 API 서버로 memory 도구가 저장한 항목이 지금 세션이 아니라 다음 세션의 시스템 프롬프트에 들어가는지, /memory 보기와 clear(확인 질문), /new가 메모리를 다시 읽는지 검증
   skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기, /skills 화면의 제어 문자 이스케이프 검증
   discord_gateway.rs   테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST로 IDENTIFY/READY, 하트비트와 ACK 누락, resume_gateway_url로 RESUME, Reconnect, INVALID_SESSION, 닫힘 코드, 거절된 토큰이 오류와 로그에 안 나옴, 허용 사용자와 멘션 규칙, 메시지 나누기, 채널별 대기열과 동시 실행, !stop/!new/!status, 종료 시 취소, 429 재시도, 실제 에이전트와 가짜 API로 재시작 뒤 채널 세션 이어 가기(meta의 source/channel, -c와 /sessions 번호 목록에서 빠짐)와 승인 답장/시간 초과 검증
+  mcp_http.rs          실제 바이너리 `-p`로 루프백 HTTP MCP 서버의 도구 호출(SSE 응답), 헤더 값이 환경 변수에서 오고 bash에는 그 변수가 없음, 변수가 없으면 그 서버만 빠짐 검증
   mcp.rs               실제 바이너리와 가짜 API, 가짜 MCP 서버(tests/fixtures/fake_mcp.py)로 모델의 MCP 도구 호출, 서버 환경에 API 키/디스코드 토큰/숨긴 변수가 없음, 종료 때 서버와 그 자식 정리, 0644 mcp.json 거절, /mcp, 파이프 입력 대화의 승인 거절과 trust, 게이트웨이 채널 질문, 작업 폴더의 모듈과 스크립트를 서버로 실행하지 않음(작업 폴더 안 상대 경로는 trust만) 검증
   plugins.rs           실제 바이너리로 junees plugin install/list/enable, -p에서 모델의 플러그인 도구 호출(환경에 비밀 없음, 플러그인 폴더에서 실행), pre_tool 훅의 bash 거절, post_turn 훅, 시스템 프롬프트의 조각 검증
   github.rs            실제 바이너리와 가짜 API, 가짜 GitHub REST로 -p에서 origin repo의 PR 보기 -> 리뷰(무인 허용 목록), 허용 목록 밖 쓰기 거절, 토큰이 모델/터미널/세션 기록에 없음 검증
