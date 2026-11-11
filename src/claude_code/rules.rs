@@ -119,6 +119,16 @@ pub fn settings_rules(file: &SettingsFile, root: &Path) -> Vec<String> {
         format!("Read(/{})", gitignore_escape(text)),
         format!("Edit(/{})", gitignore_escape(text)),
     ];
+    // git's and the GitHub CLI's credentials (a file or a folder).
+    for path in file.resolved_credentials() {
+        if let Some(path) = path.to_str() {
+            let path = gitignore_escape(path);
+            for tool in ["Read", "Edit"] {
+                rules.push(format!("{tool}(/{path})"));
+                rules.push(format!("{tool}(/{path}/**)"));
+            }
+        }
+    }
     let secrets: Vec<String> = file
         .resolved_secrets()
         .as_deref()

@@ -503,6 +503,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_and_gh_credentials_are_as_private_as_the_settings_file() {
+        let (_dir, root, file) = settings_file::testing::home();
+        let store = root.join(".git-credentials");
+        std::fs::write(&store, "https://u:ghp_secret@github.com\n").unwrap();
+        let hosts = root.join(".config/gh/hosts.yml");
+        std::fs::create_dir_all(hosts.parent().unwrap()).unwrap();
+        std::fs::write(&hosts, "github.com:\n  oauth_token: gho_secret\n").unwrap();
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        let read = ReadFile::with_settings(&settings);
+        for path in [
+            store.clone(),
+            hosts.clone(),
+            settings_file::testing::relative(&store),
+        ] {
+            let output = read.run(json!({"path": path})).await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(
+                output.content.contains("git or GitHub CLI credential file"),
+                "{}",
+                output.content
+            );
+            assert!(!output.content.contains("secret@"), "{}", output.content);
+        }
+        let output = WriteFile::with_settings(&settings)
+            .run(json!({"path": store, "content": "https://x:y@evil\n"}))
+            .await;
+        assert!(output.is_error, "{}", output.content);
+        let policy = CommandPolicy::with_settings(&settings);
+        for command in [
+            "cat ~/.git-credentials",
+            "grep -r oauth_token $HOME/.config/gh",
+            "cp ~/.git-cred* /tmp/x",
+            "base64 ~/.config/gh/hosts.yml",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("git or GitHub CLI credential file"),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        assert_eq!(policy.check("cat ~/.gitconfig"), Verdict::Allow);
+    }
+
+    #[tokio::test]
     async fn dispatches_by_name() {
         let mut registry = ToolRegistry::new();
         registry.register(Echo);

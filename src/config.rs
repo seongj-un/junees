@@ -178,6 +178,7 @@ impl Config {
             allow_dangerous: parse_flag(get("JUNEES_ALLOW_DANGEROUS"), "JUNEES_ALLOW_DANGEROUS")?,
             settings_file: crate::config_file::path(get).map(|path| {
                 SettingsFile::new(path, get("HOME").map(|home| PathBuf::from(home.trim())))
+                    .with_config_home(get("XDG_CONFIG_HOME").map(|dir| PathBuf::from(dir.trim())))
             }),
             approval_gate: false,
             webhook: false,
