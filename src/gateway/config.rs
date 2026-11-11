@@ -76,6 +76,9 @@ pub struct DiscordConfig {
     pub approval_timeout: Duration,
     /// REST base URL without a trailing slash.
     pub api_url: String,
+    /// Another base URL attachments may be downloaded from besides
+    /// Discord's CDN ([`crate::images::discord::CDN_URL_ENV`]).
+    pub cdn_url: Option<String>,
 }
 
 impl DiscordConfig {
@@ -114,6 +117,10 @@ impl DiscordConfig {
         };
         let api_url = get(API_URL_ENV).unwrap_or_else(|| DEFAULT_API_URL.to_string());
         check_url(&api_url, "https", "http").context(API_URL_ENV)?;
+        let cdn_url = get(crate::images::discord::CDN_URL_ENV);
+        if let Some(url) = &cdn_url {
+            check_url(url, "https", "http").context(crate::images::discord::CDN_URL_ENV)?;
+        }
         Ok(Self {
             token,
             allowed_users,
@@ -121,6 +128,7 @@ impl DiscordConfig {
             parallel,
             approval_timeout,
             api_url: api_url.trim_end_matches('/').to_string(),
+            cdn_url,
         })
     }
 }
@@ -211,6 +219,24 @@ mod tests {
         assert_eq!(config.approval_timeout, DEFAULT_APPROVAL_TIMEOUT);
         assert_eq!(config.api_url, DEFAULT_API_URL);
         assert!(config.channels.is_empty());
+        assert_eq!(config.cdn_url, None);
+
+        let cdn = crate::images::discord::CDN_URL_ENV;
+        let config = read(&[
+            (TOKEN_ENV, TOKEN),
+            (ALLOWED_USERS_ENV, "1"),
+            (cdn, "http://127.0.0.1:9/"),
+        ])
+        .unwrap();
+        assert_eq!(config.cdn_url.as_deref(), Some("http://127.0.0.1:9/"));
+        let err = read(&[
+            (TOKEN_ENV, TOKEN),
+            (ALLOWED_USERS_ENV, "1"),
+            (cdn, "http://cdn.example/"),
+        ])
+        .err()
+        .unwrap();
+        assert!(format!("{err:#}").contains(cdn), "{err:#}");
     }
 
     #[test]

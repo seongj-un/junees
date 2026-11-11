@@ -150,8 +150,10 @@ impl Gateway {
             self.config.channels.len(),
             self.config.parallel
         ));
+        let fetcher = crate::images::discord::Fetcher::new(self.config.cdn_url.as_deref())?;
         let shared = Arc::new(Shared {
             rest,
+            fetcher,
             engines: self.engines,
             permits: Arc::new(Semaphore::new(self.config.parallel)),
             config: self.config.clone(),

@@ -16,6 +16,7 @@ use crate::cancel::Cancel;
 use crate::claude_code::ClaudeCode;
 use crate::claude_code::chat::Chat;
 use crate::config::Config;
+use crate::images::Image;
 use crate::mcp::Mcp;
 use crate::memory::{Memory, MemoryTool, Mode};
 use crate::plugins::Plugins;
@@ -124,6 +125,19 @@ pub trait Conversation {
     /// Runs one input, reporting through `out`. A cancel ends it with
     /// [`crate::agent::Cancelled`].
     async fn turn(&mut self, input: &str, out: &UnboundedSender<Progress>) -> Result<()>;
+    /// [`Conversation::turn`] for an input sent with images (attachments).
+    /// Conversations that cannot show them to the model refuse the turn.
+    async fn turn_with_images(
+        &mut self,
+        input: &str,
+        images: Vec<Image>,
+        out: &UnboundedSender<Progress>,
+    ) -> Result<()> {
+        if !images.is_empty() {
+            anyhow::bail!(crate::images::NOT_ON_CLAUDE_CODE);
+        }
+        self.turn(input, out).await
+    }
     /// Continues a saved conversation, recording to `journal`.
     fn resume(&mut self, transcript: Transcript, journal: Option<Box<dyn Journal>>);
     /// Starts over, recording to `journal`; the memory and the skills are
@@ -319,8 +333,20 @@ struct ApiConversation {
 #[async_trait(?Send)]
 impl Conversation for ApiConversation {
     async fn turn(&mut self, input: &str, out: &UnboundedSender<Progress>) -> Result<()> {
+        self.turn_with_images(input, Vec::new(), out).await
+    }
+
+    async fn turn_with_images(
+        &mut self,
+        input: &str,
+        images: Vec<Image>,
+        out: &UnboundedSender<Progress>,
+    ) -> Result<()> {
         let mut collector = Collector::new(out);
-        let result = self.agent.run(input, |event| collector.event(event)).await;
+        let result = self
+            .agent
+            .run_with_images(input, images, |event| collector.event(event))
+            .await;
         collector.finish();
         result.map(drop)
     }

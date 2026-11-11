@@ -24,6 +24,7 @@ use super::split::{MESSAGE_LIMIT, split_message};
 use crate::agent::Cancelled;
 use crate::cancel::Cancel;
 use crate::claude_code::UsageLimit;
+use crate::images::discord::{self as attached, Attachment, Fetcher};
 use crate::memory::Memory;
 use crate::prompt_text::escape_hidden;
 use crate::provider::ProviderError;
@@ -47,6 +48,8 @@ In a server channel, mention the bot (`@Junees !stop`) unless the channel is one
 /// What the gateway shares with every channel's worker.
 pub struct Shared {
     pub rest: Arc<Rest>,
+    /// Downloads the images attached to messages.
+    pub fetcher: Fetcher,
     pub engines: Arc<dyn Engines>,
     pub config: DiscordConfig,
     pub home: Option<PathBuf>,
@@ -110,8 +113,17 @@ fn store<T>(mutex: &Mutex<T>, value: T) {
 }
 
 enum Job {
-    Input { text: String, epoch: u64 },
-    New { epoch: u64 },
+    Input {
+        text: String,
+        /// Images attached to the message, downloaded when its turn starts.
+        attachments: Vec<Attachment>,
+        /// Attachments left out, and why.
+        notes: Vec<String>,
+        epoch: u64,
+    },
+    New {
+        epoch: u64,
+    },
 }
 
 impl Job {
@@ -278,7 +290,8 @@ impl Bot {
             Some(me) => strip_mention(content, me),
             None => content.trim().to_string(),
         };
-        if content.is_empty() {
+        let (attachments, notes) = attached::attachments(data);
+        if content.is_empty() && attachments.is_empty() && notes.is_empty() {
             return;
         }
         let channel = channel.to_string();
@@ -286,9 +299,18 @@ impl Bot {
             self.command(&channel, command, direct);
             return;
         }
-        if let Some(known) = self.channels.get(&channel)
+        if attachments.is_empty()
+            && !content.is_empty()
+            && let Some(known) = self.channels.get(&channel)
             && known.state.answers.answer(content.clone())
         {
+            return;
+        }
+        if content.is_empty() && attachments.is_empty() {
+            // Only files that are not images: nothing to run.
+            let shared = Arc::clone(&self.shared);
+            let text = notes_text(&notes);
+            tokio::spawn(async move { shared.say(&channel, &text).await });
             return;
         }
         let known = self.channel(&channel);
@@ -296,6 +318,8 @@ impl Bot {
         known.state.queued.fetch_add(1, Ordering::SeqCst);
         let _ = known.jobs.send(Job::Input {
             text: content,
+            attachments,
+            notes,
             epoch,
         });
     }
@@ -581,7 +605,12 @@ async fn worker(
                 store(&state.session, status);
                 store(&state.usage, String::new());
             }
-            Job::Input { text, .. } => {
+            Job::Input {
+                text,
+                attachments,
+                notes,
+                ..
+            } => {
                 if !ready {
                     let opened = {
                         let mut index = shared
@@ -615,13 +644,18 @@ async fn worker(
                         continue;
                     }
                 }
+                let input = Input {
+                    text,
+                    attachments,
+                    notes,
+                };
                 turn(
                     &shared,
                     &channel,
                     &state,
                     &cancel,
                     conversation.as_mut(),
-                    &text,
+                    input,
                     &out,
                     &mut progress,
                 )
@@ -629,6 +663,70 @@ async fn worker(
             }
         }
     }
+}
+
+/// A message for the conversation: its text and attachments.
+struct Input {
+    text: String,
+    attachments: Vec<Attachment>,
+    notes: Vec<String>,
+}
+
+/// The attachments left out of a message, as one post.
+fn notes_text(notes: &[String]) -> String {
+    format!("(attachments left out: {})", notes.join("; "))
+}
+
+/// Downloads the images of `input`, says which attachments were left out,
+/// and returns the text and images to run; `None` when nothing is left
+/// to run or a `!stop` came meanwhile.
+async fn prepare(
+    shared: &Shared,
+    channel: &str,
+    cancel: &Cancel,
+    input: Input,
+) -> Option<(String, Vec<crate::images::Image>)> {
+    let Input {
+        text,
+        attachments,
+        mut notes,
+    } = input;
+    let images = if attachments.is_empty() {
+        Vec::new()
+    } else {
+        let (images, failed) = tokio::select! {
+            got = attached::fetch_all(&shared.fetcher, &attachments) => got,
+            _ = cancel.cancelled() => {
+                shared.say(channel, "(stopped before it started)").await;
+                return None;
+            }
+        };
+        notes.extend(failed);
+        // The kind and size only: the log never holds what users sent.
+        for image in &images {
+            (shared.log)(&format!(
+                "channel {channel}: attached {}",
+                attached::log_line(image)
+            ));
+        }
+        images
+    };
+    if !notes.is_empty() {
+        shared.say(channel, &notes_text(&notes)).await;
+    }
+    if text.is_empty() && images.is_empty() {
+        return None;
+    }
+    let mut text = if text.is_empty() {
+        crate::images::NO_TEXT.to_string()
+    } else {
+        text
+    };
+    // The model should not answer about a picture it never got.
+    if !notes.is_empty() {
+        text.push_str(&format!("\n\n{}", notes_text(&notes)));
+    }
+    Some((text, images))
 }
 
 /// Runs one input in the channel: waits for a free slot, shows typing,
@@ -641,11 +739,14 @@ async fn turn(
     state: &ChannelState,
     cancel: &Cancel,
     conversation: &mut dyn Conversation,
-    input: &str,
+    input: Input,
     out: &UnboundedSender<Progress>,
     progress: &mut UnboundedReceiver<Progress>,
 ) {
     cancel.reset();
+    let Some((input, images)) = prepare(shared, channel, cancel, input).await else {
+        return;
+    };
     let permits = Arc::clone(&shared.permits);
     let permit = match permits.clone().try_acquire_owned() {
         Ok(permit) => permit,
@@ -677,7 +778,7 @@ async fn turn(
     state.running.store(true, Ordering::SeqCst);
     let mut tools: Vec<String> = Vec::new();
     let result = {
-        let run = conversation.turn(input, out);
+        let run = conversation.turn_with_images(&input, images, out);
         tokio::pin!(run);
         let mut typing = tokio::time::interval(shared.typing_every);
         // Posting can wait out a rate limit; no burst of typing after it.
