@@ -20,11 +20,15 @@ fn settings_and_credentials_are_removed_and_nothing_else() {
         "CLAUDE_CODE_USE_BEDROCK",
         "GH_TOKEN",
         "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GH_CONFIG_DIR",
         // Kept.
         "PATH",
         "HOME",
-        "GH_CONFIG_DIR",
+        "GH_HOST",
         "GITHUB_TOKENS",
+        "GH_CONFIG_DIRS",
         "MY_JUNEES_HOME",
         "junees_home",
         "TZ",
@@ -40,7 +44,7 @@ fn settings_and_credentials_are_removed_and_nothing_else() {
         })
         .collect();
     removed.sort();
-    let mut expected = names[..9].to_vec();
+    let mut expected = names[..12].to_vec();
     expected.sort();
     assert_eq!(removed, expected);
 }
