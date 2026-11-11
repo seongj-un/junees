@@ -2,6 +2,8 @@
 //! credentials: they start the binary through `common::junees_binary`.
 //! Nothing here runs a command.
 
+use std::path::Path;
+
 mod common;
 
 use common::{junees_binary, scrub_env, scrubbed};
@@ -62,4 +64,29 @@ fn the_binary_command_removes_what_the_test_environment_has() {
         assert!(removed.contains(name), "{name} reaches the binary");
     }
     assert_eq!(removed.len(), present.len(), "{removed:?}");
+}
+
+#[test]
+fn every_binary_test_starts_from_the_scrubbed_binary() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    // Split, so this file does not find itself.
+    let direct = concat!("CARGO_BIN_", "EXE_junees");
+    let mut users = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains(direct),
+            "{} starts the binary itself: use common::junees_binary()",
+            path.display()
+        );
+        if text.contains("common::junees_binary()") {
+            users.push(path);
+        }
+    }
+    // Every file that ran the binary when this test was written.
+    assert!(users.len() >= 18, "{users:?}");
 }

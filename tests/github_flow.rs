@@ -23,7 +23,7 @@ const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 const GITHUB_TOKEN: &str = "gh-flow-test-token";
 
 fn junees(home: &Path, cwd: &Path, api: &str, github: &str) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary();
     command
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
@@ -38,19 +38,7 @@ fn junees(home: &Path, cwd: &Path, api: &str, github: &str) -> tokio::process::C
         .env("JUNEES_GITHUB_ALLOW_UNATTENDED", "review")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
-    for name in [
-        "JUNEES_MODEL",
-        "JUNEES_BACKEND",
-        "JUNEES_NOTIFY_WEBHOOK",
-        "JUNEES_WEBHOOK_MAX_TIME",
-        "JUNEES_WEBHOOK_MAX_TOKENS",
-        "JUNEES_GITHUB_FLOW_MERGE",
-        "JUNEES_HIDDEN_ENV",
-        "JUNEES_DISCORD_TOKEN",
-        "TZ",
-    ] {
-        command.env_remove(name);
-    }
+    command.env_remove("TZ");
     command
 }
 

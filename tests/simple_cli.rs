@@ -17,7 +17,7 @@ use common::{body_of, fake_api, text_reply};
 /// Junees with nothing from the test's environment but `PATH`: the
 /// state folder is `home`, git has a fixed identity and no system config.
 fn junees(home: &Path, cwd: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary();
     command
         .args(args)
         .current_dir(cwd)

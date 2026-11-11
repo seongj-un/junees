@@ -55,7 +55,7 @@ async fn bash_cannot_read_hidden_variables_from_any_ancestor() {
     let home = tempfile::tempdir().unwrap();
     let work = home.path().join("work");
     std::fs::create_dir(&work).unwrap();
-    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"))
+    let child = common::junees_binary()
         .args(["--no-session", "-p", "probe"])
         .current_dir(&work)
         .env("HOME", home.path())
@@ -67,7 +67,6 @@ async fn bash_cannot_read_hidden_variables_from_any_ancestor() {
             "JUNEES_NOTIFY_WEBHOOK",
             format!("https://discord.invalid/api/webhooks/1/{HOOK_TOKEN}"),
         )
-        .env_remove("JUNEES_HIDDEN_ENV")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

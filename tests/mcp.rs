@@ -42,7 +42,7 @@ fn home_with_server(dir: &Path, mode: u32) -> (PathBuf, PathBuf) {
 }
 
 fn command(home: &Path, cwd: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary();
     command
         .args(args)
         .current_dir(cwd)
@@ -51,8 +51,6 @@ fn command(home: &Path, cwd: &Path, url: &str, args: &[&str]) -> tokio::process:
         .env("JUNEES_HOME", home)
         .env("HOME", home)
         .env("JUNEES_STREAM", "0")
-        .env_remove("JUNEES_MODEL")
-        .env_remove("JUNEES_APPROVAL")
         .stdin(Stdio::null());
     command
 }

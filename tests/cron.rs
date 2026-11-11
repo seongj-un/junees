@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use common::{body_of, fake_api, text_reply};
 
 fn junees(home: &Path, cwd: &Path, api: &str, discord: &str) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary();
     command
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
@@ -28,19 +28,7 @@ fn junees(home: &Path, cwd: &Path, api: &str, discord: &str) -> tokio::process::
         .env("JUNEES_DISCORD_API_URL", discord)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
-    for name in [
-        "JUNEES_MODEL",
-        "JUNEES_BACKEND",
-        "JUNEES_NOTIFY_WEBHOOK",
-        "JUNEES_CRON_MAX_TIME",
-        "JUNEES_CRON_MAX_TOKENS",
-        "JUNEES_MEMORY_USER_CHARS",
-        "JUNEES_MEMORY_NOTES_CHARS",
-        "JUNEES_MEMORY_PROJECT_CHARS",
-        "TZ",
-    ] {
-        command.env_remove(name);
-    }
+    command.env_remove("TZ");
     command
 }
 

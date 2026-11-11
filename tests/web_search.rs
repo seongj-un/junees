@@ -190,19 +190,13 @@ async fn the_same_holds_for_a_streamed_turn() {
 /// session.
 async fn junees(url: &str, extra_env: &[(&str, &str)]) -> Output {
     let cwd = tempfile::tempdir().unwrap();
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary();
     command
         .args(["--no-session", "-p", "news?"])
         .current_dir(cwd.path())
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", url)
         .env("HOME", cwd.path())
-        .env_remove("JUNEES_HOME")
-        .env_remove("JUNEES_STREAM")
-        .env_remove("JUNEES_WEB_SEARCH")
-        .env_remove("JUNEES_WEB_SEARCH_MAX_USES")
-        .env_remove("JUNEES_WEB_SEARCH_ALLOWED_DOMAINS")
-        .env_remove("JUNEES_WEB_SEARCH_BLOCKED_DOMAINS")
         .envs(extra_env.iter().copied())
         .stdin(Stdio::null());
     command.output().await.unwrap()

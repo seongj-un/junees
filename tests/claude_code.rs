@@ -123,7 +123,7 @@ fn plan() -> String {
 /// fake as `claude`, and API credentials in its environment that must not
 /// reach `claude`.
 fn junees(cwd: &Path, home: &Path, bin: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary();
     command
         .args(args)
         .current_dir(cwd)
@@ -141,13 +141,6 @@ fn junees(cwd: &Path, home: &Path, bin: &Path, args: &[&str]) -> tokio::process:
         .env("ANTHROPIC_FEDERATION_RULE_ID", "rule-must-not-reach-claude")
         .env("ANTHROPIC_ORGANIZATION_ID", "org-must-not-reach-claude")
         .env("JUNEES_HOME", home.join("junees"))
-        .env_remove("JUNEES_MAX_TURNS")
-        .env_remove("JUNEES_CLAUDE_MODEL")
-        .env_remove("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB")
-        .env_remove("JUNEES_NOTIFY_WEBHOOK")
-        .env_remove("JUNEES_NOTIFY_EACH_SESSION")
-        .env_remove("JUNEES_TASK_MAX_TOKENS")
-        .env_remove("JUNEES_TASK_MAX_TIME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

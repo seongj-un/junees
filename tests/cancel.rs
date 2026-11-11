@@ -28,7 +28,7 @@ fn slow_bash(pid_file: &Path) -> Value {
 }
 
 fn command(home: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary();
     command
         .args(args)
         .current_dir(home)
@@ -36,11 +36,6 @@ fn command(home: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
         .env("ANTHROPIC_BASE_URL", url)
         .env("JUNEES_HOME", home)
         .env("HOME", home)
-        .env_remove("JUNEES_MODEL")
-        .env_remove("JUNEES_MAX_TOKENS")
-        .env_remove("JUNEES_MAX_TURNS")
-        .env_remove("JUNEES_CONTEXT_WINDOW")
-        .env_remove("JUNEES_COMPACT_THRESHOLD")
         .kill_on_drop(true);
     command
 }

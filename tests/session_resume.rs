@@ -11,20 +11,13 @@ use common::{body_of, fake_api, text_reply};
 
 /// The binary in `cwd`, talking to the fake API, with no state folder set.
 fn command(cwd: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary();
     command
         .args(args)
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", url)
-        .env_remove("JUNEES_HOME")
         .env_remove("HOME")
-        .env_remove("JUNEES_MODEL")
-        .env_remove("JUNEES_MAX_TOKENS")
-        .env_remove("JUNEES_MAX_TURNS")
-        .env_remove("JUNEES_CONTEXT_WINDOW")
-        .env_remove("JUNEES_COMPACT_THRESHOLD")
-        .env_remove("JUNEES_THINKING_BUDGET")
         .stdin(Stdio::null());
     command
 }
