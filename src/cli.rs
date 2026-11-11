@@ -23,6 +23,9 @@ Usage:
   junees gateway          run as a Discord bot (also `junees discord`; see README)
   junees cron             prompts that run on a schedule (`junees cron --help`)
   junees webhook          HTTP requests that start a run (`junees webhook --help`)
+  junees sessions search <words>
+                          search the saved sessions (--all: every folder; see
+                          `junees sessions --help`)
   junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
                           plugin install <folder> [--name <n>], enable <name> [--trust],
                           disable <name>, remove <name>
@@ -114,6 +117,8 @@ pub const REPL_HELP: &str = "\
 /task              keep working on the task
 /status            show where the task stands
 /sessions          list recent sessions and pick one to continue
+/search <words>    search the saved sessions of this folder (\"a phrase\" in quotes;
+                   --all every folder, --limit N, --source discord|cron|webhook)
 /new               start a new conversation (also /reset)
 /model [<name>]    show the model, or switch to another for this session
 /backend [api|claude-code]
@@ -152,6 +157,10 @@ pub enum Command {
     Webhook(crate::webhook::cli::WebhookCommand),
     /// `junees plugin ...` (or `junees plugins`).
     Plugin(crate::plugins::manage::PluginCommand),
+    /// `junees sessions search ...`.
+    SessionsSearch(crate::search::args::HumanSearch),
+    /// `junees sessions --help`.
+    SessionsHelp,
     Help,
     Version,
 }
@@ -266,6 +275,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                 Some(other) => bail!("setup takes no arguments (got `{other}`)"),
             };
         }
+        Some("sessions") => {
+            args.next();
+            return parse_sessions(args);
+        }
         Some("plugin" | "plugins") => {
             args.next();
             if matches!(args.peek().map(String::as_str), Some("-h" | "--help")) {
@@ -327,6 +340,46 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
     }
     run.prompt = prompt;
     Ok(Command::Run(run))
+}
+
+pub const SESSIONS_HELP: &str = "\
+junees sessions search [OPTIONS] <words or \"a phrase\">
+
+Searches the saved sessions ($JUNEES_HOME/sessions) for what was typed,
+the model's replies and the start of tool results. Every word must appear
+in the same message, case ignored; a phrase in double quotes must appear
+as written. Newest sessions first.
+
+Options:
+  --all            every working folder, not only this one
+  --limit <N>      sessions to show, 1 to 20 (default 5)
+  --source <S>     only sessions from terminal, discord, cron, webhook or all
+                   (default all; repeat or use a comma list)
+  --session <ID>   only this session (an id or the start of one), in any folder
+";
+
+fn parse_sessions(mut args: impl Iterator<Item = String>) -> Result<Command> {
+    match args.next().as_deref() {
+        Some("search") => {}
+        None | Some("-h" | "--help") => return Ok(Command::SessionsHelp),
+        Some(other) => bail!(
+            "unknown sessions command `{other}`; {}",
+            crate::search::args::USAGE
+        ),
+    }
+    let args: Vec<String> = args.collect();
+    if args
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "-h" || arg == "--help")
+    {
+        return Ok(Command::SessionsHelp);
+    }
+    let search = crate::search::args::HumanSearch::parse(
+        args.into_iter().map(crate::search::args::quote_arg),
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok(Command::SessionsSearch(search))
 }
 
 fn parse_status(args: impl Iterator<Item = String>) -> Result<Command> {
@@ -513,6 +566,43 @@ mod tests {
         assert_eq!(
             parse(&["webhook", "pause", "pr"]).unwrap(),
             Command::Webhook(crate::webhook::cli::WebhookCommand::Pause("pr".into()))
+        );
+    }
+
+    #[test]
+    fn parses_sessions_search() {
+        let search = |args: &[&str]| match parse(args).unwrap() {
+            Command::SessionsSearch(search) => search,
+            other => panic!("{args:?}: {other:?}"),
+        };
+        let found = search(&["sessions", "search", "빌드 실패", "--all", "clippy"]);
+        assert_eq!(found.query, "\"빌드 실패\" clippy");
+        assert!(found.all);
+        let found = search(&["sessions", "search", "--limit", "2", "--", "--help"]);
+        assert_eq!((found.query.as_str(), found.limit), ("--help", 2));
+        for args in [
+            &["sessions"][..],
+            &["sessions", "--help"],
+            &["sessions", "search", "--help"],
+            &["sessions", "search", "x", "-h"],
+        ] {
+            assert_eq!(parse(args).unwrap(), Command::SessionsHelp, "{args:?}");
+        }
+        for (args, expected) in [
+            (&["sessions", "list"][..], "unknown sessions command `list`"),
+            (&["sessions", "search"], "give the words to look for"),
+            (
+                &["sessions", "search", "--limit", "x", "y"],
+                "--limit must be",
+            ),
+        ] {
+            let err = parse(args).unwrap_err().to_string();
+            assert!(err.contains(expected), "{args:?}: {err}");
+        }
+        // Through -p the word is a prompt.
+        assert_eq!(
+            parse(&["-p", "sessions"]).unwrap(),
+            run(Some("sessions"), SessionMode::New)
         );
     }
 

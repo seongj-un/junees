@@ -109,6 +109,18 @@ async fn run() -> Result<ExitCode> {
             print!("{}", plugins::manage::run(&command, home.as_deref())?);
             return Ok(ExitCode::SUCCESS);
         }
+        Command::SessionsHelp => {
+            print!("{}", cli::SESSIONS_HELP);
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Reads the journals only.
+        Command::SessionsSearch(search) => {
+            let home = junees::config_file::home_dir(|key| std::env::var(key).ok())
+                .context("neither JUNEES_HOME nor HOME is set, so there are no saved sessions")?;
+            let cwd = std::env::current_dir().context("cannot read the current directory")?;
+            print!("{}", search_sessions(&home, &cwd, &search)?);
+            return Ok(ExitCode::SUCCESS);
+        }
         _ => {}
     }
     let mut settings = if command == Command::Setup {
@@ -152,10 +164,29 @@ async fn run() -> Result<ExitCode> {
         Command::Gateway => discord_gateway(&settings).await,
         Command::Cron(command) => junees::cron::command::main(command, settings).await,
         Command::Webhook(command) => junees::webhook::command::main(command, settings).await,
-        Command::Setup | Command::Help | Command::Version | Command::Plugin(_) => {
+        Command::Setup
+        | Command::Help
+        | Command::Version
+        | Command::Plugin(_)
+        | Command::SessionsHelp
+        | Command::SessionsSearch(_) => {
             unreachable!("handled above")
         }
     }
+}
+
+/// What `junees sessions search` and `/search` print for `search` in the
+/// working folder `cwd`.
+fn search_sessions(
+    home: &Path,
+    cwd: &Path,
+    search: &junees::search::args::HumanSearch,
+) -> Result<String> {
+    let options = search
+        .options(cwd, junees::search::HUMAN_TIME_LIMIT)
+        .map_err(anyhow::Error::msg)?;
+    let outcome = junees::search::search(home, &options)?;
+    Ok(junees::search::format::for_terminal(&outcome, &options))
 }
 
 /// Whether questions can be asked: both stdin and stderr are terminals.
@@ -1004,6 +1035,7 @@ impl Repl {
                 self.reset();
             }
             Slash::Sessions => return self.sessions().await,
+            Slash::Search(arg) => self.search(&arg).await,
             Slash::Status => {
                 if let Err(err) = task_status(false) {
                     report(&err);
@@ -1448,6 +1480,35 @@ impl Repl {
         match store.view(name, None) {
             Ok(text) => println!("{}", text.trim_end()),
             Err(err) => eprintln!("{err}"),
+        }
+    }
+
+    /// `/search <words>`: the saved sessions that match, numbered, with
+    /// how to continue one.
+    async fn search(&self, arg: &str) {
+        let search = match junees::search::args::HumanSearch::parse(
+            arg.split_whitespace().map(str::to_string),
+        ) {
+            Ok(search) => search,
+            Err(err) => {
+                eprintln!("{err}");
+                return;
+            }
+        };
+        let home = match self.config.require_home() {
+            Ok(home) => home.to_path_buf(),
+            Err(err) => {
+                report(&err);
+                return;
+            }
+        };
+        let cwd = self.cwd.clone();
+        let found =
+            tokio::task::spawn_blocking(move || search_sessions(&home, &cwd, &search)).await;
+        match found {
+            Ok(Ok(text)) => print!("{text}"),
+            Ok(Err(err)) => report(&err),
+            Err(err) => eprintln!("error: the search failed: {err}"),
         }
     }
 

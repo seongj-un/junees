@@ -9,6 +9,7 @@
 //! [`MAX_LINE_BYTES`] are skipped without being held in memory, and the
 //! search stops at a time limit with what it found so far.
 
+pub mod args;
 pub mod format;
 pub mod query;
 mod scan;
