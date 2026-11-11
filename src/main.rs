@@ -1377,7 +1377,10 @@ impl Repl {
             (Some(id), Some(home)) => Some(session::sessions_dir(home).join(format!("{id}.jsonl"))),
             _ => None,
         };
-        let (records, stats) = match journal.as_deref().map(junees::usage::read_session) {
+        let (records, stats) = match journal
+            .as_deref()
+            .map(|path| junees::usage::read_session(path, &prices))
+        {
             Some(Ok(read)) => read,
             Some(Err(err)) => {
                 report(&err);
