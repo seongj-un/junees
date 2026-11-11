@@ -718,6 +718,52 @@ async fn writes_send_what_github_expects() {
 }
 
 #[tokio::test]
+async fn text_for_github_may_name_commits_but_never_holds_the_token() {
+    let fake = Fake::start(vec![(
+        "POST /repos/o/n/issues/7/comments",
+        vec![reply(201, json!({"id": 1, "html_url": "u"}))],
+    )])
+    .await;
+    let tool = fake.tool(true, &[]);
+    // The review's examples: commit links and ids are what reviews name.
+    let bodies = [
+        format!("fixed in https://github.com/o/n/commit/{HEAD}"),
+        format!("rebased onto {HEAD}"),
+        format!("see https://github.com/o/n/pull/7/commits/{HEAD}"),
+        format!("rebased onto {}", HEAD.to_uppercase()),
+    ];
+    for body in &bodies {
+        let output = run(
+            &tool,
+            json!({"action": "pr_comment", "number": 7, "body": body}),
+        )
+        .await;
+        assert!(!output.is_error, "{body}: {}", output.content);
+    }
+    assert_eq!(fake.seen().len(), bodies.len());
+    // The configured token, which has no known prefix, never goes out:
+    // not in a body, not in a line comment, not in a title.
+    for input in [
+        json!({"action": "pr_comment", "number": 7, "body": format!("use {TOKEN}")}),
+        json!({"action": "review", "number": 7, "body": "ok",
+               "comments": [{"path": "a", "line": 1, "body": format!("x{TOKEN}x")}]}),
+        json!({"action": "pr_create", "title": TOKEN, "head": "a", "base": "b"}),
+    ] {
+        let output = run(&tool, input.clone()).await;
+        assert!(output.is_error, "{input}");
+        assert!(
+            output
+                .content
+                .starts_with("not sent: the call holds the user's GitHub token"),
+            "{}",
+            output.content
+        );
+        assert!(!output.content.contains(TOKEN));
+    }
+    assert_eq!(fake.seen().len(), bodies.len());
+}
+
+#[tokio::test]
 async fn bad_write_input_is_refused_before_any_request() {
     let fake = Fake::start(vec![]).await;
     let tool = fake.tool(true, &[]);

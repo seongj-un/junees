@@ -241,6 +241,14 @@ impl GithubTool {
             )
         })?;
         let repo = self.repo(input)?;
+        // The token's own value, whatever its form, never goes into text.
+        if action.write(input).is_some() && holds_text(input, self.client.token().value()) {
+            return Err(
+                "not sent: the call holds the user's GitHub token; GitHub text is visible to \
+                 others, so leave it out"
+                    .into(),
+            );
+        }
         if let Some(write) = action.write(input)
             && !self.asks
             && !self.unattended.contains(&write)
@@ -990,7 +998,9 @@ fn line_comments(comments: &Value) -> Result<Value, String> {
 }
 
 /// Refuses text for GitHub that is too long, holds hidden characters or
-/// seems to hold a credential: GitHub text is public or shared.
+/// seems to hold a credential: GitHub text is public or shared. Commit
+/// ids (40 or 64 hex digits, also in links) pass
+/// ([`crate::secrets::find_outgoing_secret`]).
 fn check_write(what: &str, text: &str) -> Result<(), String> {
     if text.chars().count() > MAX_WRITE_CHARS {
         return Err(format!(
@@ -998,13 +1008,23 @@ fn check_write(what: &str, text: &str) -> Result<(), String> {
         ));
     }
     crate::prompt_text::check_plain(&format!("`{what}`"), text)?;
-    if let Some((kind, line)) = crate::secrets::find_secret(text) {
+    if let Some((kind, line)) = crate::secrets::find_outgoing_secret(text) {
         return Err(format!(
             "not sent: line {line} of `{what}` seems to hold {kind}; GitHub text is visible to \
              others, so leave credentials out"
         ));
     }
     Ok(())
+}
+
+/// Whether any string in `value` contains `needle`.
+fn holds_text(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(needle),
+        Value::Array(items) => items.iter().any(|item| holds_text(item, needle)),
+        Value::Object(fields) => fields.values().any(|item| holds_text(item, needle)),
+        _ => false,
+    }
 }
 
 fn text_arg<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
