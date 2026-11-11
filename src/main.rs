@@ -1184,9 +1184,12 @@ impl Repl {
             ),
             Slash::Skill(name) => self.skill(&name),
             Slash::Doctor => {
+                // Read again, as `junees doctor` does: the file may have
+                // changed, or broken, since the conversation started.
+                let (settings, broken) = Settings::load_for_setup(|key| std::env::var(key).ok());
                 print!(
                     "{}",
-                    junees::doctor::run(&self.settings, None, false)
+                    junees::doctor::run(&settings, broken.as_ref(), false)
                         .await
                         .text()
                 );

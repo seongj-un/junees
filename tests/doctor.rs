@@ -9,7 +9,7 @@ use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const SECRET: &str = "sk-binary-doctor-secret";
 
@@ -188,4 +188,62 @@ async fn the_conversation_runs_doctor() {
     );
     assert!(stderr.contains("/doctor takes no argument"), "{stderr}");
     assert!(!stdout.contains(SECRET) && !stderr.contains(SECRET));
+}
+
+/// The stdout lines of one report, up to its counts line.
+async fn next_report(
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+) -> String {
+    let read = async {
+        let mut report = String::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            report.push_str(&line);
+            report.push('\n');
+            if line.ends_with(" skipped") && line.contains(" failed, ") {
+                return report;
+            }
+        }
+        panic!("junees ended before the report did:\n{report}");
+    };
+    tokio::time::timeout(Duration::from_secs(60), read)
+        .await
+        .expect("no report from /doctor")
+}
+
+#[tokio::test]
+async fn the_conversation_reads_the_settings_again() {
+    let config = format!("api_key = \"{SECRET}\"\nbase_url = \"http://127.0.0.1:9\"\n");
+    let home = Home::new(&config);
+    let mut command = common::junees_binary(&home.work, &home.root);
+    command
+        .arg("--no-session")
+        .env("JUNEES_HOME", &home.state)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+
+    input.write_all(b"/doctor\n").await.unwrap();
+    let first = next_report(&mut lines).await;
+    assert!(first.contains("reads, every key known"), "{first}");
+
+    // The file breaks while the conversation runs.
+    home.config(&format!("{config}wat = 1\n"));
+    input.write_all(b"/doctor\n/exit\n").await.unwrap();
+    drop(input);
+    let second = next_report(&mut lines).await;
+    assert!(
+        second.contains("  FAIL  config.toml: ")
+            && second.contains("line 3: unknown setting `wat`"),
+        "{second}"
+    );
+    assert!(!first.contains(SECRET) && !second.contains(SECRET));
+    let status = tokio::time::timeout(Duration::from_secs(60), child.wait())
+        .await
+        .expect("junees did not exit")
+        .unwrap();
+    assert!(status.success());
 }
