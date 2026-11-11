@@ -189,6 +189,7 @@ impl ApiEngine {
         let mut tools = ToolRegistry::with_defaults(&config.tools);
         skills::register(&mut tools, home, false);
         mcp.register(&mut tools);
+        crate::github::register(&mut tools, &config.github, dir, false);
         let system = prompt::system_prompt(dir)
             + CRON_NOTE
             + crate::subagent::prompt_note(config.subagents)

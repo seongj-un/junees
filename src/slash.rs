@@ -34,6 +34,8 @@ pub enum Slash {
     Plugins,
     /// `/cron` lists the scheduled jobs.
     Cron,
+    /// `/github` shows the GitHub settings and the rate limit left.
+    Github,
     Help,
     Exit,
     /// A command typed wrong: what to tell the user.
@@ -85,6 +87,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "mcp" => plain(Slash::Mcp),
         "plugins" => plain(Slash::Plugins),
         "cron" => plain(Slash::Cron),
+        "github" => plain(Slash::Github),
         "skill" => match arg {
             None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
             Some(name) => match crate::skills::check_name(&name) {
@@ -175,6 +178,7 @@ mod tests {
             ("/memory clear project", Slash::MemoryClear(Target::Project)),
             ("/skills", Slash::Skills),
             ("/cron", Slash::Cron),
+            ("/github", Slash::Github),
             ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),
             ("/exit", Slash::Exit),
