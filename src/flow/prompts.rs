@@ -185,15 +185,21 @@ impl Review {
         review
     }
 
-    /// Whether the verdict says it may be merged.
+    /// Whether the verdict says it may be merged: exactly `머지 가능` (or
+    /// `ready to merge`), optionally followed by a remark in parentheses
+    /// (`머지 가능 (권장 2건)`). Anything else after the words
+    /// (`머지 가능하지 않음`, `머지 가능 여부 미정`) is not a yes.
     pub fn ready(&self) -> bool {
         self.verdict.as_deref().is_some_and(|verdict| {
-            let lower = verdict.to_lowercase();
-            (lower.contains("머지 가능") || lower.contains("ready to merge"))
-                && !lower.contains("불가")
-                && !lower.contains("수정 필요")
-                && !lower.contains("not ready")
-                && !lower.contains("changes needed")
+            let lower = verdict.trim().to_lowercase();
+            ["머지 가능", "ready to merge"].iter().any(|words| {
+                lower.strip_prefix(words).is_some_and(|rest| {
+                    let rest = rest.trim();
+                    rest.is_empty()
+                        || (rest.starts_with('(') && rest.ends_with(')'))
+                        || (rest.starts_with('（') && rest.ends_with('）'))
+                })
+            })
         })
     }
 }
@@ -261,6 +267,25 @@ mod tests {
         assert!(!Review::parse("판정: 머지 불가능").ready());
         // The form copied as it is decides nothing.
         assert!(!Review::parse("판정: 머지 가능 | 수정 필요").ready());
+        // Only the exact verdict, with at most a remark in parentheses.
+        for no in [
+            "판정: 머지 가능하지 않음",
+            "판정: 머지 가능 여부 미정",
+            "판정: 머지 가능?",
+            "판정: 머지 가능 - 단, 수정 필요",
+            "Verdict: ready to merge? no",
+            "판정: 아직 머지 가능 아님",
+        ] {
+            assert!(!Review::parse(no).ready(), "{no}");
+        }
+        for yes in [
+            "판정: 머지 가능 (권장 2건)",
+            "**판정**: 머지 가능（참고만）",
+            "판정:  머지 가능  ",
+            "Verdict: Ready to merge (nits only)",
+        ] {
+            assert!(Review::parse(yes).ready(), "{yes}");
+        }
         // A heading word inside an item is not a heading.
         let review = Review::parse("### 권장\n- 필수\n");
         assert_eq!(review.should, 1);
