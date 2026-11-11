@@ -32,8 +32,10 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// images: `image` blocks and tool results with images, whose source names
 /// a file of the session's image folder ([`crate::images::store`]), and
 /// `append_content`; a format 6 Junees would send such sources to the API,
-/// or refuse a tool result whose content is a list as corrupt.
-pub const FORMAT: u32 = 7;
+/// or refuse a tool result whose content is a list as corrupt. Format 8
+/// added `clear_images`, which a format 7 Junees would refuse as a corrupt
+/// line.
+pub const FORMAT: u32 = 8;
 
 /// [`Meta::backend`] of a conversation Claude Code runs (the `claude-code`
 /// backend).
@@ -55,6 +57,11 @@ pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool fini
 
 /// What a tool result says once its output was cleared to save context.
 pub const CLEARED: &str = "[tool output cleared to save context]";
+
+/// What takes the place of the images of a message the API rejected
+/// ([`Entry::ClearImages`]).
+pub const REJECTED_IMAGES: &str =
+    "[image removed: the API rejected the request that carried it, so it is not sent again]";
 
 /// Tool result messages whose output is never cleared: the most recent ones.
 pub const KEEP_TOOL_RESULTS: usize = 3;
@@ -102,7 +109,7 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 12] = [
+const ENTRY_TYPES: [&str; 13] = [
     "meta",
     "message",
     "append_text",
@@ -115,6 +122,7 @@ const ENTRY_TYPES: [&str; 12] = [
     "drop_server_calls",
     "claude_turn",
     "subagent_usage",
+    "clear_images",
 ];
 
 /// One line of a journal.
@@ -186,6 +194,15 @@ pub enum Entry {
     /// a task's budget) but say nothing about this conversation's context
     /// size; their own histories are in journals of their own.
     SubagentUsage(Usage),
+    /// The images of the trailing user message were replaced by `note`:
+    /// the API rejected the request that carried them (a file whose header
+    /// looks right but whose data is broken, for one), so sending them
+    /// again would fail the same way ([`Transcript::clear_images_entry`]).
+    /// An input image becomes the note; a tool result loses its images and
+    /// gets the note after its output.
+    ClearImages {
+        note: String,
+    },
 }
 
 /// One turn of a conversation Claude Code runs.
@@ -410,6 +427,43 @@ impl Transcript {
                 if turn.claude_session.is_some() {
                     self.claude_session = turn.claude_session;
                 }
+            }
+            Entry::ClearImages { note } => {
+                let Some(last) = self.messages.last_mut() else {
+                    return;
+                };
+                if last.role != Role::User {
+                    return;
+                }
+                let before = estimate_tokens(&last.content);
+                let mut content = Vec::with_capacity(last.content.len());
+                let mut noted = false;
+                for mut block in std::mem::take(&mut last.content) {
+                    match &mut block {
+                        // All of the message's input images become one note.
+                        ContentBlock::Image(_) => {
+                            if !noted {
+                                content.push(ContentBlock::text(note.clone()));
+                                noted = true;
+                            }
+                            continue;
+                        }
+                        ContentBlock::ToolResult {
+                            content: output,
+                            images,
+                            ..
+                        } if !images.is_empty() => {
+                            images.clear();
+                            output.push_str(&format!("\n{note}"));
+                        }
+                        _ => {}
+                    }
+                    content.push(block);
+                }
+                last.content = content;
+                let after = estimate_tokens(&last.content);
+                self.unmeasured_tokens = (self.unmeasured_tokens + after).saturating_sub(before);
+                self.reply_measured = false;
             }
             Entry::DropServerCalls { ids } => {
                 let dropped = |block: &ContentBlock| {
@@ -669,6 +723,23 @@ impl Transcript {
                 content,
             }),
         }
+    }
+
+    /// The entry that takes the images out of the trailing user message,
+    /// or `None` when the history does not end with a user message holding
+    /// images. Called after the API rejected a request because of an image
+    /// ([`crate::provider::ProviderError::is_image_rejected`]): a failed
+    /// turn leaves its input as the last message and the next input joins
+    /// it, so without this the rejected image would go with every later
+    /// request, and compaction keeps the latest inputs whole. Only the
+    /// trailing message changes, so no thinking block sees an edited
+    /// prefix; images the API took in earlier turns stay.
+    pub fn clear_images_entry(&self) -> Option<Entry> {
+        let last = self.messages.last()?;
+        (last.role == Role::User && last.content.iter().any(|block| !block.images().is_empty()))
+            .then(|| Entry::ClearImages {
+                note: REJECTED_IMAGES.to_string(),
+            })
     }
 
     /// If the history ends with tool calls that never got a result (the
@@ -1536,7 +1607,10 @@ mod tests {
         let journal = fs::read_to_string(&path).unwrap();
         assert!(!journal.contains("\"base64\""), "{journal}");
         assert_eq!(journal.matches("\"junees_file\"").count(), 3);
-        assert!(journal.contains("\"format\":7"), "{journal}");
+        assert!(
+            journal.contains(&format!("\"format\":{FORMAT}")),
+            "{journal}"
+        );
         let images = sessions_dir(home.path()).join(&meta.id).join("images");
         let mut files: Vec<String> = fs::read_dir(&images)
             .unwrap()
@@ -1829,6 +1903,7 @@ mod tests {
             Entry::DropServerCalls { ids: vec![] },
             Entry::ClaudeTurn(claude_turn(Some("c-1"), "hi")),
             Entry::SubagentUsage(Usage::default()),
+            Entry::ClearImages { note: "n".into() },
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -1844,7 +1919,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 7);
+        assert_eq!(value["format"], 8);
         // An API conversation has no backend field.
         assert!(value.get("backend").is_none(), "{value}");
         // Journals written before the field existed are format 1.
@@ -2214,6 +2289,89 @@ mod tests {
                 keep_thinking: false
             }
         );
+    }
+
+    #[test]
+    fn rejected_images_leave_only_the_trailing_message() {
+        let input = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image(picture(1)), ContentBlock::text("look")],
+        };
+        let call = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "toolu_1".into(),
+                name: "read_file".into(),
+                input: json!({}),
+            }],
+        };
+        let result = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "read shot.png".into(),
+                is_error: false,
+                images: vec![picture(2000)],
+            }],
+        };
+        // Nothing to clear when the history ends with a reply or holds no
+        // image at its end.
+        assert!(
+            transcript_of(vec![input.clone()])
+                .clear_images_entry()
+                .is_some()
+        );
+        assert!(
+            transcript_of(vec![input.clone(), assistant("ok")])
+                .clear_images_entry()
+                .is_none()
+        );
+        assert!(
+            transcript_of(vec![
+                input.clone(),
+                assistant("ok"),
+                Message::user_text("more")
+            ])
+            .clear_images_entry()
+            .is_none()
+        );
+
+        let mut transcript = transcript_of(vec![input.clone(), call.clone(), result]);
+        let entry = transcript.clear_images_entry().unwrap();
+        assert_eq!(
+            entry,
+            Entry::ClearImages {
+                note: REJECTED_IMAGES.to_string()
+            }
+        );
+        let before = transcript.context_size();
+        transcript.apply(entry);
+        // The images the API took earlier stay; the result loses its own.
+        assert_eq!(transcript.messages[..2], [input, call]);
+        assert_eq!(
+            transcript.messages[2].content,
+            [ContentBlock::tool_result(
+                "toolu_1",
+                format!("read shot.png\n{REJECTED_IMAGES}"),
+                false
+            )]
+        );
+        assert!(transcript.context_size() < before);
+
+        // Several input images become one note before the text.
+        let mut transcript = Transcript::default();
+        transcript.apply(transcript.user_input_entry("both", vec![picture(1), picture(2)]));
+        transcript.apply(transcript.user_input_entry("and this", vec![picture(3)]));
+        transcript.apply(transcript.clear_images_entry().unwrap());
+        assert_eq!(
+            transcript.messages[0].content,
+            [
+                ContentBlock::text(REJECTED_IMAGES),
+                ContentBlock::text("both"),
+                ContentBlock::text("and this"),
+            ]
+        );
+        assert!(transcript.clear_images_entry().is_none());
     }
 
     fn assistant(text: &str) -> Message {

@@ -350,6 +350,9 @@ impl Agent {
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
         let result = self.run_turn(input, images, &mut on_event).await;
+        if let Err(err) = &result {
+            self.forget_rejected_images(err, &mut on_event);
+        }
         if let Some(after_turn) = &self.after_turn {
             after_turn.after_turn(input, &result).await;
         }
@@ -542,6 +545,31 @@ impl Agent {
             "dropped {count} web search call(s) the last turn stopped before running; \
              the model goes on from your new message"
         )));
+    }
+
+    /// After a turn failed because the API rejected an image: takes the
+    /// images out of the message the turn ended on (see
+    /// [`Transcript::clear_images_entry`]) and says so, so the next input
+    /// does not carry them to the same error.
+    fn forget_rejected_images(
+        &mut self,
+        err: &anyhow::Error,
+        on_event: &mut impl FnMut(Event<'_>),
+    ) {
+        if !err
+            .downcast_ref::<ProviderError>()
+            .is_some_and(ProviderError::is_image_rejected)
+        {
+            return;
+        }
+        let Some(entry) = self.transcript.clear_images_entry() else {
+            return;
+        };
+        self.record(entry, on_event);
+        on_event(Event::Warning(
+            "the API rejected an image in this message; it was taken out of the conversation, \
+             so your next message goes without it (attach a fixed copy to try again)",
+        ));
     }
 
     /// Runs one tool call, unless the gate turns it down.
@@ -1005,6 +1033,89 @@ mod tests {
         assert_eq!(
             images[0].bytes().unwrap(),
             crate::images::testing::png(12, 8)
+        );
+    }
+
+    fn rejected(message: &str) -> Reply {
+        Err(ProviderError::Api {
+            status: 400,
+            kind: Some("invalid_request_error".into()),
+            message: message.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn an_image_the_api_rejects_is_not_sent_again() {
+        let provider = Scripted::new(vec![
+            rejected(
+                "messages.0.content.0.image.source.base64: The image was specified using the \
+                 image/png media type, but does not appear to be a valid png image",
+            ),
+            text("no picture now"),
+        ]);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 5).with_journal(Box::new(journal.clone()));
+        let broken = crate::images::Image::from_bytes(&crate::images::testing::png(3, 3))
+            .unwrap()
+            .0;
+        let mut log = Vec::new();
+        let err = agent
+            .run_with_images("what is it?", vec![broken.clone()], notable(&mut log))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("valid png image"), "{err}");
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(
+            log[0].starts_with("warning the API rejected an image in this message"),
+            "{log:?}"
+        );
+        assert_eq!(
+            agent.run("and now?", |_| {}).await.unwrap(),
+            "no picture now"
+        );
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0][0].content,
+            [
+                ContentBlock::Image(broken),
+                ContentBlock::text("what is it?")
+            ]
+        );
+        // The next request carries the note in place of the image.
+        assert_eq!(seen[1].len(), 1);
+        assert_eq!(
+            seen[1][0].content,
+            [
+                ContentBlock::text(session::REJECTED_IMAGES),
+                ContentBlock::text("what is it?"),
+                ContentBlock::text("and now?"),
+            ]
+        );
+        assert!(journal.0.lock().unwrap().contains(&Entry::ClearImages {
+            note: session::REJECTED_IMAGES.to_string()
+        }));
+    }
+
+    #[tokio::test]
+    async fn other_rejections_keep_the_images() {
+        let provider = Scripted::new(vec![rejected("tools.0.input_schema: invalid"), text("ok")]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let picture = crate::images::Image::from_bytes(&crate::images::testing::png(3, 3))
+            .unwrap()
+            .0;
+        let mut log = Vec::new();
+        agent
+            .run_with_images("look", vec![picture.clone()], notable(&mut log))
+            .await
+            .unwrap_err();
+        assert!(log.is_empty(), "{log:?}");
+        agent.run("again", |_| {}).await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[1][0].content[0],
+            ContentBlock::Image(picture)
         );
     }
 

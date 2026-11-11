@@ -99,7 +99,7 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - `--resume`으로 다른 폴더에서 시작한 세션을 열면 `resumed <id> (N messages, started in <폴더>)`로 알려 준다(claude-code 세션은 `N Claude Code turns`). 기록 속 상대 경로는 그 폴더 기준이다.
 - 세션 파일은 그 세션을 쓰는 Junees가 `flock`으로 잠근다. 아직 실행 중인 세션을 다른 터미널에서 `-c`나 `--resume`으로 열면 "session <id> is in use by another Junees" 오류로 끝나고 파일은 건드리지 않는다. 프로세스가 죽으면 잠금은 커널이 풀어 준다.
 - 이어 갈 때 마지막 줄이 줄바꿈 없이 끝나고 읽히지 않으면(쓰는 도중 죽은 흔적) 그 줄만 버린다. 줄바꿈까지 있는 줄이 읽히지 않으면 위치와 상관없이 오류로 멈추고 파일을 고치지 않는다. 도구 실행 중에 끊겨서 결과가 없는 도구 호출은 `interrupted` 오류 결과로 채우고 그것도 기록한다.
-- 첫 줄(`meta`)에 기록 형식 버전 `format`(현재 7)이 있고, 각 줄에 기록 시각 `ts`(unix 초)가 붙는다. 이 버전보다 새 형식의 세션은 "written by a newer Junees" 오류로 열지 않는다. 형식 1(L1) 세션도 그대로 읽고 이어 쓴다.
+- 첫 줄(`meta`)에 기록 형식 버전 `format`(현재 8)이 있고, 각 줄에 기록 시각 `ts`(unix 초)가 붙는다. 이 버전보다 새 형식의 세션은 "written by a newer Junees" 오류로 열지 않는다. 형식 1(L1) 세션도 그대로 읽고 이어 쓴다.
 - 이어 쓸 때 첫 줄은 바꾸지 않으므로(덧붙이기만 함), 형식 1 세션을 이 버전으로 이어 쓴 뒤 L1 바이너리로 열면 "newer Junees"가 아니라 `line N is corrupt` 오류가 난다(파일은 그대로). 이 버전부터는 모르는 종류의 항목을 만나면 "continued by a newer Junees" 오류로 원인을 알려 준다.
 - 항목 종류: `meta`, `message`, `append_text`, `usage`, 그리고 형식 2에서 추가된 `clear_tool_results`, `compact`, `summary_usage`(아래 컨텍스트 관리).
 - 형식 3: 메시지 안의 thinking, redacted_thinking, 서버 도구 블록처럼 Junees가 직접 다루지 않는 블록을 API가 보낸 JSON 그대로 저장한다(아래 확장 사고). 이전 버전은 이런 블록을 API가 거절하는 자리표시로 읽기 때문에 형식을 올렸고, 이전 바이너리는 형식 3 세션을 "newer Junees" 오류로 열지 않는다. 형식 1, 2 세션도 그대로 읽는다. 이런 세션을 이 버전으로 이어 쓰면 첫 새 줄 앞에 `{"type":"format","format":4}` 항목을 한 번 덧붙인다. 이전 바이너리는 이 모르는 항목에서 "continued by a newer Junees" 오류로 멈추므로, thinking 블록을 자리표시로 잘못 읽어 400을 받는 일이 없다. 기록을 바꾸는 일도 항목으로 덧붙이기만 하고 파일을 새로 쓰지 않으므로, 재생 결과가 실행 중 기록과 같다.
@@ -107,6 +107,7 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - 형식 5: Claude Code가 돌린 대화(아래 구독 모드). meta 줄에 `backend: "claude-code"`(api 대화는 이 필드가 없다)가 있고, 턴마다 `claude_turn { claude_session, input, text, usage, end }` 항목이 붙는다(Claude Code 세션 id, 입력, 최종 답, 사용량, 끝난 방식). 메시지 기록은 Claude Code가 자기 세션에 들고 있으므로 Junees 기록에는 메시지가 없다. 형식 4 바이너리는 이런 파일을 빈 API 대화로 잘못 열기 때문에 형식을 올렸다(이제 "newer Junees" 오류).
 - 형식 6: 서브에이전트가 쓴 토큰을 세는 `subagent_usage` 항목(아래 서브에이전트). `summary_usage`처럼 사용량에만 더하고 컨텍스트 크기에는 쓰지 않는다. 서브에이전트의 기록은 `sessions/<id>/sub-<n>.jsonl`에 따로 있다.
 - 형식 7: 이미지(위 이미지 입력). `image` 블록과 이미지가 든 도구 결과(`content`가 목록)를 쓰고, 이미지는 세션 폴더의 파일을 가리킨다(`junees_file` 소스). 이미지가 든 입력을 실패한 턴 뒤 user 메시지에 붙이는 `append_content { content }` 항목도 생겼다. 형식 6 바이너리는 파일을 가리키는 소스를 API에 그대로 보내거나 목록인 `content`를 깨진 줄로 보므로 형식을 올렸다.
+- 형식 8: API가 거절한 이미지를 마지막 user 메시지에서 빼는 `clear_images { note }` 항목(위 이미지 입력). 형식 7 바이너리는 이 항목을 깨진 줄로 보므로 형식을 올렸다.
 - 세션 파일에는 도구 출력이 그대로 들어가므로 파일은 `0600`, 새로 만드는 `$JUNEES_HOME`과 `sessions` 폴더는 `0700`으로 만든다.
 - `JUNEES_HOME`과 `HOME`이 둘 다 없으면(cron, 일부 서비스와 컨테이너) 기록 없이 실행하고 "session not saved" 한 줄로 알린다. 이때 `-c`와 `--resume`만 오류다.
 - 토큰 사용량도 기록되고, 이어 가면 그 세션의 누적값부터 다시 센다.
@@ -221,11 +222,12 @@ junees usage --by source           # 터미널, discord, cron, webhook별
 - 디스코드: 허용된 사용자의 메시지에 붙은 이미지(아래 디스코드 게이트웨이).
 - 입력의 이미지는 텍스트 앞에 둔다([vision 문서](https://platform.claude.com/docs/en/build-with-claude/vision): "Claude works best when images come before text"). API에는 base64 소스(`{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ...}}`)로 보낸다.
 - 상한: 파일 5 MB(base64로 약 7 MB. API는 이미지당 base64 10 MB, Bedrock/Vertex는 5 MB)와 가로세로 8000 px(문서의 최대). 넘으면 이유와 줄이는 방법(ImageMagick 예)을 알려 주고 보내지 않는다. 크기는 헤더(PNG IHDR, GIF 화면 크기, WebP VP8/VP8L/VP8X, JPEG SOF)에서 읽고 픽셀은 디코딩하지 않는다. 리사이즈는 하지 않는다(이미지 라이브러리가 필요해서).
-- 세션 기록: 이미지는 세션 폴더의 파일 `$JUNEES_HOME/sessions/<id>/images/<sha256>.<확장자>`(폴더 0700, 파일 0600, 같은 이미지는 한 번만)에 두고 기록 줄에는 그 파일을 가리키는 블록(`"source": {"type": "junees_file", "media_type": ..., "sha256": ...}`)만 남긴다. 이어 갈 때 파일을 다시 읽어 붙이고, 파일이 없거나 내용이 바뀌었으면(해시가 다르면) 그 자리에 `[image ... could not be read ...]` 같은 한 줄을 넣고 이어 간다. 기록 형식 7(위 세션 기록).
+- 세션 기록: 이미지는 세션 폴더의 파일 `$JUNEES_HOME/sessions/<id>/images/<sha256>.<확장자>`(폴더 0700, 파일 0600, 같은 이미지는 한 번만)에 두고 기록 줄에는 그 파일을 가리키는 블록(`"source": {"type": "junees_file", "media_type": ..., "sha256": ...}`)만 남긴다. 이어 갈 때 파일을 다시 읽어 붙이고, 파일이 없거나 내용이 바뀌었으면(해시가 다르면) 그 자리에 `[image ... could not be read ...]` 같은 한 줄을 넣고 이어 간다. 기록 형식 7(위 세션 기록, 아래 거절된 이미지는 형식 8).
 - 컨텍스트: 이미지 크기는 base64 길이가 아니라 픽셀로 추정한다(`ceil(가로/28) x ceil(세로/28)`, 긴 변 2576 px로 줄인 뒤, 최대 4784토큰: 문서의 고해상도 등급 기준이라 다른 모델에서는 크게 잡힌다). 도구 결과를 비우면 그 결과의 이미지도 지운다. 압축 요약 호출에는 이미지 대신 `[user: image, image/png, 640x480 px]` 같은 줄이 가고, 한 턴 안에서 자를 때 그 턴의 입력에 붙은 이미지는 입력 글과 함께 남긴다.
 - 세션 검색은 이미지 블록을 건너뛰고 글만 찾고, `junees usage`는 이미지가 든 기록도 그대로 센다.
 - claude-code 백엔드: `/image`, `--image`, 디스코드 이미지는 "images are sent on the api backend only"로 거절한다. Claude Code에는 텍스트만 넘기므로, 파일을 읽으라고 하면 Claude Code의 Read 도구가 이미지를 연다.
-- 한계: 한 요청에 이미지가 20개를 넘으면 API가 이미지마다 더 작은 크기 제한을 둔다(문서: 각 변 3000 px 이하 권장). Junees는 이를 세지 않으므로, 큰 스크린샷을 많이 읽은 긴 세션은 400을 받을 수 있다(그때는 `/compact`나 `/new`). MCP 서버가 돌려준 이미지는 지금처럼 한 줄 설명으로만 간다.
+- API가 거절한 이미지: 헤더는 맞지만 데이터가 깨진 파일처럼 Junees가 미리 걸러 내지 못한 이미지 때문에 호출이 400 `invalid_request_error`로 끝나고 오류 문구에 image가 들어 있으면, 그 턴이 끝난 마지막 user 메시지(이번 입력과, 실패한 앞 턴에서 붙은 입력, 또는 도구 결과)의 이미지를 `[image removed: the API rejected the request that carried it, so it is not sent again]` 한 줄로 바꾸고(입력 이미지는 몇 개든 한 줄, 도구 결과는 출력 뒤에 그 줄) `!! the API rejected an image in this message; ...` 경고로 알린다. 기록에는 `clear_images { note }` 항목으로 남아 `-c`/`--resume`으로 이어 가도 그 이미지는 다시 가지 않고, 글은 남아 다음 입력과 함께 간다. image를 말하지 않는 400(도구 스키마, thinking 설정 등)과 컨텍스트 초과는 이미지를 그대로 둔다. 앞 턴에서 API가 이미 받아 준 이미지와 마지막 메시지가 아닌 곳의 이미지는 건드리지 않는다(앞 메시지를 바꾸면 thinking 블록이 거절되므로).
+- 한계: 한 요청에 이미지가 20개를 넘으면 API가 이미지마다 더 작은 크기 제한을 둔다(문서: 각 변 3000 px 이하 권장). Junees는 이를 세지 않으므로, 큰 스크린샷을 많이 읽은 긴 세션은 400을 받을 수 있다. 이때 걸린 이미지가 앞 턴들에 있으면 아래처럼 빠지지 않으므로 `/new`(디스코드는 `!new`)로 새로 시작한다. `/compact`는 최근 두 입력과 그 이미지를 남기므로 도움이 되지 않을 수 있다. MCP 서버가 돌려준 이미지는 지금처럼 한 줄 설명으로만 간다.
 
 ### 메모리
 

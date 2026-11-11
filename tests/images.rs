@@ -289,3 +289,54 @@ async fn images_the_api_would_refuse_stop_before_any_call() {
     // No session was started for any of them.
     assert!(!home.path().join(".junees/sessions").exists());
 }
+
+#[tokio::test]
+async fn an_image_the_api_rejects_is_left_out_of_the_resumed_session() {
+    let (home, work) = home();
+    let picture = png(40, 30);
+    std::fs::write(work.join("broken.png"), &picture).unwrap();
+    let rejected = json!({"type": "error", "error": {"type": "invalid_request_error",
+        "message": "messages.0.content.0.image.source.base64: The image was specified using \
+                    the image/png media type, but does not appear to be a valid png image"}});
+    let (url, server) = fake_api(vec![(400, rejected), (200, text_reply("Only text now."))]).await;
+
+    let first = junees(
+        home.path(),
+        &work,
+        &url,
+        &["--image", "broken.png", "-p", "what is this?"],
+    )
+    .await;
+    assert!(!first.status.success());
+    let stderr = text(&first.stderr);
+    assert!(stderr.contains("valid png image"), "{stderr}");
+    assert!(
+        stderr.contains("the API rejected an image in this message"),
+        "{stderr}"
+    );
+    let second = junees(home.path(), &work, &url, &["-c", "-p", "try again"]).await;
+    assert!(second.status.success(), "{}", text(&second.stderr));
+    assert_eq!(text(&second.stdout), "Only text now.\n");
+
+    let requests = server.await.unwrap();
+    let first = body_of(&requests[0]);
+    assert_eq!(first["messages"][0]["content"][0], image_block(&picture));
+    // Continued: the input stays, the picture does not.
+    let resumed = body_of(&requests[1]);
+    assert_eq!(
+        resumed["messages"].as_array().unwrap().len(),
+        1,
+        "{resumed}"
+    );
+    let content = unmarked(&resumed["messages"][0]["content"]);
+    assert_eq!(
+        content[0]["text"].as_str().unwrap(),
+        "[image removed: the API rejected the request that carried it, so it is not sent again]"
+    );
+    assert_eq!(
+        content,
+        json!([content[0], {"type": "text", "text": "what is this?"},
+               {"type": "text", "text": "try again"}])
+    );
+    assert!(!requests[1].contains("\"image\""), "{resumed}");
+}
