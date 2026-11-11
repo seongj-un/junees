@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod conn;
+pub mod http;
 pub mod server;
 pub mod tool;
 
