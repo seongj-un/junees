@@ -64,6 +64,8 @@ pub const KEYS: &[(&str, &str)] = &[
     ("timezone", "JUNEES_TIMEZONE"),
     ("cron_max_time", "JUNEES_CRON_MAX_TIME"),
     ("cron_max_tokens", "JUNEES_CRON_MAX_TOKENS"),
+    ("webhook_max_time", "JUNEES_WEBHOOK_MAX_TIME"),
+    ("webhook_max_tokens", "JUNEES_WEBHOOK_MAX_TOKENS"),
     (
         "discord_approval_timeout",
         "JUNEES_DISCORD_APPROVAL_TIMEOUT",

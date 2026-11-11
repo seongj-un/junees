@@ -12,6 +12,8 @@
 //!   output file, the delivery.
 //! - [`cli`], [`command`]: the `junees webhook` commands.
 
+pub mod cli;
+pub mod command;
 pub mod http;
 pub mod run;
 pub mod server;

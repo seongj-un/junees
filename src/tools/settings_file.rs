@@ -81,6 +81,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
         holds: "the installed plugins",
         tool: None,
     },
+    DataFolder {
+        name: "webhooks",
+        holds: "the webhook routes and their output",
+        tool: None,
+    },
 ];
 
 impl DataFolder {
@@ -731,6 +736,7 @@ mod tests {
             (".junees/projects/0123/notes.md", "projects"),
             (".junees/skills/new/SKILL.md", "skills"),
             (".junees/cron/jobs.json", "cron"),
+            (".junees/webhooks/routes.json", "webhooks"),
             ("link", "memory"),
             ("dirlink/notes.md", "memory"),
             ("dangling", "skills"),
