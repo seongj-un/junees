@@ -269,20 +269,79 @@ impl ServerConfig {
 }
 
 /// The environment variables the HTTP servers of `<home>/mcp.json` read
-/// their header values from; none when the file is missing or broken.
-/// Junees hides them from bash, MCP servers and plugins.
+/// their header values from. Junees hides them from bash, MCP servers and
+/// plugins, so this reads leniently: a file [`load`] refuses (open to
+/// other users, too large, a broken entry) still names the variables the
+/// user keeps tokens in. Every string in the JSON that is a header
+/// reference counts, wherever it sits; text that is no JSON at all is
+/// scanned for `env:NAME`. Only the first 16 MiB are read.
 pub fn header_env_names(home: &Path) -> Vec<String> {
-    let Ok(servers) = load(&home.join(FILE_NAME)) else {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Non-blocking, so a FIFO in its place cannot hang the start.
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(home.join(FILE_NAME))
+    else {
         return Vec::new();
     };
-    let mut names: Vec<String> = servers
-        .iter()
-        .filter_map(|server| server.http.as_ref())
-        .flat_map(|http| http.env_names().map(str::to_string))
-        .collect();
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    // A read error keeps what was read.
+    let _ = file.take(MAX_SCAN_BYTES).read_to_end(&mut bytes);
+    let mut names = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(value) => {
+            let mut names = Vec::new();
+            json_references(&value, &mut names);
+            names
+        }
+        Err(_) => text_references(&String::from_utf8_lossy(&bytes)),
+    };
     names.sort();
     names.dedup();
     names
+}
+
+/// A larger file is scanned this far for header variables.
+const MAX_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The variables of every string in `value` that is a header reference.
+fn json_references(value: &serde_json::Value, names: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some((_, var)) = super::http::target::env_reference(text) {
+                names.push(var.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                json_references(item, names);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                json_references(item, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every `env:NAME` in `text`.
+fn text_references(text: &str) -> Vec<String> {
+    text.match_indices("env:")
+        .filter_map(|(at, _)| {
+            let rest = &text[at + "env:".len()..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            super::http::target::is_var_name(name).then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// Whether the absolute `path` lies in `folder`, resolving links and `..`
@@ -469,6 +528,56 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(header_env_names(dir.path()), ["A_TOKEN", "TEAM"]);
+    }
+
+    #[test]
+    fn header_variables_are_hidden_even_when_the_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let write = |text: &str, mode: u32| {
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let names = || header_env_names(dir.path());
+        // Open to other users: load refuses it.
+        write(
+            r#"{"servers": {"a": {"url": "https://a.dev/",
+                "headers": {"Authorization": "Bearer env:A_TOKEN"}}}}"#,
+            0o644,
+        );
+        assert!(load(&path).is_err());
+        assert_eq!(names(), ["A_TOKEN"]);
+        // A broken entry next to a good one; a misspelt key still counts.
+        write(
+            r#"{"servers": {
+                "a": {"url": "https://a.dev/", "headers": {"X-Key": "env:A_TOKEN"}},
+                "b": {"url": "https://b.dev/", "header": {"X-Key": "Token env:B_TOKEN"}},
+                "c": {"url": "https://c.dev/", "headers": {"X-Key": "s3cret"}}
+            }}"#,
+            0o600,
+        );
+        assert!(load(&path).is_err());
+        assert_eq!(names(), ["A_TOKEN", "B_TOKEN"]);
+        // Not JSON at all.
+        write(
+            r#"{"servers": {"a": {"url": "https://a.dev/", "headers": {"A": "Bearer env:CUT_TOKEN"#,
+            0o600,
+        );
+        assert_eq!(names(), ["CUT_TOKEN"]);
+        // Over the 1 MiB load reads.
+        let mut big =
+            r#"{"servers": {"a": {"url": "https://a.dev/", "headers": {"A": "env:BIG"}}}}"#
+                .to_string();
+        big.push_str(&" ".repeat(MAX_FILE_BYTES as usize));
+        write(&big, 0o600);
+        assert!(load(&path).is_err());
+        assert_eq!(names(), ["BIG"]);
+        // A FIFO in its place is not waited on.
+        std::fs::remove_file(&path).unwrap();
+        let fifo = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo reads the NUL-terminated path only.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(names().is_empty());
     }
 
     #[test]

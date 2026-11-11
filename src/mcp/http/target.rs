@@ -180,25 +180,13 @@ fn header_ref(name: &str, value: &str) -> Result<HeaderRef> {
     if RESERVED.contains(&lower.as_str()) || lower.starts_with("mcp-param-") {
         bail!("`headers` may not set `{name}`: the MCP transport sets it");
     }
-    let (scheme, reference) = match value.split_once(' ') {
-        Some((scheme, rest)) => (Some(scheme), rest),
-        None => (None, value),
-    };
-    let var = reference
-        .strip_prefix("env:")
-        .filter(|var| is_var_name(var));
-    let scheme_ok = scheme.is_none_or(|scheme| {
-        !scheme.is_empty()
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    });
-    let (Some(var), true) = (var, scheme_ok) else {
-        bail!(
+    let (scheme, var) = match env_reference(value) {
+        Some(reference) => reference,
+        None => bail!(
             "the value of header `{name}` must be a reference to an environment variable, \
              `env:NAME` or a scheme word and one, as in `Bearer env:NAME`, so the file holds \
              no secret"
-        );
+        ),
     };
     Ok(HeaderRef {
         name: name.to_string(),
@@ -207,8 +195,27 @@ fn header_ref(name: &str, value: &str) -> Result<HeaderRef> {
     })
 }
 
+/// The scheme word and variable of a header value `env:NAME` or
+/// `Scheme env:NAME`; `None` for any other value.
+pub fn env_reference(value: &str) -> Option<(Option<&str>, &str)> {
+    let (scheme, reference) = match value.split_once(' ') {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, value),
+    };
+    let var = reference
+        .strip_prefix("env:")
+        .filter(|var| is_var_name(var))?;
+    let scheme_ok = scheme.is_none_or(|scheme| {
+        !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    });
+    scheme_ok.then_some((scheme, var))
+}
+
 /// `[A-Za-z_][A-Za-z0-9_]*`.
-fn is_var_name(name: &str) -> bool {
+pub fn is_var_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
