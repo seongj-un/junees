@@ -28,3 +28,4 @@ pub mod subagent;
 pub mod task;
 pub mod tools;
 pub mod web_search;
+pub mod webhook;
