@@ -336,12 +336,20 @@ impl Agent {
     /// and the next input is appended to it, so the conversation stays valid.
     /// The exception is a reply the API paused (`pause_turn`): it is kept,
     /// and the next input follows it as a new user message.
-    pub async fn run(
+    pub async fn run(&mut self, input: &str, on_event: impl FnMut(Event<'_>)) -> Result<String> {
+        self.run_with_images(input, Vec::new(), on_event).await
+    }
+
+    /// [`Agent::run`] for an input that comes with images (`/image`,
+    /// `--image`, Discord attachments): they go before its text in the
+    /// same user message.
+    pub async fn run_with_images(
         &mut self,
         input: &str,
+        images: Vec<crate::images::Image>,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
-        let result = self.run_turn(input, &mut on_event).await;
+        let result = self.run_turn(input, images, &mut on_event).await;
         if let Some(after_turn) = &self.after_turn {
             after_turn.after_turn(input, &result).await;
         }
@@ -351,10 +359,11 @@ impl Agent {
     async fn run_turn(
         &mut self,
         input: &str,
+        images: Vec<crate::images::Image>,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
         self.drop_open_server_calls(&mut on_event);
-        let entry = self.transcript.user_text_entry(input);
+        let entry = self.transcript.user_input_entry(input, images);
         self.record(entry, &mut on_event);
         let specs = self.tools.specs();
         let cancel = self.cancel.clone();
@@ -956,6 +965,47 @@ mod tests {
                 compact_threshold: 0.8,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn images_go_with_the_input_and_come_back_from_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, crate::images::testing::png(12, 8)).unwrap();
+        let provider = Scripted::new(vec![
+            tool_use("toolu_1", "read_file", json!({"path": shot})),
+            text("a small picture"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        agent.tools.register(crate::tools::ReadFile::default());
+        let attached = crate::images::Image::from_bytes(&crate::images::testing::png(3, 3))
+            .unwrap()
+            .0;
+        let answer = agent
+            .run_with_images("compare", vec![attached.clone()], |_| {})
+            .await
+            .unwrap();
+        assert_eq!(answer, "a small picture");
+
+        let seen = seen.lock().unwrap();
+        // The input: the image, then its text.
+        assert_eq!(
+            seen[0][0].content,
+            [ContentBlock::Image(attached), ContentBlock::text("compare")]
+        );
+        // The file the model read came back as an image in its result.
+        let ContentBlock::ToolResult {
+            content, images, ..
+        } = &seen[1][2].content[0]
+        else {
+            panic!("{:?}", seen[1][2]);
+        };
+        assert!(content.contains("(image/png, 12x8 px"), "{content}");
+        assert_eq!(
+            images[0].bytes().unwrap(),
+            crate::images::testing::png(12, 8)
+        );
     }
 
     /// A reply that searched the web once and cites `url`.
