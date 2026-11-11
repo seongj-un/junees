@@ -114,6 +114,12 @@ async fn run() -> Result<ExitCode> {
             print!("{}", cli::SESSIONS_HELP);
             return Ok(ExitCode::SUCCESS);
         }
+        Command::DoctorHelp => {
+            print!("{}", junees::doctor::HELP);
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Reads only; a broken settings file is one of its findings.
+        Command::Doctor(options) => return doctor(options).await,
         // Reads the journals only.
         Command::SessionsSearch(search) => {
             let home = junees::config_file::home_dir(|key| std::env::var(key).ok())
@@ -170,10 +176,28 @@ async fn run() -> Result<ExitCode> {
         | Command::Version
         | Command::Plugin(_)
         | Command::SessionsHelp
-        | Command::SessionsSearch(_) => {
+        | Command::SessionsSearch(_)
+        | Command::Doctor(_)
+        | Command::DoctorHelp => {
             unreachable!("handled above")
         }
     }
+}
+
+/// `junees doctor`: prints the report; exit code 1 when a check failed.
+async fn doctor(options: junees::doctor::Options) -> Result<ExitCode> {
+    let (settings, broken) = Settings::load_for_setup(|key| std::env::var(key).ok());
+    let report = junees::doctor::run(&settings, broken.as_ref(), options.online).await;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report.json())?);
+    } else {
+        print!("{}", report.text());
+    }
+    Ok(if report.failed() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// What `junees sessions search` and `/search` print for `search` in the
@@ -1159,6 +1183,14 @@ impl Repl {
                 )
             ),
             Slash::Skill(name) => self.skill(&name),
+            Slash::Doctor => {
+                print!(
+                    "{}",
+                    junees::doctor::run(&self.settings, None, false)
+                        .await
+                        .text()
+                );
+            }
             Slash::Github => {
                 print!(
                     "{}",
