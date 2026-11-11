@@ -18,7 +18,7 @@ Usage:
   junees webhook add-github <name> --repo owner/name [--review] [--address-reviews]
                      [--merge-when-ready] [--dir <clone>] [--deliver ...]
                      [--test-cmd \"<command>\"] [--min-approvals N] [--allow-self-review]
-                     [--re-review] [--max-runs-per-hour N]
+                     [--re-review] [--max-runs-per-hour N] [--approver <login>]...
                                    a pull request flow (below)
   junees webhook list              the routes and their last runs
   junees webhook remove <name>     (also rm)
@@ -73,6 +73,12 @@ $JUNEES_HOME/secrets/webhook-<name> and the events its steps need.
   --min-approvals (default 1) approved the head commit (or with
   --allow-self-review Junees's own review says 머지 가능 with no 필수 item)
   and GitHub says mergeable; it also needs github_flow_merge = true.
+Only reviews by people with write access count (author_association OWNER,
+MEMBER or COLLABORATOR and write, maintain or admin permission now), or,
+with --approver (repeatable, comma-separated), only those logins' reviews:
+for approvals, change requests and starting --address-reviews. A Junees
+review of the head commit that is not 머지 가능 or lists 필수 items blocks
+the merge.
 Each step runs once per pull request and head commit; the token user's own
 reviews and pushes (and the flow's pushes) are not reviewed again unless
 --re-review; at most --max-runs-per-hour (default 4) model runs per pull
@@ -278,6 +284,7 @@ fn add_github(rest: Vec<String>) -> Result<crate::flow::setup::AddGithubArgs> {
             "--test-cmd",
             "--min-approvals",
             "--max-runs-per-hour",
+            "--approver",
         ],
         &[
             "--review",
@@ -297,6 +304,7 @@ fn add_github(rest: Vec<String>) -> Result<crate::flow::setup::AddGithubArgs> {
             "--test-cmd" => args.test_cmd = Some(value),
             "--min-approvals" => args.min_approvals = Some(value),
             "--max-runs-per-hour" => args.max_runs_per_hour = Some(value),
+            "--approver" => args.approvers.push(value),
             "--review" => args.review = true,
             "--address-reviews" => args.address_reviews = true,
             "--merge-when-ready" => args.merge_when_ready = true,
@@ -435,6 +443,9 @@ mod tests {
                 "--allow-self-review",
                 "--re-review",
                 "--max-runs-per-hour=3",
+                "--approver",
+                "alice,bob",
+                "--approver=carol",
                 "--dir",
                 "/srv",
                 "--deliver",
@@ -454,6 +465,7 @@ mod tests {
                 allow_self_review: true,
                 re_review: true,
                 max_runs_per_hour: Some("3".into()),
+                approvers: vec!["alice,bob".into(), "carol".into()],
             })
         );
         assert_eq!(

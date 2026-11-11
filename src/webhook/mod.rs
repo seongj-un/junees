@@ -194,6 +194,9 @@ fn flow_settings(flow: &crate::flow::FlowConfig) -> String {
             parts.push("own review counts".to_string());
         }
     }
+    if !flow.approvers.is_empty() {
+        parts.push(format!("approvers {}", flow.approvers.join(",")));
+    }
     if flow.re_review {
         parts.push("re-review".to_string());
     }

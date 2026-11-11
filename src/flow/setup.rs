@@ -32,6 +32,8 @@ pub struct AddGithubArgs {
     pub allow_self_review: bool,
     pub re_review: bool,
     pub max_runs_per_hour: Option<String>,
+    /// `--approver` values as given (repeatable, comma-separated).
+    pub approvers: Vec<String>,
 }
 
 /// A flow route just added.
@@ -52,6 +54,19 @@ fn number(value: Option<&String>, what: &str, default: u32) -> Result<u32> {
             .parse()
             .with_context(|| format!("{what} takes a number (got `{text}`)")),
     }
+}
+
+/// The words of repeatable, comma-separated option values, without
+/// repeats (case-insensitive) and empty words.
+fn list(values: &[String]) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in values.iter().flat_map(|value| value.split(',')) {
+        let word = word.trim();
+        if !word.is_empty() && !words.iter().any(|known| known.eq_ignore_ascii_case(word)) {
+            words.push(word.to_string());
+        }
+    }
+    words
 }
 
 /// Checks `args`, writes the secret and the default prompts, and saves the
@@ -78,6 +93,7 @@ pub fn add(store: &Store, lookup: &Lookup, args: AddGithubArgs, now: i64) -> Res
             "--max-runs-per-hour",
             super::DEFAULT_RUNS_PER_HOUR,
         )?,
+        approvers: list(&args.approvers),
     };
     flow.check()?;
     if flow.allow_self_review && !(flow.merge_when_ready && flow.review) {
@@ -311,6 +327,7 @@ mod tests {
         );
         assert_eq!(route.github_allow, [Write::Review]);
         assert_eq!(route.flow.as_ref().unwrap().repo, "o/n");
+        assert!(route.flow.as_ref().unwrap().approvers.is_empty());
         assert_eq!(store.routes().unwrap(), std::slice::from_ref(route));
         let secret = std::fs::read_to_string(&added.secret_file).unwrap();
         assert_eq!(secret.trim().len(), 64, "{secret}");
@@ -346,6 +363,23 @@ mod tests {
         assert!(err.to_string().contains("exists already"), "{err}");
         // The secret of the route stays.
         assert_eq!(std::fs::read_to_string(&added.secret_file).unwrap(), secret);
+    }
+
+    #[test]
+    fn approver_lists_take_repeats_and_commas() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let mut args = args("pr", home.path());
+        args.merge_when_ready = true;
+        args.approvers = vec!["alice, bob".into(), "Alice".into(), "carol,".into()];
+        let added = add(&store, &lookup(&[]), args, 5).unwrap();
+        assert_eq!(added.flow.approvers, ["alice", "bob", "carol"]);
+        // Stored with the route; old routes without the field read empty.
+        let stored = store.routes().unwrap();
+        assert_eq!(
+            stored[0].flow.as_ref().unwrap().approvers,
+            ["alice", "bob", "carol"]
+        );
     }
 
     #[test]
@@ -426,6 +460,17 @@ mod tests {
             (
                 Box::new(|a: &mut AddGithubArgs| a.name = "A".into()),
                 "route name",
+            ),
+            (
+                Box::new(|a: &mut AddGithubArgs| {
+                    a.merge_when_ready = true;
+                    a.approvers = vec!["alice,../x".into()];
+                }),
+                "--approver takes GitHub logins (got `../x`)",
+            ),
+            (
+                Box::new(|a: &mut AddGithubArgs| a.approvers = vec!["alice".into()]),
+                "--approver is for",
             ),
             (
                 Box::new(|a: &mut AddGithubArgs| a.deliver = Some("slack".into())),

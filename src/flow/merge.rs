@@ -10,13 +10,17 @@
 //!    one passed (`success`, `neutral`, `skipped`);
 //! 4. no reviewer's last review (APPROVED, CHANGES_REQUESTED or DISMISSED;
 //!    comments do not count) requests changes;
-//! 5. at least `--min-approvals` reviewers approved the head commit, or,
+//! 5. the flow's own last review of the head commit, if there is one,
+//!    says "머지 가능" with no 필수 item;
+//! 6. at least `--min-approvals` reviewers approved the head commit, or,
 //!    with `--allow-self-review`, the flow's own last review of the head
 //!    commit says "머지 가능" with no 필수 item;
-//! 6. GitHub says it is mergeable (`true`; `null` means not computed yet).
+//! 7. GitHub says it is mergeable (`true`; `null` means not computed yet).
 //!
 //! Approvals of older commits do not count: the address step pushes
-//! commits no person has seen.
+//! commits no person has seen. Only the reviews of people with write
+//! access (or of the route's `--approver` logins) count, approvals and
+//! change requests alike ([`super::access`]).
 
 use std::collections::BTreeMap;
 
@@ -24,6 +28,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 use super::FlowConfig;
+use super::access::Access;
 use super::prompts::Review;
 use crate::github::Client;
 
@@ -48,6 +53,9 @@ pub struct ReviewFact {
     pub state: String,
     pub commit: String,
     pub body: String,
+    /// Whether the reviewer's approvals and change requests count (write
+    /// access, or an `--approver`).
+    pub counts: bool,
 }
 
 /// What the merge step reads about a pull request.
@@ -76,6 +84,23 @@ fn condition(name: &'static str, ok: bool, detail: impl Into<String>) -> Conditi
         ok,
         detail: detail.into(),
     }
+}
+
+/// The flow's own last review of the head commit: a COMMENTED review by
+/// the token's user `owner` in the review form (a verdict or 필수 items;
+/// replies to line comments are reviews too, without either).
+fn own_review(facts: &Facts, owner: &str) -> Option<Review> {
+    facts
+        .reviews
+        .iter()
+        .rev()
+        .filter(|review| {
+            review.user.eq_ignore_ascii_case(owner)
+                && review.state == "COMMENTED"
+                && review.commit == facts.head_sha
+        })
+        .map(|review| Review::parse(&review.body))
+        .find(|review| review.verdict.is_some() || review.must > 0)
 }
 
 /// The conditions for merging `facts` at commit `sha`; `owner` is the
@@ -126,14 +151,20 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
             format!("not passed: {}", names.join(", "))
         },
     ));
-    // Per reviewer the last review that sets a state.
+    // Per reviewer the last review that sets a state, of the reviewers
+    // whose reviews count.
     let mut last: BTreeMap<&str, &ReviewFact> = BTreeMap::new();
+    let mut ignored: Vec<&str> = Vec::new();
     for review in &facts.reviews {
         if matches!(
             review.state.as_str(),
             "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED"
         ) {
-            last.insert(review.user.as_str(), review);
+            if review.counts {
+                last.insert(review.user.as_str(), review);
+            } else if !ignored.contains(&review.user.as_str()) {
+                ignored.push(review.user.as_str());
+            }
         }
     }
     let requesting: Vec<&str> = last
@@ -156,15 +187,23 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
         .map(|review| review.user.as_str())
         .collect();
     let enough = approvers.len() >= config.min_approvals as usize;
-    let own = facts
-        .reviews
-        .iter()
-        .rev()
-        .find(|review| review.user.eq_ignore_ascii_case(owner) && review.commit == facts.head_sha)
-        .map(|review| Review::parse(&review.body));
+    let own = own_review(facts, owner);
     let own_ready = own
         .as_ref()
         .is_some_and(|review| review.ready() && review.must == 0);
+    out.push(condition(
+        "junees review",
+        own.is_none() || own_ready,
+        match &own {
+            None => "none of the head commit".to_string(),
+            Some(_) if own_ready => "머지 가능, no 필수 item".to_string(),
+            Some(review) => format!(
+                "{} 필수 item(s), verdict `{}`",
+                review.must,
+                crate::prompt_text::escape_hidden(review.verdict.as_deref().unwrap_or("none"))
+            ),
+        },
+    ));
     let approved = enough || (config.allow_self_review && own_ready);
     let mut detail = format!(
         "{} of {} on the head commit",
@@ -173,6 +212,17 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
     );
     if !approvers.is_empty() {
         detail.push_str(&format!(" ({})", approvers.join(", ")));
+    }
+    if !ignored.is_empty() {
+        detail.push_str(&format!(
+            "; not counted ({}): {}",
+            if config.approvers.is_empty() {
+                "no write access"
+            } else {
+                "not an --approver"
+            },
+            ignored.join(", ")
+        ));
     }
     if !enough && config.allow_self_review {
         detail.push_str(match &own {
@@ -225,8 +275,15 @@ pub fn table(conditions: &[Condition]) -> String {
 }
 
 /// Reads the facts of pull request `n` of `repo` (`owner/name`) from
-/// `pr`, the pull request as GitHub sent it just now.
-pub async fn facts(client: &Client, repo: &str, n: u64, pr: &Value) -> Result<Facts, String> {
+/// `pr`, the pull request as GitHub sent it just now; `access` decides
+/// whose reviews count.
+pub async fn facts(
+    client: &Client,
+    repo: &str,
+    n: u64,
+    pr: &Value,
+    access: &Access<'_>,
+) -> Result<Facts, String> {
     let head_sha = pr["head"]["sha"]
         .as_str()
         .ok_or("GitHub sent no head commit")?
@@ -269,16 +326,30 @@ pub async fn facts(client: &Client, repo: &str, n: u64, pr: &Value) -> Result<Fa
             outcome: text(&status["state"]),
         });
     }
-    let reviews = reviews
-        .items
-        .iter()
-        .map(|review| ReviewFact {
-            user: text(&review["user"]["login"]),
-            state: text(&review["state"]).to_ascii_uppercase(),
+    let mut facts = Vec::new();
+    for review in &reviews.items {
+        let user = text(&review["user"]["login"]);
+        let state = text(&review["state"]).to_ascii_uppercase();
+        let counts = match state.as_str() {
+            "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" => {
+                access
+                    .counts(
+                        &user,
+                        review["author_association"].as_str().unwrap_or_default(),
+                    )
+                    .await?
+            }
+            _ => false,
+        };
+        facts.push(ReviewFact {
+            user,
+            state,
             commit: text(&review["commit_id"]),
             body: text(&review["body"]),
-        })
-        .collect();
+            counts,
+        });
+    }
+    let reviews = facts;
     Ok(Facts {
         open: pr["state"].as_str() == Some("open") && pr["merged"].as_bool() != Some(true),
         draft: pr["draft"].as_bool() == Some(true),
@@ -320,6 +391,7 @@ mod tests {
             state: state.into(),
             commit: commit.into(),
             body: body.into(),
+            counts: true,
         }
     }
 
@@ -460,30 +532,101 @@ mod tests {
         )];
         assert_eq!(failing(&facts, &config), ["approvals"]);
         assert!(failing(&facts, &own).is_empty());
-        let detail = conditions(&facts, HEAD, &own, "junees-bot")[4]
-            .detail
-            .clone();
+        let detail = conditions(&facts, HEAD, &own, "junees-bot")
+            .into_iter()
+            .find(|condition| condition.name == "approvals")
+            .unwrap()
+            .detail;
         assert!(
             detail.contains("Junees's review says 머지 가능"),
             "{detail}"
         );
-        // Must items, another verdict, an older commit or someone else's
-        // review do not count.
-        for (user, commit, body) in [
-            ("junees-bot", HEAD, "판정: 머지 가능\n### 필수\n- a bug\n"),
-            ("junees-bot", HEAD, "판정: 수정 필요\n"),
-            ("junees-bot", OLD, "판정: 머지 가능\n"),
-            ("mallory", HEAD, "판정: 머지 가능\n"),
+        // Must items or another verdict block the merge outright; an
+        // older commit or someone else's review do not count.
+        for (user, commit, body, wanted) in [
+            (
+                "junees-bot",
+                HEAD,
+                "판정: 머지 가능\n### 필수\n- a bug\n",
+                vec!["junees review", "approvals"],
+            ),
+            (
+                "junees-bot",
+                HEAD,
+                "판정: 수정 필요\n",
+                vec!["junees review", "approvals"],
+            ),
+            ("junees-bot", OLD, "판정: 머지 가능\n", vec!["approvals"]),
+            ("mallory", HEAD, "판정: 머지 가능\n", vec!["approvals"]),
         ] {
             facts.reviews = vec![review(user, "COMMENTED", commit, body)];
-            assert_eq!(failing(&facts, &own), ["approvals"], "{user} {body}");
+            assert_eq!(failing(&facts, &own), wanted, "{user} {body}");
         }
-        // The last review of the head commit decides.
+        // The last review of the head commit decides; a reply to a line
+        // comment (no verdict, no items) is not a review in the form.
         facts.reviews = vec![
             review("junees-bot", "COMMENTED", HEAD, "판정: 머지 가능\n"),
             review("junees-bot", "COMMENTED", HEAD, "판정: 수정 필요\n"),
         ];
-        assert_eq!(failing(&facts, &own), ["approvals"]);
+        assert_eq!(failing(&facts, &own), ["junees review", "approvals"]);
+        facts.reviews = vec![
+            review("junees-bot", "COMMENTED", HEAD, "판정: 머지 가능\n"),
+            review("junees-bot", "COMMENTED", HEAD, "thanks, fixed"),
+        ];
+        assert!(failing(&facts, &own).is_empty());
+    }
+
+    /// The facts of the review's probe: a passing check, mergeable, the
+    /// flow's own COMMENTED review asking for a fix, and an approval of
+    /// the head commit by an account without write access.
+    fn probe() -> Facts {
+        let mut facts = green();
+        facts.checks.truncate(1);
+        let mut drive_by = review("drive-by-account", "APPROVED", HEAD, "");
+        drive_by.counts = false;
+        facts.reviews = vec![
+            review(
+                "junees-bot",
+                "COMMENTED",
+                HEAD,
+                "판정: 수정 필요\n### 필수\n- src/a.rs:3 panics\n",
+            ),
+            drive_by,
+        ];
+        facts
+    }
+
+    #[test]
+    fn only_reviews_of_people_with_write_access_count() {
+        let config = super::super::config("o/n");
+        let list = conditions(&probe(), HEAD, &config, "junees-bot");
+        assert!(!ready(&list));
+        assert_eq!(
+            missing(&list),
+            "junees review: 1 필수 item(s), verdict `수정 필요`; \
+             approvals: 0 of 1 on the head commit; not counted (no write access): drive-by-account"
+        );
+        // Without the flow's review the drive-by approval still does not
+        // count.
+        let mut facts = probe();
+        facts.reviews.remove(0);
+        assert_eq!(failing(&facts, &config), ["approvals"]);
+        // Nor does a drive-by change request block.
+        let mut facts = green();
+        let mut request = review("mallory", "CHANGES_REQUESTED", HEAD, "### 필수\n- x\n");
+        request.counts = false;
+        facts.reviews.push(request);
+        assert!(failing(&facts, &config).is_empty());
+        // The wording follows --approver.
+        let listed = FlowConfig {
+            approvers: vec!["alice".into()],
+            ..config.clone()
+        };
+        let detail = missing(&conditions(&probe(), HEAD, &listed, "junees-bot"));
+        assert!(
+            detail.contains("not counted (not an --approver)"),
+            "{detail}"
+        );
     }
 
     #[test]

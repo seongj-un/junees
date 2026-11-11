@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use reqwest::Method;
 use serde_json::{Value, json};
 
+use super::access::Access;
 use super::merge::{self, short};
 use super::prompts::{self, ADDRESS_FILE, REVIEW_FILE, Review};
 use super::state::{self, Action, Claim, Handled};
@@ -229,6 +230,7 @@ pub async fn handle(cx: &Context<'_>, incoming: &Incoming) -> Report {
         return failed(report, "GitHub sent no login for the token's user".into());
     }
     let r = repo.to_string();
+    let access = Access::new(cx.client, &r, &cx.flow.approvers);
     for step in steps {
         if cx.cancel.is_cancelled() {
             report.lines.push("interrupted".into());
@@ -239,7 +241,9 @@ pub async fn handle(cx: &Context<'_>, incoming: &Incoming) -> Report {
         match step {
             Step::Review { pr } => review(cx, incoming, &r, &owner, pr, &mut report).await,
             Step::Address { pr } => address_step(cx, incoming, &r, &owner, pr, &mut report).await,
-            Step::Merge { pr, sha } => merge_step(cx, &r, &owner, pr, &sha, &mut report).await,
+            Step::Merge { pr, sha } => {
+                merge_step(cx, &r, &owner, &access, pr, &sha, &mut report).await
+            }
             Step::MergeSha { sha } => match open_prs_at(cx.client, &r, &sha).await {
                 Ok(prs) if prs.is_empty() => report.lines.push(format!(
                     "merge: skipped: no open pull request has head {}",
@@ -247,7 +251,7 @@ pub async fn handle(cx: &Context<'_>, incoming: &Incoming) -> Report {
                 )),
                 Ok(prs) => {
                     for pr in prs {
-                        merge_step(cx, &r, &owner, pr, &sha, &mut report).await;
+                        merge_step(cx, &r, &owner, &access, pr, &sha, &mut report).await;
                     }
                 }
                 Err(err) => {
@@ -764,6 +768,7 @@ async fn merge_step(
     cx: &Context<'_>,
     r: &str,
     owner: &str,
+    access: &Access<'_>,
     n: u64,
     sha: &str,
     report: &mut Report,
@@ -799,7 +804,7 @@ async fn merge_step(
         );
         return step_line(cx, report, n, action, &line);
     }
-    let facts = match merge::facts(cx.client, r, n, &pr).await {
+    let facts = match merge::facts(cx.client, r, n, &pr, access).await {
         Ok(facts) => facts,
         Err(err) => {
             report.status = RunStatus::Failed;

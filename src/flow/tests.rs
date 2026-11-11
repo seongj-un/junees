@@ -689,14 +689,37 @@ async fn ignores_own_reviews_fork_branches_and_reviews_without_requests() {
     assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
 }
 
+/// GitHub says `login` has `permission` on `o/n`.
+fn permission(github: &FakeGithub, login: &str, permission: &str) {
+    github.set(
+        &format!("GET /repos/o/n/collaborators/{login}/permission"),
+        200,
+        json!({"permission": permission, "role_name": permission, "user": {"login": login}}),
+    );
+}
+
+/// The permission lookups the fake GitHub got.
+fn permission_reads(github: &FakeGithub) -> Vec<String> {
+    github
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(key, _)| key.clone())
+        .filter(|key| key.ends_with("/permission"))
+        .collect()
+}
+
 /// GitHub's answers for a pull request #7 at HEAD that is ready to merge.
 fn ready(github: &FakeGithub) {
     github.set("GET /repos/o/n/pulls/7", 200, pr(7, HEAD));
     github.set(
         "GET /repos/o/n/pulls/7/reviews",
         200,
-        json!([{"user": {"login": "carol"}, "state": "APPROVED", "commit_id": HEAD, "body": ""}]),
+        json!([{"user": {"login": "carol"}, "author_association": "MEMBER", "state": "APPROVED", "commit_id": HEAD, "body": ""}]),
     );
+    permission(github, "carol", "write");
+    permission(github, "bob", "maintain");
     github.set(
         &format!("GET /repos/o/n/commits/{HEAD}/check-runs"),
         200,
@@ -841,8 +864,8 @@ async fn does_not_merge_what_is_not_ready() {
                     "GET /repos/o/n/pulls/7/reviews",
                     200,
                     json!([
-                        {"user": {"login": "carol"}, "state": "APPROVED", "commit_id": HEAD},
-                        {"user": {"login": "bob"}, "state": "CHANGES_REQUESTED", "commit_id": HEAD},
+                        {"user": {"login": "carol"}, "author_association": "MEMBER", "state": "APPROVED", "commit_id": HEAD},
+                        {"user": {"login": "bob"}, "author_association": "COLLABORATOR", "state": "CHANGES_REQUESTED", "commit_id": HEAD},
                     ]),
                 )
             }),
@@ -963,4 +986,146 @@ async fn statuses_and_reviews_lead_to_the_pull_requests_of_their_commit() {
     };
     let report = run(&setup, &review, 1000).await;
     assert_eq!(report.lines, ["#7 merge: merged 1111111; commented"]);
+}
+
+#[tokio::test]
+async fn approvals_count_only_from_people_with_write_access() {
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    // The review's probe: a passing check, mergeable, the flow's own
+    // review asking for a fix, and a drive-by account's approval.
+    ready(&github);
+    github.set(
+        "GET /repos/o/n/pulls/7/reviews",
+        200,
+        json!([
+            {"user": {"login": OWNER}, "author_association": "OWNER", "state": "COMMENTED", "commit_id": HEAD,
+             "body": "판정: 수정 필요\n### 필수\n- src/a.rs:3 panics\n"},
+            {"user": {"login": "drive-by-account"}, "author_association": "NONE", "state": "APPROVED", "commit_id": HEAD, "body": ""},
+        ]),
+    );
+    github.clear();
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert!(report.quiet, "{report:?}");
+    let line = &report.lines[0];
+    assert!(
+        line.contains("junees review: 1 필수 item(s), verdict `수정 필요`"),
+        "{line}"
+    );
+    assert!(
+        line.contains(
+            "approvals: 0 of 1 on the head commit; not counted (no write access): drive-by-account"
+        ),
+        "{line}"
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+    // NONE is not even looked up.
+    assert!(permission_reads(&github).is_empty());
+
+    // A collaborator whose access is read only now, and one who approved
+    // twice (looked up once per run).
+    github.set(
+        "GET /repos/o/n/pulls/7/reviews",
+        200,
+        json!([
+            {"user": {"login": "dave"}, "author_association": "COLLABORATOR", "state": "APPROVED", "commit_id": HEAD},
+            {"user": {"login": "carol"}, "author_association": "MEMBER", "state": "APPROVED", "commit_id": NEXT},
+            {"user": {"login": "carol"}, "author_association": "MEMBER", "state": "APPROVED", "commit_id": HEAD},
+        ]),
+    );
+    permission(&github, "dave", "read");
+    let two = FlowConfig {
+        min_approvals: 2,
+        ..route.flow.clone().unwrap()
+    };
+    let strict = self::route(home.path(), two);
+    let strict_setup = Setup {
+        route: &strict,
+        ..setup
+    };
+    github.clear();
+    let report = run(&strict_setup, &suite(HEAD), 1000).await;
+    assert!(
+        report.lines[0].contains(
+            "approvals: 1 of 2 on the head commit (carol); not counted (no write access): dave"
+        ),
+        "{report:?}"
+    );
+    assert_eq!(
+        permission_reads(&github),
+        [
+            "GET /repos/o/n/collaborators/dave/permission",
+            "GET /repos/o/n/collaborators/carol/permission"
+        ]
+    );
+    // When GitHub cannot say, nothing is merged and the run fails.
+    github.set(
+        "GET /repos/o/n/collaborators/dave/permission",
+        500,
+        json!({"message": "boom"}),
+    );
+    let report = run(&strict_setup, &suite(HEAD), 1000).await;
+    assert_eq!(report.status, RunStatus::Failed);
+    assert!(
+        report.lines[0].contains("cannot read the permission of dave on o/n"),
+        "{report:?}"
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+}
+
+#[tokio::test]
+async fn approver_lists_are_the_only_reviewers_that_count() {
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    ready(&github);
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        approvers: vec!["Erin".into()],
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    // carol (a member with write access) is not on the list.
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert!(
+        report.lines[0].contains("not counted (not an --approver): carol"),
+        "{report:?}"
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+    // erin is, whatever GitHub says about her association.
+    github.set(
+        "GET /repos/o/n/pulls/7/reviews",
+        200,
+        json!([{"user": {"login": "erin"}, "author_association": "NONE", "state": "APPROVED", "commit_id": HEAD}]),
+    );
+    github.clear();
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert_eq!(report.lines, ["#7 merge: merged 1111111; commented"]);
+    assert!(permission_reads(&github).is_empty());
 }

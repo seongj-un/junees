@@ -18,6 +18,7 @@
 //! commit, an hourly cap of model runs per PR, the commits the flow pushed,
 //! and the recent results for listings.
 
+pub mod access;
 pub mod address;
 pub mod merge;
 pub mod prompts;
@@ -72,6 +73,11 @@ pub struct FlowConfig {
     pub re_review: bool,
     #[serde(default = "default_runs")]
     pub max_runs_per_hour: u32,
+    /// `--approver`: the only logins whose reviews count (approvals,
+    /// change requests, starting the address step). Empty: everyone with
+    /// write access ([`access`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvers: Vec<String>,
 }
 
 fn one() -> u32 {
@@ -150,6 +156,15 @@ impl FlowConfig {
         if !(1..=100).contains(&self.max_runs_per_hour) {
             bail!("--max-runs-per-hour takes 1 to 100");
         }
+        if let Some(login) = self.approvers.iter().find(|login| !access::is_login(login)) {
+            bail!(
+                "--approver takes GitHub logins (got `{}`)",
+                crate::prompt_text::escape_hidden(login)
+            );
+        }
+        if !self.approvers.is_empty() && !(self.address_reviews || self.merge_when_ready) {
+            bail!("--approver is for --address-reviews and --merge-when-ready");
+        }
         if let Some(command) = &self.test_cmd {
             if command.trim().is_empty() {
                 bail!("--test-cmd is empty; leave it out to push without a test");
@@ -189,5 +204,6 @@ pub(crate) fn config(repo: &str) -> FlowConfig {
         allow_self_review: false,
         re_review: false,
         max_runs_per_hour: DEFAULT_RUNS_PER_HOUR,
+        approvers: Vec::new(),
     }
 }
