@@ -141,13 +141,11 @@ async fn junees(
     unattended: &str,
     repos: Option<&str>,
 ) -> Output {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(["-p", "review PR 7"])
-        .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", api)
-        .env("HOME", home)
         .env("JUNEES_HOME", home.join(".junees"))
         .env("JUNEES_STREAM", "0")
         .env("JUNEES_GITHUB_TOKEN", TOKEN)

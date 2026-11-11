@@ -55,10 +55,8 @@ async fn bash_cannot_read_hidden_variables_from_any_ancestor() {
     let home = tempfile::tempdir().unwrap();
     let work = home.path().join("work");
     std::fs::create_dir(&work).unwrap();
-    let child = common::junees_binary()
+    let child = common::junees_binary(&work, home.path())
         .args(["--no-session", "-p", "probe"])
-        .current_dir(&work)
-        .env("HOME", home.path())
         .env("JUNEES_HOME", home.path().join(".junees"))
         .env_remove("XDG_CONFIG_HOME")
         .env("ANTHROPIC_API_KEY", KEY)

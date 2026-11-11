@@ -13,12 +13,10 @@ mod common;
 use common::{body_of, fake_api, text_reply};
 
 fn junees(home: &Path, cwd: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(args)
-        .current_dir(cwd)
         .env("JUNEES_HOME", home)
-        .env("HOME", home)
         .env("JUNEES_STREAM", "0")
         .stdin(Stdio::null());
     command

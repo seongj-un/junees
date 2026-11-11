@@ -17,10 +17,9 @@ use common::{body_of, fake_api, text_reply};
 /// Junees with nothing from the test's environment but `PATH`: the
 /// state folder is `home`, git has a fixed identity and no system config.
 fn junees(home: &Path, cwd: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(args)
-        .current_dir(cwd)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", home)

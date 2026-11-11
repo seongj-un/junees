@@ -23,13 +23,11 @@ const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 const GITHUB_TOKEN: &str = "gh-flow-test-token";
 
 fn junees(home: &Path, cwd: &Path, api: &str, github: &str) -> tokio::process::Command {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(cwd, home);
     command
-        .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", api)
         .env("JUNEES_HOME", home)
-        .env("HOME", home)
         .env("JUNEES_STREAM", "0")
         .env("JUNEES_TIMEZONE", "UTC")
         .env("JUNEES_GITHUB_TOKEN", GITHUB_TOKEN)

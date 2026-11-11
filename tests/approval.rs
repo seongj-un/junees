@@ -31,14 +31,12 @@ fn bash_calls(commands: &[&str]) -> Value {
 }
 
 fn command(home: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(home, home);
     command
         .args(args)
-        .current_dir(home)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", url)
         .env("JUNEES_HOME", home)
-        .env("HOME", home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

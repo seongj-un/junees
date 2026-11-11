@@ -123,10 +123,9 @@ fn plan() -> String {
 /// fake as `claude`, and API credentials in its environment that must not
 /// reach `claude`.
 fn junees(cwd: &Path, home: &Path, bin: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(args)
-        .current_dir(cwd)
         .env("JUNEES_BACKEND", "claude-code")
         .env("JUNEES_CLAUDE_BIN", bin)
         .env("ANTHROPIC_API_KEY", "sk-ant-api-must-not-reach-claude")

@@ -68,10 +68,9 @@ fn junees_command(
     args: &[&str],
     vars: &[(&str, &str)],
 ) -> tokio::process::Command {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(args)
-        .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", url)
         .env("JUNEES_HOME", home.join("junees"))
@@ -84,11 +83,10 @@ fn junees_command(
 /// `junees task status` with the given arguments, without an API key: the
 /// status needs none.
 async fn status(cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(["task", "status"])
         .args(args)
-        .current_dir(cwd)
         .env("JUNEES_HOME", home.join("junees"))
         .stdin(Stdio::null());
     isolate_git(&mut command, home);
@@ -742,10 +740,9 @@ async fn status_without_a_task_says_to_run_init() {
 async fn task_mode_refuses_folders_outside_git() {
     let home = tempfile::tempdir().unwrap();
     let plain = tempfile::tempdir().unwrap();
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(plain.path(), home.path());
     command
         .args(["task", "init", "goal"])
-        .current_dir(plain.path())
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
         .stdin(Stdio::null());
@@ -810,10 +807,9 @@ async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
     let (hook, webhook) = fake_api(vec![(204, json!({}))]).await;
     let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
 
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(root, home.path());
     command
         .args(["task", "run"])
-        .current_dir(root)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", &url)
         .env("JUNEES_HOME", home.path().join("junees"))

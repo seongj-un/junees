@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use std::ffi::OsStr;
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -40,13 +41,38 @@ where
     }
 }
 
-/// The junees binary, without any variable of the test's environment that
-/// [`scrubbed`] matches. Every binary test starts here and sets what it
-/// needs afterwards.
-pub fn junees_binary() -> tokio::process::Command {
+/// The junees binary run in `cwd` with `home` as its `HOME`, without any
+/// variable of the test's environment that [`scrubbed`] matches. Every
+/// binary test starts here and sets what else it needs afterwards.
+///
+/// Both folders must lie outside the crate (see [`outside_the_crate`]), so
+/// a binary test's bash never runs in the crate's repository (where a bare
+/// `git push` reaches its upstream) or in the real home that holds it.
+pub fn junees_binary(cwd: &Path, home: &Path) -> tokio::process::Command {
+    for (what, path) in [("cwd", cwd), ("HOME", home)] {
+        assert!(
+            outside_the_crate(path),
+            "a binary test's {what} must be a temporary folder, not {}",
+            path.display()
+        );
+    }
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
     scrub_env(&mut command, std::env::vars_os().map(|(name, _)| name));
+    command.current_dir(cwd).env("HOME", home);
     command
+}
+
+/// Whether `path` is an existing folder that is neither the crate's
+/// folder, inside it, nor above it (the real home, `/`). A relative path
+/// counts from the test's own cwd, the crate, so it never passes.
+pub fn outside_the_crate(path: &Path) -> bool {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .unwrap();
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    path.is_dir() && !path.starts_with(&crate_dir) && !crate_dir.starts_with(&path)
 }
 
 /// Serves the given (status, body) pairs to consecutive connections and

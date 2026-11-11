@@ -145,10 +145,9 @@ fn with_tools(id: &str, text: &str) -> Vec<Value> {
 /// `claude`, and API credentials in its environment that must not reach
 /// `claude`.
 fn junees(cwd: &Path, home: &Path, bin: &Path, args: &[&str]) -> tokio::process::Command {
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(args)
-        .current_dir(cwd)
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", home)

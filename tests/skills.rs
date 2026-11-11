@@ -89,13 +89,11 @@ async fn the_conversation_reads_and_keeps_skills() {
         (200, text_reply("Second session.")),
     ])
     .await;
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(&cwd, dir.path());
     command
         .arg("--no-session")
-        .current_dir(&cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", &url)
-        .env("HOME", dir.path())
         .env("JUNEES_HOME", &home)
         .env("JUNEES_STREAM", "0")
         .stdin(Stdio::piped())
@@ -198,13 +196,11 @@ async fn the_skills_screen_escapes_hidden_characters() {
     }
     let cwd = dir.path().join("work");
     std::fs::create_dir(&cwd).unwrap();
-    let mut command = common::junees_binary();
+    let mut command = common::junees_binary(&cwd, dir.path());
     command
         .arg("--no-session")
-        .current_dir(&cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
-        .env("HOME", dir.path())
         .env("JUNEES_HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
