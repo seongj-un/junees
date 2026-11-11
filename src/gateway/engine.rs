@@ -288,7 +288,8 @@ fn memory(config: &Config, cwd: &std::path::Path) -> Option<Memory> {
 }
 
 /// The system prompt of the agent: the terminal conversation's, the
-/// gateway note, then the memory and the skills as they are now.
+/// gateway note, then the project instruction files, the memory and the
+/// skills as they are now.
 fn api_system(
     config: &Config,
     cwd: &std::path::Path,
@@ -298,6 +299,7 @@ fn api_system(
     prompt::system_prompt(cwd)
         + GATEWAY_NOTE
         + crate::subagent::prompt_note(config.subagents)
+        + &config.context_files.load(cwd).section()
         + &prompt::data_sections(
             memory,
             Mode::Conversation,
@@ -413,8 +415,9 @@ impl Engines for ClaudeEngines {
 }
 
 fn claude_system(config: &Config, cwd: &std::path::Path) -> String {
-    prompt::claude_append(
+    prompt::claude_append_with_context(
         GATEWAY_NOTE.trim_start().to_string(),
+        &config.context_files.load(cwd),
         memory(config, cwd).as_ref(),
         config.home.as_deref(),
     )

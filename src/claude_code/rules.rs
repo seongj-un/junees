@@ -96,6 +96,11 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
             rules.push(format!("Bash({rule})"));
         }
     }
+    // A webhook run may not write the project instruction files, in any
+    // folder (`//` starts an absolute path, `**/` any depth below it).
+    for name in settings.protected_instruction_files() {
+        rules.push(format!("Edit(//**/{})", gitignore_escape(&name)));
+    }
     for prefix in &settings.deny_commands {
         rules.push(format!("Bash({prefix} *)"));
     }
@@ -278,5 +283,17 @@ mod tests {
         ] {
             assert!(rules.iter().any(|r| r == rule), "{rule} missing");
         }
+        // And no instruction file writes, when the files are on.
+        assert!(!rules.iter().any(|rule| rule.starts_with("Edit(")));
+        settings.instruction_files = vec!["AGENTS.md".into(), "[x].md".into()];
+        let rules = deny_rules(&settings);
+        assert!(rules.iter().any(|r| r == "Edit(//**/AGENTS.md)"));
+        assert!(rules.iter().any(|r| r == r"Edit(//**/\[x\].md)"));
+        settings.webhook = false;
+        assert!(
+            !deny_rules(&settings)
+                .iter()
+                .any(|rule| rule.starts_with("Edit("))
+        );
     }
 }

@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::settings_file::{DATA_FOLDERS, Named};
 use super::{SettingsFile, ToolSettings};
-use super::{gh_command, self_command};
+use super::{gh_command, instruction_files, self_command};
 
 /// Whether a command may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,7 @@ pub struct CommandPolicy {
     settings_file: Option<SettingsFile>,
     ask_self_commands: bool,
     webhook: bool,
+    instruction_files: Vec<String>,
 }
 
 /// How deep `sh -c`, `eval` and `$(...)` may nest before a command is refused.
@@ -161,6 +162,17 @@ impl CommandPolicy {
         self
     }
 
+    /// Also refuses commands that may write to a project instruction file
+    /// named one of `names` ([`instruction_files`]), in any folder: a
+    /// redirect that writes to one, or the name given to any program
+    /// other than [`LISTS_FOLDER`] and [`READS_DATA`], like the data folder
+    /// rule. For webhook runs ([`ToolSettings::protected_instruction_files`]),
+    /// even with [`CommandPolicy::allow_dangerous`].
+    pub fn protect_instruction_files(mut self, names: Vec<String>) -> Self {
+        self.instruction_files = names;
+        self
+    }
+
     pub fn check(&self, command: &str) -> Verdict {
         match self.violation(command, 0, None) {
             Some(reason) => Verdict::Deny(reason),
@@ -199,7 +211,7 @@ impl CommandPolicy {
                 {
                     return Some(reason);
                 }
-                if let Some(file) = &self.settings_file {
+                if self.settings_file.is_some() || !self.instruction_files.is_empty() {
                     let words = self
                         .command_words(&command.words, depth)
                         .unwrap_or_default();
@@ -218,7 +230,9 @@ impl CommandPolicy {
                                 .get(1)
                                 .is_some_and(|script| std::ptr::eq(script, word)))
                     };
-                    let reason = command
+                    // Each word and redirect target, and whether the
+                    // command may write to it.
+                    let targets: Vec<(&String, bool)> = command
                         .words
                         .iter()
                         .map(|word| (word, !reads_data && !runs(word)))
@@ -229,13 +243,31 @@ impl CommandPolicy {
                                 .filter(|(op, _)| !op.starts_with("<<"))
                                 .map(|(op, target)| (target, redirect_writes(op, target))),
                         )
-                        .find_map(|(word, writes)| match file.names(word, cwd.as_deref())? {
-                            Named::File => Some(file.named_reason(word)),
-                            Named::Folder if !lists_folder => Some(file.folder_reason(word)),
-                            Named::Folder => None,
-                            Named::Data(index) if writes => Some(DATA_FOLDERS[index].reason(word)),
-                            Named::Data(_) => None,
+                        .collect();
+                    if let Some(file) = &self.settings_file {
+                        let reason = targets.iter().find_map(|&(word, writes)| {
+                            match file.names(word, cwd.as_deref())? {
+                                Named::File => Some(file.named_reason(word)),
+                                Named::Folder if !lists_folder => Some(file.folder_reason(word)),
+                                Named::Folder => None,
+                                Named::Data(index) if writes => {
+                                    Some(DATA_FOLDERS[index].reason(word))
+                                }
+                                Named::Data(_) => None,
+                            }
                         });
+                        if reason.is_some() {
+                            return reason;
+                        }
+                    }
+                    let reason =
+                        targets
+                            .iter()
+                            .filter(|(_, writes)| *writes)
+                            .find_map(|&(word, _)| {
+                                instruction_files::named(word, &self.instruction_files)
+                                    .map(|name| instruction_files::reason(word, name))
+                            });
                     if reason.is_some() {
                         return reason;
                     }
@@ -482,6 +514,7 @@ impl CommandPolicy {
             .protect_settings_file(settings.settings_file.clone())
             .ask_self_commands(settings.approval_gate)
             .webhook_run(settings.webhook)
+            .protect_instruction_files(settings.protected_instruction_files())
     }
 
     /// Why a person should look at `command` before it runs, if at all:

@@ -72,6 +72,9 @@ pub struct Config {
     pub subagents: Option<subagent::Settings>,
     /// The `github` tool's settings (`JUNEES_GITHUB_*`).
     pub github: crate::github::Settings,
+    /// The project instruction files a session reads
+    /// (`JUNEES_CONTEXT_FILES`).
+    pub context_files: crate::context_files::Setting,
 }
 
 impl Config {
@@ -82,7 +85,7 @@ impl Config {
     /// `JUNEES_HIDDEN_ENV`, `JUNEES_APPROVAL`, `JUNEES_TASK_MAX_TOKENS`,
     /// `JUNEES_TASK_MAX_TIME`, `JUNEES_TASK_SKILL_MANAGE`, `JUNEES_STREAM`,
     /// the `JUNEES_WEB_SEARCH*` settings, the `JUNEES_MEMORY_*_CHARS`
-    /// limits and the subagent settings.
+    /// limits, the subagent settings and `JUNEES_CONTEXT_FILES`.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
@@ -172,6 +175,7 @@ impl Config {
             );
         }
         let home = crate::config_file::home_dir(get);
+        let context_files = crate::context_files::Setting::read(&lookup)?;
         let tools = ToolSettings {
             hidden_env: comma_list(get("JUNEES_HIDDEN_ENV")),
             deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),
@@ -183,6 +187,7 @@ impl Config {
             approval_gate: false,
             webhook: false,
             gh_config_dir: None,
+            instruction_files: context_files.names.clone(),
         };
         let approval = ApprovalMode::parse(get("JUNEES_APPROVAL").as_deref())?;
 
@@ -226,6 +231,7 @@ impl Config {
             memory,
             subagents,
             github,
+            context_files,
         })
     }
 
@@ -333,6 +339,10 @@ mod tests {
                     "/home/tester/.junees/config.toml",
                     Some(PathBuf::from("/home/tester")),
                 )),
+                instruction_files: crate::context_files::DEFAULT_NAMES
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect(),
                 ..ToolSettings::default()
             }
         );
@@ -352,6 +362,35 @@ mod tests {
         assert_eq!(config.web_search, None);
         assert!(!config.task_skill_manage);
         assert_eq!(config.memory, Limits::default());
+        assert_eq!(
+            config.context_files,
+            crate::context_files::Setting::with_home(Some(PathBuf::from("/home/tester")))
+        );
+    }
+
+    #[test]
+    fn project_instruction_files_can_be_renamed_or_turned_off() {
+        let names = |value: &str| {
+            config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_CONTEXT_FILES", value)])
+                .map(|config| config.context_files.names)
+        };
+        assert_eq!(
+            names("RULES.md, AGENTS.md").unwrap(),
+            ["RULES.md", "AGENTS.md"]
+        );
+        // Read as given: an empty value (`context_files = ""`) is off too.
+        assert!(names("").unwrap().is_empty());
+        assert!(names("off").unwrap().is_empty());
+        // The tools know them, to keep webhook runs from writing them.
+        let tools = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_CONTEXT_FILES", "RULES.md"),
+        ])
+        .unwrap()
+        .tools;
+        assert_eq!(tools.instruction_files, ["RULES.md"]);
+        let err = names("docs/AGENTS.md").unwrap_err().to_string();
+        assert!(err.contains("JUNEES_CONTEXT_FILES"), "{err}");
     }
 
     #[test]

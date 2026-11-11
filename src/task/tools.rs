@@ -257,6 +257,7 @@ mod tests {
             approval_gate: false,
             webhook: false,
             gh_config_dir: None,
+            instruction_files: Vec::new(),
         };
         let verifier = Verifier::new(root.path().to_path_buf(), &settings);
         let output = verifier.run("test -z \"$HOME\"").await;

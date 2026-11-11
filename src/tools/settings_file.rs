@@ -395,17 +395,7 @@ impl SettingsFile {
     /// Where writing to the absolute `path` lands: `.`, `..` and symbolic
     /// links resolved, a dangling link followed to where it points.
     fn lands(&self, path: &Path) -> Option<PathBuf> {
-        let mut path = path.to_path_buf();
-        for _ in 0..MAX_LINKS {
-            match resolve(&path) {
-                Some(resolved) => return Some(resolved),
-                None => match (std::fs::read_link(&path), path.parent()) {
-                    (Ok(link), Some(parent)) => path = parent.join(link),
-                    _ => return None,
-                },
-            }
-        }
-        None
+        lands(path)
     }
 
     /// The absolute path `word` names from `cwd`, without resolving it.
@@ -484,8 +474,24 @@ impl SettingsFile {
     }
 }
 
+/// Where writing to the absolute `path` lands: `.`, `..` and symbolic
+/// links resolved, a dangling link followed to where it points.
+pub(super) fn lands(path: &Path) -> Option<PathBuf> {
+    let mut path = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        match resolve(&path) {
+            Some(resolved) => return Some(resolved),
+            None => match (std::fs::read_link(&path), path.parent()) {
+                (Ok(link), Some(parent)) => path = parent.join(link),
+                _ => return None,
+            },
+        }
+    }
+    None
+}
+
 /// Whether a path component holds a glob pattern.
-fn is_glob(name: &str) -> bool {
+pub(super) fn is_glob(name: &str) -> bool {
     name.contains(['*', '?', '['])
 }
 
@@ -530,7 +536,7 @@ impl Glob {
 /// Whether the glob `pattern` (`*`, `?`, `[...]`) matches `name`. A `*`
 /// also matches a leading `.` (as with `dotglob`), to err on the safe side.
 /// Runs in time `pattern` times `name`, however many `*` there are.
-fn glob_match(pattern: &str, name: &str) -> bool {
+pub(super) fn glob_match(pattern: &str, name: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let mut parts = Vec::new();
     let mut i = 0;
@@ -579,7 +585,7 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 /// Appends the words bash brace expansion makes of `word` (`a{b,c}d` gives
 /// `abd` and `acd`) to `out`, at most [`MAX_BRACE_WORDS`] of them. Braces
 /// without a top-level comma (`${HOME}`) stay as they are.
-fn expand_braces(word: &str, out: &mut Vec<String>) {
+pub(super) fn expand_braces(word: &str, out: &mut Vec<String>) {
     if out.len() >= MAX_BRACE_WORDS {
         return;
     }
