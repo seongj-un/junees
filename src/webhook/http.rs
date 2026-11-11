@@ -69,13 +69,18 @@ pub fn reason(status: u16) -> &'static str {
 }
 
 /// Reads the head of a request. Bytes read past it (the start of the
-/// body) are left in `buf`.
+/// body) are left in `buf`. Each read is searched for the end of the head
+/// from where the last search stopped, so a client sending one byte at a
+/// time costs no more than one sending it all at once.
 pub async fn read_head<R: AsyncRead + Unpin>(io: &mut R, buf: &mut Vec<u8>) -> Result<Head, Error> {
     let mut chunk = [0u8; 4096];
+    // Where the search goes on: the end may start in the last 3 bytes.
+    let mut searched = 0;
     let end = loop {
-        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break end;
+        if let Some(found) = buf[searched..].windows(4).position(|w| w == b"\r\n\r\n") {
+            break searched + found;
         }
+        searched = buf.len().saturating_sub(3);
         if buf.len() >= MAX_HEAD {
             return Err(error(431, "the request head is longer than 16 KiB"));
         }
@@ -143,13 +148,9 @@ fn is_token(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
-/// Reads the body `head` announces, after the bytes already in `buf`.
-/// Answers `Expect: 100-continue` before reading.
-pub async fn read_body<S: AsyncRead + AsyncWrite + Unpin>(
-    io: &mut S,
-    head: &Head,
-    mut buf: Vec<u8>,
-) -> Result<Vec<u8>, Error> {
+/// The length of the body `head` announces: a `Content-Length` of at most
+/// [`MAX_BODY`], and no `Transfer-Encoding`.
+pub fn body_length(head: &Head) -> Result<usize, Error> {
     if head.header("transfer-encoding").is_some() {
         return Err(error(
             411,
@@ -178,6 +179,18 @@ pub async fn read_body<S: AsyncRead + AsyncWrite + Unpin>(
     if length > MAX_BODY {
         return Err(error(413, "the body is larger than 1 MiB"));
     }
+    Ok(length)
+}
+
+/// Reads the body of `length` bytes ([`body_length`]) `head` announces,
+/// after the bytes already in `buf`. Answers `Expect: 100-continue` before
+/// reading, so the caller checks what it can before calling this.
+pub async fn read_body<S: AsyncRead + AsyncWrite + Unpin>(
+    io: &mut S,
+    head: &Head,
+    length: usize,
+    mut buf: Vec<u8>,
+) -> Result<Vec<u8>, Error> {
     if head
         .header("expect")
         .is_some_and(|value| value.eq_ignore_ascii_case("100-continue"))
@@ -205,6 +218,12 @@ pub async fn read_body<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Writes a plain-text answer and closes the connection's sending side.
 pub async fn respond<W: AsyncWrite + Unpin>(io: &mut W, status: u16, body: &str) {
+    let _ = io.write_all(render(status, body).as_bytes()).await;
+    let _ = io.shutdown().await;
+}
+
+/// A whole plain-text answer.
+pub fn render(status: u16, body: &str) -> String {
     let body = format!("{body}\n");
     let mut text = format!(
         "HTTP/1.1 {status} {}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\n\
@@ -217,8 +236,7 @@ pub async fn respond<W: AsyncWrite + Unpin>(io: &mut W, status: u16, body: &str)
     }
     text.push_str("\r\n");
     text.push_str(&body);
-    let _ = io.write_all(text.as_bytes()).await;
-    let _ = io.shutdown().await;
+    text
 }
 
 #[cfg(test)]
@@ -232,9 +250,12 @@ mod tests {
         client.shutdown().await.unwrap();
         let mut buf = Vec::new();
         let result = match read_head(&mut server, &mut buf).await {
-            Ok(head) => read_body(&mut server, &head, buf)
-                .await
-                .map(|body| (head, body)),
+            Ok(head) => match body_length(&head) {
+                Ok(length) => read_body(&mut server, &head, length, buf)
+                    .await
+                    .map(|body| (head, body)),
+                Err(err) => Err(err),
+            },
             Err(err) => Err(err),
         };
         drop(server);
@@ -278,7 +299,8 @@ mod tests {
         let reader = tokio::spawn(async move {
             let mut buf = Vec::new();
             let head = read_head(&mut server, &mut buf).await.unwrap();
-            read_body(&mut server, &head, buf).await.unwrap()
+            let length = body_length(&head).unwrap();
+            read_body(&mut server, &head, length, buf).await.unwrap()
         });
         let mut reply = [0u8; 25];
         client.read_exact(&mut reply).await.unwrap();
@@ -364,8 +386,48 @@ mod tests {
         });
         let mut buf = Vec::new();
         let head = read_head(&mut server, &mut buf).await.unwrap();
-        assert_eq!(read_body(&mut server, &head, buf).await.unwrap(), b"abc");
+        let length = body_length(&head).unwrap();
+        assert_eq!(
+            read_body(&mut server, &head, length, buf).await.unwrap(),
+            b"abc"
+        );
         writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn finds_the_end_of_the_head_across_reads() {
+        // The end split over reads at every place, and a lone `\r\n\r`
+        // before it that must not count.
+        let request = b"POST /hooks/a HTTP/1.1\r\nX-A: \r\rb\r\n\r\nbody";
+        for split in 1..request.len() {
+            let (mut client, mut server) = tokio::io::duplex(1024);
+            let (first, second) = request.split_at(split);
+            let (first, second) = (first.to_vec(), second.to_vec());
+            let writer = tokio::spawn(async move {
+                client.write_all(&first).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                client.write_all(&second).await.unwrap();
+                client
+            });
+            let mut buf = Vec::new();
+            let head = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                read_head(&mut server, &mut buf),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("the end of the head is missed at {split}"))
+            .unwrap();
+            assert_eq!(head.header("x-a"), Some("\r\rb"), "split at {split}");
+            writer.await.unwrap();
+            // What came after the head stays for the body.
+            let mut rest = buf.clone();
+            if rest.len() < 4 {
+                let mut more = vec![0u8; 4 - rest.len()];
+                server.read_exact(&mut more).await.unwrap();
+                rest.extend(more);
+            }
+            assert_eq!(rest, b"body", "split at {split}");
+        }
     }
 
     #[tokio::test]

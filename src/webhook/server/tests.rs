@@ -428,6 +428,40 @@ async fn a_second_signal_interrupts_the_runs() {
 }
 
 #[tokio::test]
+async fn refuses_before_asking_for_the_body() {
+    // A short read limit: a server waiting for the body answers 408.
+    let server = start(true, Duration::from_secs(3)).await;
+    let url = &server.url;
+    for (path, length, wanted) in [
+        ("/hooks/nope", 1000, 404),
+        ("/hooks/open", http::MAX_BODY + 1, 413),
+        ("/other", 1000, 404),
+    ] {
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: {length}\r\n\r\n"
+        );
+        // Without `100 Continue` and without waiting for a body.
+        assert_eq!(raw(url, request.as_bytes()).await.0, wanted, "{path}");
+    }
+    // A route that exists still gets `100 Continue`, then its answer.
+    let mut stream = tokio::net::TcpStream::connect(url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    stream
+        .write_all(b"POST /hooks/pr HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 2\r\n\r\n")
+        .await
+        .unwrap();
+    let mut reply = [0u8; 25];
+    stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"HTTP/1.1 100 Continue\r\n\r\n");
+    stream.write_all(b"{}").await.unwrap();
+    let mut text = String::new();
+    stream.read_to_string(&mut text).await.unwrap();
+    assert!(text.starts_with("HTTP/1.1 401 "), "{text}");
+    assert_eq!(server.runner.started(), 0);
+}
+
+#[tokio::test]
 async fn a_slow_client_gets_408() {
     let server = start(true, Duration::from_millis(300)).await;
     let mut stream = tokio::net::TcpStream::connect(server.url.trim_start_matches("http://"))

@@ -179,13 +179,13 @@ impl Server {
     }
 
     async fn connection<S: AsyncRead + AsyncWrite + Unpin>(self: Arc<Self>, mut stream: S) {
-        let read = tokio::time::timeout(self.read_timeout, read_request(&mut stream)).await;
+        let read = tokio::time::timeout(self.read_timeout, self.read_request(&mut stream)).await;
         let (answer, what) = match read {
             Err(_) => (answer(408, "the request took too long"), String::new()),
-            Ok(Err(error)) => (answer(error.status, error.message), String::new()),
-            Ok(Ok((name, head, body))) => {
-                let what = format!("/hooks/{name}");
-                (self.handle(&name, &head, &body).await, what)
+            Ok(Err(refused)) => refused,
+            Ok(Ok((route, head, body))) => {
+                let what = format!("/hooks/{}", route.name);
+                (self.handle(route, &head, &body).await, what)
             }
         };
         (self.log)(&format!(
@@ -197,20 +197,65 @@ impl Server {
         http::respond(&mut stream, answer.status, &answer.text).await;
     }
 
-    /// The answer to a request for route `name`; queues it when it runs.
-    pub async fn handle(self: &Arc<Self>, name: &str, head: &Head, body: &[u8]) -> Answer {
+    /// Reads a request for a route. What can be checked without the body
+    /// (method, path, length, that the route exists) is checked before
+    /// reading it, and before `100 Continue` asks the client to send it.
+    /// A refusal comes with the path for the log (empty before it is known).
+    async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        stream: &mut S,
+    ) -> Result<(Route, Head, Vec<u8>), (Answer, String)> {
+        let refused = |err: http::Error, what: &str| (answer(err.status, err.message), what.into());
+        let mut buf = Vec::new();
+        let head = http::read_head(stream, &mut buf)
+            .await
+            .map_err(|err| refused(err, ""))?;
+        let name = head
+            .path
+            .strip_prefix("/hooks/")
+            .filter(|name| check_name(name).is_ok())
+            .map(str::to_string);
+        if head.method != "POST" {
+            return Err((answer(405, "only POST is accepted"), String::new()));
+        }
+        let Some(name) = name else {
+            return Err((
+                answer(404, "not found; webhooks are POST /hooks/<route name>"),
+                String::new(),
+            ));
+        };
+        let what = format!("/hooks/{name}");
+        let length = http::body_length(&head).map_err(|err| refused(err, &what))?;
+        let route = self
+            .route(&name)
+            .await
+            .map_err(|refusal| (refusal, what.clone()))?;
+        let body = http::read_body(stream, &head, length, buf)
+            .await
+            .map_err(|err| refused(err, &what))?;
+        Ok((route, head, body))
+    }
+
+    /// Route `name`, read from the routes file for each request.
+    async fn route(&self, name: &str) -> Result<Route, Answer> {
         let store = Store::new(&self.home);
         let routes = match tokio::task::spawn_blocking(move || store.routes()).await {
             Ok(Ok(routes)) => routes,
             Ok(Err(err)) => {
                 (self.log)(&format!("cannot read the routes: {err:#}"));
-                return answer(500, "cannot read the routes");
+                return Err(answer(500, "cannot read the routes"));
             }
-            Err(_) => return answer(500, "cannot read the routes"),
+            Err(_) => return Err(answer(500, "cannot read the routes")),
         };
-        let Some(route) = routes.into_iter().find(|route| route.name == name) else {
-            return answer(404, "no such route");
-        };
+        routes
+            .into_iter()
+            .find(|route| route.name == name)
+            .ok_or_else(|| answer(404, "no such route"))
+    }
+
+    /// The answer to a request for `route`; queues it when it runs.
+    pub async fn handle(self: &Arc<Self>, route: Route, head: &Head, body: &[u8]) -> Answer {
+        let name = route.name.as_str();
         if self.state.lock().unwrap().closing {
             return answer(503, "the server is stopping");
         }
@@ -314,33 +359,6 @@ impl Server {
         }
         self.busy.send_modify(|n| *n -= 1);
     }
-}
-
-/// Reads a request and finds its route name in the path.
-async fn read_request<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
-) -> Result<(String, Head, Vec<u8>), http::Error> {
-    let mut buf = Vec::new();
-    let head = http::read_head(stream, &mut buf).await?;
-    let name = head
-        .path
-        .strip_prefix("/hooks/")
-        .filter(|name| check_name(name).is_ok())
-        .map(str::to_string);
-    if head.method != "POST" {
-        return Err(http::Error {
-            status: 405,
-            message: "only POST is accepted",
-        });
-    }
-    let Some(name) = name else {
-        return Err(http::Error {
-            status: 404,
-            message: "not found; webhooks are POST /hooks/<route name>",
-        });
-    };
-    let body = http::read_body(stream, &head, buf).await?;
-    Ok((name, head, body))
 }
 
 /// Letters, digits, `_`, `-` and `.`, 1 to `max` of them.
