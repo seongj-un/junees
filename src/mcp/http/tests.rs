@@ -88,8 +88,10 @@ struct Knobs {
     status: Option<u16>,
     /// Answer every POST with a redirect here.
     redirect: Option<String>,
-    /// The next request in the current session gets 404.
+    /// The next request in the current session gets 404, with the SDK's
+    /// JSON-RPC error body unless `expire_empty`.
     expire: bool,
+    expire_empty: bool,
     sessions: u32,
     current: Option<String>,
 }
@@ -244,7 +246,15 @@ impl Fake {
             if knobs.expire || session != knobs.current.as_deref() {
                 knobs.expire = false;
                 knobs.current = None;
-                return Reply::empty(404);
+                if knobs.expire_empty {
+                    return Reply::empty(404);
+                }
+                // What the TypeScript SDK sends for an unknown session.
+                return Reply::json(
+                    404,
+                    json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32001,
+                        "message": "Session not found"}}),
+                );
             }
             if seen.header("mcp-protocol-version") != Some("2025-06-18") {
                 return Reply::empty(400);
@@ -587,32 +597,37 @@ async fn a_legacy_server_gets_initialize_and_its_session() {
 
 #[tokio::test]
 async fn an_ended_session_is_opened_again() {
-    let fake = Fake::start(Knobs {
-        legacy: true,
-        ..Knobs::default()
-    })
-    .await;
-    let mcp = start(&fake, json!({})).await;
-    fake.knobs.lock().unwrap().expire = true;
-    let output = call(&mcp, "echo", json!({"text": "again"})).await;
-    assert_eq!(
-        (output.content.as_str(), output.is_error),
-        ("echo: again", false)
-    );
-    let seen = fake.seen();
-    let tail: Vec<(String, Option<&str>)> = seen[seen.len() - 4..]
-        .iter()
-        .map(|seen| (seen.rpc().to_string(), seen.header("mcp-session-id")))
-        .collect();
-    assert_eq!(
-        tail,
-        [
-            ("tools/call".to_string(), Some("sess-1")),
-            ("initialize".to_string(), None),
-            ("notifications/initialized".to_string(), Some("sess-2")),
-            ("tools/call".to_string(), Some("sess-2")),
-        ]
-    );
+    // The 404 counts with and without a JSON-RPC error body.
+    for expire_empty in [false, true] {
+        let fake = Fake::start(Knobs {
+            legacy: true,
+            expire_empty,
+            ..Knobs::default()
+        })
+        .await;
+        let mcp = start(&fake, json!({})).await;
+        fake.knobs.lock().unwrap().expire = true;
+        let output = call(&mcp, "echo", json!({"text": "again"})).await;
+        assert_eq!(
+            (output.content.as_str(), output.is_error),
+            ("echo: again", false),
+            "expire_empty: {expire_empty}"
+        );
+        let seen = fake.seen();
+        let tail: Vec<(String, Option<&str>)> = seen[seen.len() - 4..]
+            .iter()
+            .map(|seen| (seen.rpc().to_string(), seen.header("mcp-session-id")))
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                ("tools/call".to_string(), Some("sess-1")),
+                ("initialize".to_string(), None),
+                ("notifications/initialized".to_string(), Some("sess-2")),
+                ("tools/call".to_string(), Some("sess-2")),
+            ]
+        );
+    }
     // A modern server's 404 is an answer, not an ended session.
     let modern = Fake::start(Knobs::default()).await;
     let mcp = start(&modern, json!({})).await;
@@ -846,6 +861,9 @@ fn json_rpc_answers_are_matched_by_id() {
     let error = json!({"jsonrpc": "2.0", "id": 3, "error": {"code": -1, "message": "no"}});
     assert!(matches!(
         reply_to(&error, 3),
-        Some(Err(HttpError::Rpc(RpcError { code: -1, .. })))
+        Some(Err(HttpError::Rpc {
+            error: RpcError { code: -1, .. },
+            status: None
+        }))
     ));
 }

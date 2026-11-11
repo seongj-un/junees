@@ -63,8 +63,12 @@ const UNSUPPORTED_VERSION: i64 = -32022;
 /// Why an HTTP exchange gave no result.
 #[derive(Debug)]
 enum HttpError {
-    /// A JSON-RPC error, in a success or an error response.
-    Rpc(RpcError),
+    /// A JSON-RPC error, in a success response (`status` none) or in the
+    /// body of an error response.
+    Rpc {
+        error: RpcError,
+        status: Option<StatusCode>,
+    },
     /// An error status without a JSON-RPC error in its body.
     Status(StatusCode),
     /// Anything else, described without the URL or header values.
@@ -74,9 +78,18 @@ enum HttpError {
 impl HttpError {
     fn into_call_error(self) -> CallError {
         match self {
-            HttpError::Rpc(error) => CallError::Rpc(error),
+            HttpError::Rpc { error, .. } => CallError::Rpc(error),
             HttpError::Status(status) => CallError::Failed(status_text(status)),
             HttpError::Other(reason) => CallError::Failed(reason),
+        }
+    }
+
+    /// The HTTP error status of the response, whatever its body held.
+    fn status(&self) -> Option<StatusCode> {
+        match self {
+            HttpError::Rpc { status, .. } => *status,
+            HttpError::Status(status) => Some(*status),
+            HttpError::Other(_) => None,
         }
     }
 }
@@ -178,10 +191,10 @@ impl HttpConnection {
                 self.inner.session.lock().unwrap().era = Some(era.clone());
                 return Ok((era, capabilities));
             }
-            Err(HttpError::Rpc(error)) if error.code == UNSUPPORTED_VERSION => {
+            Err(HttpError::Rpc { error, .. }) if error.code == UNSUPPORTED_VERSION => {
                 return Err(server::unsupported(&error));
             }
-            Err(HttpError::Rpc(error))
+            Err(HttpError::Rpc { error, .. })
                 if matches!(error.code, HEADER_MISMATCH | MISSING_CLIENT_CAPABILITY) =>
             {
                 return Err(format!(
@@ -190,7 +203,7 @@ impl HttpConnection {
                 ));
             }
             // Not a modern error: a legacy server.
-            Err(HttpError::Rpc(_)) => {}
+            Err(HttpError::Rpc { .. }) => {}
             Err(HttpError::Status(status)) if status.is_client_error() => {}
             Err(HttpError::Status(status)) => {
                 return Err(format!("`server/discover` failed: {}", status_text(status)));
@@ -270,7 +283,9 @@ impl Inner {
             .exchange_as(&mut guard, method, &params, &session, extra)
             .await;
         guard.disarm();
-        if let Err(HttpError::Status(StatusCode::NOT_FOUND)) = answer
+        // The status counts, not the body: servers send a JSON-RPC error
+        // (-32001 "Session not found") with the 404.
+        if answer.as_ref().err().and_then(HttpError::status) == Some(StatusCode::NOT_FOUND)
             && session.id.is_some()
         {
             let session = self.reopen(session.generation).await?;
@@ -516,7 +531,10 @@ impl Inner {
             .ok()
             .and_then(|message| rpc_error(&message));
         match error {
-            Some(error) => HttpError::Rpc(error),
+            Some(error) => HttpError::Rpc {
+                error,
+                status: Some(status),
+            },
             None => HttpError::Status(status),
         }
     }
@@ -663,7 +681,10 @@ fn reply_to(message: &Value, id: u64) -> Option<Result<Value, HttpError>> {
         return None;
     }
     Some(match rpc_error(message) {
-        Some(error) => Err(HttpError::Rpc(error)),
+        Some(error) => Err(HttpError::Rpc {
+            error,
+            status: None,
+        }),
         None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
     })
 }
