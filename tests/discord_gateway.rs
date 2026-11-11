@@ -1589,9 +1589,87 @@ async fn fake_cdn(body: Vec<u8>) -> (String, Arc<Mutex<Vec<String>>>) {
     (url, asked)
 }
 
+/// A loopback stand-in for Discord's CDN that reads each request, notes
+/// its path and never answers.
+async fn silent_cdn() -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&asked);
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            if let Some(request) = read_http(&mut socket).await {
+                log.lock().unwrap().push(request.path);
+            }
+            held.push(socket);
+        }
+    });
+    (url, asked)
+}
+
 fn with_attachments(mut message: Value, attachments: Value) -> Value {
     message["attachments"] = attachments;
     message
+}
+
+#[tokio::test]
+async fn a_turn_downloading_its_attachments_can_be_stopped() {
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (cdn, asked) = silent_cdn().await;
+    let cdn_base = format!("{cdn}/attachments/");
+    let running = start(
+        discord(&rest.url, &[("JUNEES_DISCORD_CDN_URL", &cdn_base)]),
+        fake(Duration::ZERO),
+        None,
+        dir.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        with_attachments(
+            message("505", USER, "what is this?", false, &[]),
+            json!([{"id": "1", "filename": "shot.png", "content_type": "image/png",
+                    "size": 45, "url": format!("{cdn_base}1/2/shot.png")}]),
+        ),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while asked.lock().unwrap().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the CDN was never asked"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "!status", false, &[]),
+    )
+    .await;
+    rest.wait_post("505", |p| {
+        p.contains("a turn downloads its attachments, 0 queued")
+    })
+    .await;
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "!stop", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "(stopped before it started)")
+        .await;
+    // The stopped message never ran; the channel goes on.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "after", false, &[]))
+        .await;
+    let posts = rest.wait_post("505", |p| p == "reply 1: after").await;
+    assert!(
+        !posts.iter().any(|p| p == "(nothing is running here)"),
+        "{posts:#?}"
+    );
+    running.stop().await;
 }
 
 #[tokio::test]

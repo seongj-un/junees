@@ -84,6 +84,9 @@ pub struct ChannelState {
     running: AtomicBool,
     /// A turn waits for a free slot (`discord_parallel`).
     waiting: AtomicBool,
+    /// A turn downloads the images attached to its message, before it
+    /// waits for a slot.
+    preparing: AtomicBool,
     queued: AtomicUsize,
     /// Raised by `!stop`; queued jobs of an older epoch are dropped.
     epoch: AtomicU64,
@@ -93,9 +96,11 @@ pub struct ChannelState {
 }
 
 impl ChannelState {
-    /// A turn runs or waits for a slot.
+    /// A turn runs, waits for a slot or downloads its attachments.
     fn busy(&self) -> bool {
-        self.running.load(Ordering::SeqCst) || self.waiting.load(Ordering::SeqCst)
+        self.running.load(Ordering::SeqCst)
+            || self.waiting.load(Ordering::SeqCst)
+            || self.preparing.load(Ordering::SeqCst)
     }
 }
 
@@ -443,6 +448,8 @@ impl Bot {
                         "a turn is running"
                     } else if state.waiting.load(Ordering::SeqCst) {
                         "a turn waits for a free slot"
+                    } else if state.preparing.load(Ordering::SeqCst) {
+                        "a turn downloads its attachments"
                     } else {
                         "idle"
                     },
@@ -683,6 +690,7 @@ fn notes_text(notes: &[String]) -> String {
 async fn prepare(
     shared: &Shared,
     channel: &str,
+    state: &ChannelState,
     cancel: &Cancel,
     input: Input,
 ) -> Option<(String, Vec<crate::images::Image>)> {
@@ -694,12 +702,17 @@ async fn prepare(
     let images = if attachments.is_empty() {
         Vec::new()
     } else {
-        let (images, failed) = tokio::select! {
-            got = attached::fetch_all(&shared.fetcher, &attachments) => got,
-            _ = cancel.cancelled() => {
-                shared.say(channel, "(stopped before it started)").await;
-                return None;
-            }
+        // Marked busy meanwhile, so `!stop` cancels the download (it can
+        // take 30 seconds per attachment) and `!status` tells.
+        state.preparing.store(true, Ordering::SeqCst);
+        let got = tokio::select! {
+            got = attached::fetch_all(&shared.fetcher, &attachments) => Some(got),
+            _ = cancel.cancelled() => None,
+        };
+        state.preparing.store(false, Ordering::SeqCst);
+        let Some((images, failed)) = got else {
+            shared.say(channel, "(stopped before it started)").await;
+            return None;
         };
         notes.extend(failed);
         // The kind and size only: the log never holds what users sent.
@@ -744,7 +757,7 @@ async fn turn(
     progress: &mut UnboundedReceiver<Progress>,
 ) {
     cancel.reset();
-    let Some((input, images)) = prepare(shared, channel, cancel, input).await else {
+    let Some((input, images)) = prepare(shared, channel, state, cancel, input).await else {
         return;
     };
     let permits = Arc::clone(&shared.permits);
