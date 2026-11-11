@@ -64,10 +64,19 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
     }
     if settings.webhook {
         // A webhook run (anyone's text): no push, no change of git's
-        // configuration, no credentials, no aliases from `-c` (Junees's
-        // own bash allows reading the configuration; these rules cannot
-        // tell reading from writing), no GitHub CLI login (`gh auth`, or
-        // GH_CONFIG_DIR pointed back at the user's folder).
+        // configuration, no credentials, no aliases from `-c`, no GitHub
+        // CLI login (`gh auth`, or GH_CONFIG_DIR pointed back at the
+        // user's folder).
+        //
+        // `git config *` also refuses reads, unlike Junees's own bash,
+        // which allows `git config --get`, `--list` and a lone key. No
+        // narrower set of these rules is safe: a rule only sees the text,
+        // and `*` matches any characters, so `git config * *` (a key and
+        // a value) also matches `git config --get user.email`, and writes
+        // it does not foresee (a single-word form such as `--edit`, maybe
+        // a tab between key and value) would get past it. The model can
+        // still read the repository's settings with the Read tool
+        // (`.git/config`).
         for rule in [
             "gh auth",
             "gh auth *",
