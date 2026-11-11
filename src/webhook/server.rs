@@ -627,6 +627,7 @@ impl ProcessRunner {
                 started_at: last.map_or(started, |last| last.started_at),
                 prompt: None,
                 outcome: &outcome,
+                quiet: false,
             },
         )
         .await;

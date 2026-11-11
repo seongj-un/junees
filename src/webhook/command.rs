@@ -372,6 +372,7 @@ async fn run_now(
         started_at,
         prompt: prompt.as_deref().ok(),
         outcome: &outcome,
+        quiet: false,
     };
     let last = run::finish(home, &tz, lookup, &route, incoming, &ended).await;
     if !outcome.answer.is_empty() {

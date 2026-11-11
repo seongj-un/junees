@@ -135,11 +135,15 @@ pub struct Ended<'a> {
     /// `None` when the run ended before it made one.
     pub prompt: Option<&'a str>,
     pub outcome: &'a Outcome,
+    /// Nothing happened worth keeping (a flow event that was skipped): no
+    /// output file and no delivery, only the record.
+    pub quiet: bool,
 }
 
-/// Ends a run: writes the output file, delivers the result, and records
-/// it as the route's last run (unless the route was removed meanwhile).
-/// Problems with any of these are printed, not fatal.
+/// Ends a run: writes the output file, delivers the result (both unless
+/// [`Ended::quiet`]), and records it as the route's last run (unless the
+/// route was removed meanwhile). Problems with any of these are printed,
+/// not fatal.
 pub async fn finish(
     home: &Path,
     tz: &TimeZone,
@@ -151,16 +155,10 @@ pub async fn finish(
     let outcome = ended.outcome;
     let finished_at = unix_now();
     let text = render(tz, route, incoming, ended, finished_at);
-    let output = match crate::cron::output::write_text(
-        &super::output_dir(home, &route.name),
-        ended.started_at,
-        &text,
-    ) {
-        Ok(path) => Some(path),
-        Err(err) => {
-            eprintln!("  !! route {}: {err:#}", route.name);
-            None
-        }
+    let output = if ended.quiet {
+        None
+    } else {
+        write_output(home, route, ended.started_at, &text)
     };
     let report = Report {
         source: "webhook",
@@ -171,7 +169,12 @@ pub async fn finish(
         note: &outcome.note,
         output: output.as_deref(),
     };
-    let delivery_error = match deliver::deliver(lookup, &report).await {
+    let delivered = if ended.quiet {
+        Ok(())
+    } else {
+        deliver::deliver(lookup, &report).await
+    };
+    let delivery_error = match delivered {
         Ok(()) => None,
         Err(err) => {
             let err = format!("{err:#}");
@@ -209,6 +212,23 @@ pub async fn finish(
         );
     }
     last
+}
+
+/// Writes the output file of a run; its path, or `None` (printed) when
+/// it cannot.
+fn write_output(
+    home: &Path,
+    route: &Route,
+    started_at: i64,
+    text: &str,
+) -> Option<std::path::PathBuf> {
+    match crate::cron::output::write_text(&super::output_dir(home, &route.name), started_at, text) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            eprintln!("  !! route {}: {err:#}", route.name);
+            None
+        }
+    }
 }
 
 /// The output file's text.
@@ -393,6 +413,7 @@ mod tests {
             started_at: 101,
             prompt: Some(&prompt),
             outcome: &outcome,
+            quiet: false,
         };
         let last = finish(
             home.path(),
