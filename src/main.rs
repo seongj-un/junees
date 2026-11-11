@@ -14,6 +14,7 @@ use junees::claude_code::{BACKEND_ENV, Backend, ClaudeCode, MODEL_ENV, UsageLimi
 use junees::cli::{self, Command, SessionMode, TaskCommand, TaskRun};
 use junees::config::Config;
 use junees::config_file::Settings;
+use junees::context_files::ContextFiles;
 use junees::gateway::Gateway;
 use junees::gateway::config::DiscordConfig;
 use junees::gateway::engine::{ApiEngines, ClaudeEngines, Engines};
@@ -338,6 +339,7 @@ fn api_agent(
     input: Option<&SharedLines>,
     mcp: &Mcp,
     plugins: &Plugins,
+    context: &ContextFiles,
 ) -> Result<Agent> {
     let memory = conversation_memory(config, cwd);
     let gate = input.and_then(|input| approval::for_conversation(config, cwd, input));
@@ -359,7 +361,7 @@ fn api_agent(
         make_provider(config)?,
         tools,
         AgentOptions {
-            system: api_system(config, cwd, memory.as_ref(), plugins),
+            system: api_system(config, cwd, memory.as_ref(), plugins, context),
             max_tokens: config.max_tokens,
             max_turns: config.max_turns,
             context_window: config.context_window,
@@ -409,12 +411,19 @@ fn conversation_memory(config: &Config, cwd: &Path) -> Option<Memory> {
     Some(Memory::for_folder(home, cwd, config.memory))
 }
 
-/// The system prompt of Junees's own agent: the memory and the skill list
-/// are read now and stay as they are for the session, so the prompt cache
-/// holds.
-fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>, plugins: &Plugins) -> String {
+/// The system prompt of Junees's own agent: the project instruction files
+/// (`context`), the memory and the skill list are read when the session
+/// starts and stay as they are for it, so the prompt cache holds.
+fn api_system(
+    config: &Config,
+    cwd: &Path,
+    memory: Option<&Memory>,
+    plugins: &Plugins,
+    context: &ContextFiles,
+) -> String {
     prompt::system_prompt(cwd)
         + subagent::prompt_note(config.subagents)
+        + &context.section()
         + &prompt::data_sections(
             memory,
             Mode::Conversation,
@@ -424,10 +433,21 @@ fn api_system(config: &Config, cwd: &Path, memory: Option<&Memory>, plugins: &Pl
         + plugins.prompt_section()
 }
 
-/// What the conversation adds to Claude Code's system prompt: the memory
-/// and the skill list ([`prompt::claude_append`]).
-fn claude_system(config: &Config, memory: Option<&Memory>) -> String {
-    prompt::claude_append(String::new(), memory, config.home.as_deref())
+/// What the conversation adds to Claude Code's system prompt: the project
+/// instruction files, the memory and the skill list
+/// ([`prompt::claude_append_with_context`]).
+fn claude_system(config: &Config, memory: Option<&Memory>, context: &ContextFiles) -> String {
+    prompt::claude_append_with_context(String::new(), context, memory, config.home.as_deref())
+}
+
+/// The project instruction files of a session in `cwd`, read now; says on
+/// stderr which ones it read or skipped.
+fn project_context(config: &Config, cwd: &Path) -> ContextFiles {
+    let context = config.context_files.load(cwd);
+    if let Some(line) = context.summary() {
+        eprintln!("{line}");
+    }
+    context
 }
 
 /// Claude Code for the conversation, once `claude --version` and its
@@ -437,6 +457,7 @@ async fn claude_chat(
     config: &Config,
     cwd: &Path,
     cancel: &Cancel,
+    context: &ContextFiles,
 ) -> Result<(Chat, String)> {
     let claude = ClaudeCode::from_lookup(|key| settings.get(key));
     let version = claude.check(cwd, &config.tools).await?;
@@ -459,6 +480,7 @@ async fn claude_chat(
     chat.set_system(claude_system(
         config,
         conversation_memory(config, cwd).as_ref(),
+        context,
     ));
     Ok((chat, version))
 }
@@ -493,14 +515,15 @@ async fn conversation(
         Backend::Api => load_plugins(&config, &cwd),
         Backend::ClaudeCode => Arc::new(Plugins::none()),
     };
+    let context = project_context(&config, &cwd);
     let (mut engine, banner) = match backend {
         Backend::Api => {
             let input = interactive.then_some(&input);
-            let agent = api_agent(&config, &cwd, &cancel, input, &mcp, &plugins)?;
+            let agent = api_agent(&config, &cwd, &cancel, input, &mcp, &plugins, &context)?;
             (Engine::Api(Box::new(agent)), config.model.clone())
         }
         Backend::ClaudeCode => {
-            let (chat, version) = claude_chat(&settings, &config, &cwd, &cancel).await?;
+            let (chat, version) = claude_chat(&settings, &config, &cwd, &cancel, &context).await?;
             let model = chat.claude().model.clone();
             let banner = format!(
                 "Claude Code {version}, model {}",
@@ -543,6 +566,7 @@ async fn conversation(
             println!("{}", opened.status);
             let mut repl = Repl {
                 memory: conversation_memory(&config, &cwd),
+                context,
                 engine,
                 config,
                 settings,
@@ -946,6 +970,9 @@ struct Repl {
     /// The enabled plugins on the api backend (none on the claude-code one
     /// until `/backend api` reads them).
     plugins: Arc<Plugins>,
+    /// The project instruction files the session read when it started
+    /// (`/context` shows them).
+    context: ContextFiles,
 }
 
 impl Repl {
@@ -1057,22 +1084,25 @@ impl Repl {
                      manages the conversation's context and compacts it by itself"
                 ),
             },
-            Slash::Context => match &self.engine {
-                Engine::Api(agent) => {
-                    let options = agent.options();
-                    println!(
-                        "context {} / {} tokens; old tool output is cleared from {} tokens",
-                        agent.context_tokens(),
-                        options.context_window,
-                        options.compact_limit()
-                    );
+            Slash::Context => {
+                match &self.engine {
+                    Engine::Api(agent) => {
+                        let options = agent.options();
+                        println!(
+                            "context {} / {} tokens; old tool output is cleared from {} tokens",
+                            agent.context_tokens(),
+                            options.context_window,
+                            options.compact_limit()
+                        );
+                    }
+                    Engine::Claude(_) => eprintln!(
+                        "the context size is not shown on the claude-code backend: Claude \
+                         Code keeps the context (and compacts it by itself); /usage shows the \
+                         tokens used"
+                    ),
                 }
-                Engine::Claude(_) => eprintln!(
-                    "/context is not available on the claude-code backend: Claude Code \
-                     keeps the context (and compacts it by itself); /usage shows the tokens \
-                     used"
-                ),
-            },
+                print!("{}", self.context.overview());
+            }
             Slash::Memory => match &self.memory {
                 Some(memory) => print!("{}", memory.overview()),
                 None => eprintln!("{NO_MEMORY}"),
@@ -1308,11 +1338,18 @@ impl Repl {
                     Some(&self.input),
                     &self.mcp,
                     &self.plugins,
+                    &self.context,
                 )?))
             }
             Backend::ClaudeCode => {
-                let (chat, version) =
-                    claude_chat(&self.settings, &config, &self.cwd, &self.cancel).await?;
+                let (chat, version) = claude_chat(
+                    &self.settings,
+                    &config,
+                    &self.cwd,
+                    &self.cancel,
+                    &self.context,
+                )
+                .await?;
                 println!("Claude Code {version}");
                 Engine::Claude(Box::new(chat))
             }
@@ -1367,20 +1404,28 @@ impl Repl {
         false
     }
 
-    /// Gives the conversation the memory and the skills as they are now,
-    /// for a new session.
+    /// Gives the conversation the project instruction files, the memory
+    /// and the skills as they are now, for a new session.
     fn reread_system(&mut self) {
+        self.context = project_context(&self.config, &self.cwd);
         let memory = self.memory.as_ref();
         match &mut self.engine {
-            Engine::Api(agent) => {
-                agent.set_system(api_system(&self.config, &self.cwd, memory, &self.plugins))
+            Engine::Api(agent) => agent.set_system(api_system(
+                &self.config,
+                &self.cwd,
+                memory,
+                &self.plugins,
+                &self.context,
+            )),
+            Engine::Claude(chat) => {
+                chat.set_system(claude_system(&self.config, memory, &self.context))
             }
-            Engine::Claude(chat) => chat.set_system(claude_system(&self.config, memory)),
         }
     }
 
     fn reset(&mut self) {
-        // A new session reads the memory and the skills again.
+        // A new session reads the instruction files, the memory and the
+        // skills again.
         self.reread_system();
         if !self.saving {
             self.engine.reset(None);

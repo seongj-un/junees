@@ -121,7 +121,8 @@ pub const REPL_HELP: &str = "\
                    for this session (a switch starts a new conversation)
 /compact           replace the earlier conversation with a summary (api backend;
                    Claude Code compacts its own)
-/context           show the context size and its limit (api backend)
+/context           show the context size and its limit (api backend) and the
+                   project instruction files the session read
 /usage             show token usage of this session
 /memory            show what the persistent memory holds
 /memory clear user|notes|project
