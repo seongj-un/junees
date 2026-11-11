@@ -762,6 +762,7 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         claude,
         skill_manage: config.task_skill_manage,
         memory,
+        context_files: config.context_files.clone(),
     };
     let mut printer = Printer::new();
     let mut reporter = |report: Report<'_>| match report {
