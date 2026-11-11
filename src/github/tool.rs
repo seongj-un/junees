@@ -921,31 +921,57 @@ impl Tool for GithubTool {
     }
 }
 
-/// The latest review of each reviewer, and whether it was on an older
-/// commit than the head.
+/// The state of each reviewer as GitHub counts it: their last APPROVED,
+/// CHANGES_REQUESTED or DISMISSED review (a COMMENTED one changes
+/// nothing), whether it was on an older commit than the head, and how many
+/// comment-only reviews they left.
 fn review_states(reviews: &[Value], head: Option<&str>) -> String {
-    let mut latest: Vec<(String, &Value)> = Vec::new();
+    // Per reviewer: the deciding review and the count of comment reviews.
+    let mut reviewers: Vec<(String, Option<&Value>, usize)> = Vec::new();
     for review in reviews {
         let login = field(&review["user"]["login"], NAME_CHARS);
-        match latest.iter_mut().find(|(name, _)| *name == login) {
-            Some((_, last)) => *last = review,
-            None => latest.push((login, review)),
+        let index = match reviewers.iter().position(|(name, _, _)| *name == login) {
+            Some(index) => index,
+            None => {
+                reviewers.push((login, None, 0));
+                reviewers.len() - 1
+            }
+        };
+        let (_, state, comments) = &mut reviewers[index];
+        match review["state"].as_str() {
+            Some("APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") => *state = Some(review),
+            Some("COMMENTED") => *comments += 1,
+            // PENDING: not submitted, seen only by its author.
+            _ => {}
         }
     }
-    if latest.is_empty() {
+    reviewers.retain(|(_, state, comments)| state.is_some() || *comments > 0);
+    if reviewers.is_empty() {
         return "reviews: none\n".into();
     }
-    let states: Vec<_> = latest
+    let states: Vec<_> = reviewers
         .iter()
-        .map(|(login, review)| {
-            let older = match (review["commit_id"].as_str(), head) {
-                (Some(commit), Some(head)) if commit != head => " (on an older commit)",
-                _ => "",
-            };
-            format!("{login} {}{older}", field(&review["state"], 30))
+        .map(|(login, state, comments)| {
+            let mut text = login.clone();
+            if let Some(review) = state {
+                let older = match (review["commit_id"].as_str(), head) {
+                    (Some(commit), Some(head)) if commit != head => " (on an older commit)",
+                    _ => "",
+                };
+                text.push_str(&format!(" {}{older}", field(&review["state"], 30)));
+            }
+            if *comments > 0 {
+                let plus = if state.is_some() { " +" } else { "" };
+                text.push_str(&format!("{plus} {comments} comment-only"));
+            }
+            text
         })
         .collect();
-    format!("reviews (latest per reviewer): {}\n", states.join(", "))
+    format!(
+        "reviews (per reviewer the last APPROVED, CHANGES_REQUESTED or DISMISSED review; \
+         comment-only reviews do not change it and are counted apart): {}\n",
+        states.join("; ")
+    )
 }
 
 /// `status +a -d path` of a pull request file.

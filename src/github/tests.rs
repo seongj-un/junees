@@ -301,7 +301,11 @@ async fn pr_view_sends_the_api_headers_and_frames_what_github_wrote() {
     assert!(text.contains("changes: 2 commits, 3 files, +10 -4\n"));
     assert!(text.contains("labels: bug\nreview requested from: carol\n"));
     assert!(
-        text.contains("reviews (latest per reviewer): bob APPROVED, dave COMMENTED\n"),
+        text.contains(
+            "reviews (per reviewer the last APPROVED, CHANGES_REQUESTED or DISMISSED review; \
+             comment-only reviews do not change it and are counted apart): bob APPROVED; dave \
+             1 comment-only\n"
+        ),
         "{text}"
     );
     assert!(
@@ -342,6 +346,50 @@ async fn pr_view_sends_the_api_headers_and_frames_what_github_wrote() {
         assert!(headers.contains("user-agent: junees/"));
         assert!(headers.contains(&format!("authorization: Bearer {TOKEN}")));
     }
+}
+
+#[tokio::test]
+async fn a_comment_review_does_not_hide_a_change_request() {
+    let review = |id: u64, login: &str, state: &str, commit: &str| {
+        json!({"id": id, "user": {"login": login}, "state": state, "commit_id": commit,
+               "body": "", "submitted_at": "t"})
+    };
+    let old = "1111111111111111111111111111111111111111";
+    let mut routes = vec![(
+        "GET /repos/o/n/pulls/7/reviews",
+        vec![reply(
+            200,
+            json!([
+                // The review's case: changes requested, then only a comment.
+                review(1, "bob", "CHANGES_REQUESTED", old),
+                review(2, "bob", "COMMENTED", HEAD),
+                // An approval later dismissed, then a comment.
+                review(3, "erin", "APPROVED", HEAD),
+                review(4, "erin", "DISMISSED", HEAD),
+                review(5, "erin", "COMMENTED", HEAD),
+                // Comments only, and an unsubmitted review.
+                review(6, "dave", "COMMENTED", HEAD),
+                review(7, "dave", "COMMENTED", HEAD),
+                review(8, "frank", "PENDING", HEAD),
+            ]),
+        )],
+    )];
+    routes.extend(pr_routes());
+    let fake = Fake::start(routes).await;
+    let output = run(
+        &fake.tool(false, &[]),
+        json!({"action": "pr_view", "number": 7}),
+    )
+    .await;
+    assert!(
+        output.content.contains(
+            "comment-only reviews do not change it and are counted apart): bob \
+             CHANGES_REQUESTED (on an older commit) + 1 comment-only; erin DISMISSED + 1 \
+             comment-only; dave 2 comment-only\n"
+        ),
+        "{}",
+        output.content
+    );
 }
 
 #[tokio::test]
