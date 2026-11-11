@@ -858,67 +858,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_test_runs_a_home_delete_or_a_push_to_origin_for_real() {
-        // A test that runs such a command through a real bash relies on
-        // one policy rule; a mutation run that removes it deleted or
-        // pushed for real. Policy-only checks (`policy.check`) are fine.
-        // The patterns are built here so this test does not find itself.
-        let rm = |target: &str| format!("rm -rf {target}");
-        let forbidden = [
-            rm("~"),
-            rm("$HOME"),
-            rm("${HOME}"),
-            format!("git push {}", "origin"),
-        ];
-        let runs_bash = [
-            "Bash::",
-            "dispatch(\"bash\"",
-            "\"name\": \"bash\"",
-            "name: \"bash\"",
-            "CARGO_BIN_EXE",
-        ];
-        fn rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    rust_files(&path, files);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    files.push(path);
-                }
-            }
-        }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut files = Vec::new();
-        rust_files(&root.join("src"), &mut files);
-        rust_files(&root.join("tests"), &mut files);
-        assert!(files.len() > 50, "{files:?}");
-        let mut found = Vec::new();
-        for file in &files {
-            let text = std::fs::read_to_string(file).unwrap();
-            // Each test runs from its attribute to the next one.
-            let mut tests: Vec<(usize, String)> = Vec::new();
-            for (number, line) in text.lines().enumerate() {
-                let line_start = line.trim_start();
-                if line_start.starts_with("#[test]") || line_start.starts_with("#[tokio::test") {
-                    tests.push((number + 1, String::new()));
-                }
-                if let Some((_, body)) = tests.last_mut() {
-                    body.push_str(line);
-                    body.push('\n');
-                }
-            }
-            for (line, body) in tests {
-                if runs_bash.iter().any(|mark| body.contains(mark))
-                    && let Some(command) = forbidden.iter().find(|bad| body.contains(bad.as_str()))
-                {
-                    found.push(format!("{}:{line}: `{command}`", file.display()));
-                }
-            }
-        }
-        assert!(found.is_empty(), "run through a real bash: {found:?}");
-    }
-
     #[tokio::test]
     async fn the_test_sandbox_keeps_commands_in_its_folder() {
         let dir = tempfile::tempdir().unwrap();

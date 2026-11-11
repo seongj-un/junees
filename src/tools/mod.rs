@@ -7,6 +7,8 @@ mod policy;
 mod read_file;
 pub mod self_command;
 mod settings_file;
+#[cfg(test)]
+mod test_scan;
 mod write_file;
 
 pub use bash::Bash;
