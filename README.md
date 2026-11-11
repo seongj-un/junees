@@ -117,7 +117,7 @@ junees sessions search --all --limit 10 배포     # 모든 폴더, 10개까지
 junees sessions search --source discord 회의록   # 디스코드 채널 세션만
 ```
 
-대화 안에서는 `/search "빌드 실패" clippy`처럼 쓴다(옵션도 같다). 결과는 번호, 세션 id, 마지막 기록 시각(UTC), 작업 폴더, 출처 표시(`[discord <채널>]`, `[cron <작업>]`), 맞는 곳의 한 줄 스니펫(`user:`, `assistant:`, `summary:`, `tool bash:`)이고, 끝에 `junees --resume <id>`로 이어 가라는 안내가 붙는다.
+대화 안에서는 `/search "빌드 실패" clippy`처럼 쓴다(옵션도 같다. 큰따옴표 안의 낱말은 `/search "run --all tests"`처럼 옵션 모양이어도 구절의 낱말로 읽는다). 결과는 번호, 세션 id, 마지막 기록 시각(UTC), 작업 폴더, 출처 표시(`[discord <채널>]`, `[cron <작업>]`), 맞는 곳의 한 줄 스니펫(`user:`, `assistant:`, `summary:`, `tool bash:`)이고, 끝에 `junees --resume <id>`로 이어 가라는 안내가 붙는다.
 
 - 찾는 곳: `$JUNEES_HOME/sessions/*.jsonl`과 서브에이전트 기록(`sessions/<id>/*.jsonl`)의 사용자 입력, 모델 텍스트, 압축 요약, Claude Code 턴의 입력과 답, 도구 결과의 앞부분. 입력과 텍스트는 메시지마다 앞 64 KiB, 도구 결과는 앞 4 KiB만 본다(명령이 찍은 모든 줄이나 읽은 파일 전체가 아니라 무엇에 대한 결과인지). 비워진 도구 결과와 이전 `session_search`의 결과는 빼서, 검색이 자기 결과를 다시 찾지 않는다.
 - 맞추기: 공백으로 나눈 낱말이 모두 한 메시지(텍스트 블록이나 도구 결과 하나) 안에 있어야 한다. 대소문자는 무시하고 한글은 그대로 찾는다. `"빌드 실패"`처럼 큰따옴표로 묶으면 구절로 찾는다(공백과 줄바꿈 차이는 무시). 낱말은 16개, 질의는 500자까지.

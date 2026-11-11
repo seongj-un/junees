@@ -24,8 +24,10 @@ pub struct HumanSearch {
 
 impl HumanSearch {
     /// Parses options and words; options may come anywhere before `--`,
-    /// everything after it is words. A word with whitespace in it (one
-    /// shell argument) should come quoted ([`quote_arg`]).
+    /// everything after it is words, and so is everything inside double
+    /// quotes (`"run --all tests"` split on whitespace is one phrase). A
+    /// word with whitespace in it (one shell argument) should come quoted
+    /// ([`quote_arg`]).
     pub fn parse(tokens: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut search = Self {
             query: String::new(),
@@ -37,7 +39,13 @@ impl HumanSearch {
         let mut sources: Option<Vec<String>> = None;
         let mut words: Vec<String> = Vec::new();
         let mut tokens = tokens.into_iter();
+        let mut quoted = false;
         while let Some(token) = tokens.next() {
+            if quoted {
+                quoted = !opens_quote(&token);
+                words.push(token);
+                continue;
+            }
             match token.as_str() {
                 "--all" => search.all = true,
                 "--limit" => {
@@ -68,7 +76,10 @@ impl HumanSearch {
                 other if other.starts_with("--") => {
                     return Err(format!("unknown option `{other}`; {USAGE}"));
                 }
-                _ => words.push(token),
+                _ => {
+                    quoted = opens_quote(&token);
+                    words.push(token);
+                }
             }
         }
         if let Some(sources) = sources {
@@ -93,6 +104,29 @@ impl HumanSearch {
             time_limit,
         })
     }
+}
+
+/// Whether `token` leaves a double quote open (or closes an open one):
+/// an odd number of them.
+fn opens_quote(token: &str) -> bool {
+    token.matches('"').count() % 2 == 1
+}
+
+/// Whether `args` ask for help: `-h` or `--help` before `--` and outside
+/// double quotes.
+pub fn asks_help(args: &[String]) -> bool {
+    let mut quoted = false;
+    for arg in args {
+        if !quoted {
+            match arg.as_str() {
+                "--" => return false,
+                "-h" | "--help" => return true,
+                _ => {}
+            }
+        }
+        quoted ^= opens_quote(arg);
+    }
+    false
 }
 
 /// A shell argument as a query word: in double quotes when it has
@@ -175,6 +209,31 @@ mod tests {
             let err = parse(tokens).unwrap_err();
             assert!(err.contains(expected), "{tokens:?}: {err}");
         }
+    }
+
+    /// Words inside double quotes stay words even when they look like
+    /// options, as `/search` splits them (PR #49 review, item 3).
+    #[test]
+    fn quoted_words_are_not_options() {
+        let line = |text: &str| HumanSearch::parse(text.split_whitespace().map(str::to_string));
+        let search = line("\"run --all tests\"").unwrap();
+        assert!(!search.all);
+        let options = search
+            .options(Path::new("/w"), Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(options.query.terms(), ["run --all tests"]);
+        assert_eq!(options.folder.as_deref(), Some("/w"));
+
+        let search = line("\"fix --limit bug\"").unwrap();
+        assert_eq!(search.limit, DEFAULT_LIMIT);
+        assert_eq!(search.query, "\"fix --limit bug\"");
+
+        // Options outside the quotes still count; an unclosed quote runs
+        // to the end.
+        let search = line("--limit 2 \"a --session b\" --all c \"open --source x").unwrap();
+        assert_eq!((search.limit, search.all, search.session), (2, true, None));
+        assert_eq!(search.sources, SOURCES);
+        assert_eq!(search.query, "\"a --session b\" c \"open --source x");
     }
 
     #[test]

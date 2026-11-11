@@ -368,11 +368,7 @@ fn parse_sessions(mut args: impl Iterator<Item = String>) -> Result<Command> {
         ),
     }
     let args: Vec<String> = args.collect();
-    if args
-        .iter()
-        .take_while(|arg| *arg != "--")
-        .any(|arg| arg == "-h" || arg == "--help")
-    {
+    if crate::search::args::asks_help(&args) {
         return Ok(Command::SessionsHelp);
     }
     let search = crate::search::args::HumanSearch::parse(
@@ -604,6 +600,31 @@ mod tests {
             parse(&["-p", "sessions"]).unwrap(),
             run(Some("sessions"), SessionMode::New)
         );
+    }
+
+    /// Words inside double quotes stay words even when they look like
+    /// options or help (PR #49 review, item 3).
+    #[test]
+    fn sessions_search_keeps_quoted_option_words() {
+        let found = match parse(&["sessions", "search", "\"run", "--all", "tests\""]).unwrap() {
+            Command::SessionsSearch(search) => search,
+            other => panic!("{other:?}"),
+        };
+        assert!(!found.all);
+        assert_eq!(found.query, "\"run --all tests\"");
+        match parse(&[
+            "sessions", "search", "\"fix", "--help", "bug\"", "--limit", "2",
+        ])
+        .unwrap()
+        {
+            Command::SessionsSearch(search) => {
+                assert_eq!(
+                    (search.query.as_str(), search.limit),
+                    ("\"fix --help bug\"", 2)
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
