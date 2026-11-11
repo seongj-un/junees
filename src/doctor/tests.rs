@@ -1169,3 +1169,64 @@ async fn webhook_secrets_never_show() {
         assert_hidden(&report, "probe-hook");
     }
 }
+
+#[tokio::test]
+async fn folders_in_secrets_are_checked_inside() {
+    let fixture = Fixture::new();
+    fixture.write("secrets/gh/token", "x\n", 0o600);
+    fixture.write("secrets/gh/deeper/open", "x\n", 0o644);
+    let secrets = fixture.home.join("secrets");
+    mode(&secrets, 0o700);
+    mode(&secrets.join("gh"), 0o700);
+    mode(&secrets.join("gh/deeper"), 0o755);
+    // A link back up is looked at, not walked again.
+    std::os::unix::fs::symlink(secrets.join("gh"), secrets.join("gh/up")).unwrap();
+
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "state folder",
+        "secrets/gh/",
+        Status::Ok,
+        "mode 700",
+    );
+    expect(
+        &report,
+        "state folder",
+        "secrets/gh/token",
+        Status::Ok,
+        "mode 600",
+    );
+    expect(
+        &report,
+        "state folder",
+        "secrets/gh/up/",
+        Status::Ok,
+        "mode 700",
+    );
+    assert!(!has(&report, "state folder", "secrets/gh/up/token"));
+    expect(
+        &report,
+        "state folder",
+        "secrets/gh/deeper/",
+        Status::Fail,
+        "mode 755",
+    );
+    expect(
+        &report,
+        "state folder",
+        "secrets/gh/deeper/open",
+        Status::Fail,
+        "mode 644",
+    );
+
+    mode(&secrets.join("gh/deeper"), 0o700);
+    mode(&secrets.join("gh/deeper/open"), 0o600);
+    let report = fixture.run(false).await;
+    let failed: Vec<&Check> = report
+        .checks
+        .iter()
+        .filter(|check| check.area == "state folder" && check.status != Status::Ok)
+        .collect();
+    assert!(failed.is_empty(), "{}", report.text());
+}

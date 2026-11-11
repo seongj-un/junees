@@ -1,6 +1,7 @@
 //! The state folder: who may open it and the files that hold settings,
 //! programs or secrets; the size of the saved sessions.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -22,7 +23,8 @@ const PRIVATE_FILES: &[(&str, bool)] = &[
     ("webhooks/routes.json", false),
 ];
 
-/// `$JUNEES_HOME` (0700), its private files (0600) and `secrets/`.
+/// `$JUNEES_HOME` (0700), its private files (0600) and `secrets/` (its
+/// folders 0700, its files 0600).
 pub(super) fn state_folder(report: &mut Report, home: Option<&Path>) {
     let Some(home) = home else {
         report.warn(
@@ -43,14 +45,26 @@ pub(super) fn state_folder(report: &mut Report, home: Option<&Path>) {
     if !private_folder(report, &secrets, "secrets/", false) {
         return;
     }
-    let entries = match fs::read_dir(&secrets) {
+    let mut seen = HashSet::new();
+    if let Ok(metadata) = fs::metadata(&secrets) {
+        seen.insert((metadata.dev(), metadata.ino()));
+    }
+    secret_entries(report, &secrets, "secrets/", &mut seen);
+}
+
+/// Checks what is in the secrets folder `dir`, shown as `label` (ending in
+/// `/`): folders must be 0700 and are looked into (a webhook secret file
+/// may sit in one), everything else is a file that must be 0600. `seen`
+/// holds the folders looked into already, so a link back up ends there.
+fn secret_entries(report: &mut Report, dir: &Path, label: &str, seen: &mut HashSet<(u64, u64)>) {
+    let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) => {
             report.fail(
                 AREA,
-                "secrets/",
-                format!("cannot list {}: {err}", shown(&secrets)),
-                format!("make it yours and readable: chmod 700 {}", shown(&secrets)),
+                label,
+                format!("cannot list {}: {err}", shown(dir)),
+                format!("make it yours and readable: chmod 700 {}", shown(dir)),
             );
             return;
         }
@@ -61,12 +75,19 @@ pub(super) fn state_folder(report: &mut Report, home: Option<&Path>) {
         .collect();
     names.sort();
     for name in names {
-        private_file(
-            report,
-            &secrets.join(&name),
-            &format!("secrets/{name}"),
-            true,
-        );
+        let path = dir.join(&name);
+        let name = format!("{label}{name}");
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {
+                let folder = format!("{name}/");
+                if private_folder(report, &path, &folder, false)
+                    && seen.insert((metadata.dev(), metadata.ino()))
+                {
+                    secret_entries(report, &path, &folder, seen);
+                }
+            }
+            _ => private_file(report, &path, &name, true),
+        }
     }
 }
 
