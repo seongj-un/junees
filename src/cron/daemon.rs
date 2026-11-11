@@ -767,6 +767,15 @@ mod tests {
         let err = lock(home.path()).unwrap_err().to_string();
         assert!(err.contains("another `junees cron daemon`"), "{err}");
         drop(held);
-        assert!(!is_running(home.path()));
+        // A child forked by another test between fork and exec keeps a
+        // copy of the descriptor, so the lock may outlive `drop` briefly.
+        let start = std::time::Instant::now();
+        while is_running(home.path()) {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "the lock stayed taken after the daemon let it go"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }
