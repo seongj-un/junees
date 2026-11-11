@@ -34,6 +34,8 @@ pub struct Bash {
     policy: CommandPolicy,
     /// Without git credentials ([`super::strip_git_credentials`]).
     webhook: bool,
+    /// The run's GitHub CLI configuration folder ([`super::GhConfigDir`]).
+    gh_config_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Bash {
@@ -43,6 +45,7 @@ impl Default for Bash {
             hidden_env: Vec::new(),
             policy: CommandPolicy::default(),
             webhook: false,
+            gh_config_dir: None,
         }
     }
 }
@@ -69,13 +72,19 @@ impl Bash {
             .hide_env(CLAUDE_CODE_SECRET_ENV_VARS.iter().copied())
             .hide_env(settings.hidden_env.iter().cloned())
             .policy(CommandPolicy::with_settings(settings))
-            .without_git_credentials(settings.webhook)
+            .without_git_credentials(settings.webhook, settings.gh_config_dir.clone())
     }
 
     /// Runs commands without the user's git and GitHub CLI credentials
-    /// (a webhook run, [`ToolSettings::webhook`]).
-    pub fn without_git_credentials(mut self, webhook: bool) -> Self {
+    /// (a webhook run, [`ToolSettings::webhook`]), with `gh_config_dir`
+    /// as the GitHub CLI configuration folder.
+    pub fn without_git_credentials(
+        mut self,
+        webhook: bool,
+        gh_config_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         self.webhook = webhook;
+        self.gh_config_dir = gh_config_dir;
         self
     }
 
@@ -93,7 +102,7 @@ impl Bash {
             cmd.env_remove(name);
         }
         if self.webhook {
-            super::strip_git_credentials(&mut cmd);
+            super::strip_git_credentials(&mut cmd, self.gh_config_dir.as_deref());
         }
         cmd
     }
@@ -516,6 +525,25 @@ mod tests {
         );
         assert_eq!(get("GIT_CONFIG_VALUE_0"), Some(Some(String::new())));
         assert_eq!(get("GIT_TERMINAL_PROMPT"), Some(Some("0".into())));
+        assert_eq!(
+            get("GH_CONFIG_DIR"),
+            Some(Some(super::super::NO_GH_CONFIG_DIR.into()))
+        );
+        // The run's own GitHub CLI folder when it has one.
+        let gh = super::super::GhConfigDir::new().unwrap();
+        let own = Bash::with_settings(&ToolSettings {
+            webhook: true,
+            gh_config_dir: Some(gh.path().to_path_buf()),
+            ..ToolSettings::default()
+        })
+        .command("true");
+        assert!(
+            own.as_std().get_envs().any(
+                |(name, value)| name == "GH_CONFIG_DIR" && value == Some(gh.path().as_os_str())
+            ),
+            "{:?}",
+            own.as_std().get_envs().collect::<Vec<_>>()
+        );
         // Other runs keep them.
         let plain = Bash::with_settings(&ToolSettings::default()).command("true");
         assert!(
@@ -569,6 +597,92 @@ mod tests {
             "{}",
             webhook.content
         );
+    }
+
+    #[test]
+    fn a_runs_github_cli_folder_is_new_private_and_removed_after() {
+        use std::os::unix::fs::PermissionsExt;
+        let gh = super::super::GhConfigDir::new().unwrap();
+        let path = gh.path().to_path_buf();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
+        assert_ne!(super::super::GhConfigDir::new().unwrap().path(), path);
+        std::fs::write(path.join("config.yml"), "aliases: {}\n").unwrap();
+        drop(gh);
+        assert!(!path.exists());
+    }
+
+    /// The `gh` program on PATH, if any.
+    fn gh_program() -> Option<std::path::PathBuf> {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join("gh"))
+            .find(|path| path.is_file())
+    }
+
+    #[tokio::test]
+    async fn gh_has_no_login_in_a_webhook_runs_shell() {
+        // The review's probe with a real `gh`: it reads its login from
+        // ~/.config/gh/hosts.yml by itself. A fake HOME holds one with a
+        // fake token; nothing here reaches the network (no login means no
+        // API call, and `gh auth token` only reads the file).
+        let Some(gh) = gh_program() else {
+            eprintln!("skipped: no gh on PATH");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let hosts = home.path().join(".config/gh/hosts.yml");
+        std::fs::create_dir_all(hosts.parent().unwrap()).unwrap();
+        let token = "gho_junees0fake0token0for0tests0only00000";
+        std::fs::write(
+            &hosts,
+            format!("github.com:\n    oauth_token: {token}\n    user: fake\n"),
+        )
+        .unwrap();
+        let fake_home = |command: &mut Command| {
+            command
+                .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", home.path().join(".config"))
+                .env("GH_NO_UPDATE_NOTIFIER", "1")
+                .env("GH_PROMPT_DISABLED", "1")
+                .env_remove("GH_HOST");
+        };
+        // Control: this fake login is one gh reads.
+        let mut plain = Command::new(&gh);
+        plain
+            .args(["auth", "token"])
+            .stdin(Stdio::null())
+            .env_remove("GH_CONFIG_DIR");
+        for name in super::super::WEBHOOK_REMOVED_ENV {
+            plain.env_remove(name);
+        }
+        fake_home(&mut plain);
+        let out = plain.output().await.unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), token);
+
+        let dir = super::super::GhConfigDir::new().unwrap();
+        let bash = Bash::with_settings(&ToolSettings {
+            webhook: true,
+            gh_config_dir: Some(dir.path().to_path_buf()),
+            ..ToolSettings::default()
+        });
+        let script = format!(
+            "{gh} auth token; echo \"token exit=$?\"; {gh} auth status 2>&1; echo \"status exit=$?\"",
+            gh = gh.display()
+        );
+        let mut command = bash.command(&script);
+        fake_home(&mut command);
+        let out = command.output().await.unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!text.contains(token), "{text}");
+        assert!(!text.contains("token exit=0"), "{text}");
+        assert!(text.contains("not logged in"), "{text}");
+        assert!(!text.contains("status exit=0"), "{text}");
     }
 
     #[tokio::test]

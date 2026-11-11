@@ -376,9 +376,13 @@ async fn run_now(
         escape_hidden(&incoming.label()),
         escape_hidden(&route.dir.display().to_string())
     );
-    let (outcome, prompt, quiet) = match &route.flow {
-        Some(flow) => {
-            let report = flow_run(home, lookup, &route, flow, incoming, &cancel).await;
+    // gh in the run's commands finds no login there (removed after the run).
+    let gh_config = crate::tools::GhConfigDir::new()
+        .context("cannot make the run's GitHub CLI configuration folder");
+    let (outcome, prompt, quiet) = match (&route.flow, &gh_config) {
+        (_, Err(err)) => (Outcome::failed(format!("{err:#}")), None, false),
+        (Some(flow), Ok(gh)) => {
+            let report = flow_run(home, lookup, &route, flow, incoming, gh.path(), &cancel).await;
             let outcome = Outcome {
                 status: report.status,
                 answer: report.text(),
@@ -388,13 +392,13 @@ async fn run_now(
             };
             (outcome, report.prompt, report.quiet)
         }
-        None => {
+        (None, Ok(gh)) => {
             let prompt = run::prompt(&route, incoming);
             let outcome = match &prompt {
                 Err(err) => Outcome::failed(format!("cannot make the prompt: {err:#}")),
                 Ok(prompt) => match prepare(&hide_secrets(home, lookup), &route).await {
                     Ok((engine, limits)) => {
-                        run::execute(&*engine, &route, prompt, &cancel, limits).await
+                        run::execute(&*engine, &route, prompt, gh.path(), &cancel, limits).await
                     }
                     Err(err) => Outcome::failed(format!("{err:#}")),
                 },
@@ -402,6 +406,7 @@ async fn run_now(
             (outcome, prompt.ok(), false)
         }
     };
+    drop(gh_config);
     let ended = Ended {
         run_id,
         started_at,
@@ -486,6 +491,7 @@ async fn flow_run(
     route: &Route,
     flow: &crate::flow::FlowConfig,
     incoming: &Incoming,
+    gh_config: &Path,
     cancel: &Cancel,
 ) -> crate::flow::run::Report {
     let lookup = hide_secrets(home, lookup);
@@ -537,6 +543,7 @@ async fn flow_run(
         merge_setting,
         unattended: &unattended,
         hidden: &hidden,
+        gh_config,
         now: unix_now(),
     };
     crate::flow::run::handle(&cx, incoming).await

@@ -47,19 +47,30 @@ pub enum Trigger<'a> {
     Cron,
     /// A request to webhook route `route`, which is anyone's text: only
     /// the writes both its `github_allow` and the user's list allow.
+    /// `gh_config` is the run's empty GitHub CLI configuration folder
+    /// ([`crate::tools::GhConfigDir`]).
     Webhook {
         route: &'a str,
         github_allow: &'a [crate::github::Write],
+        gh_config: &'a Path,
     },
 }
 
 impl Trigger<'_> {
     /// The tool settings of a run with this trigger: a webhook run's bash
-    /// gets the webhook rules ([`ToolSettings::webhook`]).
+    /// gets the webhook rules ([`ToolSettings::webhook`]) and the run's
+    /// GitHub CLI configuration folder.
     pub fn tool_settings(&self, settings: &ToolSettings) -> ToolSettings {
-        ToolSettings {
-            webhook: matches!(self, Trigger::Webhook { .. }),
-            ..settings.clone()
+        match self {
+            Trigger::Cron => ToolSettings {
+                webhook: false,
+                ..settings.clone()
+            },
+            Trigger::Webhook { gh_config, .. } => ToolSettings {
+                webhook: true,
+                gh_config_dir: Some(gh_config.to_path_buf()),
+                ..settings.clone()
+            },
         }
     }
 }
@@ -250,6 +261,7 @@ impl ApiEngine {
             Trigger::Webhook {
                 route,
                 github_allow,
+                ..
             } => crate::github::register_webhook(
                 &mut tools,
                 &config.github,
@@ -644,6 +656,7 @@ mod tests {
             trigger: Trigger::Webhook {
                 route: "flow",
                 github_allow: allow,
+                gh_config: Path::new("/run/gh-config"),
             },
         };
         let (engine, _) = self::engine(home.path(), replies(), Duration::ZERO);
@@ -660,15 +673,20 @@ mod tests {
         );
         // A scheduled job's tools keep the user's settings.
         let settings = ToolSettings::default();
-        assert!(
-            Trigger::Webhook {
-                route: "flow",
-                github_allow: allow
-            }
-            .tool_settings(&settings)
-            .webhook
+        let webhook = Trigger::Webhook {
+            route: "flow",
+            github_allow: allow,
+            gh_config: Path::new("/run/gh-config"),
+        }
+        .tool_settings(&settings);
+        assert!(webhook.webhook);
+        assert_eq!(
+            webhook.gh_config_dir.as_deref(),
+            Some(Path::new("/run/gh-config"))
         );
-        assert!(!Trigger::Cron.tool_settings(&settings).webhook);
+        let cron = Trigger::Cron.tool_settings(&settings);
+        assert!(!cron.webhook);
+        assert_eq!(cron.gh_config_dir, None);
     }
 
     #[test]

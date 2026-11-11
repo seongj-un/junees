@@ -266,6 +266,7 @@ struct Setup<'a> {
 
 async fn run(setup: &Setup<'_>, incoming: &Incoming, now: i64) -> Report {
     let cancel = Cancel::new();
+    let gh = crate::tools::GhConfigDir::new().unwrap();
     let cx = Context {
         home: setup.home,
         route: setup.route,
@@ -280,6 +281,7 @@ async fn run(setup: &Setup<'_>, incoming: &Incoming, now: i64) -> Report {
         merge_setting: setup.merge,
         unattended: setup.unattended,
         hidden: &[],
+        gh_config: gh.path(),
         now,
     };
     handle(&cx, incoming).await

@@ -182,6 +182,7 @@ impl Config {
             }),
             approval_gate: false,
             webhook: false,
+            gh_config_dir: None,
         };
         let approval = ApprovalMode::parse(get("JUNEES_APPROVAL").as_deref())?;
 

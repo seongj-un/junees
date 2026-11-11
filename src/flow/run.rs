@@ -63,6 +63,10 @@ pub struct Context<'a> {
     pub unattended: &'a [Write],
     /// Variables the test command does not get (`hidden_env`).
     pub hidden: &'a [String],
+    /// The run's empty GitHub CLI configuration folder
+    /// ([`crate::tools::GhConfigDir`]) for the model's commands and the
+    /// test command.
+    pub gh_config: &'a Path,
     pub now: i64,
 }
 
@@ -415,6 +419,7 @@ async fn model_run(
         trigger: Trigger::Webhook {
             route: &cx.route.name,
             github_allow: allow,
+            gh_config: cx.gh_config,
         },
     };
     let outcome = engine.run(&spec, cx.cancel, cx.limits).await;

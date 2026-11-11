@@ -77,27 +77,68 @@ pub const WEBHOOK_REMOVED_ENV: &[&str] = &[
 /// Variables set on a webhook run's shell ([`strip_git_credentials`]): an
 /// empty `credential.helper` with command-line scope, which empties the
 /// list of helpers every config file set (git-config(1), "credential.helper";
-/// gitcredentials(7)); no terminal prompt for a password; and a GitHub CLI
-/// configuration folder that does not exist, so `gh` has no login (its
-/// `gh auth git-credential` helper and `gh auth token` included).
+/// gitcredentials(7)), and no terminal prompt for a password.
 pub const WEBHOOK_SET_ENV: &[(&str, &str)] = &[
     ("GIT_CONFIG_COUNT", "1"),
     ("GIT_CONFIG_KEY_0", "credential.helper"),
     ("GIT_CONFIG_VALUE_0", ""),
     ("GIT_TERMINAL_PROMPT", "0"),
-    ("GH_CONFIG_DIR", "/nonexistent/junees-webhook-run"),
 ];
 
+/// The GitHub CLI configuration folder of a webhook run's commands when
+/// the run has no [`GhConfigDir`] of its own (tests): a folder that does
+/// not exist, so `gh` has no login either.
+pub const NO_GH_CONFIG_DIR: &str = "/nonexistent/junees-webhook-run";
+
+/// An empty, private (0700) GitHub CLI configuration folder for one
+/// webhook run, removed when dropped. `gh` reads its login (hosts.yml)
+/// from `GH_CONFIG_DIR`, so with this folder it has none: `gh auth token`,
+/// `gh auth git-credential` and every API call run without the user's
+/// token ([`strip_git_credentials`]).
+#[derive(Debug)]
+pub struct GhConfigDir(std::path::PathBuf);
+
+impl GhConfigDir {
+    /// A new folder `junees-gh-<random>` in the temporary folder.
+    pub fn new() -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        let path =
+            std::env::temp_dir().join(format!("junees-gh-{}", crate::cron::store::random_hex(16)));
+        // Fails when the name is taken: never a folder someone else made.
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self(path))
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for GhConfigDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Takes the user's git and GitHub CLI credentials away from `command`, a
-/// shell (or the claude-code backend) of a webhook run: the flow pushes
-/// with them itself, the model must not.
-pub fn strip_git_credentials(command: &mut tokio::process::Command) {
+/// shell, the claude-code backend or the test command of a webhook run:
+/// the flow pushes with them itself, the model and the code it changed
+/// must not. `gh_config_dir` is the run's [`GhConfigDir`]
+/// ([`NO_GH_CONFIG_DIR`] when `None`).
+pub fn strip_git_credentials(
+    command: &mut tokio::process::Command,
+    gh_config_dir: Option<&std::path::Path>,
+) {
     for name in WEBHOOK_REMOVED_ENV {
         command.env_remove(name);
     }
     for (name, value) in WEBHOOK_SET_ENV {
         command.env(name, value);
     }
+    command.env(
+        "GH_CONFIG_DIR",
+        gh_config_dir.unwrap_or(std::path::Path::new(NO_GH_CONFIG_DIR)),
+    );
 }
 
 /// User settings for the default tools, read by [`crate::config::Config`].
@@ -129,6 +170,9 @@ pub struct ToolSettings {
     /// and GitHub CLI credentials ([`strip_git_credentials`]); the flow
     /// code pushes by itself.
     pub webhook: bool,
+    /// The webhook run's empty GitHub CLI configuration folder
+    /// ([`GhConfigDir`]), set by [`crate::cron::run::Trigger::tool_settings`].
+    pub gh_config_dir: Option<std::path::PathBuf>,
 }
 
 /// What a tool hands back to the model. Failures are reported as output with

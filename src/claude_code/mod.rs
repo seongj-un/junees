@@ -485,7 +485,7 @@ impl ClaudeCode {
         }
         if settings.webhook {
             // Claude Code's Bash tool inherits this environment.
-            crate::tools::strip_git_credentials(&mut command);
+            crate::tools::strip_git_credentials(&mut command, settings.gh_config_dir.as_deref());
         }
         command
     }
