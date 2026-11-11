@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use super::store::{Job, RunStatus};
+use super::store::RunStatus;
 use crate::gateway::config::{self as discord, DiscordConfig, Token};
 use crate::gateway::rest::Rest;
 use crate::gateway::split::{MESSAGE_LIMIT, split_message};
@@ -83,7 +83,11 @@ pub type Lookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// What a run produced, for delivery.
 pub struct Report<'a> {
-    pub job: &'a Job,
+    /// What ran: `cron` or `webhook`.
+    pub source: &'a str,
+    /// The job or route.
+    pub label: &'a str,
+    pub deliver: &'a Delivery,
     pub status: RunStatus,
     /// The final answer (may be empty).
     pub answer: &'a str,
@@ -95,8 +99,12 @@ pub struct Report<'a> {
 impl Report<'_> {
     /// The first line of every delivery: which job and how it went.
     pub fn headline(&self) -> String {
-        let label = escape_hidden(self.job.label()).replace('`', "'");
-        let mut line = format!("**junees cron** `{label}`: {}", self.status.word());
+        let label = escape_hidden(self.label).replace('`', "'");
+        let mut line = format!(
+            "**junees {}** `{label}`: {}",
+            self.source,
+            self.status.word()
+        );
         if !self.note.is_empty() {
             let note = escape_hidden(self.note).replace('`', "'");
             let note = crate::cli::preview(&note, 300);
@@ -117,7 +125,7 @@ impl Report<'_> {
 
 /// Delivers `report` as its job asks. `Err` says why it did not arrive.
 pub async fn deliver(lookup: &Lookup, report: &Report<'_>) -> Result<()> {
-    match &report.job.deliver {
+    match report.deliver {
         Delivery::Local => Ok(()),
         Delivery::Webhook => {
             let notifier = Notifier::from_lookup(|key| lookup(key))?;
@@ -284,7 +292,9 @@ pub(crate) mod tests {
             ("JUNEES_DISCORD_API_URL", &url),
         ]);
         let report = Report {
-            job: &job,
+            source: "cron",
+            label: job.label(),
+            deliver: &job.deliver,
             status: RunStatus::Failed,
             answer: "partial 답",
             note: "time limit reached",
@@ -313,7 +323,9 @@ pub(crate) mod tests {
         job.deliver = Delivery::Discord("42".into());
         let answer = "줄\n".repeat(6000);
         let report = Report {
-            job: &job,
+            source: "cron",
+            label: job.label(),
+            deliver: &job.deliver,
             status: RunStatus::Ok,
             answer: &answer,
             note: "",
@@ -338,7 +350,9 @@ pub(crate) mod tests {
         let mut job = job("0123abcd", Schedule::Once { at: 1 }, None);
         job.deliver = Delivery::Webhook;
         let report = Report {
-            job: &job,
+            source: "cron",
+            label: job.label(),
+            deliver: &job.deliver,
             status: RunStatus::Ok,
             answer: "done",
             note: "",
@@ -365,7 +379,7 @@ pub(crate) mod tests {
         let mut job = job.clone();
         job.deliver = Delivery::Discord("42".into());
         let report = Report {
-            job: &job,
+            deliver: &job.deliver,
             ..report
         };
         let err = deliver(&lookup(&[]), &report).await.unwrap_err();
