@@ -7,7 +7,10 @@
 //! (a merge every time, "always" does not cover it). Where no one is asked
 //! (`-p`, scheduled runs, `JUNEES_APPROVAL=off`) only the writes
 //! `JUNEES_GITHUB_ALLOW_UNATTENDED` names run, and only when
-//! `JUNEES_GITHUB_REPOS` is set. Every action is limited to
+//! `JUNEES_GITHUB_REPOS` is set. A webhook run is started by text anyone
+//! can write (PR bodies, comments), so it gets no unattended write unless
+//! its route allows it too (`junees webhook add --github-allow`,
+//! [`register_webhook`]). Every action is limited to
 //! the repositories of `JUNEES_GITHUB_REPOS`, or to the working folder's
 //! `origin` when that is empty. What GitHub sends back (titles, bodies,
 //! comments, diffs) is written by other people, so the tool marks it as
@@ -26,6 +29,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use client::Client;
@@ -68,8 +72,10 @@ impl fmt::Debug for Token {
     }
 }
 
-/// A write the tool can make, as `JUNEES_GITHUB_ALLOW_UNATTENDED` names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A write the tool can make, as `JUNEES_GITHUB_ALLOW_UNATTENDED` and a
+/// webhook route's `--github-allow` name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Write {
     /// `pr_comment` and `review_reply`.
     Comment,
@@ -102,6 +108,31 @@ impl Write {
 
     fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|write| write.name() == name)
+    }
+
+    /// A comma-separated list of writes (any case); `what` names the
+    /// setting in the error.
+    pub fn parse_list(text: &str, what: &str) -> Result<Vec<Self>> {
+        let mut writes = Vec::new();
+        for item in list(Some(text.to_string())) {
+            let write = Self::parse(&item.to_ascii_lowercase()).with_context(|| {
+                let names: Vec<_> = Self::ALL.iter().map(|write| write.name()).collect();
+                format!("{what}: unknown write `{item}` (use {})", names.join(", "))
+            })?;
+            if !writes.contains(&write) {
+                writes.push(write);
+            }
+        }
+        Ok(writes)
+    }
+
+    /// `comment, review`, or `none`.
+    pub fn join(writes: &[Self]) -> String {
+        if writes.is_empty() {
+            return "none".into();
+        }
+        let names: Vec<_> = writes.iter().map(|write| write.name()).collect();
+        names.join(", ")
     }
 }
 
@@ -191,17 +222,10 @@ impl Settings {
                 .with_context(|| format!("{REPOS_ENV}: `{item}` is not owner/name"))?;
             repos.push(repo);
         }
-        let mut unattended = Vec::new();
-        for item in list(get(UNATTENDED_ENV)) {
-            let write = Write::parse(&item.to_ascii_lowercase()).with_context(|| {
-                let names: Vec<_> = Write::ALL.iter().map(|write| write.name()).collect();
-                format!(
-                    "{UNATTENDED_ENV}: unknown write `{item}` (use {})",
-                    names.join(", ")
-                )
-            })?;
-            unattended.push(write);
-        }
+        let unattended = match get(UNATTENDED_ENV) {
+            Some(text) => Write::parse_list(&text, UNATTENDED_ENV)?,
+            None => Vec::new(),
+        };
         Ok(Self {
             token,
             api_url,
@@ -279,11 +303,32 @@ impl Settings {
 /// cannot widen them; a later run reads the origin again, which is why
 /// writes without a question need the list.
 pub fn register(tools: &mut ToolRegistry, settings: &Settings, cwd: &Path, asks: bool) {
-    let Some(token) = &settings.token else {
-        return;
-    };
+    if let Some(tool) = tool(settings, cwd, asks) {
+        tools.register(tool);
+    }
+}
+
+/// Registers the `github` tool for a run of webhook route `route`. No one
+/// is asked there, and the request that started it (PR bodies, comments)
+/// is anyone's text, so a write runs only when both the route's
+/// `--github-allow` (`allow`) and the user's
+/// JUNEES_GITHUB_ALLOW_UNATTENDED allow it: none by default.
+pub fn register_webhook(
+    tools: &mut ToolRegistry,
+    settings: &Settings,
+    cwd: &Path,
+    route: &str,
+    allow: &[Write],
+) {
+    if let Some(tool) = tool(settings, cwd, false) {
+        tools.register(tool.for_webhook(route, allow));
+    }
+}
+
+fn tool(settings: &Settings, cwd: &Path, asks: bool) -> Option<GithubTool> {
+    let token = settings.token.as_ref()?;
     match Client::new(&settings.api_url, token.clone()) {
-        Ok(client) => tools.register(
+        Ok(client) => Some(
             GithubTool::new(
                 client,
                 settings.origin(cwd),
@@ -293,7 +338,10 @@ pub fn register(tools: &mut ToolRegistry, settings: &Settings, cwd: &Path, asks:
             )
             .origin_only(settings.repos.is_empty()),
         ),
-        Err(err) => eprintln!("  !! github tool not available: {err:#}"),
+        Err(err) => {
+            eprintln!("  !! github tool not available: {err:#}");
+            None
+        }
     }
 }
 

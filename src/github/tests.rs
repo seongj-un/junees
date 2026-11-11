@@ -959,6 +959,99 @@ async fn without_a_question_only_the_allowed_writes_run() {
 }
 
 #[tokio::test]
+async fn webhook_runs_write_only_what_the_route_and_the_settings_allow() {
+    let fake = Fake::start(vec![
+        (
+            "POST /repos/o/n/issues/7/comments",
+            vec![reply(201, json!({"id": 1}))],
+        ),
+        (
+            "POST /repos/o/n/pulls/7/reviews",
+            vec![reply(200, json!({"id": 2, "state": "x"}))],
+        ),
+        (
+            "PUT /repos/o/n/pulls/7/merge",
+            vec![reply(200, json!({"sha": "s"}))],
+        ),
+    ])
+    .await;
+    let comment = json!({"action": "pr_comment", "number": 7, "body": "hi"});
+    let review = json!({"action": "review", "number": 7, "event": "COMMENT", "body": "ok"});
+    let merge = json!({"action": "merge", "number": 7, "sha": HEAD});
+    let every = Write::ALL;
+
+    // The user allows every write unattended; a route without
+    // --github-allow still writes nothing.
+    let none = fake.tool(false, &every).for_webhook("pr", &[]);
+    for input in [&comment, &review, &merge] {
+        let output = run(&none, input.clone()).await;
+        assert!(output.is_error, "{input}");
+        assert!(
+            output.content.contains("this is a webhook run")
+                && output.content.contains("webhook route `pr`")
+                && output.content.contains("--github-allow`, now: none)"),
+            "{}",
+            output.content
+        );
+    }
+    assert!(fake.seen().is_empty());
+
+    // Both lists must allow a write: the route allows comment and merge,
+    // the user comment and review.
+    let route = [Write::Comment, Write::Merge];
+    let both = fake
+        .tool(false, &[Write::Comment, Write::Review])
+        .for_webhook("pr", &route);
+    assert!(!run(&both, comment.clone()).await.is_error);
+    for input in [&review, &merge] {
+        let output = run(&both, input.clone()).await;
+        assert!(output.is_error, "{input}");
+        assert!(
+            output.content.contains(
+                "now: comment, merge) and the user's JUNEES_GITHUB_ALLOW_UNATTENDED \
+                           (github_allow_unattended, now: comment, review)"
+            ),
+            "{}",
+            output.content
+        );
+    }
+    assert_eq!(fake.targets(), ["POST /repos/o/n/issues/7/comments"]);
+
+    // The repository list is still needed.
+    let origin_only = fake
+        .tool(false, &every)
+        .for_webhook("pr", &every)
+        .origin_only(true);
+    assert!(
+        run(&origin_only, comment.clone())
+            .await
+            .content
+            .contains("need the user's JUNEES_GITHUB_REPOS")
+    );
+    assert_eq!(fake.seen().len(), 1);
+}
+
+#[test]
+fn write_lists_parse_like_the_setting() {
+    assert_eq!(
+        Write::parse_list(" Comment, review,,comment ", "--github-allow").unwrap(),
+        [Write::Comment, Write::Review]
+    );
+    let err = Write::parse_list("comment,delete", "--github-allow")
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        err,
+        "--github-allow: unknown write `delete` (use comment, review, approve, pr_create, merge)"
+    );
+    assert_eq!(Write::join(&[]), "none");
+    assert_eq!(
+        serde_json::to_value([Write::PrCreate, Write::Approve]).unwrap(),
+        json!(["pr_create", "approve"])
+    );
+}
+
+#[tokio::test]
 async fn only_allowed_repositories_are_used() {
     let fake = Fake::start(vec![("GET /repos/O/N/pulls", vec![reply(200, json!([]))])]).await;
     let tool = fake.tool(true, &[]);

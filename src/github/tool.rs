@@ -215,6 +215,9 @@ pub struct GithubTool {
     /// Whether `allowed` is the working folder's origin, not the user's
     /// JUNEES_GITHUB_REPOS: then no write runs without a question.
     origin_only: bool,
+    /// In a webhook run: the route's name and the writes it allows. A
+    /// write without a question then needs both lists.
+    webhook: Option<(String, Vec<Write>)>,
 }
 
 impl GithubTool {
@@ -232,7 +235,15 @@ impl GithubTool {
             asks,
             unattended,
             origin_only: false,
+            webhook: None,
         }
+    }
+
+    /// Makes this the tool of a run of webhook route `route`, which allows
+    /// the writes `allow` (`junees webhook add --github-allow`).
+    pub fn for_webhook(mut self, route: &str, allow: &[Write]) -> Self {
+        self.webhook = Some((route.to_string(), allow.to_vec()));
+        self
     }
 
     /// Says that the allowed repositories come from the working folder's
@@ -265,6 +276,21 @@ impl GithubTool {
         if let Some(write) = action.write(input)
             && !self.asks
         {
+            if let Some((route, allow)) = &self.webhook
+                && !(allow.contains(&write) && self.unattended.contains(&write))
+            {
+                return Err(format!(
+                    "not run: `{}` writes to GitHub and no one is asked here: this is a webhook \
+                     run, started by text anyone can write (pull request bodies, comments). A \
+                     write runs only when both webhook route `{route}` (`junees webhook add \
+                     --github-allow`, now: {}) and the user's JUNEES_GITHUB_ALLOW_UNATTENDED \
+                     (github_allow_unattended, now: {}) allow `{}`",
+                    action.name(),
+                    Write::join(allow),
+                    Write::join(&self.unattended),
+                    write.name()
+                ));
+            }
             if !self.unattended.contains(&write) {
                 return Err(format!(
                     "not run: `{}` writes to GitHub and no one is asked here (-p, scheduled \
