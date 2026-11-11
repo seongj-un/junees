@@ -75,9 +75,23 @@ pub fn is_serving(home: &Path) -> bool {
     }
 }
 
+/// Recent results shown per flow route.
+const FLOW_RECENT: usize = 5;
+
 /// The routes as text: name, kind, events, and with `detail` the secret's
 /// place, prompt (shortened), folder and destination too.
 pub fn overview(routes: &[Route], tz: &TimeZone, detail: bool) -> String {
+    overview_with(routes, tz, detail, &|_| Vec::new())
+}
+
+/// [`overview`] with the recent results of each flow route (`recent`
+/// gives them by route name, newest last).
+pub fn overview_with(
+    routes: &[Route],
+    tz: &TimeZone,
+    detail: bool,
+    recent: &dyn Fn(&str) -> Vec<crate::flow::state::Handled>,
+) -> String {
     if routes.is_empty() {
         return "(no webhook routes; add one with `junees webhook add <name> --prompt \"...\"`)\n"
             .to_string();
@@ -85,7 +99,14 @@ pub fn overview(routes: &[Route], tz: &TimeZone, detail: bool) -> String {
     let mut out = String::new();
     for route in routes {
         let mut line = format!("{} ({})", route.name, route.kind.word());
-        if route.events.is_empty() {
+        if let Some(flow) = &route.flow {
+            line = format!(
+                "{} (github flow on {}): {}",
+                route.name,
+                flow.repo,
+                flow.actions()
+            );
+        } else if route.events.is_empty() {
             line.push_str(": every event");
         } else {
             line.push_str(&format!(": {}", route.events.join(", ")));
@@ -124,14 +145,35 @@ pub fn overview(routes: &[Route], tz: &TimeZone, detail: bool) -> String {
             out.push_str(&line);
             out.push('\n');
         }
+        if route.flow.is_some() {
+            let handled = recent(&route.name);
+            for item in handled.iter().rev().take(FLOW_RECENT) {
+                out.push_str(&format!(
+                    "  #{} {}: {} ({})\n",
+                    item.pr,
+                    item.action.word(),
+                    crate::cli::preview(&escape_hidden(&item.result), 160),
+                    tz.format(item.at)
+                ));
+            }
+        }
         if detail {
             let secret = route
                 .secret
                 .as_ref()
                 .map_or_else(|| "none".to_string(), |secret| secret.describe());
+            let prompt = match &route.flow {
+                Some(flow) => flow_settings(flow),
+                None => crate::cli::preview(&escape_hidden(&route.prompt), PROMPT_PREVIEW),
+            };
             out.push_str(&format!(
-                "  prompt: {}\n  folder: {}, deliver: {}, secret: {}\n",
-                crate::cli::preview(&escape_hidden(&route.prompt), PROMPT_PREVIEW),
+                "  {}: {}\n  folder: {}, deliver: {}, secret: {}\n",
+                if route.flow.is_some() {
+                    "flow"
+                } else {
+                    "prompt"
+                },
+                prompt,
                 escape_hidden(&route.dir.display().to_string()),
                 route.deliver,
                 escape_hidden(&secret)
@@ -139,6 +181,28 @@ pub fn overview(routes: &[Route], tz: &TimeZone, detail: bool) -> String {
         }
     }
     out
+}
+
+/// A flow's settings for the detailed listing.
+fn flow_settings(flow: &crate::flow::FlowConfig) -> String {
+    let mut parts = vec!["prompts in $JUNEES_HOME/flows/".to_string()];
+    if flow.address_reviews {
+        parts.push(match &flow.test_cmd {
+            Some(command) => format!("test `{}`", escape_hidden(command)),
+            None => "no test command".to_string(),
+        });
+    }
+    if flow.merge_when_ready {
+        parts.push(format!("{} approval(s)", flow.min_approvals));
+        if flow.allow_self_review {
+            parts.push("own review counts".to_string());
+        }
+    }
+    if flow.re_review {
+        parts.push("re-review".to_string());
+    }
+    parts.push(format!("{} runs/hour per PR", flow.max_runs_per_hour));
+    parts.join(", ")
 }
 
 /// The listing of `/webhooks` and `!webhooks`.
@@ -155,9 +219,26 @@ pub fn listing(
         Ok(routes) => routes,
         Err(err) => return format!("cannot read the webhook routes: {err:#}\n"),
     };
-    let mut out = overview(&routes, &tz, detail);
+    let recent = |name: &str| {
+        crate::flow::state::route_state(home, name)
+            .map(|state| state.recent)
+            .unwrap_or_default()
+    };
+    let mut out = overview_with(&routes, &tz, detail, &recent);
     if routes.iter().any(|route| !route.github_allow.is_empty()) {
         out.push_str(&github_line(lookup));
+    }
+    if routes.iter().any(|route| {
+        route
+            .flow
+            .as_ref()
+            .is_some_and(|flow| flow.merge_when_ready)
+    }) {
+        out.push_str(&match crate::flow::merge_enabled(lookup) {
+            Ok(true) => "(github flows merge: github_flow_merge is on)\n".to_string(),
+            Ok(false) => "(github flows do not merge until github_flow_merge = true)\n".to_string(),
+            Err(err) => format!("({err:#})\n"),
+        });
     }
     if !routes.is_empty() && !is_serving(home) {
         out.push_str("(no `junees webhook serve` is running: requests are not received)\n");
