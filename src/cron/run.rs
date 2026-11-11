@@ -31,7 +31,7 @@ use crate::provider::anthropic::AnthropicProvider;
 use crate::session::{self, SessionWriter};
 use crate::skills;
 use crate::task::budget::{format_duration, tokens};
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ToolSettings};
 
 /// Added to the system prompt of every job.
 pub const CRON_NOTE: &str = "\n\nYou are running a scheduled job (`junees cron`), \
@@ -51,6 +51,17 @@ pub enum Trigger<'a> {
         route: &'a str,
         github_allow: &'a [crate::github::Write],
     },
+}
+
+impl Trigger<'_> {
+    /// The tool settings of a run with this trigger: a webhook run's bash
+    /// gets the webhook rules ([`ToolSettings::webhook`]).
+    pub fn tool_settings(&self, settings: &ToolSettings) -> ToolSettings {
+        ToolSettings {
+            webhook: matches!(self, Trigger::Webhook { .. }),
+            ..settings.clone()
+        }
+    }
 }
 
 /// What one unattended run does.
@@ -231,7 +242,7 @@ impl ApiEngine {
         let dir = spec.dir;
         let home = config.home.as_deref();
         let memory = home.map(|home| Memory::for_folder(home, dir, config.memory));
-        let mut tools = ToolRegistry::with_defaults(&config.tools);
+        let mut tools = ToolRegistry::with_defaults(&spec.trigger.tool_settings(&config.tools));
         skills::register(&mut tools, home, false);
         mcp.register(&mut tools);
         match spec.trigger {
@@ -369,7 +380,7 @@ impl Engine for ClaudeEngine {
         let mut chat = Chat::new(
             self.claude.clone(),
             spec.dir.to_path_buf(),
-            config.tools.clone(),
+            spec.trigger.tool_settings(&config.tools),
             config.max_turns,
             cancel.clone(),
         );
@@ -606,6 +617,58 @@ mod tests {
         cancel.cancel();
         let outcome = slow.run(&job.spec(), &cancel, limits()).await;
         assert_eq!(outcome.note, "interrupted");
+    }
+
+    #[tokio::test]
+    async fn webhook_runs_refuse_git_push_in_bash() {
+        let home = tempfile::tempdir().unwrap();
+        let call = |id: &str| ContentBlock::ToolUse {
+            id: id.into(),
+            name: "bash".into(),
+            // A remote that does not exist: harmless should the rule fail.
+            input: serde_json::json!({"command": "git push /nonexistent-junees-remote HEAD:main"}),
+        };
+        let replies = || {
+            vec![
+                reply(vec![call("t1")], StopReason::ToolUse),
+                reply(vec![ContentBlock::text("done")], StopReason::EndTurn),
+            ]
+        };
+        let allow: &[crate::github::Write] = &[];
+        let webhook = Spec {
+            prompt: "push it",
+            dir: home.path(),
+            source: session::WEBHOOK,
+            channel: "flow",
+            note: "",
+            trigger: Trigger::Webhook {
+                route: "flow",
+                github_allow: allow,
+            },
+        };
+        let (engine, _) = self::engine(home.path(), replies(), Duration::ZERO);
+        let outcome = engine.run(&webhook, &Cancel::new(), limits()).await;
+        assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
+        let session = outcome.session.unwrap();
+        let path = session::sessions_dir(home.path()).join(format!("{session}.jsonl"));
+        let journal = std::fs::read_to_string(path).unwrap();
+        assert!(
+            journal.contains(
+                "blocked by policy: `git push` is not allowed: this run was started by a webhook"
+            ),
+            "{journal}"
+        );
+        // A scheduled job's tools keep the user's settings.
+        let settings = ToolSettings::default();
+        assert!(
+            Trigger::Webhook {
+                route: "flow",
+                github_allow: allow
+            }
+            .tool_settings(&settings)
+            .webhook
+        );
+        assert!(!Trigger::Cron.tool_settings(&settings).webhook);
     }
 
     #[test]

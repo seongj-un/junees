@@ -180,6 +180,7 @@ impl Config {
                 SettingsFile::new(path, get("HOME").map(|home| PathBuf::from(home.trim())))
             }),
             approval_gate: false,
+            webhook: false,
         };
         let approval = ApprovalMode::parse(get("JUNEES_APPROVAL").as_deref())?;
 

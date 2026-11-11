@@ -81,6 +81,12 @@ pub struct ToolSettings {
     /// of refusing them. Off for `-p`, task mode and
     /// scheduled runs, where no one is asked.
     pub approval_gate: bool,
+    /// The run was started by a webhook request, a GitHub flow step
+    /// included: anyone's text drives it. bash refuses `git push` and
+    /// the other git commands that publish commits, change the
+    /// repository's git configuration or reach git credentials
+    /// ([`CommandPolicy::webhook_run`]); the flow code pushes by itself.
+    pub webhook: bool,
 }
 
 /// What a tool hands back to the model. Failures are reported as output with

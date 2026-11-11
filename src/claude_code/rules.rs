@@ -62,6 +62,26 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
         rules.push(format!("Bash({command})"));
         rules.push(format!("Bash({command} *)"));
     }
+    if settings.webhook {
+        // A webhook run (anyone's text): no push, no change of git's
+        // configuration, no credentials, no aliases from `-c` (Junees's
+        // own bash allows reading the configuration; these rules cannot
+        // tell reading from writing).
+        for rule in [
+            "git push",
+            "git push *",
+            "git -C * push*",
+            "git send-pack *",
+            "git subtree push *",
+            "git config *",
+            "git -C * config *",
+            "git credential*",
+            "git-credential*",
+            "git -c *",
+        ] {
+            rules.push(format!("Bash({rule})"));
+        }
+    }
     for prefix in &settings.deny_commands {
         rules.push(format!("Bash({prefix} *)"));
     }
@@ -210,5 +230,26 @@ mod tests {
         let mut settings = settings;
         settings.allow_dangerous = false;
         assert_eq!(deny_rules(&settings).last().unwrap(), "Bash(docker rm *)");
+        assert!(
+            !deny_rules(&settings)
+                .iter()
+                .any(|rule| rule == "Bash(git push *)")
+        );
+        // Webhook runs: no push, git configuration or credentials, even
+        // with the built-in rules off.
+        settings.webhook = true;
+        settings.allow_dangerous = true;
+        let rules = deny_rules(&settings);
+        for rule in [
+            "Bash(git push)",
+            "Bash(git push *)",
+            "Bash(git -C * push*)",
+            "Bash(git send-pack *)",
+            "Bash(git config *)",
+            "Bash(git credential*)",
+            "Bash(git -c *)",
+        ] {
+            assert!(rules.iter().any(|r| r == rule), "{rule} missing");
+        }
     }
 }
