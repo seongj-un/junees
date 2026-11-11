@@ -15,6 +15,7 @@ pub mod flock;
 pub mod flow;
 pub mod gateway;
 pub mod github;
+pub mod images;
 pub mod mcp;
 pub mod memory;
 pub mod message;
