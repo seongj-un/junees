@@ -74,6 +74,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("github_api_url", "JUNEES_GITHUB_API_URL"),
     ("github_repos", "JUNEES_GITHUB_REPOS"),
     ("github_allow_unattended", "JUNEES_GITHUB_ALLOW_UNATTENDED"),
+    ("github_flow_merge", "JUNEES_GITHUB_FLOW_MERGE"),
 ];
 
 const HEADER: &str = "\

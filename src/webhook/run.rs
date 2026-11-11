@@ -277,6 +277,7 @@ fn render(
             out.push_str(prompt.trim_end());
             out.push('\n');
         }
+        None if route.flow.is_some() => out.push_str("(none: no model run)\n"),
         None => out.push_str("(none: the run ended before it was made)\n"),
     }
     out.push_str("\n## Answer\n\n");

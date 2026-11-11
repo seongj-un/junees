@@ -98,6 +98,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
         holds: "the webhook routes and their output",
         tool: None,
     },
+    DataFolder {
+        name: "flows",
+        holds: "the GitHub flow prompts and state",
+        tool: None,
+    },
 ];
 
 impl DataFolder {
@@ -815,6 +820,7 @@ mod tests {
             (".junees/skills/new/SKILL.md", "skills"),
             (".junees/cron/jobs.json", "cron"),
             (".junees/webhooks/routes.json", "webhooks"),
+            (".junees/flows/review.md", "flows"),
             ("link", "memory"),
             ("dirlink/notes.md", "memory"),
             ("dangling", "skills"),

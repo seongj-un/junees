@@ -10,6 +10,7 @@ pub mod config_file;
 pub mod context;
 pub mod cron;
 pub mod flock;
+pub mod flow;
 pub mod gateway;
 pub mod github;
 pub mod mcp;

@@ -13,8 +13,12 @@ use serde::{Deserialize, Serialize};
 use crate::cron::deliver::Delivery;
 use crate::cron::store::{LastRun, lock_file, read_private, write_private};
 
-/// The format of routes.json this build writes; newer ones are refused.
-pub const FORMAT: u32 = 1;
+/// The newest format of routes.json this build reads; newer ones are
+/// refused. It writes 2 only when a route holds a GitHub flow, so older
+/// builds refuse those routes instead of running them as plain prompts.
+pub const FORMAT: u32 = 2;
+/// The format of routes.json without flows.
+const PLAIN_FORMAT: u32 = 1;
 
 /// Longest route name.
 pub const NAME_CHARS: usize = 64;
@@ -131,6 +135,10 @@ pub struct Route {
     /// JUNEES_GITHUB_ALLOW_UNATTENDED, which must allow them too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub github_allow: Vec<crate::github::Write>,
+    /// A GitHub pull request flow (`junees webhook add-github`) run
+    /// instead of the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<crate::flow::FlowConfig>,
 }
 
 impl Route {
@@ -255,8 +263,13 @@ impl Store {
 
 impl Locked {
     pub fn save(&self) -> Result<()> {
+        let format = if self.routes.iter().any(|route| route.flow.is_some()) {
+            FORMAT
+        } else {
+            PLAIN_FORMAT
+        };
         let text = serde_json::to_string_pretty(&File_ {
-            format: FORMAT,
+            format,
             routes: self.routes.clone(),
         })?;
         write_private(&self.path, &text)
@@ -310,6 +323,7 @@ pub(crate) mod tests {
             last: None,
             last_event: None,
             github_allow: Vec::new(),
+            flow: None,
         }
     }
 
@@ -325,6 +339,8 @@ pub(crate) mod tests {
         assert_eq!(store.routes().unwrap(), [route("pr")]);
         let text = std::fs::read_to_string(store.path()).unwrap();
         assert!(text.contains(r#""env": "TEST_HOOK_SECRET""#), "{text}");
+        assert!(text.contains(r#""format": 1"#), "{text}");
+        assert!(!text.contains("flow"), "{text}");
         let mode = std::fs::metadata(store.path())
             .unwrap()
             .permissions()
@@ -344,7 +360,7 @@ pub(crate) mod tests {
                 .contains("no route")
         );
         drop(locked);
-        std::fs::write(store.path(), r#"{"format": 2, "routes": []}"#).unwrap();
+        std::fs::write(store.path(), r#"{"format": 3, "routes": []}"#).unwrap();
         assert!(
             store
                 .routes()
@@ -352,6 +368,27 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("newer junees")
         );
+    }
+
+    #[test]
+    fn routes_with_a_flow_are_written_in_a_format_older_builds_refuse() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let mut locked = store.lock().unwrap();
+        let mut flow = route("flow");
+        flow.flow = Some(crate::flow::config("o/n"));
+        locked.routes = vec![route("plain"), flow.clone()];
+        locked.save().unwrap();
+        drop(locked);
+        let text = std::fs::read_to_string(store.path()).unwrap();
+        assert!(text.contains(r#""format": 2"#), "{text}");
+        assert_eq!(store.routes().unwrap()[1], flow);
+        let mut locked = store.lock().unwrap();
+        locked.routes.pop();
+        locked.save().unwrap();
+        drop(locked);
+        let text = std::fs::read_to_string(store.path()).unwrap();
+        assert!(text.contains(r#""format": 1"#), "{text}");
     }
 
     #[test]

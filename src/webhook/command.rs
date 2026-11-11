@@ -236,6 +236,7 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         last: None,
         last_event: None,
         github_allow,
+        flow: None,
     };
     locked.routes.push(route.clone());
     locked.save()?;
