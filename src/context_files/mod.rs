@@ -19,6 +19,14 @@
 //! general rules win the room); the prompt says where a file was cut.
 //! Hidden characters are written as escapes
 //! ([`crate::prompt_text::escape_hidden`]).
+//!
+//! A webhook run, which anyone's text drives, reads the files as the last
+//! commit of the repository holds them ([`ContextFiles::load_committed`]),
+//! so a change an earlier run made to them never counts; outside a
+//! repository it reads none. Every run says which files have uncommitted
+//! changes ([`ContextFiles::uncommitted`]).
+
+mod committed;
 
 use std::fs;
 use std::io::Read;
@@ -28,6 +36,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use crate::prompt_text::{escape_hidden, is_hidden};
+use committed::{Head, Object};
 
 /// The setting with the file names, a comma-separated list (file key
 /// `context_files`); empty or `off` turns the files off.
@@ -94,6 +103,12 @@ impl Setting {
     /// The files for a session working in `dir`, read now.
     pub fn load(&self, dir: &Path) -> ContextFiles {
         ContextFiles::load(dir, self.home.as_deref(), &self.names)
+    }
+
+    /// The files for a webhook run working in `dir`, read now from the
+    /// last commit ([`ContextFiles::load_committed`]).
+    pub fn load_committed(&self, dir: &Path) -> ContextFiles {
+        ContextFiles::load_committed(dir, self.home.as_deref(), &self.names)
     }
 }
 
@@ -169,7 +184,19 @@ pub struct ContextFiles {
     /// The folders read, the working folder first; empty when the files
     /// are off.
     pub levels: Vec<PathBuf>,
+    /// Read from the last commit of the repository, not from the working
+    /// tree ([`ContextFiles::load_committed`]).
+    pub committed: bool,
+    /// Instruction files whose content in the working tree is not what the
+    /// last commit holds (or that it does not hold): files that went in
+    /// like that, or for a read from the commit, files whose changes were
+    /// left out.
+    pub uncommitted: Vec<PathBuf>,
 }
+
+/// Why a webhook run outside a repository reads no instruction files.
+const NOT_IN_A_REPOSITORY: &str = "not read: a webhook run reads instruction files only from \
+    the last commit of a git repository, and this folder is not in one";
 
 impl ContextFiles {
     /// Reads `names` in `dir` and the folders above it up to the top of
@@ -178,16 +205,15 @@ impl ContextFiles {
         if names.is_empty() {
             return Self::default();
         }
-        let start = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-        let home = home.map(|home| fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()));
-        let levels = levels(&start, home.as_deref());
-        let top = levels.last().cloned().unwrap_or_else(|| start.clone());
+        let (levels, top) = walk(dir, home);
         let mut out = Self {
             levels: levels.clone(),
             ..Self::default()
         };
-        let mut seen: Vec<((u64, u64), PathBuf)> = Vec::new();
+        let mut seen = Vec::new();
         let mut room = TOTAL_LIMIT;
+        // The files that went in and the file each was read from.
+        let mut read_from: Vec<(PathBuf, PathBuf)> = Vec::new();
         for dir in levels.iter().rev() {
             for name in names {
                 let path = dir.join(name);
@@ -199,36 +225,154 @@ impl ContextFiles {
                         continue;
                     }
                 };
-                if let Some((_, first)) = seen.iter().find(|(id, _)| *id == found.id) {
-                    let why = format!("the same file as {}", first.display());
-                    out.skipped.push(Skipped { path, why });
-                    continue;
+                let target = found.target.clone();
+                if out.add(path.clone(), found, &mut seen, &mut room)
+                    && let Some(target) = target
+                {
+                    read_from.push((path, target));
                 }
-                seen.push((found.id, path.clone()));
-                if room == 0 {
-                    let why = format!(
-                        "left out: the {} KiB limit of all files is used up",
-                        TOTAL_LIMIT / 1024
-                    );
-                    out.skipped.push(Skipped { path, why });
-                    continue;
+            }
+        }
+        if let Some(head) = repository(&top) {
+            let rels: Vec<(PathBuf, String)> = read_from
+                .iter()
+                .filter_map(|(path, _)| Some((path.clone(), rel(path, &top)?)))
+                .collect();
+            let names: Vec<String> = rels.iter().map(|(_, rel)| rel.clone()).collect();
+            // Without an answer from git nothing is said about changes.
+            if let Ok(objects) = head.lookup(&names) {
+                for ((path, _), object) in rels.into_iter().zip(objects) {
+                    let target = read_from
+                        .iter()
+                        .find(|(read, _)| *read == path)
+                        .map(|(_, target)| target);
+                    if let Some(target) = target
+                        && differs(&head, &object, target)
+                    {
+                        out.uncommitted.push(path);
+                    }
                 }
-                let mut text = found.text;
-                let mut cut = found.cut.then_some(Cut::File);
-                if text.len() > room {
-                    text.truncate(floor(&text, room));
-                    cut = Some(Cut::Total);
-                }
-                room -= text.len();
-                out.files.push(File {
-                    path,
-                    size: found.size,
-                    text,
-                    cut,
-                });
             }
         }
         out
+    }
+
+    /// Like [`ContextFiles::load`], but reads the files as the last commit
+    /// (`HEAD`) of the repository whose top the walk stops at holds them,
+    /// for a webhook run: what an earlier run wrote to them without a
+    /// commit never goes in. A link in the commit is followed only to a
+    /// file in it. Without a repository there (the walk stopped at HOME,
+    /// or at the working folder alone) no file is read. The files in the
+    /// working tree whose content differs are listed in
+    /// [`ContextFiles::uncommitted`].
+    pub fn load_committed(dir: &Path, home: Option<&Path>, names: &[String]) -> Self {
+        if names.is_empty() {
+            return Self::default();
+        }
+        let (levels, top) = walk(dir, home);
+        let mut out = Self {
+            levels: levels.clone(),
+            committed: true,
+            ..Self::default()
+        };
+        let paths: Vec<PathBuf> = levels
+            .iter()
+            .rev()
+            .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+            .collect();
+        let Some(head) = repository(&top) else {
+            for path in paths {
+                if fs::symlink_metadata(&path).is_ok() {
+                    let why = NOT_IN_A_REPOSITORY.to_string();
+                    out.skipped.push(Skipped { path, why });
+                }
+            }
+            return out;
+        };
+        let rels: Vec<(PathBuf, String)> = paths
+            .into_iter()
+            .filter_map(|path| {
+                let rel = rel(&path, &top)?;
+                Some((path, rel))
+            })
+            .collect();
+        let names: Vec<String> = rels.iter().map(|(_, rel)| rel.clone()).collect();
+        let objects = match head.lookup(&names) {
+            Ok(objects) => objects,
+            Err(err) => {
+                let why = format!("cannot read the last commit: {err}");
+                out.skipped.push(Skipped { path: top, why });
+                return out;
+            }
+        };
+        let mut seen = Vec::new();
+        let mut room = TOTAL_LIMIT;
+        for ((path, _), object) in rels.into_iter().zip(objects) {
+            if let Some(target) = worktree_file(&path, &top)
+                && differs(&head, &object, &target)
+            {
+                out.uncommitted.push(path.clone());
+            }
+            match object {
+                Object::Missing => {}
+                Object::Other(why) => out.skipped.push(Skipped { path, why }),
+                Object::Blob { oid, size } => match head.read(&oid, FILE_LIMIT + 1) {
+                    Ok(bytes) => {
+                        let (text, cut) = prompt_text(&bytes);
+                        let found = Found {
+                            id: Id::Blob(oid),
+                            size,
+                            text,
+                            cut,
+                            target: None,
+                        };
+                        out.add(path, found, &mut seen, &mut room);
+                    }
+                    Err(why) => out.skipped.push(Skipped { path, why }),
+                },
+            }
+        }
+        out
+    }
+
+    /// Puts `found` in as the file at `path` unless the same file went in
+    /// already (`seen`) or the `room` left for all files is used up;
+    /// whether it went in.
+    fn add(
+        &mut self,
+        path: PathBuf,
+        found: Found,
+        seen: &mut Vec<(Id, PathBuf)>,
+        room: &mut usize,
+    ) -> bool {
+        if let Some((_, first)) = seen.iter().find(|(id, _)| *id == found.id) {
+            let why = format!("the same file as {}", first.display());
+            self.skipped.push(Skipped { path, why });
+            return false;
+        }
+        seen.push((found.id, path.clone()));
+        if *room == 0 {
+            let why = format!(
+                "left out: the {} KiB limit of all files is used up",
+                TOTAL_LIMIT / 1024
+            );
+            self.skipped.push(Skipped { path, why });
+            return false;
+        }
+        let mut text = found.text;
+        let mut cut = found.cut.then_some(Cut::File);
+        if text.len() > *room {
+            text.truncate(floor(&text, *room));
+            cut = Some(Cut::Total);
+        }
+        *room -= text.len();
+        self.files.push(File {
+            path,
+            size: found.size,
+            text,
+            cut,
+        });
+        true
     }
 
     /// Whether the files are turned off.
@@ -307,29 +451,59 @@ impl ContextFiles {
             return format!("project instructions: off ({SETTING})\n");
         }
         let mut out = String::new();
+        let top = escape_hidden(
+            &self
+                .levels
+                .last()
+                .map(|top| top.display().to_string())
+                .unwrap_or_default(),
+        );
         if self.files.is_empty() {
-            let top = self.levels.last().map(|top| top.display().to_string());
+            let found = if self.committed {
+                "none in the last commit"
+            } else {
+                "none found"
+            };
             out.push_str(&format!(
-                "project instructions: none found (from the working folder up to {})\n",
-                escape_hidden(&top.unwrap_or_default())
+                "project instructions: {found} (from the working folder up to {top})\n"
             ));
         } else {
             let total: usize = self.files.iter().map(|file| file.text.len()).sum();
-            out.push_str(&format!(
-                "project instructions ({total} bytes; read when the session started, /new \
-                 reads them again):\n"
-            ));
+            if self.committed {
+                out.push_str(&format!(
+                    "project instructions ({total} bytes; read from the last commit of {top} \
+                     when the run started, uncommitted changes left out):\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "project instructions ({total} bytes; read when the session started, /new \
+                     reads them again):\n"
+                ));
+            }
         }
         for file in &self.files {
             let path = escape_hidden(&file.path.display().to_string());
+            let changed = if self.has_uncommitted(file) {
+                " (uncommitted changes)"
+            } else {
+                ""
+            };
             match file.cut {
-                None => out.push_str(&format!("  {path}: {} bytes\n", file.size)),
+                None => out.push_str(&format!("  {path}: {} bytes{changed}\n", file.size)),
                 Some(cut) => out.push_str(&format!(
-                    "  {path}: {} of {} bytes ({})\n",
+                    "  {path}: {} of {} bytes ({}){changed}\n",
                     file.text.len(),
                     file.size,
                     cut_reason(cut)
                 )),
+            }
+        }
+        if self.committed {
+            for path in &self.uncommitted {
+                out.push_str(&format!(
+                    "  uncommitted changes in {}: left out, the last commit's version is used\n",
+                    escape_hidden(&path.display().to_string())
+                ));
             }
         }
         for skipped in &self.skipped {
@@ -345,20 +519,31 @@ impl ContextFiles {
     /// A line for the start of a session (stderr) naming the files read
     /// and the ones skipped; `None` when there are neither.
     pub fn summary(&self) -> Option<String> {
-        if self.files.is_empty() && self.skipped.is_empty() {
+        if self.files.is_empty() && self.skipped.is_empty() && self.uncommitted.is_empty() {
             return None;
         }
         let mut parts: Vec<String> = self
             .files
             .iter()
             .map(|file| {
-                let path = escape_hidden(&file.path.display().to_string());
-                match file.cut {
-                    None => path,
-                    Some(_) => format!("{path} (cut)"),
+                let mut path = escape_hidden(&file.path.display().to_string());
+                if file.cut.is_some() {
+                    path.push_str(" (cut)");
                 }
+                if self.has_uncommitted(file) {
+                    path.push_str(" (uncommitted changes)");
+                }
+                path
             })
             .collect();
+        if self.committed {
+            parts.extend(self.uncommitted.iter().map(|path| {
+                format!(
+                    "uncommitted changes in {} left out",
+                    escape_hidden(&path.display().to_string())
+                )
+            }));
+        }
         parts.extend(self.skipped.iter().map(|skipped| {
             format!(
                 "skipped {} ({})",
@@ -366,7 +551,21 @@ impl ContextFiles {
                 escape_hidden(&skipped.why)
             )
         }));
-        Some(format!("(project instructions: {})", parts.join(", ")))
+        let from = if self.committed {
+            " from the last commit"
+        } else {
+            ""
+        };
+        Some(format!(
+            "(project instructions{from}: {})",
+            parts.join(", ")
+        ))
+    }
+
+    /// Whether `file` went in with uncommitted changes (only a read from
+    /// the working tree puts them in).
+    fn has_uncommitted(&self, file: &File) -> bool {
+        !self.committed && self.uncommitted.contains(&file.path)
     }
 }
 
@@ -391,14 +590,80 @@ pub fn levels(start: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     vec![start.to_path_buf()]
 }
 
+/// What tells one file under two names apart from two files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Id {
+    /// Device and inode, in the working tree.
+    Inode(u64, u64),
+    /// The blob, in the last commit.
+    Blob(String),
+}
+
 /// A file read for the prompt.
 struct Found {
-    /// Device and inode, to notice one file under two names.
-    id: (u64, u64),
+    id: Id,
     size: u64,
     text: String,
     /// Cut at [`FILE_LIMIT`].
     cut: bool,
+    /// The file in the working tree it was read from (a link's target).
+    target: Option<PathBuf>,
+}
+
+/// The folders a session in `dir` reads ([`levels`]), and the one the
+/// walk stops at, all canonical.
+fn walk(dir: &Path, home: Option<&Path>) -> (Vec<PathBuf>, PathBuf) {
+    let start = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let home = home.map(|home| fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()));
+    let levels = levels(&start, home.as_deref());
+    let top = levels.last().cloned().unwrap_or(start);
+    (levels, top)
+}
+
+/// The repository of a walk that stopped at `top`: only when `top` holds
+/// `.git`.
+fn repository(top: &Path) -> Option<Head<'_>> {
+    fs::symlink_metadata(top.join(".git"))
+        .is_ok()
+        .then_some(Head { top })
+}
+
+/// `path` as git names it in a commit of the repository at `top`; `None`
+/// when it is outside or cannot be named (not UTF-8, a line break).
+fn rel(path: &Path, top: &Path) -> Option<String> {
+    let rel = path.strip_prefix(top).ok()?;
+    let parts: Option<Vec<&str>> = rel
+        .components()
+        .map(|part| part.as_os_str().to_str())
+        .collect();
+    let rel = parts?.join("/");
+    (!rel.is_empty() && !rel.contains('\n')).then_some(rel)
+}
+
+/// The regular file in the working tree that `path` is or links to,
+/// when it is inside `top`.
+fn worktree_file(path: &Path, top: &Path) -> Option<PathBuf> {
+    fs::symlink_metadata(path).ok()?;
+    let target = fs::canonicalize(path).ok()?;
+    (target.starts_with(top) && fs::metadata(&target).ok()?.is_file()).then_some(target)
+}
+
+/// Whether the working tree's file `target` is not what the commit holds
+/// (`object`). Unknown (an error) counts as the same.
+fn differs(head: &Head<'_>, object: &Object, target: &Path) -> bool {
+    match object {
+        Object::Blob { oid, size } => head.same(oid, *size, target).is_ok_and(|same| !same),
+        Object::Missing | Object::Other(_) => true,
+    }
+}
+
+/// What goes into the prompt of a file's first bytes: hidden characters
+/// escaped, cut at [`FILE_LIMIT`], and whether it was cut.
+fn prompt_text(bytes: &[u8]) -> (String, bool) {
+    let mut text = escape_hidden(&String::from_utf8_lossy(bytes));
+    let cut = bytes.len() > FILE_LIMIT || text.len() > FILE_LIMIT;
+    text.truncate(floor(&text, FILE_LIMIT));
+    (text, cut)
 }
 
 /// Reads instruction file `path`: `None` when there is none, and why it is
@@ -443,14 +708,13 @@ fn read(path: &Path, top: &Path) -> Result<Option<Found>, String> {
     file.take(FILE_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|err| format!("cannot read it: {err}"))?;
-    let mut text = escape_hidden(&String::from_utf8_lossy(&bytes));
-    let cut = bytes.len() > FILE_LIMIT || text.len() > FILE_LIMIT;
-    text.truncate(floor(&text, FILE_LIMIT));
+    let (text, cut) = prompt_text(&bytes);
     Ok(Some(Found {
-        id: (meta.dev(), meta.ino()),
+        id: Id::Inode(meta.dev(), meta.ino()),
         size: meta.len(),
         text,
         cut,
+        target: Some(target),
     }))
 }
 
