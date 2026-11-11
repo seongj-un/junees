@@ -411,13 +411,13 @@ async fn secrets_never_show() {
         assert!(!text.contains(secret), "{secret} in\n{text}");
         assert!(!json.contains(secret), "{secret} in {json}");
     }
-    // The allowed-users error quoted the token; it was cut out.
+    // The allowed-users error quoted the token; only its length is left.
     expect(
         &report,
         "discord",
         "gateway",
         Status::Fail,
-        "got `[hidden]`",
+        "got 22 characters (not shown)",
     );
     expect(&report, "keys", "Anthropic API key", Status::Ok, "set");
 }
@@ -1033,4 +1033,139 @@ async fn offline_sends_nothing() {
     assert!(!has(&report, "online", "API key"));
     let err = listener.accept().unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+}
+
+/// Asserts that neither the text nor the JSON report shows `secret`.
+fn assert_hidden(report: &Report, secret: &str) {
+    let (text, json) = (report.text(), report.json().to_string());
+    assert!(!text.contains(secret), "{secret} in\n{text}");
+    assert!(!json.contains(secret), "{secret} in {json}");
+}
+
+#[tokio::test]
+async fn a_bot_prefixed_token_never_shows() {
+    const TOKEN: &str = "abc.def.probesecret123";
+    let fixture = Fixture::new();
+    // The token with `Bot `, and the same token where the allowed users go
+    // (their error quotes it); then the token and a piece of it where an
+    // error quotes them without `got`.
+    for (extra, backend) in [
+        (format!("discord_allowed_users = \"{TOKEN}\"\n"), None),
+        (
+            format!("discord_allowed_users = \"1\"\nbackend = \"{TOKEN}\"\n"),
+            Some("unknown backend `[hidden]`"),
+        ),
+        (
+            "discord_allowed_users = \"1\"\nbackend = \"def.probesecret1\"\n".to_string(),
+            Some("unknown backend `[hidden]`"),
+        ),
+    ] {
+        fixture.config(&format!("discord_token = \"Bot {TOKEN}\"\n{extra}"));
+        let report = fixture.run(false).await;
+        assert_hidden(&report, "probesecret");
+        match backend {
+            Some(detail) => expect(&report, "settings", "backend", Status::Fail, detail),
+            None => expect(
+                &report,
+                "discord",
+                "gateway",
+                Status::Fail,
+                "got 22 characters (not shown)",
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_key_in_another_setting_never_shows() {
+    // Built in pieces so no key-looking literal sits in the source.
+    let key = ["sk", "ant", "api03", "Probe0123456789abcdefXYZ"].join("-");
+    let mut fixture = Fixture::new();
+    fixture.set("JUNEES_MAX_TOKENS", &key);
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "values",
+        Status::Fail,
+        &format!(
+            "JUNEES_MAX_TOKENS must be a positive integer, got {} characters (not shown)",
+            key.len()
+        ),
+    );
+    assert_hidden(&report, "Probe0123456789");
+    // Quoted without `got`, it still looks like a key and is cut out.
+    fixture.config(&format!("backend = \"{key}\"\n"));
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "backend",
+        Status::Fail,
+        "unknown backend [hidden] use `api`",
+    );
+    assert_hidden(&report, "Probe0123456789");
+    assert_eq!(crate::secrets::find_secret(&report.text()), None);
+}
+
+#[tokio::test]
+async fn credentials_in_the_environment_never_show() {
+    const VALUE: &str = "env-probe-credential";
+    for var in [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "JUNEES_GITHUB_TOKEN",
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.set(var, VALUE);
+        // An error that quotes the value without `got`.
+        fixture.config(&format!("backend = \"{VALUE}\"\n"));
+        let report = fixture.run(false).await;
+        assert_hidden(&report, "probe-credential");
+        expect(
+            &report,
+            "settings",
+            "backend",
+            Status::Fail,
+            "unknown backend `[hidden]`",
+        );
+    }
+}
+
+#[tokio::test]
+async fn webhook_secrets_never_show() {
+    let mut fixture = Fixture::new();
+    let store = crate::webhook::store::Store::new(&fixture.home);
+    let file = fixture.write("secrets/pr", "file-probe-hook-secret\n", 0o600);
+    let mut by_env = crate::webhook::store::tests::route("env");
+    by_env.secret = Some(Secret::Env("DOCTOR_HOOK_SECRET".into()));
+    let mut by_file = crate::webhook::store::tests::route("file");
+    by_file.secret = Some(Secret::File(file));
+    let mut locked = store.lock().unwrap();
+    locked.routes.extend([by_env, by_file]);
+    locked.save().unwrap();
+    drop(locked);
+    fixture.set("DOCTOR_HOOK_SECRET", "env-probe-hook-secret");
+    for value in ["env-probe-hook-secret", "file-probe-hook-secret"] {
+        fixture.config(&format!("backend = \"{value}\"\n"));
+        let report = fixture.run(false).await;
+        expect(
+            &report,
+            "webhooks",
+            "route env",
+            Status::Ok,
+            "env DOCTOR_HOOK_SECRET",
+        );
+        expect(
+            &report,
+            "webhooks",
+            "route file",
+            Status::Ok,
+            "secret: file",
+        );
+        assert_hidden(&report, "probe-hook");
+    }
 }

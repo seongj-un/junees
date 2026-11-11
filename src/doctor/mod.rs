@@ -10,8 +10,9 @@
 //! `claude auth status`.
 //!
 //! Secrets never show: checks say whether a key is set and where, never
-//! its value, and every value of a secret setting is cut out of the
-//! report before it is printed, in case an error quotes one.
+//! its value, and before the report is printed every secret Junees knows
+//! of, the values errors quote and anything else that looks like a
+//! credential are cut out of it ([`redact`]).
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,7 @@ use crate::prompt_text::escape_hidden;
 mod claude;
 mod files;
 mod online;
+mod redact;
 mod services;
 mod settings;
 #[cfg(test)]
@@ -121,6 +123,8 @@ pub struct Report {
     pub home: Option<PathBuf>,
     pub online: bool,
     pub checks: Vec<Check>,
+    /// The secrets cut out of it before it is printed.
+    hidden: redact::Hidden,
 }
 
 impl Report {
@@ -195,22 +199,23 @@ impl Report {
         self.count(Status::Fail) > 0
     }
 
-    /// Cuts every one of `secrets` out of the report.
-    fn redact(&mut self, secrets: &[String]) {
-        let cut = |text: &mut String| {
-            for secret in secrets {
-                if text.contains(secret.as_str()) {
-                    *text = text.replace(secret.as_str(), "[hidden]");
-                }
-            }
-        };
-        for check in &mut self.checks {
-            cut(&mut check.name);
-            cut(&mut check.detail);
-            if let Some(fix) = &mut check.fix {
-                cut(fix);
-            }
-        }
+    /// Keeps `secret` (read by a check) out of the report.
+    fn hide(&mut self, secret: &str) {
+        self.hidden.add(secret);
+    }
+
+    /// Cuts the secrets out of every check.
+    fn redact(&mut self) {
+        let texts = self.checks.iter_mut().flat_map(|check| {
+            [
+                Some(&mut check.name),
+                Some(&mut check.detail),
+                check.fix.as_mut(),
+            ]
+            .into_iter()
+            .flatten()
+        });
+        redact::redact(&self.hidden, texts);
     }
 
     /// The report for a terminal: the checks by area, then the counts.
@@ -302,6 +307,7 @@ pub async fn run_with(
         home: home.clone(),
         online,
         checks: Vec::new(),
+        hidden: redact::Hidden::default(),
     };
     let path = settings.env("PATH");
     let path = path.as_deref().map(std::ffi::OsStr::new);
@@ -321,27 +327,9 @@ pub async fn run_with(
     if online {
         online::api_key(&mut report, settings).await;
     }
-    report.redact(&secret_values(settings));
+    report.hidden.add_settings(settings);
+    report.redact();
     report
-}
-
-/// The settings whose values are secrets.
-const SECRET_SETTINGS: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    crate::gateway::config::TOKEN_ENV,
-    crate::github::TOKEN_ENV,
-    crate::notify::WEBHOOK_ENV,
-];
-
-/// The values of [`SECRET_SETTINGS`] that are long enough to be told
-/// apart from ordinary words.
-fn secret_values(settings: &Settings) -> Vec<String> {
-    SECRET_SETTINGS
-        .iter()
-        .filter_map(|name| settings.get(name))
-        .map(|value| value.trim().to_string())
-        .filter(|value| value.chars().count() >= 8)
-        .collect()
 }
 
 /// This process's user id.

@@ -118,7 +118,10 @@ pub(super) fn webhooks(report: &mut Report, home: &Path, settings: &Settings) {
                 ),
             ),
             Some(secret) => match secret.read(&|key| settings.env(key)) {
-                Ok(_) => report.ok(AREA, &name, format!("secret: {}", secret.describe())),
+                Ok(value) => {
+                    report.hide(&String::from_utf8_lossy(&value));
+                    report.ok(AREA, &name, format!("secret: {}", secret.describe()));
+                }
                 Err(err) => report.fail(
                     AREA,
                     &name,
