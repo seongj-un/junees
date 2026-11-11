@@ -60,10 +60,11 @@ pub fn session(
             kind: if live.claude_code {
                 Kind::ClaudeCode
             } else {
-                Kind::Subagents // a sum of calls: priced at the base rates
+                Kind::Call
             },
             model: live.model.clone(),
             usage: unsaved,
+            one_call: false, // a sum of calls: priced at the base rates
         };
         totals.add(&record, prices);
         let label = if id.is_some() {
@@ -130,7 +131,7 @@ pub fn period(
     let folder = (!args.all).then_some(cwd.as_ref());
 
     let mut groups: BTreeMap<String, Totals> = BTreeMap::new();
-    let stats = scan::scan(home, since, folder, &mut |origin, record| {
+    let stats = scan::scan(home, since, folder, prices, &mut |origin, record| {
         let key = match args.by {
             By::Day => {
                 let ts = i64::try_from(record.ts).unwrap_or(i64::MAX);
@@ -295,6 +296,16 @@ fn notes(total: &Totals, stats: &Stats, prices: &Prices) -> String {
         out.push_str(&format!(
             "No price is known for {}: their tokens are counted but left out of the cost \
              (`prices` in config.toml sets one; see junees usage --help).\n",
+            models.join(", ")
+        ));
+    }
+    if !total.base_rated.is_empty() {
+        let models: Vec<&str> = total.base_rated.iter().map(String::as_str).collect();
+        out.push_str(&format!(
+            "Some tokens of {} are only known as sums of several calls (subagents whose \
+             own journals are missing or do not add up to what the session recorded, or \
+             tokens not in the journal) and are priced at the base rates: calls with long \
+             prompts cost more, so the cost may be low.\n",
             models.join(", ")
         ));
     }
