@@ -561,7 +561,32 @@ journalctl --user -u junees-webhook -f   # 요청마다 경로, 답, 실행 시�
 
 `systemctl --user stop`은 SIGTERM이므로 위처럼 도는 실행을 기다렸다가 끝난다. `KillMode=mixed`가 있어야 그렇게 된다. 기본값 `control-group`은 유닛의 cgroup 안 모든 프로세스에 SIGTERM을 한꺼번에 보내서, `junees webhook run` 자식과 그 도구들도 바로 신호를 받아 실행이 끊긴다(자식이 프로세스 그룹을 따로 쓰는 것은 cgroup 단위 신호에는 소용이 없다). `mixed`는 SIGTERM을 주 프로세스(serve)에만 보내고, serve가 끝난 뒤나 `TimeoutStopSec`이 지난 뒤 남은 프로세스에 SIGKILL을 보낸다. 그래서 `TimeoutStopSec`은 실행 한 번의 최대 시간보다 길게 둔다(systemd 기본은 90초). 기다리지 않고 끊으려면 serve에만 두 번째 신호를 보낸다: `systemctl --user kill --kill-whom=main -s TERM junees-webhook`(systemd 252 이전은 `--kill-who`). 이 차이는 systemd 255의 `systemd-run --user`로 확인했다(SIGTERM을 받으면 자식을 기다리는 주 프로세스와 `setsid`로 띄운 자식: `control-group`에서는 자식도 SIGTERM을 받았고 `mixed`에서는 받지 않고 끝까지 돌았다).
 
-범위 밖, 한계: TLS, keep-alive, chunked 본문, 경로마다 다른 한도, 실패 시 재시도, 전체 동시 실행 상한, 서버를 다시 띄운 뒤의 중복 기억, 대화와 게이트웨이에서 경로를 추가/삭제하는 명령은 하지 않는다. GitHub PR 리뷰/수정/merge 흐름은 다음 단계(7단계 C)에서 GitHub 도구와 잇는다. 실제 GitHub, 실제 API, 실제 디스코드로는 확인하지 않았다(가짜 API, 가짜 REST, reqwest로 보낸 요청으로만).
+범위 밖, 한계: TLS, keep-alive, chunked 본문, 경로마다 다른 한도, 실패 시 재시도, 전체 동시 실행 상한, 서버를 다시 띄운 뒤의 중복 기억, 대화와 게이트웨이에서 경로를 추가/삭제하는 명령은 하지 않는다. GitHub PR 리뷰/수정/merge 흐름은 아래 `add-github`. 실제 GitHub, 실제 API, 실제 디스코드로는 확인하지 않았다(가짜 API, 가짜 REST, reqwest로 보낸 요청으로만).
+
+#### GitHub PR 흐름 (add-github)
+
+`junees webhook add-github` 한 줄로 저장소의 PR 흐름(리뷰, 리뷰 반영, 준비되면 merge)을 맡긴다. 프롬프트 템플릿 대신 정해진 단계를 도는 경로를 만든다.
+
+```sh
+cd ~/work/some-project              # --address-reviews는 이 저장소의 clone에서 일한다
+junees webhook add-github pr-flow --repo seongj-un/junees \
+  --review --address-reviews --test-cmd "cargo test -q" \
+  --merge-when-ready --min-approvals 1 --deliver discord:234567890123456789
+```
+
+- 만드는 것: `$JUNEES_HOME/secrets/webhook-<이름>`에 무작위 시크릿(32바이트 hex, 0600, 폴더 0700, 값은 출력하지 않는다), 기본 프롬프트 `$JUNEES_HOME/flows/review.md`와 `address.md`(없을 때만), 단계에 맞는 이벤트 필터와 경로의 GitHub 쓰기(`--review`면 `review`, `--address-reviews`면 `comment`. `merge`는 주지 않는다). 출력은 GitHub에 넣을 값(Payload URL `https://<공개 주소>/hooks/<이름>`, Content type `application/json`, Secret은 시크릿 파일 내용, 고를 이벤트: Pull requests, Pull request reviews, Check suites, Statuses 중 필요한 것)과 아직 없는 설정이다: `github_token`, `github_repos`에 그 저장소, `github_allow_unattended`에 `review`/`comment`(무엇을 켤지 그대로 적는다), `--merge-when-ready`면 `github_flow_merge = true`.
+- 리뷰(`--review`): `pull_request`의 opened, synchronize, ready_for_review에 모델이 `github` 도구로 PR을 읽고(pr_view, pr_diff, checks) COMMENT 리뷰를 하나 남긴다. 형식은 `review.md`(판정: 머지 가능 | 수정 필요, `### 필수`, `### 권장`, `### 참고`)이고 사용자가 고칠 수 있다. 프롬프트 파일은 웹훅 템플릿과 같은 `{{payload.*}}`를 받는데 payload는 흐름이 읽은 PR이다(`repo`, `number`, `title`, `author`, `head`, `base`, `head_sha`, address는 `review.id/user/state/body`도). 값은 데이터 태그에 들어간다. draft와 닫힌 PR은 건너뛰고, 이벤트의 head가 지금 head가 아니면(그 push의 이벤트가 따로 온다) 건너뛴다. 모델은 경로 폴더(`--dir`, 기본 현재 폴더)에서 돈다.
+- 리뷰 반영(`--address-reviews`): `pull_request_review.submitted` 중 상태가 CHANGES_REQUESTED이거나 본문에 필수/권장 항목이 있는 리뷰, 저장소 자신의 브랜치인 PR만(포크 PR과 head 저장소가 지워진 PR은 건너뜀). `--dir`의 clone(origin이 그 저장소여야 하고 add-github가 확인한다)에서 head 브랜치를 fetch해 `<dir>/.junees-worktrees/pr-<번호>`에 head 커밋으로 worktree를 만든다(이전 것은 지우고 새로, `.git/info/exclude`에 등록해 clone은 깨끗하게 보인다). 모델이 거기서 고치고(`address.md`, 커밋/push는 하지 말라고 한다. 답만 필요한 스레드는 `review_reply` 가능), Junees가 커밋하고(`fix: address review <id> on #<n>`, 새 `.env`/키 같은 파일은 빼고), `--test-cmd`를 `sh -c`로 돌려(그 worktree에서, API 키/토큰/숨김 변수 없이, 자기 프로세스 그룹, 시간 한도는 webhook_max_time, 출력은 `flows/logs/<경로>-pr<n>.log`) 통과하면 push한다. `--test-cmd`가 없으면 테스트 없이 push하고 코멘트에 그렇게 적는다. push는 force 없이 `HEAD:refs/heads/<브랜치>`로, 모델이 돌기 전에 읽은 origin URL로 보낸다(그 사이 원격 설정이 바뀌어도). 자격 증명은 사용자의 git 설정(credential helper, ssh agent)에 맡기고 Junees는 토큰을 git에 넘기지 않는다. 끝나면 PR에 코멘트(push한 커밋, 테스트 결과, 모델의 요약. 요약이 토큰처럼 보이면 뺀다)를 단다. 테스트가 실패하면 push하지 않고 출력 끝부분을 코멘트한다. 바꾼 것이 없으면 push 없이 그렇다고 코멘트한다. 흐름이 다는 코멘트도 경로와 `github_allow_unattended`가 `comment`를 허용할 때만 단다.
+- merge(`--merge-when-ready`): `check_suite.completed`, `status`(그 커밋이 head인 열린 PR들), `pull_request_review.submitted`에 흐름 코드가 직접 조건을 본다(모델은 관여하지 않는다. PR 본문의 글이 merge를 시키지 못하게): (1) 열려 있고 draft 아님, (2) head가 이벤트의 커밋 그대로, (3) check run이나 commit status가 하나 이상 있고 모두 success/neutral/skipped(대기, 실패, 체크 없음은 아직), (4) 리뷰어별 마지막 APPROVED/CHANGES_REQUESTED/DISMISSED 중 CHANGES_REQUESTED 없음, (5) head 커밋을 승인한 리뷰어가 `--min-approvals`(기본 1) 이상, 또는 `--allow-self-review`면 토큰 주인(=Junees)의 그 커밋에 대한 마지막 리뷰가 "판정: 머지 가능"이고 필수 0, (6) `mergeable`이 true(null은 아직 계산 전). 모두 맞으면 그 head SHA를 고정해 `PUT .../merge`(method merge)하고 조건 표와 결과를 코멘트한다. GitHub가 거절하면(그 사이 바뀜 등) 그 이유를 코멘트하고 같은 커밋으로는 다시 시도하지 않는다. 조건이 안 맞는 이벤트는 코멘트 없이 기록만 한다(체크 이벤트마다 코멘트가 쌓이지 않게). 이중 동의: 경로에 `--merge-when-ready`가 있고 사용자 설정 `github_flow_merge = true`(`JUNEES_GITHUB_FLOW_MERGE`)일 때만 merge한다. merge는 모델의 도구가 아니라 흐름 코드가 REST로 하므로 경로의 `--github-allow`에는 `merge`가 없다.
+- 승인은 head 커밋에 대한 것만 센다: 리뷰 반영 단계가 사람이 보지 않은 커밋을 push하므로, 그 전 커밋의 승인으로 merge되지 않게.
+- 루프 방지: 토큰 주인(`GET /user`의 login)이 낸 리뷰는 반영하지 않는다(Junees 자신의 리뷰). synchronize는 보낸 사람이 토큰 주인이거나 흐름이 push한 커밋(`flows/state.json`에 기록, push 자격 증명이 다른 계정이어도)이면 다시 리뷰하지 않는다. `--re-review`면 둘 다 리뷰한다(그래도 자기 리뷰는 반영하지 않으므로 루프가 닫힌다). 같은 PR의 같은 단계는 head 커밋마다 한 번(`state.json`, 실행이 실패하면 표시를 거둬 Redeliver로 다시 돌 수 있다. 테스트 실패나 push 실패는 모델이 이미 고친 뒤라 거두지 않는다). 모델 실행(리뷰, 반영)은 PR마다 한 시간에 `--max-runs-per-hour`(기본 4)번까지.
+- 백엔드: 흐름의 모델 실행은 api 백엔드만 된다(claude-code 백엔드에는 경로가 쓰기를 제한하는 `github` 도구가 없다. 그렇게 설정돼 있으면 실행이 실패로 기록된다).
+- 기록: 무언가 한 실행(모델 실행, merge 시도, 실패)만 `webhooks/output/<이름>/`에 출력 파일을 쓰고 `--deliver`로 보낸다. 건너뛴 이벤트는 경로의 마지막 실행 기록(`last`)과 `state.json`에만 남는다. `junees webhook list`와 `/webhooks`는 흐름 경로를 `pr-flow (github flow on o/n): review, address-reviews, merge-when-ready`로 보여 주고, 아래에 최근 처리 5개(`#7 review: reviewed 1a2b3c4 (시각)`, `#7 merge: not ready at ...: checks: ...`)와 `github_flow_merge`가 켜졌는지를 보여 준다. 상세 목록은 프롬프트 대신 흐름 설정(테스트 명령, 승인 수, 시간당 상한)을 보여 준다.
+- 저장: 흐름은 `routes.json`의 경로에 `flow`로 저장된다. 흐름 경로가 있으면 파일 형식이 2가 되어 예전 junees는 그 파일을 읽지 않는다(흐름을 모르는 빌드가 자리표시 프롬프트를 실행하지 않게). `flows/`(프롬프트, 상태, 테스트 로그)는 모델의 도구가 쓰지 못하는 데이터 폴더이고, `junees webhook add-github`는 bash에서 막거나 묻는다(명령 정책).
+
+위험: 리뷰와 반영은 남이 쓴 PR 본문, diff, 리뷰를 읽고 무인으로 bash를 쓰는 실행이다. 반영 단계는 그 코드와 테스트 명령을 사용자 권한으로 실행하고 사용자의 git 자격 증명으로 push한다(push는 그 PR 브랜치로만, force 없이). 믿는 사람만 PR을 열고 리뷰하는 저장소에만 켠다. `--allow-self-review`는 모델의 판정이 승인을 대신하므로, 프롬프트 주입이 "머지 가능"을 쓰게 만들면 사람 승인 없이 merge될 수 있다(체크 통과와 mergeable은 여전히 필요). 브랜치 보호 규칙은 확인하지 않는다(GitHub가 merge를 거절하면 그 이유를 코멘트한다).
+
+범위 밖: 포크 PR 반영, 리뷰 스레드 해결 표시(GraphQL), squash/rebase merge, 브랜치 보호 읽기, 여러 저장소를 한 경로로, claude-code 백엔드.
 
 ### 플러그인
 
@@ -617,6 +642,7 @@ junees plugin remove issues             # 끄고 폴더를 지운다
 github_token = "github_pat_..."          # JUNEES_GITHUB_TOKEN (없으면 도구도 없다)
 github_repos = "seongj-un/junees"        # JUNEES_GITHUB_REPOS, 쉼표로 구분 (비면 작업 폴더의 origin만)
 github_allow_unattended = "comment,review"   # JUNEES_GITHUB_ALLOW_UNATTENDED (기본: 없음)
+github_flow_merge = false                # JUNEES_GITHUB_FLOW_MERGE: webhook add-github --merge-when-ready가 merge하려면 true (기본 false)
 github_api_url = "https://api.github.com"    # JUNEES_GITHUB_API_URL (GitHub Enterprise면 https://<호스트>/api/v3)
 ```
 
@@ -633,7 +659,7 @@ github_api_url = "https://api.github.com"    # JUNEES_GITHUB_API_URL (GitHub Ent
 - bash의 `gh`: 서버의 `gh`가 로그인돼 있으면 bash로 같은 쓰기를 할 수 있으므로, 명령 정책이 `gh pr merge`/`review`/`close`/`comment`/`create`, 쓰기 `gh api` 등을 무인 실행에서는 막고 대화와 게이트웨이에서는 `risky`에서도 묻는다(merge는 매번. 아래 명령 정책).
 - claude-code 백엔드에는 이 도구를 주지 않는다. Claude Code는 자기 `gh`나 git 자격 증명을 쓸 수 있고, Junees의 승인 질문과 허용 목록이 그쪽 도구 호출에는 걸리지 않기 때문이다. 이 토큰도 Claude Code 자식 환경에서는 지운다.
 
-범위 밖: GraphQL(스레드 해결 여부, 해결 표시), 이슈와 릴리스, 브랜치 보호 확인, 작업 모드(`junees task`)의 GitHub 도구, 웹훅과 이어지는 리뷰/수정/merge 흐름(7단계 C).
+범위 밖: GraphQL(스레드 해결 여부, 해결 표시), 이슈와 릴리스, 브랜치 보호 확인, 작업 모드(`junees task`)의 GitHub 도구. 웹훅과 이어지는 리뷰/수정/merge 흐름은 웹훅 절의 `add-github`.
 
 ### 컨텍스트 관리
 
@@ -792,7 +818,7 @@ src/
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
-  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 도구 호출 전 훅 PreTool
+  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks, flows)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 도구 호출 전 훅 PreTool
   mcp/               MCP 클라이언트 (stdio)
     config.rs          $JUNEES_HOME/mcp.json 읽기와 검사 (0600, 자기 소유, 값을 되풀이하지 않는 오류)
     conn.rs            서버 프로세스(프로세스 그룹, 환경 정리)와 JSON-RPC 2.0 줄 메시지, 요청 id와 답 대기, 취소 알림, 서버 요청(ping) 답, stderr 꼬리, 종료(입력 닫기 -> SIGTERM -> SIGKILL)
@@ -853,14 +879,23 @@ src/
     tool.rs            github 도구: 액션별 요청과 결과, 무인 허용 목록(웹훅 실행은 경로 목록과 둘 다), 보낼 글 검사, 승인 질문 내용(question)
     format.rs          GitHub가 준 글을 데이터로 표시 (첫 줄 안내, 인용 줄, 제어 문자 이스케이프, 상한)
     tests.rs           가짜 GitHub REST 서버로 요청 모양, 페이지, 레이트 리밋, 오류와 토큰 비노출, 허용 목록, 승인 판정 검증
+  flow/              GitHub PR 흐름 (junees webhook add-github)
+    mod.rs             흐름 설정 FlowConfig(저장소, 단계, 테스트 명령, 승인 수, 시간당 상한), 이벤트와 경로 쓰기, github_flow_merge
+    state.rs           flows/state.json: head 커밋당 한 번 표시와 되돌리기, 시간당 모델 실행 상한, 흐름이 push한 커밋, 최근 처리
+    prompts.rs         flows/review.md, address.md 기본값과 채우기(데이터 태그), 리뷰 형식(판정/필수/권장/참고) 읽기
+    merge.rs           merge 조건(열림, head 고정, 체크, 변경 요청, head 커밋 승인 또는 자기 리뷰, mergeable)과 REST merge
+    address.rs         리뷰 반영의 git: 브랜치 이름 검사, origin 확인, fetch와 worktree, 커밋, 자격 증명 없는 테스트 명령, force 없는 push
+    run.rs             이벤트 하나: 단계 계획, 루프 방지, 모델 실행(단계별로 좁힌 GitHub 쓰기), 코멘트, 기록
+    setup.rs           add-github: 무작위 시크릿 파일, 기본 프롬프트, 경로, GitHub 설정 안내와 빠진 설정
+    tests.rs           가짜 GitHub REST, 가짜 엔진, 로컬 bare 저장소로 이벤트별 시나리오
   webhook/           웹훅 (junees webhook)
     http.rs            작은 HTTP/1.1 수신기: 요청 줄, 헤더(16 KiB), Content-Length 본문(1 MiB), chunked 거절, 100-continue, 응답 뒤 연결 종료
     signature.rs       sha256=<hex> HMAC-SHA256 서명과 상수 시간 확인(ring)
-    store.rs           경로 저장 webhooks/routes.json(0600, 잠금, 원자적 쓰기), 종류, 시크릿 위치, 이벤트 필터, GitHub 쓰기 허용(github_allow), 이름 검사
+    store.rs           경로 저장 webhooks/routes.json(0600, 잠금, 원자적 쓰기), 종류, 시크릿 위치, 이벤트 필터, GitHub 쓰기 허용(github_allow), GitHub 흐름(flow, 있으면 형식 2), 이름 검사
     template.rs        프롬프트 템플릿({{event}}, {{payload.a.b}} 등), 값 정리와 상한, 무작위 이름의 데이터 태그
     server.rs          junees webhook serve: 경로/메서드/서명/이벤트/중복 판단, 시크릿 없는 경로의 요청 검사(Host, 브라우저/프록시 헤더, JSON), 동시 연결 상한, 경로마다 줄 세우기(대기 20, 429), 실행마다 자식 프로세스, 결과 없이 끝난 실행 기록, 종료
     run.rs             실행 하나: running 기록, 프롬프트, cron 엔진(세션 source webhook), 출력 파일 webhooks/output/<이름>/, 전달, 마지막 실행 기록
-    cli.rs, command.rs junees webhook 인자 파싱과 명령(serve/add/list/remove/pause/resume/test/run)
+    cli.rs, command.rs junees webhook 인자 파싱과 명령(serve/add/add-github/list/remove/pause/resume/test/run), 흐름 경로의 실행 연결
     mod.rs             설정(webhook_max_time, webhook_max_tokens), /webhooks와 !webhooks 목록
 tests/
   common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림)
@@ -886,6 +921,7 @@ tests/
   plugins.rs           실제 바이너리로 junees plugin install/list/enable, -p에서 모델의 플러그인 도구 호출(환경에 비밀 없음, 플러그인 폴더에서 실행), pre_tool 훅의 bash 거절, post_turn 훅, 시스템 프롬프트의 조각 검증
   github.rs            실제 바이너리와 가짜 API, 가짜 GitHub REST로 -p에서 origin repo의 PR 보기 -> 리뷰(무인 허용 목록), 허용 목록 밖 쓰기 거절, 토큰이 모델/터미널/세션 기록에 없음 검증
   cron.rs              실제 바이너리와 가짜 API, 가짜 디스코드 REST로 cron add/list/run(전달, 출력 파일, 세션, 읽기 전용 도구)/pause/resume/rm, 데몬이 때가 된 작업을 자식 프로세스로 실행하고 실패를 전달하는지 검증
+  github_flow.rs       실제 바이너리로 webhook add-github(시크릿 파일 0600, 안내, 형식 2), serve에 서명한 pull_request.opened -> 모델의 리뷰가 가짜 GitHub에 POST, 같은 커밋의 두 번째 전달은 아무것도 안 함, list의 최근 처리 검증
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
