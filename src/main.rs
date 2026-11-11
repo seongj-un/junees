@@ -351,6 +351,7 @@ fn api_agent(
     if let Some(memory) = &memory {
         tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
     }
+    junees::search::register(&mut tools, config.home.as_deref(), cwd, true);
     skills::register(&mut tools, config.home.as_deref(), true);
     mcp.register(&mut tools);
     plugins.register(&mut tools);

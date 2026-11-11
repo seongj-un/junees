@@ -237,6 +237,9 @@ impl Engines for ApiEngines {
         if let Some(memory) = &memory {
             tools.register(MemoryTool::new(memory.clone(), Mode::Conversation));
         }
+        // Channel sessions stay out: a reply in a guild channel is read by
+        // more people than the one who asked.
+        crate::search::register(&mut tools, config.home.as_deref(), &self.cwd, false);
         skills::register(&mut tools, config.home.as_deref(), true);
         self.mcp.register(&mut tools);
         self.plugins.register(&mut tools);

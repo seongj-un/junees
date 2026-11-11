@@ -206,6 +206,7 @@ impl TaskEnv<'_> {
         report: &mut Reporter<'_>,
     ) -> Result<(Agent, Option<String>)> {
         let home = self.home.as_deref();
+        crate::search::register(&mut tools, home, &self.root, false);
         skills::register(&mut tools, home, self.skill_manage);
         let mode = if self.skill_manage {
             skills::Mode::Manage

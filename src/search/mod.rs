@@ -12,11 +12,13 @@
 pub mod format;
 pub mod query;
 mod scan;
+pub mod tool;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub use query::Query;
+pub use tool::register;
 
 use crate::session;
 
