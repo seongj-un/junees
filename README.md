@@ -846,13 +846,13 @@ junees doctor --json      # 같은 내용을 JSON으로
 junees doctor --online    # API 키 확인 요청과 claude auth status까지
 ```
 
-대화 안에서는 `/doctor`(네트워크 없이). 실패(`FAIL`)가 하나라도 있으면 종료 코드 1, 경고만 있으면 0이다.
+대화 안에서는 `/doctor`(네트워크 없이, `junees doctor`처럼 설정을 그때 다시 읽으므로 대화 중에 고치거나 깨뜨린 `config.toml`도 보인다). 실패(`FAIL`)가 하나라도 있으면 종료 코드 1, 경고만 있으면 0이다.
 
 점검하는 것:
 
-- 상태 폴더: `$JUNEES_HOME`이 내 것이고 `0700`인지, `config.toml`, `mcp.json`, `cron/jobs.json`, `webhooks/routes.json`, `secrets/` 안 파일이 내 것이고 `0600`인지. 다른 사용자가 바꿀 수 있으면 실패, 읽기만 할 수 있으면 비밀이 들 수 있는 파일(`config.toml`, `mcp.json`, `secrets/*`)은 실패, 나머지는 경고. 고치는 줄은 `chmod 600 <경로>`처럼 그대로 실행할 수 있는 명령이다.
+- 상태 폴더: `$JUNEES_HOME`이 내 것이고 `0700`인지, `config.toml`, `mcp.json`, `cron/jobs.json`, `webhooks/routes.json`, `secrets/` 안 파일이 내 것이고 `0600`인지(`secrets/` 아래 하위 폴더는 `0700`인지 보고 그 안을 다시 확인한다). 다른 사용자가 바꿀 수 있으면 실패, 읽기만 할 수 있으면 비밀이 들 수 있는 파일(`config.toml`, `mcp.json`, `secrets/*`)은 실패, 나머지는 경고. 고치는 줄은 `chmod 600 <경로>`처럼 그대로 실행할 수 있는 명령이다.
 - 설정: `config.toml`이 읽히는지(모르는 키, 따옴표 없는 값은 줄 번호와 함께), 모든 값이 읽히는지(`Config`, 백엔드, `timezone`, cron/웹훅 한도를 실제 실행과 같은 함수로 읽는다). 파일이 깨져 있어도 점검은 멈추지 않고 파일 없이 나머지를 본다.
-- 키: API 키, GitHub 토큰, 알림 웹훅이 있는지와 어디서 왔는지(환경 변수 / config.toml)만. 값은 어떤 경우에도 출력하지 않는다. 오류 문장이 값을 인용하더라도(예: 토큰을 `discord_allowed_users`에 잘못 넣은 경우) 보고서에서 비밀 설정의 값을 모두 `[hidden]`으로 바꾼 뒤 출력한다. api 백엔드에 키가 없으면 실패, claude-code 백엔드면 해당 없음.
+- 키: API 키, GitHub 토큰, 알림 웹훅이 있는지와 어디서 왔는지(환경 변수 / config.toml)만. 값은 어떤 경우에도 출력하지 않는다. 오류 문장이 값을 인용하더라도(예: 토큰을 `discord_allowed_users`에 잘못 넣은 경우) 출력 전에 보고서에서 세 가지를 지운다: 설정 오류가 `` got `...` ``로 인용한 값은 길이만 남기고, 비밀 값(API 키, 디스코드 토큰은 `Bot `을 뗀 것도, GitHub과 `gh` 토큰, 알림 웹훅, `CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_AUTH_TOKEN` 같은 Claude Code 자격 증명, 점검이 읽은 웹훅 시크릿)은 통째로든 12자 이상 조각으로든 `[hidden]`으로 바꾸고, 그래도 자격 증명처럼 보이는 단어(메모리와 같은 `secrets.rs` 규칙)도 `[hidden]`으로 바꾼다. api 백엔드에 키가 없으면 실패, claude-code 백엔드면 해당 없음.
 - claude-code 백엔드: `claude --version`(2.1.259 이상, 실행하는 프로그램은 이것 하나), 로그인(`claude auth status`는 `--online`일 때만), `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 켜져 있는지, 켜져 있으면 `bwrap`이 PATH에 있는지와 비특권 user namespace를 막는 커널 설정(`kernel.apparmor_restrict_unprivileged_userns = 1`, `kernel.unprivileged_userns_clone = 0`, `user.max_user_namespaces = 0`). 백엔드가 claude-code면 문제는 실패, api면 경고이고, api인데 `claude`도 없으면 이 부분은 건너뛴다. setuid root인 `bwrap`은 user namespace가 필요 없으므로 제한이 있어도 ok.
 - 프로그램: `git`(없으면 경고: 작업 모드와 GitHub 흐름이 쓴다), `gh`(선택).
 - 디스코드: 토큰과 허용 사용자(게이트웨이가 시작할 때와 같은 검사). 둘 다 없으면 해당 없음.
@@ -1039,7 +1039,7 @@ tests/
   cron.rs              실제 바이너리와 가짜 API, 가짜 디스코드 REST로 cron add/list/run(전달, 출력 파일, 세션, 읽기 전용 도구)/pause/resume/rm, 데몬이 때가 된 작업을 자식 프로세스로 실행하고 실패를 전달하는지 검증
   github_flow.rs       실제 바이너리로 webhook add-github(시크릿 파일 0600, 안내, 형식 2), serve에 서명한 pull_request.opened -> 모델의 리뷰가 가짜 GitHub에 POST, 같은 커밋의 두 번째 전달은 아무것도 안 함, list의 최근 처리 검증
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
-  doctor.rs            실제 바이너리로 junees doctor 출력과 종료 코드(권한 실패면 1), --json 형식, 깨진 설정 파일도 점검 결과로, --help와 잘못된 인자, 대화의 /doctor, 비밀 값이 출력되지 않음 검증
+  doctor.rs            실제 바이너리로 junees doctor 출력과 종료 코드(권한 실패면 1), --json 형식, 깨진 설정 파일도 점검 결과로, --help와 잘못된 인자, 대화의 /doctor(대화 중에 깨진 설정 파일을 다시 읽음), 비밀 값이 출력되지 않음 검증
   session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
