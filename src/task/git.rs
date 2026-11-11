@@ -45,7 +45,7 @@ const SAFE_CONFIG: &[&str] = &[
 /// Git can still run commands from the repository's config (clean filters
 /// on `git add`, for one), so it gets neither the repository variables nor
 /// any credential, like the session's own bash.
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new("git");
     command.args(SAFE_CONFIG).args(args).current_dir(dir);
     hide_env(&mut command);
@@ -62,7 +62,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 
 /// Removes the repository variables, the credentials Junees reads and
 /// Claude Code's credentials from a git command's environment.
-fn hide_env(command: &mut Command) {
+pub(crate) fn hide_env(command: &mut Command) {
     for name in REPO_ENV_VARS
         .iter()
         .chain(SECRET_ENV_VARS)
