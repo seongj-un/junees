@@ -833,6 +833,14 @@ async fn bad_write_input_is_refused_before_any_request() {
             "a REQUEST_CHANGES review needs a `body`",
         ),
         (
+            json!({"action": "review", "number": 7, "event": "approve", "body": "lgtm"}),
+            "missing `commit_id`: an APPROVE review needs the head commit you reviewed",
+        ),
+        (
+            json!({"action": "review", "number": 7, "event": "APPROVE", "commit_id": "abc"}),
+            "`commit_id` must be a full commit sha",
+        ),
+        (
             json!({"action": "review", "number": 7, "event": "LGTM", "body": "x"}),
             "`event` must be",
         ),
@@ -906,7 +914,7 @@ async fn without_a_question_only_the_allowed_writes_run() {
     .await;
     let comment = json!({"action": "pr_comment", "number": 7, "body": "hi"});
     let review = json!({"action": "review", "number": 7, "event": "COMMENT", "body": "ok"});
-    let approve = json!({"action": "review", "number": 7, "event": "APPROVE"});
+    let approve = json!({"action": "review", "number": 7, "event": "APPROVE", "commit_id": HEAD});
     let merge = json!({"action": "merge", "number": 7, "sha": HEAD});
 
     let none = fake.tool(false, &[]);
@@ -1196,10 +1204,19 @@ async fn writes_are_asked_about_and_a_merge_every_time() {
         "  ?? approve github: pr_comment on o/n #7\n     * posts a comment on GitHub as you\n     \
          body:\n       first\n       \\u{1b}[2Ksecond\n"
     );
-    let approve = json!({"action": "review", "number": 7, "event": "APPROVE"});
+    let approve = json!({"action": "review", "number": 7, "event": "APPROVE", "commit_id": HEAD});
     assert_eq!(
         risky.request("github", &approve).unwrap().kinds,
         ["github: approve"]
+    );
+    // The question shows the commit an approval is bound to.
+    assert_eq!(
+        risky
+            .request("github", &approve)
+            .unwrap()
+            .preview
+            .as_deref(),
+        Some(format!("event: APPROVE\ncommit_id: {HEAD}\n").as_str())
     );
     let merge = json!({"action": "merge", "number": 7, "sha": HEAD});
     let request = risky.request("github", &merge).unwrap();

@@ -159,6 +159,7 @@ fn preview(input: &Value) -> String {
         "base",
         "draft",
         "event",
+        "commit_id",
         "comment_id",
         "method",
         "sha",
@@ -770,8 +771,19 @@ impl GithubTool {
         if let Some(text) = text {
             body["body"] = json!(text);
         }
-        if let Some(sha) = opt_text(input, "commit_id")? {
-            body["commit_id"] = json!(check_sha(sha, "commit_id")?);
+        match opt_text(input, "commit_id")? {
+            Some(sha) => body["commit_id"] = json!(check_sha(sha, "commit_id")?),
+            // GitHub would approve whatever the head is when the request
+            // arrives, also commits pushed after the user said yes.
+            None if event == "APPROVE" => {
+                return Err(
+                    "missing `commit_id`: an APPROVE review needs the head commit you \
+                            reviewed (pr_view shows it), so a commit pushed since is not \
+                            approved unseen"
+                        .into(),
+                );
+            }
+            None => {}
         }
         if let Some(comments) = input.get("comments").filter(|value| !value.is_null()) {
             body["comments"] = line_comments(comments)?;
@@ -872,7 +884,8 @@ impl Tool for GithubTool {
          pr_files, pr_comments (conversation, reviews, and review threads with comment ids), \
          pr_list, checks (check runs and commit statuses of `ref`, or of the head of \
          `number`). Writes: pr_create, pr_comment, review (event COMMENT, APPROVE or \
-         REQUEST_CHANGES, `body`, line `comments`), review_reply (answers the review thread \
+         REQUEST_CHANGES, `body`, line `comments`; APPROVE needs `commit_id`, the head commit \
+         you reviewed), review_reply (answers the review thread \
          whose first comment is `comment_id`), merge (`sha` must be the head commit you \
          reviewed; method merge, squash or rebase). `repo` is owner/name; the default is the \
          working folder's origin. Writes may need the user's approval, and some are not \
@@ -899,7 +912,7 @@ impl Tool for GithubTool {
                 "body": {"type": "string", "description": "pr_create, pr_comment, review, review_reply: Markdown text"},
                 "draft": {"type": "boolean"},
                 "event": {"type": "string", "enum": ["COMMENT", "APPROVE", "REQUEST_CHANGES"]},
-                "commit_id": {"type": "string", "description": "review: the commit reviewed (default the head)"},
+                "commit_id": {"type": "string", "description": "review: the commit reviewed; required with APPROVE (the head sha pr_view shows), otherwise default the head"},
                 "comments": {
                     "type": "array",
                     "description": "review: comments on lines of the diff",
