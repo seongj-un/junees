@@ -14,6 +14,7 @@ junees task "할 일 관리 웹 앱을 만들어"   # 장기 작업: 계획하�
 junees setup                        # 설정 다시
 junees gateway                      # 디스코드 봇으로 띄우기 (아래 디스코드 게이트웨이)
 junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작업 (아래 예약 작업)
+junees doctor                       # 설치와 설정 점검 (아래 점검)
 ```
 
 대화 안에서 쓰는 명령:
@@ -29,9 +30,10 @@ junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작�
 - `/skills`: 스킬 목록(`$JUNEES_HOME/skills`, 아래 스킬), `/skill <이름>`: 스킬 본문과 파일 목록.
 - `/cron`: 예약 작업 목록(아래 예약 작업).
 - `/context`: 컨텍스트 크기와 한도(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), 그리고 이 세션이 읽은 프로젝트 지침 파일과 바이트 수(두 백엔드 모두, 아래 프로젝트 지침 파일).
+- `/doctor`: 설치와 설정 점검(`junees doctor`와 같은 목록, 네트워크 없이. 아래 점검).
 - `/compact`(api 백엔드만), `/usage`, `/help`, `/exit`.
 
-명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `cron`, `sessions`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `cron`, `sessions`, `doctor`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
 ### 설정 파일과 처음 설정
 
@@ -836,6 +838,50 @@ github_api_url = "https://api.github.com"    # JUNEES_GITHUB_API_URL (GitHub Ent
 - `-p`와 `task` 모드는 사람이 없으므로 묻지 않는다(명령 정책만 적용).
 - `risky`는 흔한 실수를 막는 장치이지 보안 경계가 아니다. 명령 문자열만 보고 판단하므로 `rsync`, `tar -C`, `unzip -d`, `perl -pi`, `python3 -c "open(...)"`, `crontab -r`처럼 따로 알지 못하는 명령의 쓰기는 묻지 않고, 작업 폴더 안의 `write_file`은 묻지 않으므로 스크립트를 써 두고 `bash run.sh`나 `make`로 실행하면 어떤 검사든 피할 수 있다. 그 경계가 필요하면 `JUNEES_APPROVAL=all`을 쓴다.
 
+### 점검 (junees doctor)
+
+```sh
+junees doctor             # 항목마다 ok / warn / FAIL / --(해당 없음)과 고치는 방법 한 줄
+junees doctor --json      # 같은 내용을 JSON으로
+junees doctor --online    # API 키 확인 요청과 claude auth status까지
+```
+
+대화 안에서는 `/doctor`(네트워크 없이). 실패(`FAIL`)가 하나라도 있으면 종료 코드 1, 경고만 있으면 0이다.
+
+점검하는 것:
+
+- 상태 폴더: `$JUNEES_HOME`이 내 것이고 `0700`인지, `config.toml`, `mcp.json`, `cron/jobs.json`, `webhooks/routes.json`, `secrets/` 안 파일이 내 것이고 `0600`인지. 다른 사용자가 바꿀 수 있으면 실패, 읽기만 할 수 있으면 비밀이 들 수 있는 파일(`config.toml`, `mcp.json`, `secrets/*`)은 실패, 나머지는 경고. 고치는 줄은 `chmod 600 <경로>`처럼 그대로 실행할 수 있는 명령이다.
+- 설정: `config.toml`이 읽히는지(모르는 키, 따옴표 없는 값은 줄 번호와 함께), 모든 값이 읽히는지(`Config`, 백엔드, `timezone`, cron/웹훅 한도를 실제 실행과 같은 함수로 읽는다). 파일이 깨져 있어도 점검은 멈추지 않고 파일 없이 나머지를 본다.
+- 키: API 키, GitHub 토큰, 알림 웹훅이 있는지와 어디서 왔는지(환경 변수 / config.toml)만. 값은 어떤 경우에도 출력하지 않는다. 오류 문장이 값을 인용하더라도(예: 토큰을 `discord_allowed_users`에 잘못 넣은 경우) 보고서에서 비밀 설정의 값을 모두 `[hidden]`으로 바꾼 뒤 출력한다. api 백엔드에 키가 없으면 실패, claude-code 백엔드면 해당 없음.
+- claude-code 백엔드: `claude --version`(2.1.259 이상, 실행하는 프로그램은 이것 하나), 로그인(`claude auth status`는 `--online`일 때만), `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 켜져 있는지, 켜져 있으면 `bwrap`이 PATH에 있는지와 비특권 user namespace를 막는 커널 설정(`kernel.apparmor_restrict_unprivileged_userns = 1`, `kernel.unprivileged_userns_clone = 0`, `user.max_user_namespaces = 0`). 백엔드가 claude-code면 문제는 실패, api면 경고이고, api인데 `claude`도 없으면 이 부분은 건너뛴다. setuid root인 `bwrap`은 user namespace가 필요 없으므로 제한이 있어도 ok.
+- 프로그램: `git`(없으면 경고: 작업 모드와 GitHub 흐름이 쓴다), `gh`(선택).
+- 디스코드: 토큰과 허용 사용자(게이트웨이가 시작할 때와 같은 검사). 둘 다 없으면 해당 없음.
+- 예약 작업과 웹훅: `jobs.json`/`routes.json`이 읽히는지, 기다리는 작업이나 멈추지 않은 경로가 있는데 `junees cron daemon`/`junees webhook serve`가 돌지 않으면 경고(잠금 파일이 잡혀 있는지로 판단한다. 비어 있으면 잠깐 잡았다 바로 놓는다). 경로마다 시크릿 파일이 있고 내 것이고 `0600`인지(값은 읽기만 하고 출력하지 않음), 환경 변수 시크릿은 지금 환경에 없으면 경고(서버의 환경은 다를 수 있다).
+- 세션: `$JUNEES_HOME/sessions`의 파일 수와 크기, 1 GiB를 넘으면 경고.
+- MCP: `mcp.json`이 읽히는지, 켜진 서버의 `command`가 PATH(서버 `env`에 PATH가 있으면 그것)나 그 경로에 실행 파일로 있는지, `cwd`가 폴더인지. 서버를 실행하지는 않는다.
+- 플러그인: 켜진 플러그인의 폴더와 `plugin.json`이 실제 실행 때와 같은 검사(소유자, 권한, manifest 형식, 프롬프트 파일)를 통과하는지.
+- `--online`: 키가 있으면 `GET <base_url>/v1/models?limit=1`을 한 번 보낸다(토큰을 쓰지 않는다). 2xx면 ok, 401/403이면 실패, 그 밖이나 연결 실패는 경고(URL은 출력하지 않고 호스트만).
+
+점검은 읽기만 한다: 파일을 만들거나 쓰지 않고, 잠금을 붙잡고 있지 않으며, MCP 서버와 플러그인 명령을 실행하지 않으며, 기본으로 네트워크를 쓰지 않는다.
+
+Linux에서 Claude Code의 환경 정리(`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`)는 bubblewrap이 있어야 시작하고, bubblewrap은 비특권 user namespace를 만든다. Ubuntu 23.10 이후처럼 `kernel.apparmor_restrict_unprivileged_userns = 1`이면 bubblewrap을 설치해도 AppArmor가 막으므로, `bwrap`에 `userns`를 허용하는 프로필을 더한다:
+
+```sh
+sudo apt install bubblewrap
+sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+bwrap --ro-bind / / true && echo ok    # 확인
+```
+
+그럴 수 없으면 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0`으로 정리 없이 돌릴 수 있다(Claude Code가 실행하는 명령이 그 자격 증명을 볼 수 있다. 시작 때 경고).
+
 ## 구조
 
 ```
@@ -911,7 +957,7 @@ src/
   memory/            영구 메모리
     mod.rs             저장소 셋(user, notes, 프로젝트별 notes) 읽기/쓰기(0600, 원자적, flock), 항목 추가/교체/삭제와 상한, 프롬프트 절(대화, task, Claude Code 읽기 전용), /memory 보기
     tool.rs            memory 도구 (task 세션은 project만)
-  cli.rs             인자 파싱(위치 인자 질문, task/status/setup/gateway/cron/webhook 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
+  cli.rs             인자 파싱(위치 인자 질문, task/status/setup/gateway/cron/webhook/doctor 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
   gateway/           디스코드 게이트웨이 (junees gateway)
     mod.rs             Gateway::run: Get Gateway Bot, 연결 태스크, 채널 LocalSet, 종료 처리, 로그(Log)
     config.rs          discord_* 설정 (토큰 Token은 Debug에서 숨김, 허용 사용자 필수, https/wss 확인)
@@ -957,6 +1003,14 @@ src/
     run.rs             실행 하나: running 기록, 프롬프트, cron 엔진(세션 source webhook), 출력 파일 webhooks/output/<이름>/, 전달, 마지막 실행 기록
     cli.rs, command.rs junees webhook 인자 파싱과 명령(serve/add/add-github/list/remove/pause/resume/test/run), 흐름 경로의 실행 연결
     mod.rs             설정(webhook_max_time, webhook_max_tokens), /webhooks와 !webhooks 목록
+  doctor/            설치와 설정 점검 (junees doctor, /doctor)
+    mod.rs             인자, 점검 결과(ok/warn/fail/skip, 고치는 방법), 텍스트와 JSON 출력, 비밀 값 지우기, 점검 순서
+    files.rs           상태 폴더와 비공개 파일 권한, secrets/, 세션 폴더 크기
+    settings.rs        설정 파일 읽기와 모든 값, 키가 있는지(값 없이), 디스코드, 알림 웹훅
+    claude.rs          claude --version, --online의 auth status, 환경 정리와 bubblewrap, user namespace 제한(/proc/sys)
+    services.rs        git/gh, cron 데몬과 웹훅 서버(잠금으로 판단), 웹훅 시크릿, MCP 명령 찾기(실행 안 함), 켜진 플러그인
+    online.rs          --online: 키 확인 요청 GET /v1/models
+    tests.rs           임시 상태 폴더, 가짜 PATH와 /proc/sys, 가짜 claude, 가짜 API로 각 점검의 ok/경고/실패
 tests/
   common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림), 테스트 환경의 JUNEES_*/ANTHROPIC_*/CLAUDE_CODE_* 변수와 GH_TOKEN/GITHUB_TOKEN/GH_ENTERPRISE_TOKEN/GITHUB_ENTERPRISE_TOKEN/GH_CONFIG_DIR을 지우고, 인자로 받은 임시 cwd와 HOME에서 도는 바이너리 명령(junees_binary(cwd, home), 크레이트 폴더나 그 안, 그 위의 폴더는 거부, 모든 바이너리 테스트가 이것으로 시작)
   binary_env.rs        junees_binary가 지우는 변수와 남기는 변수, 주어진 임시 폴더에서만 돌고 크레이트 쪽 폴더는 거부하는지, 모든 바이너리 테스트가 그 헬퍼를 쓰는지 검증(명령은 실행하지 않음)
@@ -985,6 +1039,7 @@ tests/
   cron.rs              실제 바이너리와 가짜 API, 가짜 디스코드 REST로 cron add/list/run(전달, 출력 파일, 세션, 읽기 전용 도구)/pause/resume/rm, 데몬이 때가 된 작업을 자식 프로세스로 실행하고 실패를 전달하는지 검증
   github_flow.rs       실제 바이너리로 webhook add-github(시크릿 파일 0600, 안내, 형식 2), serve에 서명한 pull_request.opened -> 모델의 리뷰가 가짜 GitHub에 POST, 같은 커밋의 두 번째 전달은 아무것도 안 함, list의 최근 처리 검증
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
+  doctor.rs            실제 바이너리로 junees doctor 출력과 종료 코드(권한 실패면 1), --json 형식, 깨진 설정 파일도 점검 결과로, --help와 잘못된 인자, 대화의 /doctor, 비밀 값이 출력되지 않음 검증
   session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
