@@ -420,6 +420,9 @@ async fn model_run(
             route: &cx.route.name,
             github_allow: allow,
             gh_config: cx.gh_config,
+            // The route's folder (the base checkout), not a worktree of
+            // the pull request: its instruction files are its author's.
+            context_dir: &cx.route.dir,
         },
     };
     let outcome = engine.run(&spec, cx.cancel, cx.limits).await;
