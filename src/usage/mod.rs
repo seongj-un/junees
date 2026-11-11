@@ -3,10 +3,12 @@
 //! Everything comes from the session journals, read and never changed:
 //! the `usage` entry of each model call, `summary_usage` of compaction
 //! summaries, `subagent_usage` (the tokens of a `delegate` call's
-//! subagents, which their own journals in `sessions/<id>/` also hold, so
-//! those are not read again) and the usage of `claude_turn` entries.
-//! Costs are estimated from [`prices`]; Claude Code turns run on the
-//! user's subscription and show tokens only.
+//! subagents, which their own journals in `sessions/<id>/` also hold) and
+//! the usage of `claude_turn` entries. Subagent journals are read only
+//! for models priced by the prompt length of each call, in place of the
+//! `subagent_usage` entries they add up to (`scan::split_subagents`), so
+//! no call counts twice. Costs are estimated from [`prices`]; Claude Code
+//! turns run on the user's subscription and show tokens only.
 
 pub mod args;
 pub mod prices;
@@ -29,8 +31,8 @@ pub enum Kind {
     Call,
     /// A compaction summary call (`summary_usage`).
     Summary,
-    /// The calls of a `delegate` call's subagents together
-    /// (`subagent_usage`).
+    /// The calls of a `delegate` call's subagents: together
+    /// (`subagent_usage`), or one by one from their own journals.
     Subagents,
     /// One Claude Code turn (`claude_turn`), on the subscription.
     ClaudeCode,
@@ -59,6 +61,9 @@ pub struct Record {
     /// Claude Code.
     pub model: String,
     pub usage: Usage,
+    /// The usage is that of one model call, so a price by prompt length
+    /// applies; sums of several calls are priced at the base rates.
+    pub one_call: bool,
 }
 
 /// Token sums and what they cost.
@@ -75,6 +80,9 @@ pub struct Totals {
     pub unpriced: BTreeSet<String>,
     /// Some of the tokens are Claude Code turns, paid by the subscription.
     pub subscription: bool,
+    /// Models priced by prompt length whose tokens are partly sums of
+    /// several calls, priced at the base rates: the cost may be low.
+    pub base_rated: BTreeSet<String>,
 }
 
 impl Totals {
@@ -89,11 +97,13 @@ impl Totals {
         }
         match prices.get(&record.model) {
             Some(price) => {
-                let one_call = record.kind != Kind::Subagents;
-                self.cost = self
-                    .cost
-                    .saturating_add(prices::cost(&price, &record.usage, one_call));
+                self.cost =
+                    self.cost
+                        .saturating_add(prices::cost(&price, &record.usage, record.one_call));
                 self.priced = true;
+                if !record.one_call && price.long.is_some() {
+                    self.base_rated.insert(model_name(&record.model));
+                }
             }
             None => {
                 self.unpriced.insert(model_name(&record.model));
@@ -107,6 +117,7 @@ impl Totals {
         self.priced |= other.priced;
         self.unpriced.extend(other.unpriced.iter().cloned());
         self.subscription |= other.subscription;
+        self.base_rated.extend(other.base_rated.iter().cloned());
     }
 
     /// Cache reads per thousand prompt tokens (cache reads, cache writes

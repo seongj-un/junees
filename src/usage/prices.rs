@@ -103,7 +103,9 @@ impl Prices {
     /// The table changed by `setting`, the value of [`PRICES_ENV`]:
     /// comma-separated `<model>=<input>/<output>` with optional
     /// `/<cache write>/<cache read>`, in dollars per million tokens. Left
-    /// out, cache writes cost 1.25x input and cache reads 0.1x.
+    /// out, the cache rates keep the table's ratio to input for a model of
+    /// the table (cache reads are 0.05x on some), and are 1.25x input for
+    /// writes and 0.1x for reads for other models.
     pub fn from_setting(setting: Option<&str>) -> Result<Self, String> {
         let mut overrides = Vec::new();
         for item in setting.unwrap_or_default().split(',') {
@@ -130,7 +132,17 @@ impl Prices {
                 .collect::<Option<Vec<u64>>>()
                 .ok_or_else(|| fail("has a price that is not a number like 3 or 0.125"))?;
             let price = match numbers[..] {
-                [input, output] => flat(input, input * 5 / 4, input / 10, output),
+                [input, output] => {
+                    let (write, read) = match Prices::default().get(model) {
+                        // The table's cache rates, relative to input.
+                        Some(known) => (
+                            input * known.rates.cache_write / known.rates.input,
+                            input * known.rates.cache_read / known.rates.input,
+                        ),
+                        None => (input * 5 / 4, input / 10),
+                    };
+                    flat(input, write, read, output)
+                }
                 [input, output, write, read] => flat(input, write, read, output),
                 _ => return Err(fail("needs 2 or 4 prices")),
             };
