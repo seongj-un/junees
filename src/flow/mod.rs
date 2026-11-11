@@ -21,8 +21,11 @@
 pub mod address;
 pub mod merge;
 pub mod prompts;
+pub mod run;
 pub mod state;
 
+#[cfg(test)]
+mod tests;
 
 use std::path::{Path, PathBuf};
 
