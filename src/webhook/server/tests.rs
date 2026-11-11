@@ -90,18 +90,25 @@ async fn start(loopback: bool, read_timeout: Duration) -> Running {
     drop(locked);
     let runner = Arc::new(FakeRunner::default());
     let env: Env = Arc::new(|key: &str| (key == "HOOK_SECRET").then(|| SECRET.to_string()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = listener.local_addr().unwrap();
+    let url = format!("http://{local}");
+    // Bound to loopback either way; the server is told it listens wider.
+    let listen = if loopback {
+        local
+    } else {
+        SocketAddr::from(([0, 0, 0, 0], local.port()))
+    };
     let server = Arc::new(
         Server::new(
             home.path(),
-            loopback,
+            listen,
             Arc::clone(&runner) as Arc<dyn Runner>,
             env,
             Arc::new(|_: &str| {}),
         )
         .with_read_timeout(read_timeout),
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, force) = (Cancel::new(), Cancel::new());
     let served = tokio::spawn(server.serve(listener, stop.clone(), force.clone()));
     Running {
@@ -135,9 +142,20 @@ async fn raw(url: &str, request: &[u8]) -> (u16, String) {
     (status, body)
 }
 
-/// POSTs `body` to `/hooks/<name>` with `headers` (and a length).
+/// POSTs `body` to `/hooks/<name>` with `headers` (and a length), and
+/// `Host: <the server's address>` and `Content-Type: application/json`
+/// unless `headers` name them.
 async fn post(url: &str, name: &str, headers: &[(&str, &str)], body: &str) -> (u16, String) {
-    let mut request = format!("POST /hooks/{name} HTTP/1.1\r\nHost: x\r\n");
+    let mut request = format!("POST /hooks/{name} HTTP/1.1\r\n");
+    let host = url.trim_start_matches("http://");
+    for (key, value) in [("Host", host), ("Content-Type", "application/json")] {
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(key))
+        {
+            request.push_str(&format!("{key}: {value}\r\n"));
+        }
+    }
     for (key, value) in headers {
         request.push_str(&format!("{key}: {value}\r\n"));
     }
@@ -294,6 +312,90 @@ async fn routes_without_a_secret_need_a_loopback_listener() {
         202
     );
     server.runner.gate.add_permits(10);
+}
+
+#[tokio::test]
+async fn routes_without_a_secret_refuse_browsers_and_proxies() {
+    let server = start(true, READ_TIMEOUT).await;
+    let url = &server.url;
+    let port = url.rsplit(':').next().unwrap();
+    // What a web page in the user's browser sends with
+    // `fetch(url, {method: "POST", mode: "no-cors", body})`: no preflight.
+    let probe = format!(
+        "POST /hooks/open HTTP/1.1\r\nHost: evil.example:{port}\r\n\
+         Origin: https://evil.example\r\nSec-Fetch-Site: cross-site\r\n\
+         Sec-Fetch-Mode: no-cors\r\nContent-Type: text/plain;charset=UTF-8\r\n\
+         Content-Length: 2\r\n\r\n{{}}"
+    );
+    assert_eq!(raw(url, probe.as_bytes()).await.0, 403);
+    // Each mark alone, on an otherwise local JSON request.
+    let local = format!("127.0.0.1:{port}");
+    let other_port = format!("127.0.0.1:{}", port.parse::<u16>().unwrap() ^ 1);
+    let evil = format!("evil.example:{port}");
+    let cases: Vec<(Vec<(&str, &str)>, u16)> = vec![
+        // DNS rebinding: the page's own name resolves to 127.0.0.1.
+        (vec![("Host", evil.as_str())], 403),
+        (vec![("Host", "127.0.0.1")], 403),
+        (vec![("Host", &other_port)], 403),
+        (vec![("Host", "127.0.0.2:1")], 403),
+        (vec![("Host", &local), ("Host", &local)], 403),
+        (vec![("Origin", "null")], 403),
+        (vec![("Sec-Fetch-Site", "same-origin")], 403),
+        (vec![("Sec-Fetch-Mode", "navigate")], 403),
+        (vec![("X-Forwarded-For", "203.0.113.5")], 403),
+        (vec![("Forwarded", "for=203.0.113.5")], 403),
+        (vec![("CF-Connecting-IP", "203.0.113.5")], 403),
+        (vec![("X-Real-IP", "203.0.113.5")], 403),
+        (vec![("Content-Type", "text/plain")], 415),
+        (
+            vec![("Content-Type", "application/x-www-form-urlencoded")],
+            415,
+        ),
+        (vec![("Content-Type", "application/jsonx")], 415),
+        (vec![("Content-Type", "")], 415),
+    ];
+    for (headers, wanted) in cases {
+        let (status, text) = post(url, "open", &headers, "{}").await;
+        assert_eq!(status, wanted, "{headers:?}: {text}");
+    }
+    let no_type =
+        format!("POST /hooks/open HTTP/1.1\r\nHost: {local}\r\nContent-Length: 2\r\n\r\n{{}}");
+    assert_eq!(raw(url, no_type.as_bytes()).await.0, 415);
+    let no_host = "POST /hooks/open HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+    assert_eq!(raw(url, no_host.as_bytes()).await.0, 403);
+    assert_eq!(server.runner.started(), 0, "nothing ran");
+    // What a program on this machine sends (curl, a local tool).
+    let localhost = format!("LocalHost:{port}");
+    let ipv6 = format!("[::1]:{port}");
+    for headers in [
+        vec![],
+        vec![("Host", localhost.as_str())],
+        vec![("Host", ipv6.as_str())],
+        vec![("Content-Type", "Application/JSON; charset=utf-8")],
+    ] {
+        let (status, text) = post(url, "open", &headers, "{}").await;
+        assert_eq!(status, 202, "{headers:?}: {text}");
+    }
+    // A route with a secret relies on its signature alone.
+    let opened = r#"{"action":"opened"}"#;
+    let signature = signature::sign(SECRET.as_bytes(), opened.as_bytes());
+    let (status, text) = post(
+        url,
+        "pr",
+        &[
+            ("Host", "hooks.example.com"),
+            ("X-Forwarded-For", "203.0.113.5"),
+            ("Origin", "https://github.com"),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            ("X-GitHub-Event", "pull_request"),
+            ("X-Hub-Signature-256", &signature),
+        ],
+        opened,
+    )
+    .await;
+    assert_eq!((status, text.as_str()), (202, "queued"));
+    server.runner.gate.add_permits(10);
+    server.runner.wait_started(5).await;
 }
 
 #[tokio::test]
@@ -468,7 +570,14 @@ async fn a_slow_client_gets_408() {
         .await
         .unwrap();
     stream
-        .write_all(b"POST /hooks/open HTTP/1.1\r\nContent-Length: 10\r\n\r\n{")
+        .write_all(
+            format!(
+                "POST /hooks/open HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+                 Content-Length: 10\r\n\r\n{{",
+                server.url.trim_start_matches("http://")
+            )
+            .as_bytes(),
+        )
         .await
         .unwrap();
     let mut text = String::new();

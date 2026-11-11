@@ -183,7 +183,9 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
     match &secret {
         None => eprintln!(
             "  !! the route has no secret: anyone who can reach the server can start runs. \
-             It is only served while `junees webhook serve` listens on a loopback address"
+             It is only served while `junees webhook serve` listens on a loopback address, \
+             to JSON requests sent straight to it (Host 127.0.0.1:<port>, localhost:<port> \
+             or [::1]:<port>; no browser or proxy headers)"
         ),
         Some(Secret::Env(name)) if std::env::var_os(name).is_none() => {
             eprintln!("  !! {name} is not set here: set it for `junees webhook serve`")
@@ -404,7 +406,7 @@ async fn serve(home: &Path, lookup: Lookup, listen: Option<String>) -> Result<Ex
         "junees webhook server for {}: POST http://{local}/hooks/<name>; SIGINT or SIGTERM stops it",
         home.display()
     );
-    Arc::new(Server::new(home, loopback, Arc::new(runner), env, log))
+    Arc::new(Server::new(home, local, Arc::new(runner), env, log))
         .serve(listener, stop, force)
         .await;
     eprintln!("webhook server stopped");

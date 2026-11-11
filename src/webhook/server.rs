@@ -4,8 +4,10 @@
 //!
 //! The answers: 405 for another method, 404 for another path or an unknown
 //! route, 401 for a missing or wrong signature, 403 for a route without a
-//! secret when the server listens on a non-loopback address, 400 for a
-//! request it cannot use, 200 `pong` for GitHub's `ping`, 503 while
+//! secret when the server listens on a non-loopback address or the request
+//! may not come straight from a program on this machine
+//! ([`Server::check_unsigned`]), 415 for such a request that is not JSON,
+//! 400 for a request it cannot use, 200 `pong` for GitHub's `ping`, 503 while
 //! paused or stopping, 202 `ignored` for events the route does not want,
 //! 200 `duplicate` for a delivery id it has seen (the last [`REMEMBERED`]),
 //! 429 when [`MAX_WAITING`] requests already wait for the route, else 202
@@ -17,6 +19,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
+use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -47,6 +50,14 @@ pub const MAX_WAITING: usize = 20;
 pub const REMEMBERED: usize = 1000;
 /// How long a client may take to send its request.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Headers a proxy or tunnel adds to say who sent a request; a route
+/// without a secret refuses requests carrying one.
+pub const PROXY_HEADERS: &[&str] = &[
+    "x-forwarded-for",
+    "forwarded",
+    "cf-connecting-ip",
+    "x-real-ip",
+];
 
 /// Runs accepted requests.
 #[async_trait]
@@ -104,6 +115,8 @@ pub struct Server {
     home: PathBuf,
     /// Whether it listens on a loopback address only.
     loopback: bool,
+    /// The port it listens on.
+    port: u16,
     runner: Arc<dyn Runner>,
     env: Env,
     log: Log,
@@ -114,10 +127,18 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(home: &Path, loopback: bool, runner: Arc<dyn Runner>, env: Env, log: Log) -> Self {
+    /// A server for the listener bound to `listen`.
+    pub fn new(
+        home: &Path,
+        listen: SocketAddr,
+        runner: Arc<dyn Runner>,
+        env: Env,
+        log: Log,
+    ) -> Self {
         Self {
             home: home.to_path_buf(),
-            loopback,
+            loopback: listen.ip().is_loopback(),
+            port: listen.port(),
             runner,
             env,
             log,
@@ -230,6 +251,8 @@ impl Server {
             .route(&name)
             .await
             .map_err(|refusal| (refusal, what.clone()))?;
+        self.check_unsigned(&route, &head)
+            .map_err(|refusal| (refusal, what.clone()))?;
         let body = http::read_body(stream, &head, length, buf)
             .await
             .map_err(|err| refused(err, &what))?;
@@ -317,16 +340,87 @@ impl Server {
         answer(202, "queued")
     }
 
-    /// Checks the signature `route` asks for.
-    fn check_signature(&self, route: &Route, head: &Head, body: &[u8]) -> Result<(), Answer> {
-        let Some(secret) = &route.secret else {
-            if self.loopback {
-                return Ok(());
-            }
+    /// Checks a request for a route without a secret, from its head. Such
+    /// a route is served only on a loopback listener, and only to requests
+    /// a program on this machine sends straight to it: the `Host` is a
+    /// loopback literal with the server's port, no header a browser adds
+    /// (`Origin`, `Sec-Fetch-*`) or a proxy or tunnel adds
+    /// ([`PROXY_HEADERS`]), and a `Content-Type` of `application/json`.
+    ///
+    /// A loopback listener alone does not tell who sent a request: a web
+    /// page open in the user's browser can POST to it (a `text/plain`
+    /// request needs no CORS preflight), with its own name as `Host` after
+    /// DNS rebinding, and a tunnel delivers outside requests from loopback.
+    /// Browsers always send `Origin` or `Sec-Fetch-*` on such requests, and
+    /// need a preflight the server never answers before sending JSON.
+    fn check_unsigned(&self, route: &Route, head: &Head) -> Result<(), Answer> {
+        if route.secret.is_some() {
+            return Ok(());
+        }
+        if !self.loopback {
             return Err(answer(
                 403,
                 "this route has no secret; it is only served on a loopback address",
             ));
+        }
+        let port = self.port;
+        let local = [
+            format!("127.0.0.1:{port}"),
+            format!("localhost:{port}"),
+            format!("[::1]:{port}"),
+        ];
+        let hosts: Vec<&str> = head
+            .headers
+            .iter()
+            .filter(|(name, _)| name == "host")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        if !matches!(hosts[..], [host] if local.iter().any(|name| name.eq_ignore_ascii_case(host)))
+        {
+            return Err(answer(
+                403,
+                "this route has no secret; it only takes requests sent to this machine \
+                 (Host 127.0.0.1, localhost or [::1] with the port)",
+            ));
+        }
+        if head
+            .headers
+            .iter()
+            .any(|(name, _)| name == "origin" || name.starts_with("sec-fetch-"))
+        {
+            return Err(answer(
+                403,
+                "this route has no secret; it does not take requests from a browser",
+            ));
+        }
+        if head
+            .headers
+            .iter()
+            .any(|(name, _)| PROXY_HEADERS.contains(&name.as_str()))
+        {
+            return Err(answer(
+                403,
+                "this route has no secret; it does not take requests through a proxy or tunnel",
+            ));
+        }
+        let json = head
+            .header("content-type")
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json"));
+        if !json {
+            return Err(answer(
+                415,
+                "this route has no secret; send Content-Type: application/json",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks the signature `route` asks for. A route without one was
+    /// checked by [`Self::check_unsigned`].
+    fn check_signature(&self, route: &Route, head: &Head, body: &[u8]) -> Result<(), Answer> {
+        let Some(secret) = &route.secret else {
+            return Ok(());
         };
         let key = secret.read(&*self.env).map_err(|err| {
             (self.log)(&format!("route {}: {err:#}", route.name));
