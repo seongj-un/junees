@@ -222,6 +222,61 @@ fn channel_sessions_only_when_asked() {
     assert!(parse_sources(["slack"]).unwrap_err().contains("unknown"));
 }
 
+/// Channel sessions from before meta lines named their source (#34): a
+/// channel in the meta or in the gateway's index makes them Discord
+/// sessions, out of the default scope (PR #49 review, item 2).
+#[tokio::test]
+async fn old_channel_sessions_are_not_terminal_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let terminal = session(home, "/w", None, &[user("needle at the terminal")], 40);
+    let indexed = session(home, "/w", None, &[user("needle in an old channel")], 30);
+    let mut sub = SessionWriter::create_sub(&journal(home, &indexed), "sub-1").unwrap();
+    sub.record(&user("needle in its subagent")).unwrap();
+    let sub_path = sub.path().to_path_buf();
+    drop(sub);
+    set_age(&sub_path, 25);
+    let marked = session(home, "/w", None, &[user("needle with a channel mark")], 20);
+    // A meta line naming a channel but no source.
+    let path = journal(home, &marked);
+    let data = std::fs::read_to_string(&path).unwrap();
+    let (first, rest) = data.split_once('\n').unwrap();
+    let mut meta: Value = serde_json::from_str(first).unwrap();
+    assert!(meta.get("source").is_none(), "{meta}");
+    meta["channel"] = json!("777");
+    std::fs::write(&path, format!("{meta}\n{rest}")).unwrap();
+    set_age(&path, 20);
+    let index = home.join(crate::gateway::sessions::INDEX_FILE);
+    std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+    std::fs::write(&index, json!({"555": indexed}).to_string()).unwrap();
+
+    assert_eq!(
+        ids(&search(home, &options("needle", Some("/w"))).unwrap()),
+        [&terminal]
+    );
+    let restricted = SessionSearch::new(home, Path::new("/w"), false);
+    let output = run(&restricted, json!({"query": "needle"})).await.content;
+    assert!(output.contains(&terminal), "{output}");
+    assert!(!output.contains("old channel"), "{output}");
+
+    let mut discord = options("needle", Some("/w"));
+    discord.sources = vec!["discord".into()];
+    let found = search(home, &discord).unwrap();
+    let seen: Vec<(String, &str, Option<&str>)> = found
+        .hits
+        .iter()
+        .map(|hit| (hit.id.clone(), hit.source.as_str(), hit.channel.as_deref()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (marked.clone(), "discord", Some("777")),
+            (format!("{indexed}/sub-1"), "discord", Some("555")),
+            (indexed.clone(), "discord", Some("555")),
+        ]
+    );
+}
+
 #[test]
 fn broken_and_huge_lines_are_skipped() {
     let home = tempfile::tempdir().unwrap();

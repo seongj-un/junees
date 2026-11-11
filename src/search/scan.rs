@@ -1,7 +1,7 @@
 //! Reading the journals: which files, line by line, and what in them is
 //! searched.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use super::{
     SNIPPETS_PER_SESSION, Snippet, TERMINAL,
 };
 use crate::message::{ContentBlock, Role};
-use crate::session::{CLEARED, Entry, INTERRUPTED, Meta, SUMMARY_HEADER};
+use crate::session::{CLEARED, DISCORD, Entry, INTERRUPTED, Meta, SUMMARY_HEADER};
 
 /// Bytes read from a journal at a time.
 const READ_BUFFER: usize = 64 * 1024;
@@ -63,7 +63,49 @@ fn journals(dir: &Path) -> anyhow::Result<Vec<Journal>> {
     Ok(found)
 }
 
-pub(super) fn run(dir: &Path, options: &Options, deadline: Instant) -> anyhow::Result<Outcome> {
+/// Session id to channel id, from the Discord gateway's index
+/// ([`crate::gateway::sessions::INDEX_FILE`]): it also names the channel
+/// sessions from before meta lines recorded their source. Empty when the
+/// index is missing or broken.
+pub(super) fn gateway_channels(home: &Path) -> HashMap<String, String> {
+    fs::read_to_string(home.join(crate::gateway::sessions::INDEX_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<BTreeMap<String, String>>(&text).ok())
+        .map(|index| {
+            index
+                .into_iter()
+                .map(|(channel, id)| (id, channel))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Where a session took place, and its channel. Sessions from before meta
+/// lines named their [`Meta::source`] count as Discord sessions when the
+/// meta names a channel or the gateway's index (`old_channels`) ties a
+/// channel to the session or, for a subagent, to its parent; only the
+/// rest started at a terminal.
+fn origin(meta: &Meta, old_channels: &HashMap<String, String>) -> (String, Option<String>) {
+    if let Some(source) = &meta.source {
+        return (source.clone(), meta.channel.clone());
+    }
+    let parent = meta.id.split('/').next().unwrap_or_default();
+    match meta
+        .channel
+        .clone()
+        .or_else(|| old_channels.get(parent).cloned())
+    {
+        Some(channel) => (DISCORD.to_string(), Some(channel)),
+        None => (TERMINAL.to_string(), None),
+    }
+}
+
+pub(super) fn run(
+    dir: &Path,
+    options: &Options,
+    old_channels: &HashMap<String, String>,
+    deadline: Instant,
+) -> anyhow::Result<Outcome> {
     let journals = journals(dir)?;
     let mut outcome = Outcome {
         files: journals.len(),
@@ -77,7 +119,7 @@ pub(super) fn run(dir: &Path, options: &Options, deadline: Instant) -> anyhow::R
             outcome.timed_out = true;
             break;
         }
-        let (hit, finished) = read_journal(journal, options, deadline, &mut outcome);
+        let (hit, finished) = read_journal(journal, options, old_channels, deadline, &mut outcome);
         outcome.hits.extend(hit);
         if !finished {
             outcome.timed_out = true;
@@ -145,8 +187,7 @@ fn read_line(
     }
 }
 
-fn in_scope(meta: &Meta, options: &Options) -> bool {
-    let source = meta.source.as_deref().unwrap_or(TERMINAL);
+fn in_scope(meta: &Meta, source: &str, options: &Options) -> bool {
     options.sources.iter().any(|s| s == source)
         && options
             .folder
@@ -163,6 +204,7 @@ fn in_scope(meta: &Meta, options: &Options) -> bool {
 fn read_journal(
     journal: &Journal,
     options: &Options,
+    old_channels: &HashMap<String, String>,
     deadline: Instant,
     outcome: &mut Outcome,
 ) -> (Option<Hit>, bool) {
@@ -179,7 +221,8 @@ fn read_journal(
     let Ok(Entry::Meta(meta)) = serde_json::from_slice::<Entry>(&line) else {
         return (None, true);
     };
-    if !in_scope(&meta, options) {
+    let (source, channel) = origin(&meta, old_channels);
+    if !in_scope(&meta, &source, options) {
         return (None, true);
     }
     outcome.read += 1;
@@ -192,8 +235,8 @@ fn read_journal(
             .unwrap_or_default()
             .as_secs(),
         cwd: meta.cwd,
-        source: meta.source.unwrap_or_else(|| TERMINAL.to_string()),
-        channel: meta.channel,
+        source,
+        channel,
         backend: meta.backend,
         snippets: Vec::new(),
         matches: 0,

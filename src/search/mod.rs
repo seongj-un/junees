@@ -55,7 +55,8 @@ pub const TOOL_TIME_LIMIT: Duration = Duration::from_secs(5);
 pub const HUMAN_TIME_LIMIT: Duration = Duration::from_secs(15);
 
 /// The source name of sessions started at a terminal (no
-/// [`session::Meta::source`]): conversations, `-p` and task sessions.
+/// [`session::Meta::source`] and no channel): conversations, `-p` and
+/// task sessions.
 pub const TERMINAL: &str = "terminal";
 
 /// Every source a search can be limited to.
@@ -125,7 +126,13 @@ pub struct Outcome {
 /// sessions folder can fail; unreadable journals are skipped.
 pub fn search(home: &Path, options: &Options) -> anyhow::Result<Outcome> {
     let deadline = Instant::now() + options.time_limit;
-    scan::run(&session::sessions_dir(home), options, deadline)
+    let old_channels = scan::gateway_channels(home);
+    scan::run(
+        &session::sessions_dir(home),
+        options,
+        &old_channels,
+        deadline,
+    )
 }
 
 /// Checks source names given by the model or the user: each must be one
