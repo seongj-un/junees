@@ -65,14 +65,10 @@ pub fn is_serving(home: &Path) -> bool {
     let Ok(file) = std::fs::File::open(dir(home).join(LOCK_FILE)) else {
         return false;
     };
-    // SAFETY: `file` owns the descriptor and outlives the call; a lock
-    // taken here is released when it is dropped.
-    unsafe {
-        libc::flock(
-            std::os::fd::AsRawFd::as_raw_fd(&file),
-            libc::LOCK_EX | libc::LOCK_NB,
-        ) != 0
-    }
+    // A lock let go a moment ago can still be held by a child forked
+    // in between (until it execs), so look with the usual retries; a
+    // lock taken here is released when `file` is dropped.
+    !crate::flock::try_exclusive(&file).unwrap_or(false)
 }
 
 /// Recent results shown per flow route.
