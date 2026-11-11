@@ -221,6 +221,11 @@ fn failure_note(err: &anyhow::Error, deadline: &Deadline, limits: Limits) -> Str
 pub struct ApiEngine {
     config: Arc<Config>,
     provider: ProviderFactory,
+    /// Tests only: bash runs in the run's folder, in a sandbox there
+    /// ([`crate::tools::Bash::sandboxed`]). A real run's process is
+    /// already in that folder; a test's is in the crate.
+    #[cfg(test)]
+    sandbox: bool,
 }
 
 impl ApiEngine {
@@ -239,7 +244,19 @@ impl ApiEngine {
                 .with_web_search(settings.web_search.clone()),
             ) as Box<dyn Provider>)
         });
-        Self { config, provider }
+        Self {
+            config,
+            provider,
+            #[cfg(test)]
+            sandbox: false,
+        }
+    }
+
+    /// Runs bash in the run's folder with its user state there (tests).
+    #[cfg(test)]
+    pub fn sandboxed(mut self) -> Self {
+        self.sandbox = true;
+        self
     }
 
     /// Uses `provider` for the model calls (tests).
@@ -253,7 +270,12 @@ impl ApiEngine {
         let dir = spec.dir;
         let home = config.home.as_deref();
         let memory = home.map(|home| Memory::for_folder(home, dir, config.memory));
-        let mut tools = ToolRegistry::with_defaults(&spec.trigger.tool_settings(&config.tools));
+        let settings = spec.trigger.tool_settings(&config.tools);
+        let mut tools = ToolRegistry::with_defaults(&settings);
+        #[cfg(test)]
+        if self.sandbox {
+            tools.register(crate::tools::Bash::with_settings(&settings).sandboxed(dir));
+        }
         skills::register(&mut tools, home, false);
         mcp.register(&mut tools);
         match spec.trigger {
@@ -515,7 +537,10 @@ mod tests {
                 delay,
             }) as Box<dyn Provider>)
         });
-        (ApiEngine::new(config).with_provider(provider), seen)
+        (
+            ApiEngine::new(config).with_provider(provider).sandboxed(),
+            seen,
+        )
     }
 
     fn limits() -> Limits {
