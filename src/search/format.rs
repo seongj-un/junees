@@ -71,13 +71,14 @@ fn notes(outcome: &Outcome, options: &Options, limit_hint: &str) -> Vec<String> 
 
 /// The tool result: each session's snippets inside a `<tag ...>` element
 /// (the caller picks a random tag name, so quoted text cannot close it),
-/// after a line saying the quoted text is data.
-pub fn for_model(outcome: &Outcome, options: &Options, tag: &str) -> String {
+/// after a line saying the quoted text is data. `all_folders`: the tool
+/// may search every folder, so an empty result points there.
+pub fn for_model(outcome: &Outcome, options: &Options, tag: &str, all_folders: bool) -> String {
     let query = escape_hidden(&options.query.display());
     let mut out = String::new();
     if outcome.hits.is_empty() {
         out.push_str(&format!("No session {} matches `{query}`.", scope(options)));
-        if options.folder.is_some() && options.session.is_none() {
+        if all_folders && options.folder.is_some() && options.session.is_none() {
             out.push_str(" `all: true` searches every folder.");
         }
         out.push('\n');

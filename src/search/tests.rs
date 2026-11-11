@@ -166,7 +166,7 @@ fn newest_first_with_limits() {
     two.limit = 2;
     let found = search(home, &two).unwrap();
     assert_eq!(ids(&found), [&newest, &middle]);
-    let text = format::for_model(&found, &two, "t");
+    let text = format::for_model(&found, &two, "t", true);
     assert!(text.contains("(2 more matches in this session)"), "{text}");
     assert!(
         text.contains("More sessions may match: raise `limit`"),
@@ -263,7 +263,7 @@ fn broken_and_huge_lines_are_skipped() {
     assert_eq!(texts, ["needle before", "needle after"]);
     assert_eq!(found.broken_lines, 3);
     assert_eq!(found.long_lines, 1);
-    let text = format::for_model(&found, &options("needle", Some("/w")), "t");
+    let text = format::for_model(&found, &options("needle", Some("/w")), "t", true);
     assert!(
         text.contains("Skipped 3 unreadable and 1 oversized journal lines."),
         "{text}"
@@ -366,7 +366,7 @@ fn stops_at_the_time_limit() {
     assert!(found.timed_out);
     assert!(found.hits.is_empty());
     assert_eq!((found.read, found.files), (0, 1));
-    let text = format::for_model(&found, &quick, "t");
+    let text = format::for_model(&found, &quick, "t", true);
     assert!(
         text.contains("stopped at its time limit (0 s) after reading 0 of 1 journals"),
         "{text}"
@@ -378,7 +378,7 @@ fn no_sessions_folder_finds_nothing() {
     let home = tempfile::tempdir().unwrap();
     let found = search(home.path(), &options("needle", Some("/w"))).unwrap();
     assert_eq!(found, Outcome::default());
-    let text = format::for_model(&found, &options("needle", Some("/w")), "t");
+    let text = format::for_model(&found, &options("needle", Some("/w")), "t", true);
     assert_eq!(
         text,
         "No session in this folder (/w) matches `needle`. `all: true` searches every folder.\n"
@@ -493,6 +493,73 @@ async fn the_tool_quotes_results_as_data() {
     )
     .await;
     assert!(!output.is_error, "{}", output.content);
+}
+
+/// Gateway, scheduled-job and task runs (`channels = false`) search only
+/// their own folder: `all` is refused, and `session` names only a session
+/// of that folder (PR #49 review, item 1).
+#[tokio::test]
+async fn restricted_runs_stay_in_their_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let other = session(
+        home,
+        "/private/other",
+        None,
+        &[user("deploy key is PROBE-SECRET-1")],
+        10,
+    );
+    let own = session(home, "/gw", None, &[user("PROBE in the gateway folder")], 0);
+    let tool = SessionSearch::new(home, Path::new("/gw"), false);
+    assert!(tool.input_schema()["properties"].get("all").is_none());
+
+    let output = run(&tool, json!({"query": "PROBE-SECRET"})).await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with("No session"),
+        "{}",
+        output.content
+    );
+    assert!(!output.content.contains("all: true"), "{}", output.content);
+
+    let output = run(&tool, json!({"query": "PROBE", "all": true})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output
+            .content
+            .contains("only the sessions of its own working folder"),
+        "{}",
+        output.content
+    );
+
+    for session in ["2", other.as_str()] {
+        let output = run(&tool, json!({"query": "PROBE", "session": session})).await;
+        assert!(!output.is_error, "{}", output.content);
+        assert!(!output.content.contains("deploy key"), "{}", output.content);
+    }
+    let output = run(&tool, json!({"query": "PROBE", "session": "2"})).await;
+    assert!(
+        output.content.contains(&format!("id=\"{own}\"")),
+        "{}",
+        output.content
+    );
+    let output = run(&tool, json!({"query": "PROBE", "all": false})).await;
+    assert!(
+        output.content.contains(&format!("id=\"{own}\"")),
+        "{}",
+        output.content
+    );
+    assert!(!output.content.contains("deploy key"), "{}", output.content);
+
+    // The terminal conversation still searches every folder.
+    let open = SessionSearch::new(home, Path::new("/gw"), true);
+    for input in [
+        json!({"query": "PROBE", "all": true}),
+        json!({"query": "PROBE", "session": other}),
+    ] {
+        let output = run(&open, input).await;
+        assert!(output.content.contains("deploy key"), "{}", output.content);
+    }
 }
 
 #[tokio::test]
