@@ -64,7 +64,13 @@ pub const LOCK_FILE: &str = "gateway/lock";
 /// state folder would both answer every message, run the tools twice and
 /// take each other's channel sessions, so a second one is refused.
 pub fn lock(home: &Path) -> Result<File> {
-    let path = home.join(LOCK_FILE);
+    lock_file(home, LOCK_FILE)
+}
+
+/// [`lock`] on the lock file `name` (relative to `home`): each gateway
+/// (Discord, Telegram) has its own, since they answer different chats.
+pub fn lock_file(home: &Path, name: &str) -> Result<File> {
+    let path = home.join(name);
     let dir = path.parent().context("the lock file has no folder")?;
     fs::DirBuilder::new()
         .recursive(true)

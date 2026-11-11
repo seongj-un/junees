@@ -22,20 +22,29 @@ pub const INDEX_FILE: &str = "gateway/discord-sessions.json";
 pub struct SessionIndex {
     path: Option<PathBuf>,
     channels: BTreeMap<String, String>,
+    /// The [`session::Meta::source`] of the sessions it ties to channels.
+    source: &'static str,
 }
 
 impl SessionIndex {
-    /// The index of the state folder `home`; empty (and not saved) without
-    /// one. A broken file is an error: overwriting it would lose every
-    /// channel's session.
+    /// The Discord gateway's index of the state folder `home`; empty (and
+    /// not saved) without one. A broken file is an error: overwriting it
+    /// would lose every channel's session.
     pub fn load(home: Option<&Path>) -> Result<Self> {
+        Self::load_for(home, INDEX_FILE, session::DISCORD)
+    }
+
+    /// [`SessionIndex::load`] of the index `file` (relative to `home`) of
+    /// a gateway whose sessions have the meta `source`.
+    pub fn load_for(home: Option<&Path>, file: &str, source: &'static str) -> Result<Self> {
         let Some(home) = home else {
             return Ok(Self {
                 path: None,
                 channels: BTreeMap::new(),
+                source,
             });
         };
-        let path = home.join(INDEX_FILE);
+        let path = home.join(file);
         let channels = match fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text).with_context(|| {
                 format!(
@@ -51,6 +60,7 @@ impl SessionIndex {
         Ok(Self {
             path: Some(path),
             channels,
+            source,
         })
     }
 
@@ -72,12 +82,13 @@ impl SessionIndex {
             return Ok(());
         };
         let dir = path.parent().context("the index has no folder")?;
+        let name = path.file_name().context("the index has no file name")?;
+        let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
         let write = || -> std::io::Result<()> {
             fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
                 .create(dir)?;
-            let tmp = dir.join(".discord-sessions.json.tmp");
             let _ = fs::remove_file(&tmp);
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -189,7 +200,7 @@ pub fn start(
         cwd,
         &engines.model(),
         engines.session_backend(),
-        session::DISCORD,
+        index.source,
         channel,
     );
     match created {
