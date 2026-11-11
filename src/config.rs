@@ -70,6 +70,8 @@ pub struct Config {
     /// The `delegate` tool's settings (`JUNEES_SUBAGENTS` and
     /// `JUNEES_SUBAGENT_*`); `None` turns it off.
     pub subagents: Option<subagent::Settings>,
+    /// The `github` tool's settings (`JUNEES_GITHUB_*`).
+    pub github: crate::github::Settings,
 }
 
 impl Config {
@@ -199,6 +201,7 @@ impl Config {
         let web_search = WebSearch::read(get)?;
         let memory = Limits::read(get)?;
         let subagents = subagent::Settings::read(get)?;
+        let github = crate::github::Settings::read(get)?;
 
         Ok(Self {
             api_key,
@@ -219,6 +222,7 @@ impl Config {
             web_search,
             memory,
             subagents,
+            github,
         })
     }
 
