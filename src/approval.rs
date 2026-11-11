@@ -643,6 +643,33 @@ mod tests {
     }
 
     #[test]
+    fn github_writes_through_gh_are_asked_about_even_when_risky() {
+        let (_dir, workspace) = workspace();
+        let gate = approval(ApprovalMode::Risky, &workspace);
+        let request = gate
+            .request("bash", &bash("gh pr review 7 --approve"))
+            .unwrap();
+        assert_eq!(
+            request.reasons,
+            [
+                "`gh pr review` submits a review (approval, change request or comment) on GitHub \
+              as you"
+            ]
+        );
+        assert_eq!(request.kinds, ["bash: write to GitHub through gh"]);
+        // A merge, like the github tool's, is asked about every time.
+        let request = gate
+            .request("bash", &bash("gh api -X PUT repos/o/n/pulls/7/merge"))
+            .unwrap();
+        assert_eq!(
+            request.kinds,
+            ["bash: merge on GitHub through gh (asked every time)"]
+        );
+        assert!(request.kinds[0].ends_with(ASKED_EVERY_TIME));
+        assert_eq!(gate.request("bash", &bash("gh pr view 7")), None);
+    }
+
+    #[test]
     fn risky_asks_only_about_cautioned_commands_and_outside_writes() {
         let (dir, workspace) = workspace();
         let gate = approval(ApprovalMode::Risky, &workspace);

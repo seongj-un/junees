@@ -2,6 +2,7 @@
 
 mod bash;
 mod edit_file;
+pub mod gh_command;
 mod policy;
 mod read_file;
 pub mod self_command;
@@ -75,8 +76,9 @@ pub struct ToolSettings {
     pub settings_file: Option<SettingsFile>,
     /// An approval gate asks the user before risky calls (the conversation
     /// or the Discord gateway with `JUNEES_APPROVAL` risky or all), so bash
-    /// leaves Junees's own state-changing subcommands ([`self_command`]) to
-    /// its question instead of refusing them. Off for `-p`, task mode and
+    /// leaves Junees's own state-changing subcommands ([`self_command`]) and
+    /// GitHub writes through `gh` ([`gh_command`]) to its question instead
+    /// of refusing them. Off for `-p`, task mode and
     /// scheduled runs, where no one is asked.
     pub approval_gate: bool,
 }
