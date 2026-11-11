@@ -71,21 +71,31 @@ pub fn timezone(lookup: &dyn Fn(&str) -> Option<String>) -> Result<TimeZone> {
 
 /// The limits of one run, from the settings.
 pub fn limits(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Limits> {
+    limits_from(lookup, MAX_TIME_ENV, MAX_TOKENS_ENV)
+}
+
+/// The limits of one run from the settings `time_env` and `tokens_env`
+/// (the defaults when unset).
+pub fn limits_from(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    time_env: &str,
+    tokens_env: &str,
+) -> Result<Limits> {
     let get = |key: &str| lookup(key).filter(|value| !value.trim().is_empty());
-    let max_time = match get(MAX_TIME_ENV) {
+    let max_time = match get(time_env) {
         None => DEFAULT_MAX_TIME,
-        Some(raw) => crate::task::budget::parse_duration(&raw).context(MAX_TIME_ENV)?,
+        Some(raw) => crate::task::budget::parse_duration(&raw).context(time_env.to_string())?,
     };
     if max_time.is_zero() {
-        bail!("{MAX_TIME_ENV} must be longer than 0s");
+        bail!("{time_env} must be longer than 0s");
     }
-    let max_tokens = match get(MAX_TOKENS_ENV) {
+    let max_tokens = match get(tokens_env) {
         None => DEFAULT_MAX_TOKENS,
         Some(raw) => raw
             .trim()
             .parse()
             .ok()
-            .with_context(|| format!("{MAX_TOKENS_ENV} must be a whole number, got `{raw}`"))?,
+            .with_context(|| format!("{tokens_env} must be a whole number, got `{raw}`"))?,
     };
     Ok(Limits {
         max_time,
@@ -128,7 +138,9 @@ pub async fn finish(
         }
     };
     let report = Report {
-        job,
+        source: "cron",
+        label: job.label(),
+        deliver: &job.deliver,
         status: outcome.status,
         answer: &outcome.answer,
         note: &outcome.note,

@@ -2708,6 +2708,11 @@ mod tests {
             "cat ~/.jun*/config.toml".into(),
             "cat ~/.jun*".into(),
             "cd ~/.junees && cat /proc/self/cwd/config.toml".into(),
+            // The secrets folder next to it (webhook secret files).
+            "cat ~/.junees/secrets/pr-review".into(),
+            "cat $JUNEES_HOME/secrets/*".into(),
+            "grep -r . ~/.junees/secrets".into(),
+            "cd ~/.junees/secrets && cat pr-review".into(),
         ] {
             match policy.check(&command) {
                 Verdict::Deny(reason) => assert!(

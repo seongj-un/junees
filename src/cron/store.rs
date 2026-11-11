@@ -160,28 +160,7 @@ impl Store {
     /// Takes the lock (waiting up to 10 seconds for another holder) and
     /// reads the jobs.
     pub fn lock(&self) -> Result<Locked> {
-        create_private_dir(&self.dir)?;
-        let lock_path = self.dir.join("jobs.lock");
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&lock_path)
-            .with_context(|| format!("cannot open {}", lock_path.display()))?;
-        let start = Instant::now();
-        while !crate::flock::try_exclusive(&lock)
-            .with_context(|| format!("cannot lock {}", lock_path.display()))?
-        {
-            if start.elapsed() > LOCK_WAIT {
-                bail!(
-                    "{} stays locked by another junees; try again",
-                    lock_path.display()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let lock = lock_file(&self.dir, "jobs.lock")?;
         let path = self.path();
         let jobs = read(&path)?;
         Ok(Locked {
@@ -204,26 +183,7 @@ impl Locked {
             format: FORMAT,
             jobs: self.jobs.clone(),
         })?;
-        let dir = self.path.parent().context("jobs.json has no folder")?;
-        let tmp = dir.join(".jobs.json.tmp");
-        let write = || -> std::io::Result<()> {
-            match fs::remove_file(&tmp) {
-                Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
-                _ => {}
-            }
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-            file.write_all(text.as_bytes())?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-            fs::rename(&tmp, &self.path)?;
-            File::open(dir)?.sync_all()
-        };
-        write().with_context(|| format!("cannot write {}", self.path.display()))
+        write_private(&self.path, &text)
     }
 
     /// The index of the job `key` names: its id, its name, or a unique id
@@ -263,16 +223,84 @@ pub fn find(jobs: &[Job], key: &str) -> Result<usize> {
     }
 }
 
-/// Reads jobs.json; a missing file is no jobs.
-fn read(path: &Path) -> Result<Vec<Job>> {
+/// Opens `dir/name` (creating `dir` as 0700 and the file as 0600) and
+/// takes an exclusive `flock` on it, waiting up to 10 seconds for another
+/// holder. The lock is held while the file stays open.
+pub fn lock_file(dir: &Path, name: &str) -> Result<File> {
+    create_private_dir(dir)?;
+    let lock_path = dir.join(name);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .with_context(|| format!("cannot open {}", lock_path.display()))?;
+    let start = Instant::now();
+    while !crate::flock::try_exclusive(&lock)
+        .with_context(|| format!("cannot lock {}", lock_path.display()))?
+    {
+        if start.elapsed() > LOCK_WAIT {
+            bail!(
+                "{} stays locked by another junees; try again",
+                lock_path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(lock)
+}
+
+/// Reads `path` if it exists, refusing a file others may change
+/// ([`check_private`]).
+pub fn read_private(path: &Path) -> Result<Option<String>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("cannot read {}", path.display())),
     };
     check_private(path, &metadata)?;
-    let text =
-        fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    fs::read_to_string(path)
+        .map(Some)
+        .with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// Writes `text` and a line end to `path` as 0600: a temporary file next
+/// to it (`.<name>.tmp`), then a rename, so a reader never sees half a
+/// file.
+pub fn write_private(path: &Path, text: &str) -> Result<()> {
+    let dir = path.parent().context("the file has no folder")?;
+    let name = path
+        .file_name()
+        .context("the file has no name")?
+        .to_string_lossy();
+    let tmp = dir.join(format!(".{name}.tmp"));
+    let write = || -> std::io::Result<()> {
+        match fs::remove_file(&tmp) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+            _ => {}
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(text.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        File::open(dir)?.sync_all()
+    };
+    write().with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Reads jobs.json; a missing file is no jobs.
+fn read(path: &Path) -> Result<Vec<Job>> {
+    let Some(text) = read_private(path)? else {
+        return Ok(Vec::new());
+    };
     let file: File_ =
         serde_json::from_str(&text).with_context(|| format!("{} is broken", path.display()))?;
     if file.format > FORMAT {
@@ -286,7 +314,7 @@ fn read(path: &Path) -> Result<Vec<Job>> {
 }
 
 /// A regular file of this user that nobody else may write.
-fn check_private(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+pub fn check_private(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     if !metadata.file_type().is_file() {
         bail!("{} is not a regular file", path.display());
     }

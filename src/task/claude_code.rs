@@ -275,7 +275,8 @@ mod tests {
             format!("Read(/{}/state/config.toml)", cwd.display())
         );
 
-        // A folder holding the repository, or inside it: only the file.
+        // A folder holding the repository, or inside it: only the file and
+        // the secrets folder.
         let file = SettingsFile::new("/nonexistent-junees/j/config.toml", None);
         for root in ["/nonexistent-junees/j/repo", "/nonexistent-junees", "/"] {
             assert_eq!(
@@ -283,6 +284,8 @@ mod tests {
                 [
                     "Read(//nonexistent-junees/j/config.toml)",
                     "Edit(//nonexistent-junees/j/config.toml)",
+                    "Read(//nonexistent-junees/j/secrets/**)",
+                    "Edit(//nonexistent-junees/j/secrets/**)",
                 ],
                 "{root}"
             );

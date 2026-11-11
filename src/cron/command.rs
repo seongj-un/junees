@@ -286,7 +286,7 @@ async fn run_now(
         escape_hidden(&job.dir.display().to_string())
     );
     let outcome = match prepare(lookup, &job).await {
-        Ok((engine, limits)) => engine.run(&job, &cancel, limits).await,
+        Ok((engine, limits)) => engine.run(&job.spec(), &cancel, limits).await,
         Err(err) => Outcome::failed(format!("{err:#}")),
     };
     let last = super::finish(home, tz, lookup, &job, &run_id, due, started_at, &outcome).await;
@@ -313,28 +313,33 @@ async fn run_now(
 }
 
 /// The engine of the `backend` setting and the limits, in the job's
-/// folder (the tools work in the current folder).
+/// folder.
 async fn prepare(lookup: &Lookup, job: &Job) -> Result<(Box<dyn Engine>, super::run::Limits)> {
     let limits = super::limits(&**lookup)?;
-    std::env::set_current_dir(&job.dir)
-        .with_context(|| format!("cannot work in {}", job.dir.display()))?;
+    Ok((engine_in(lookup, &job.dir).await?, limits))
+}
+
+/// Moves to `dir` (the tools work in the current folder) and makes the
+/// engine of the `backend` setting there.
+pub async fn engine_in(lookup: &Lookup, dir: &Path) -> Result<Box<dyn Engine>> {
+    std::env::set_current_dir(dir).with_context(|| format!("cannot work in {}", dir.display()))?;
     let engine: Box<dyn Engine> = match Backend::from_lookup(|key| lookup(key))? {
         Backend::Api => Box::new(ApiEngine::new(Config::from_lookup(|key| lookup(key))?)),
         Backend::ClaudeCode => {
             let config = Config::from_lookup_without_key(|key| lookup(key))?;
             let claude = ClaudeCode::from_lookup(|key| lookup(key));
-            claude.check(&job.dir, &config.tools).await?;
+            claude.check(dir, &config.tools).await?;
             for notice in claude.notices() {
                 eprintln!("  !! {notice}");
             }
             Box::new(ClaudeEngine::new(claude, config))
         }
     };
-    Ok((engine, limits))
+    Ok(engine)
 }
 
 /// Sets `cancel` on SIGINT or SIGTERM.
-fn cancel_on_signals(cancel: Cancel) -> Result<()> {
+pub fn cancel_on_signals(cancel: Cancel) -> Result<()> {
     let mut interrupt = signal(SignalKind::interrupt()).context("cannot catch SIGINT")?;
     let mut terminate = signal(SignalKind::terminate()).context("cannot catch SIGTERM")?;
     tokio::spawn(async move {

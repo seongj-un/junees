@@ -40,6 +40,7 @@ pub const HELP: &str = "\
 `!memory` what the persistent memory holds (in a server channel only how much; the contents in a DM)
 `!skills` the skills Junees knows
 `!cron` the scheduled jobs (in a server channel without their prompts and folders)
+`!webhooks` the webhook routes (in a server channel without their prompts and folders)
 `!help` this list
 In a server channel, mention the bot (`@Junees !stop`) unless the channel is one of discord_channels.";
 
@@ -137,6 +138,7 @@ pub enum Command {
     Memory,
     Skills,
     Cron,
+    Webhooks,
     Help,
     Task,
     Unknown(String),
@@ -159,6 +161,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "memory" => Command::Memory,
         "skills" => Command::Skills,
         "cron" => Command::Cron,
+        "webhooks" => Command::Webhooks,
         "help" => Command::Help,
         "task" => Command::Task,
         _ => Command::Unknown(word.to_string()),
@@ -364,6 +367,9 @@ impl Bot {
             Command::Skills => self.skills(),
             // Prompts and folders only in DMs, like the memory.
             Command::Cron => crate::cron::listing_from_env(self.shared.home.as_deref(), direct),
+            Command::Webhooks => {
+                crate::webhook::listing_from_env(self.shared.home.as_deref(), direct)
+            }
             Command::Help => HELP.to_string(),
             Command::Task => {
                 "`!task` is not available in the gateway yet; run `junees task \"<goal>\"` \
@@ -769,6 +775,7 @@ mod tests {
         assert_eq!(parse_command("!memory"), Some(Command::Memory));
         assert_eq!(parse_command("!skills"), Some(Command::Skills));
         assert_eq!(parse_command("!cron"), Some(Command::Cron));
+        assert_eq!(parse_command("!webhooks"), Some(Command::Webhooks));
         assert_eq!(parse_command("!task build it"), Some(Command::Task));
         assert_eq!(parse_command("!foo"), Some(Command::Unknown("foo".into())));
         for text in ["new", "!", "! new", "!!!", "!123", "hello !new"] {

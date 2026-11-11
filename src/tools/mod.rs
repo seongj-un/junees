@@ -17,7 +17,7 @@ pub use edit_file::EditFile;
 pub(crate) use policy::resolve;
 pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};
 pub use read_file::ReadFile;
-pub use settings_file::SettingsFile;
+pub use settings_file::{SettingsFile, secrets_dir};
 pub use write_file::WriteFile;
 
 use std::sync::Arc;

@@ -142,11 +142,15 @@ mod tests {
         let (_dir, root, file) = crate::tools::settings_file::testing::home();
         let config = root.join(".junees/config.toml");
         std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
+        // A webhook secret file.
+        std::fs::create_dir_all(root.join(".junees/secrets")).unwrap();
+        std::fs::write(root.join(".junees/secrets/hook"), "secret-key").unwrap();
         let tool = ReadFile {
             settings_file: Some(file),
         };
         for path in [
             config.clone(),
+            root.join(".junees/secrets/hook"),
             root.join(".junees/sessions/../config.toml"),
             root.join("link"),
             crate::tools::settings_file::testing::relative(&config),

@@ -22,6 +22,7 @@ Usage:
   junees setup            change the settings
   junees gateway          run as a Discord bot (also `junees discord`; see README)
   junees cron             prompts that run on a schedule (`junees cron --help`)
+  junees webhook          HTTP requests that start a run (`junees webhook --help`)
   junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
                           plugin install <folder> [--name <n>], enable <name> [--trust],
                           disable <name>, remove <name>
@@ -102,6 +103,8 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_TIMEZONE         [timezone] zone of `junees cron` schedules (default the system's)
   JUNEES_CRON_MAX_TIME    [cron_max_time] time one scheduled run may take (default 30m)
   JUNEES_CRON_MAX_TOKENS  [cron_max_tokens] tokens one scheduled run may use (default 1000000)
+  JUNEES_WEBHOOK_MAX_TIME    [webhook_max_time] time one webhook run may take (default 30m)
+  JUNEES_WEBHOOK_MAX_TOKENS  [webhook_max_tokens] tokens one webhook run may use (default 1000000)
   (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
   JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see README)
 ";
@@ -129,6 +132,7 @@ pub const REPL_HELP: &str = "\
 /plugins           show the plugins this session uses and the installed ones
 /cron              list the scheduled jobs (`junees cron` manages them)
 /github            show the GitHub token state, repositories and rate limit
+/webhooks          list the webhook routes (`junees webhook` manages them)
 /exit              quit (also /quit, Ctrl-D, or Ctrl-C twice at the prompt)
 Ctrl-C during a turn cancels the turn and stops a running tool; at an
 approval question it skips the call and cancels the turn. During /task it
@@ -144,6 +148,8 @@ pub enum Command {
     Gateway,
     /// `junees cron ...`: scheduled jobs.
     Cron(crate::cron::cli::CronCommand),
+    /// `junees webhook ...`: webhook routes and their server.
+    Webhook(crate::webhook::cli::WebhookCommand),
     /// `junees plugin ...` (or `junees plugins`).
     Plugin(crate::plugins::manage::PluginCommand),
     Help,
@@ -247,6 +253,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Some("cron") => {
             args.next();
             return crate::cron::cli::parse(args).map(Command::Cron);
+        }
+        Some("webhook") => {
+            args.next();
+            return crate::webhook::cli::parse(args).map(Command::Webhook);
         }
         Some("setup") => {
             args.next();
@@ -499,6 +509,10 @@ mod tests {
         assert_eq!(
             parse(&["cron", "rm", "ab"]).unwrap(),
             Command::Cron(crate::cron::cli::CronCommand::Remove("ab".into()))
+        );
+        assert_eq!(
+            parse(&["webhook", "pause", "pr"]).unwrap(),
+            Command::Webhook(crate::webhook::cli::WebhookCommand::Pause("pr".into()))
         );
     }
 

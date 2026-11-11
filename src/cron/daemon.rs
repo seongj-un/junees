@@ -395,11 +395,35 @@ impl ProcessLauncher {
     }
 }
 
-fn signal_group(pid: i32, signal: i32) {
+/// Sends `signal` to the process group `pid` leads.
+pub fn signal_group(pid: i32, signal: i32) {
     // SAFETY: kill only sends a signal; a negative pid names the group the
     // run's process leads.
     unsafe {
         libc::kill(-pid, signal);
+    }
+}
+
+/// Waits for `child`, the leader of process group `pid`; after `limit`
+/// stops the group (SIGINT, then SIGKILL after [`GRACE`]). Returns how it
+/// ended (`exit status: 0`).
+pub async fn wait_limited(child: &mut tokio::process::Child, pid: i32, limit: Duration) -> String {
+    let status = match tokio::time::timeout(limit, child.wait()).await {
+        Ok(status) => status,
+        Err(_) => {
+            signal_group(pid, libc::SIGINT);
+            match tokio::time::timeout(GRACE, child.wait()).await {
+                Ok(status) => status,
+                Err(_) => {
+                    signal_group(pid, libc::SIGKILL);
+                    child.wait().await
+                }
+            }
+        }
+    };
+    match status {
+        Ok(status) => status.to_string(),
+        Err(err) => format!("cannot wait for it: {err}"),
     }
 }
 
@@ -438,24 +462,8 @@ impl Launcher for ProcessLauncher {
             exit: String::new(),
         };
         tokio::spawn(async move {
-            let status = match tokio::time::timeout(limit, child.wait()).await {
-                Ok(status) => status,
-                Err(_) => {
-                    signal_group(pid, libc::SIGINT);
-                    match tokio::time::timeout(GRACE, child.wait()).await {
-                        Ok(status) => status,
-                        Err(_) => {
-                            signal_group(pid, libc::SIGKILL);
-                            child.wait().await
-                        }
-                    }
-                }
-            };
+            let exit = wait_limited(&mut child, pid, limit).await;
             groups.lock().unwrap().remove(&finished.run_id);
-            let exit = match status {
-                Ok(status) => status.to_string(),
-                Err(err) => format!("cannot wait for it: {err}"),
-            };
             let _ = done.send(Finished { exit, ..finished });
         });
         Ok(())

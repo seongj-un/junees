@@ -1,6 +1,8 @@
 //! Running one job's prompt: the unattended path of `junees -p` (no
 //! approval questions, the command policy applies), in a new session, with
 //! the memory and the skills to read only, and a time and token limit.
+//! Webhook runs (`crate::webhook`) take the same path with a [`Spec`] of
+//! their own.
 //!
 //! The tools work in the process's current folder, so a run happens in a
 //! process of its own (`junees cron run <id>`), which moves to the job's
@@ -37,6 +39,32 @@ pub const CRON_NOTE: &str = "\n\nYou are running a scheduled job (`junees cron`)
     about. Do the job, then end with the result: your final message is delivered as the \
     job's output. The saved memory and skills can be read but not changed here.";
 
+/// What one unattended run does.
+#[derive(Debug, Clone, Copy)]
+pub struct Spec<'a> {
+    pub prompt: &'a str,
+    /// The folder it works in (the process is already there).
+    pub dir: &'a Path,
+    /// Its session's [`session::Meta::source`] and channel.
+    pub source: &'a str,
+    pub channel: &'a str,
+    /// Added to the system prompt ([`CRON_NOTE`] for a job).
+    pub note: &'a str,
+}
+
+impl Job {
+    /// The run of this job.
+    pub fn spec(&self) -> Spec<'_> {
+        Spec {
+            prompt: &self.prompt,
+            dir: &self.dir,
+            source: session::CRON,
+            channel: &self.id,
+            note: CRON_NOTE,
+        }
+    }
+}
+
 /// Limits of one run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -72,8 +100,8 @@ impl Outcome {
 /// What runs a job's prompt.
 #[async_trait(?Send)]
 pub trait Engine {
-    /// Runs `job` in the current folder until done, `cancel`, or `limits`.
-    async fn run(&self, job: &Job, cancel: &Cancel, limits: Limits) -> Outcome;
+    /// Runs `spec` in the current folder until done, `cancel`, or `limits`.
+    async fn run(&self, spec: &Spec<'_>, cancel: &Cancel, limits: Limits) -> Outcome;
 }
 
 /// Keeps the text after the last tool call: the final answer.
@@ -182,8 +210,9 @@ impl ApiEngine {
         self
     }
 
-    fn agent(&self, dir: &Path, mcp: &Mcp, cancel: &Cancel, limits: Limits) -> Result<Agent> {
+    fn agent(&self, spec: &Spec<'_>, mcp: &Mcp, cancel: &Cancel, limits: Limits) -> Result<Agent> {
         let config = &self.config;
+        let dir = spec.dir;
         let home = config.home.as_deref();
         let memory = home.map(|home| Memory::for_folder(home, dir, config.memory));
         let mut tools = ToolRegistry::with_defaults(&config.tools);
@@ -191,7 +220,7 @@ impl ApiEngine {
         mcp.register(&mut tools);
         crate::github::register(&mut tools, &config.github, dir, false);
         let system = prompt::system_prompt(dir)
-            + CRON_NOTE
+            + spec.note
             + crate::subagent::prompt_note(config.subagents)
             + &prompt::data_sections(
                 memory.as_ref(),
@@ -232,13 +261,13 @@ impl ApiEngine {
 
 #[async_trait(?Send)]
 impl Engine for ApiEngine {
-    async fn run(&self, job: &Job, cancel: &Cancel, limits: Limits) -> Outcome {
+    async fn run(&self, spec: &Spec<'_>, cancel: &Cancel, limits: Limits) -> Outcome {
         let config = &self.config;
-        let mcp = Mcp::start(config.home.as_deref(), &config.tools.hidden_env, &job.dir).await;
+        let mcp = Mcp::start(config.home.as_deref(), &config.tools.hidden_env, spec.dir).await;
         for line in mcp.report() {
             eprintln!("{line}");
         }
-        let mut agent = match self.agent(&job.dir, &mcp, cancel, limits) {
+        let mut agent = match self.agent(spec, &mcp, cancel, limits) {
             Ok(agent) => agent,
             Err(err) => {
                 mcp.shutdown().await;
@@ -249,11 +278,11 @@ impl Engine for ApiEngine {
         if let Some(home) = config.home.as_deref() {
             match SessionWriter::create_for_channel(
                 home,
-                &job.dir,
+                spec.dir,
                 &config.model,
                 None,
-                session::CRON,
-                &job.id,
+                spec.source,
+                spec.channel,
             ) {
                 Ok((meta, writer)) => {
                     session = Some(meta.id);
@@ -264,7 +293,7 @@ impl Engine for ApiEngine {
         }
         let deadline = Deadline::start(cancel, limits.max_time);
         let mut answer = Answer::default();
-        let result = agent.run(&job.prompt, |event| answer.event(event)).await;
+        let result = agent.run(spec.prompt, |event| answer.event(event)).await;
         mcp.shutdown().await;
         let used = tokens(agent.usage());
         match result {
@@ -306,19 +335,19 @@ impl ClaudeEngine {
 
 #[async_trait(?Send)]
 impl Engine for ClaudeEngine {
-    async fn run(&self, job: &Job, cancel: &Cancel, limits: Limits) -> Outcome {
+    async fn run(&self, spec: &Spec<'_>, cancel: &Cancel, limits: Limits) -> Outcome {
         let config = &self.config;
         let home = config.home.as_deref();
         let mut chat = Chat::new(
             self.claude.clone(),
-            job.dir.clone(),
+            spec.dir.to_path_buf(),
             config.tools.clone(),
             config.max_turns,
             cancel.clone(),
         );
-        let memory = home.map(|home| Memory::for_folder(home, &job.dir, config.memory));
+        let memory = home.map(|home| Memory::for_folder(home, spec.dir, config.memory));
         chat.set_system(prompt::claude_append(
-            CRON_NOTE.trim_start().to_string(),
+            spec.note.trim_start().to_string(),
             memory.as_ref(),
             home,
         ));
@@ -327,11 +356,11 @@ impl Engine for ClaudeEngine {
             let model = self.claude.model.clone().unwrap_or_default();
             match SessionWriter::create_for_channel(
                 home,
-                &job.dir,
+                spec.dir,
                 &model,
                 Some(session::CLAUDE_CODE),
-                session::CRON,
-                &job.id,
+                spec.source,
+                spec.channel,
             ) {
                 Ok((meta, writer)) => {
                     session = Some(meta.id);
@@ -342,7 +371,7 @@ impl Engine for ClaudeEngine {
         }
         let deadline = Deadline::start(cancel, limits.max_time);
         let mut answer = Answer::default();
-        let result = chat.turn(&job.prompt, |event| answer.event(event)).await;
+        let result = chat.turn(spec.prompt, |event| answer.event(event)).await;
         let used = tokens(chat.usage());
         let mut outcome = Outcome {
             status: RunStatus::Ok,
@@ -458,7 +487,7 @@ mod tests {
             )],
             Duration::ZERO,
         );
-        let outcome = engine.run(&job, &Cancel::new(), limits()).await;
+        let outcome = engine.run(&job.spec(), &Cancel::new(), limits()).await;
         assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
         assert_eq!(outcome.answer, "오늘의 요약");
         assert_eq!(outcome.tokens, 110);
@@ -505,7 +534,7 @@ mod tests {
         );
         let outcome = engine
             .run(
-                &job,
+                &job.spec(),
                 &Cancel::new(),
                 Limits {
                     max_tokens: 100,
@@ -532,7 +561,7 @@ mod tests {
         let start = Instant::now();
         let outcome = late
             .run(
-                &job,
+                &job.spec(),
                 &Cancel::new(),
                 Limits {
                     max_time: Duration::from_millis(200),
@@ -547,7 +576,7 @@ mod tests {
         let (slow, _) = engine(home.path(), vec![], Duration::from_secs(30));
         let cancel = Cancel::new();
         cancel.cancel();
-        let outcome = slow.run(&job, &cancel, limits()).await;
+        let outcome = slow.run(&job.spec(), &cancel, limits()).await;
         assert_eq!(outcome.note, "interrupted");
     }
 

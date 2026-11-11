@@ -36,10 +36,19 @@ pub fn job_dir(home: &Path, id: &str) -> PathBuf {
 /// Writes `record` to a new file named after its start time (UTC) and
 /// returns its path; then drops the oldest files beyond [`KEEP`].
 pub fn write(home: &Path, tz: &TimeZone, record: &Record<'_>) -> Result<PathBuf> {
-    let dir = job_dir(home, &record.job.id);
-    create_private_dir(&dir)?;
-    let stamp = file_stamp(record.started_at);
-    let text = render(tz, record);
+    write_text(
+        &job_dir(home, &record.job.id),
+        record.started_at,
+        &render(tz, record),
+    )
+}
+
+/// Writes `text` to a new private file in `dir` named after `started_at`
+/// (UTC, `-2`, `-3`... for more runs in one second) and returns its path;
+/// then drops the oldest files of `dir` beyond [`KEEP`].
+pub fn write_text(dir: &Path, started_at: i64, text: &str) -> Result<PathBuf> {
+    create_private_dir(dir)?;
+    let stamp = file_stamp(started_at);
     for attempt in 1..100 {
         let name = if attempt == 1 {
             format!("{stamp}.md")
@@ -57,7 +66,7 @@ pub fn write(home: &Path, tz: &TimeZone, record: &Record<'_>) -> Result<PathBuf>
                 file.write_all(text.as_bytes())
                     .and_then(|()| file.sync_all())
                     .with_context(|| format!("cannot write {}", path.display()))?;
-                prune(&dir);
+                prune(dir);
                 return Ok(path);
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -66,7 +75,7 @@ pub fn write(home: &Path, tz: &TimeZone, record: &Record<'_>) -> Result<PathBuf>
             }
         }
     }
-    anyhow::bail!("too many runs of {} at {stamp}", record.job.id)
+    anyhow::bail!("too many runs in {} at {stamp}", dir.display())
 }
 
 /// `20261110-090000Z`.

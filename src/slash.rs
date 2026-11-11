@@ -36,6 +36,8 @@ pub enum Slash {
     Cron,
     /// `/github` shows the GitHub settings and the rate limit left.
     Github,
+    /// `/webhooks` lists the webhook routes.
+    Webhooks,
     Help,
     Exit,
     /// A command typed wrong: what to tell the user.
@@ -88,6 +90,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "plugins" => plain(Slash::Plugins),
         "cron" => plain(Slash::Cron),
         "github" => plain(Slash::Github),
+        "webhooks" => plain(Slash::Webhooks),
         "skill" => match arg {
             None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
             Some(name) => match crate::skills::check_name(&name) {
@@ -179,6 +182,7 @@ mod tests {
             ("/skills", Slash::Skills),
             ("/cron", Slash::Cron),
             ("/github", Slash::Github),
+            ("/webhooks", Slash::Webhooks),
             ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),
             ("/exit", Slash::Exit),

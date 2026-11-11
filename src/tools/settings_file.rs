@@ -3,6 +3,9 @@
 //! turn the command rules off for the next run (`allow_dangerous`). The MCP
 //! server list next to it (`mcp.json`) gets the same protection: it may
 //! hold tokens, and writing it would start programs in the next session.
+//! So does everything in the secrets folder next to it
+//! ([`SECRETS_FOLDER`]): webhook secret files, which `junees webhook add`
+//! only takes from there, and the user's environment files.
 //!
 //! read_file, write_file and edit_file refuse it; the command policy refuses
 //! bash commands that name it (also through a glob or braces) or that use
@@ -21,6 +24,15 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::policy::resolve;
+
+/// The folder under `$JUNEES_HOME` for secrets the tools may neither read
+/// nor change, like the settings file (webhook secret files).
+pub const SECRETS_FOLDER: &str = "secrets";
+
+/// The secrets folder of the state folder `junees_home`.
+pub fn secrets_dir(junees_home: &Path) -> PathBuf {
+    junees_home.join(SECRETS_FOLDER)
+}
 
 /// How many symbolic links a dangling chain may have before giving up.
 const MAX_LINKS: usize = 40;
@@ -79,6 +91,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
     DataFolder {
         name: "plugins",
         holds: "the installed plugins",
+        tool: None,
+    },
+    DataFolder {
+        name: "webhooks",
+        holds: "the webhook routes and their output",
         tool: None,
     },
 ];
@@ -145,10 +162,18 @@ impl SettingsFile {
         self.home.as_deref()
     }
 
+    /// The secrets folder next to the file, absolute and resolved like
+    /// [`Self::resolved_path`].
+    pub fn resolved_secrets(&self) -> Option<PathBuf> {
+        let dir = std::path::absolute(secrets_dir(self.path.parent()?)).ok()?;
+        Some(resolve(&dir).unwrap_or(dir))
+    }
+
     /// Whether the file tools must refuse `path` (relative paths start from
     /// the current folder): it is the settings file once `.`, `..` and
     /// symbolic links are resolved, a dangling link to where it would be,
-    /// or a hard link to it.
+    /// or a hard link to it; the MCP server list the same way; or the
+    /// secrets folder or a path in it.
     pub fn is(&self, path: &Path) -> bool {
         if path.is_absolute() {
             return self.same(path);
@@ -209,18 +234,18 @@ impl SettingsFile {
     /// The error a file tool returns for `path`.
     pub fn refusal(&self, path: &str) -> String {
         format!(
-            "{path} is the user's private Junees settings file (it holds the API key and \
-             other secrets). Junees tools do not read or change it; ask the user to change settings \
-             with `junees setup` instead."
+            "{path} is the user's private Junees settings file or a secret next to it (it holds \
+             the API key and other secrets). Junees tools do not read or change it; ask the user to \
+             change settings with `junees setup` instead."
         )
     }
 
     /// Why the command policy refuses a command that names it as `word`.
     pub fn named_reason(&self, word: &str) -> String {
         format!(
-            "`{word}` is the user's private Junees settings file (it holds the API key and \
-             other secrets); commands may not read or change it. Ask the user to change settings with \
-             `junees setup` instead."
+            "`{word}` is the user's private Junees settings file or a secret next to it (it \
+             holds the API key and other secrets); commands may not read or change it. Ask the user \
+             to change settings with `junees setup` instead."
         )
     }
 
@@ -283,6 +308,11 @@ impl SettingsFile {
         .find_map(|(target, named)| {
             let target = resolve(target).unwrap_or_else(|| target.to_path_buf());
             matches(&target, true).then_some(named)
+        })
+        .or_else(|| {
+            self.resolved_secrets()
+                .is_some_and(|dir| prefix.starts_with(&dir) || matches(&dir, false))
+                .then_some(Named::File)
         })
         .or_else(|| {
             (0..DATA_FOLDERS.len())
@@ -365,10 +395,15 @@ impl SettingsFile {
         self.path.with_file_name(crate::mcp::config::FILE_NAME)
     }
 
-    /// Whether the absolute `path` leads to the settings file or the MCP
-    /// server list.
+    /// Whether the absolute `path` leads to the settings file, the MCP
+    /// server list, or into the secrets folder.
     fn same(&self, path: &Path) -> bool {
-        self.same_as(path, &self.path) || self.same_as(path, &self.mcp_path())
+        self.same_as(path, &self.path)
+            || self.same_as(path, &self.mcp_path())
+            || self
+                .lands(path)
+                .zip(self.resolved_secrets())
+                .is_some_and(|(path, dir)| path.starts_with(dir))
     }
 
     /// Whether the absolute `path` leads to the file `file`.
@@ -596,6 +631,54 @@ mod tests {
     }
 
     #[test]
+    fn knows_the_secrets_folder() {
+        let (_dir, root, file) = home();
+        let secrets = root.join(".junees/secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::create_dir_all(root.join(".junees/webhooks")).unwrap();
+        std::fs::write(secrets.join("hook"), "s3cret").unwrap();
+        symlink(secrets.join("hook"), root.join("hooklink")).unwrap();
+        symlink(&secrets, root.join("dirlink")).unwrap();
+        for path in [
+            ".junees/secrets/hook",
+            ".junees/secrets",
+            ".junees/secrets/new",
+            ".junees/webhooks/../secrets/hook",
+            "hooklink",
+            "dirlink/hook",
+        ] {
+            assert!(file.is(&root.join(path)), "{path}");
+        }
+        assert!(file.is(&relative(&secrets.join("hook"))));
+        for path in [
+            ".junees/webhooks/routes.json",
+            ".junees/secretsx",
+            ".junees",
+        ] {
+            assert!(!file.is(&root.join(path)), "{path}");
+        }
+        for word in [
+            "~/.junees/secrets/hook",
+            "$JUNEES_HOME/secrets",
+            "${JUNEES_HOME}/secrets/",
+            "~/.junees/secrets/*",
+            "~/.junees/s*/hook",
+            "~/.junees/*/hook",
+            "~/.junees/{x,secrets}/hook",
+            "~/hooklink",
+            "~/dirlink",
+            "if=~/.junees/secrets/hook",
+        ] {
+            assert_eq!(file.names(word, Some(&root)), Some(Named::File), "{word}");
+        }
+        assert_eq!(
+            file.names("~/.junees/webhooks/routes.json", Some(&root))
+                .map(|named| matches!(named, Named::Data(_))),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn knows_a_dangling_link_to_a_missing_file() {
         let (_dir, root, file) = home();
         std::fs::remove_file(root.join(".junees/config.toml")).unwrap();
@@ -731,6 +814,7 @@ mod tests {
             (".junees/projects/0123/notes.md", "projects"),
             (".junees/skills/new/SKILL.md", "skills"),
             (".junees/cron/jobs.json", "cron"),
+            (".junees/webhooks/routes.json", "webhooks"),
             ("link", "memory"),
             ("dirlink/notes.md", "memory"),
             ("dangling", "skills"),
@@ -769,7 +853,7 @@ mod tests {
             ("~/.junees/m*/user.md", 0),
             ("~/*/memory/x", 0),
             ("~/.junees/{sessions,projects}/x", 1),
-            ("~/.junees/s*", 2),
+            ("~/.junees/sk*", 2),
         ] {
             assert_eq!(
                 file.names(word, Some(&junees)),
@@ -777,8 +861,10 @@ mod tests {
                 "{word}"
             );
         }
-        // The settings file and its folder come first.
+        // The settings file, the secrets folder and the settings folder
+        // come first.
         assert_eq!(file.names("~/.junees/*", Some(&junees)), Some(Named::File));
+        assert_eq!(file.names("~/.junees/s*", Some(&junees)), Some(Named::File));
         assert_eq!(
             file.names("~/.junees/memory/..", Some(&junees)),
             Some(Named::Folder)
@@ -786,7 +872,7 @@ mod tests {
         for word in [
             "~/.junees/sessions/s.jsonl",
             "~/.junees/memoryx",
-            "~/.junees/se*",
+            "~/.junees/ses*",
             "~/memory/user.md",
             "$DIR/memory",
         ] {
