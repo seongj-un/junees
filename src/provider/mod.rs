@@ -100,6 +100,12 @@ pub trait Provider: Send + Sync {
     fn manual_thinking(&self) -> bool {
         false
     }
+
+    /// The model the calls go to, if the provider names one. Journals
+    /// stamp it on usage entries, so costs follow a `/model` switch.
+    fn model(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Reports the text, thinking and server tool blocks of a whole response,

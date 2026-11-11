@@ -67,7 +67,7 @@ fn journals(dir: &Path) -> anyhow::Result<Vec<Journal>> {
 /// ([`crate::gateway::sessions::INDEX_FILE`]): it also names the channel
 /// sessions from before meta lines recorded their source. Empty when the
 /// index is missing or broken.
-pub(super) fn gateway_channels(home: &Path) -> HashMap<String, String> {
+pub(crate) fn gateway_channels(home: &Path) -> HashMap<String, String> {
     fs::read_to_string(home.join(crate::gateway::sessions::INDEX_FILE))
         .ok()
         .and_then(|text| serde_json::from_str::<BTreeMap<String, String>>(&text).ok())
@@ -85,7 +85,10 @@ pub(super) fn gateway_channels(home: &Path) -> HashMap<String, String> {
 /// meta names a channel or the gateway's index (`old_channels`) ties a
 /// channel to the session or, for a subagent, to its parent; only the
 /// rest started at a terminal.
-fn origin(meta: &Meta, old_channels: &HashMap<String, String>) -> (String, Option<String>) {
+pub(crate) fn origin(
+    meta: &Meta,
+    old_channels: &HashMap<String, String>,
+) -> (String, Option<String>) {
     if let Some(source) = &meta.source {
         return (source.clone(), meta.channel.clone());
     }
@@ -131,7 +134,7 @@ pub(super) fn run(
 
 /// What one line read gave.
 #[derive(Debug, PartialEq, Eq)]
-enum Line {
+pub(crate) enum Line {
     /// A line is in the buffer, without its `\n`.
     Read,
     /// The line was longer than the limit; it was read past, not kept.
@@ -142,7 +145,7 @@ enum Line {
 
 /// Reads the next line into `line`, keeping at most `max` bytes of it in
 /// memory: a longer line is consumed and reported as [`Line::TooLong`].
-fn read_line(
+pub(crate) fn read_line(
     reader: &mut impl BufRead,
     line: &mut Vec<u8>,
     max: usize,

@@ -28,6 +28,9 @@ Usage:
   junees sessions search <words>
                           search the saved sessions (--all: every folder; see
                           `junees sessions --help`)
+  junees usage            tokens and estimated cost of the saved sessions
+                          (--days N, --by day|model|folder|source, --all; see
+                          `junees usage --help`)
   junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
                           plugin install <folder> [--name <n>], enable <name> [--trust],
                           disable <name>, remove <name>
@@ -78,6 +81,8 @@ Environment (each also a key of config.toml, named in brackets):
   ANTHROPIC_API_KEY   [api_key] needed on the api backend only
   ANTHROPIC_BASE_URL  [base_url] API base URL (default https://api.anthropic.com)
   JUNEES_MODEL        [model] model id (default claude-sonnet-4-6)
+  JUNEES_PRICES       [prices] model prices for cost estimates, replacing the built-in
+                      table: \"<model>=<input>/<output>, ...\" in $ per million tokens
   JUNEES_MAX_TOKENS   [max_tokens] max output tokens per model call (default 8192)
   JUNEES_MAX_TURNS    [max_turns] max model calls per prompt (default 50)
   JUNEES_CONTEXT_WINDOW     [context_window] model context window in tokens (default 200000)
@@ -131,7 +136,8 @@ pub const REPL_HELP: &str = "\
                    Claude Code compacts its own)
 /context           show the context size and its limit (api backend) and the
                    project instruction files the session read
-/usage             show token usage of this session
+/usage             show the tokens and estimated cost of this session (with its
+                   subagents); `junees usage` covers past days
 /memory            show what the persistent memory holds
 /memory clear user|notes|project
                    empty one memory (asks first)
@@ -169,6 +175,10 @@ pub enum Command {
     Doctor(crate::doctor::Options),
     /// `junees doctor --help`.
     DoctorHelp,
+    /// `junees usage ...`.
+    Usage(crate::usage::args::UsageArgs),
+    /// `junees usage --help`.
+    UsageHelp,
     Help,
     Version,
 }
@@ -290,6 +300,15 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Some("doctor") => {
             args.next();
             return Ok(crate::doctor::parse(args)?.map_or(Command::DoctorHelp, Command::Doctor));
+        }
+        Some("usage") => {
+            args.next();
+            return Ok(
+                match crate::usage::args::parse(args).map_err(anyhow::Error::msg)? {
+                    Some(usage) => Command::Usage(usage),
+                    None => Command::UsageHelp,
+                },
+            );
         }
         Some("plugin" | "plugins") => {
             args.next();
@@ -583,6 +602,34 @@ mod tests {
         assert_eq!(
             parse(&["webhook", "pause", "pr"]).unwrap(),
             Command::Webhook(crate::webhook::cli::WebhookCommand::Pause("pr".into()))
+        );
+    }
+
+    #[test]
+    fn parses_usage() {
+        use crate::usage::args::{By, UsageArgs};
+        assert_eq!(
+            parse(&["usage"]).unwrap(),
+            Command::Usage(UsageArgs::default())
+        );
+        assert_eq!(
+            parse(&["usage", "--by", "folder", "--days", "30", "--all"]).unwrap(),
+            Command::Usage(UsageArgs {
+                days: 30,
+                by: By::Folder,
+                all: true
+            })
+        );
+        assert_eq!(parse(&["usage", "-h"]).unwrap(), Command::UsageHelp);
+        let err = parse(&["usage", "--by", "week"]).unwrap_err().to_string();
+        assert!(err.contains("--by takes day, model"), "{err}");
+        // Through -p the word is a prompt.
+        assert_eq!(
+            parse(&["-p", "usage"]).unwrap(),
+            Command::Run(RunArgs {
+                prompt: Some("usage".into()),
+                ..RunArgs::default()
+            })
         );
     }
 

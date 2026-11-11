@@ -120,6 +120,15 @@ async fn run() -> Result<ExitCode> {
         }
         // Reads only; a broken settings file is one of its findings.
         Command::Doctor(options) => return doctor(options).await,
+        Command::UsageHelp => {
+            print!("{}", junees::usage::args::HELP);
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Reads the journals and the settings only; needs no API key.
+        Command::Usage(args) => {
+            print!("{}", usage_report(&args)?);
+            return Ok(ExitCode::SUCCESS);
+        }
         // Reads the journals only.
         Command::SessionsSearch(search) => {
             let home = junees::config_file::home_dir(|key| std::env::var(key).ok())
@@ -178,7 +187,9 @@ async fn run() -> Result<ExitCode> {
         | Command::SessionsHelp
         | Command::SessionsSearch(_)
         | Command::Doctor(_)
-        | Command::DoctorHelp => {
+        | Command::DoctorHelp
+        | Command::Usage(_)
+        | Command::UsageHelp => {
             unreachable!("handled above")
         }
     }
@@ -212,6 +223,24 @@ fn search_sessions(
         .map_err(anyhow::Error::msg)?;
     let outcome = junees::search::search(home, &options)?;
     Ok(junees::search::format::for_terminal(&outcome, &options))
+}
+
+/// What `junees usage` prints.
+fn usage_report(args: &junees::usage::args::UsageArgs) -> Result<String> {
+    let settings = Settings::from_env()?;
+    let lookup = |key: &str| settings.get(key);
+    let home = junees::config_file::home_dir(lookup)
+        .context("neither JUNEES_HOME nor HOME is set, so there are no saved sessions")?;
+    let prices =
+        junees::usage::Prices::from_setting(settings.get(junees::usage::PRICES_ENV).as_deref())
+            .map_err(anyhow::Error::msg)?;
+    let zone = junees::cron::timezone(&lookup)?;
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    junees::usage::period(&home, &cwd, args, &prices, &zone, now)
 }
 
 /// Whether questions can be asked: both stdin and stderr are terminals.
@@ -1096,34 +1125,7 @@ impl Repl {
             Slash::Task(goal) => return self.task(goal).await,
             Slash::Model(model) => self.model(model),
             Slash::Backend(backend) => self.backend(backend).await,
-            Slash::Usage => match &self.engine {
-                Engine::Api(agent) => {
-                    let usage = agent.usage();
-                    println!(
-                        "input {} tokens (cache write {}, cache read {}), output {} tokens, \
-                         web searches {}",
-                        usage.input_tokens,
-                        usage.cache_creation_input_tokens,
-                        usage.cache_read_input_tokens,
-                        usage.output_tokens,
-                        usage.web_searches()
-                    );
-                }
-                Engine::Claude(chat) => {
-                    let usage = chat.usage();
-                    println!(
-                        "input {} tokens (cache write {}, cache read {}), output {} tokens, \
-                         {} Claude Code turns{}",
-                        usage.input_tokens,
-                        usage.cache_creation_input_tokens,
-                        usage.cache_read_input_tokens,
-                        usage.output_tokens,
-                        chat.turns(),
-                        chat.claude_session()
-                            .map_or_else(String::new, |id| format!(", Claude Code session {id}"))
-                    );
-                }
-            },
+            Slash::Usage => self.usage(),
             // Nothing is recorded until the summary is back, so the
             // compaction can simply be dropped.
             Slash::Compact => match &mut self.engine {
@@ -1344,6 +1346,57 @@ impl Repl {
                 println!("model: {model} (this session; `junees setup` changes the default)");
             }
             Err(err) => report(&err),
+        }
+    }
+
+    /// `/usage`: the tokens and estimated cost of this session, from its
+    /// journal, and what the journal missed (all of it without one).
+    fn usage(&self) {
+        let live = match &self.engine {
+            Engine::Api(agent) => junees::usage::Live {
+                usage: agent.usage(),
+                model: self.config.model.clone(),
+                claude_code: false,
+            },
+            Engine::Claude(chat) => junees::usage::Live {
+                usage: chat.usage(),
+                model: chat.claude().model.clone().unwrap_or_default(),
+                claude_code: true,
+            },
+        };
+        let prices = match junees::usage::Prices::from_setting(
+            self.settings.get(junees::usage::PRICES_ENV).as_deref(),
+        ) {
+            Ok(prices) => prices,
+            Err(err) => {
+                eprintln!("  !! {err}; using the built-in prices");
+                junees::usage::Prices::default()
+            }
+        };
+        let journal = match (&self.session_id, &self.config.home) {
+            (Some(id), Some(home)) => Some(session::sessions_dir(home).join(format!("{id}.jsonl"))),
+            _ => None,
+        };
+        let (records, stats) = match journal.as_deref().map(junees::usage::read_session) {
+            Some(Ok(read)) => read,
+            Some(Err(err)) => {
+                report(&err);
+                Default::default()
+            }
+            None => Default::default(),
+        };
+        let id = journal.as_ref().and(self.session_id.as_deref());
+        print!(
+            "{}",
+            junees::usage::session(id, &records, &stats, &live, &prices)
+        );
+        if let Engine::Claude(chat) = &self.engine {
+            println!(
+                "{} Claude Code turns{}",
+                chat.turns(),
+                chat.claude_session()
+                    .map_or_else(String::new, |id| format!(", Claude Code session {id}"))
+            );
         }
     }
 

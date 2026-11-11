@@ -32,5 +32,6 @@ pub mod slash;
 pub mod subagent;
 pub mod task;
 pub mod tools;
+pub mod usage;
 pub mod web_search;
 pub mod webhook;

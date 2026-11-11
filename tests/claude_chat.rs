@@ -229,8 +229,10 @@ async fn a_conversation_continues_one_claude_code_session() {
             "session ",
             "Hello there.\n",
             "Still here.\n",
-            "input 25 tokens (cache write 0, cache read 0), output 7 tokens, \
-             2 Claude Code turns, Claude Code session s-1\n",
+            "Session ",
+            "subscription\n",
+            "Claude Code turns run on your Claude subscription: tokens only, no cost.\n",
+            "2 Claude Code turns, Claude Code session s-1\n",
             // /context still lists the project instruction files.
             "project instructions: none found",
             "model: of Claude Code's choice (Claude Code runs the conversation)\n",

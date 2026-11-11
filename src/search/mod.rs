@@ -19,6 +19,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub use query::Query;
+pub(crate) use scan::{Line, gateway_channels, origin, read_line};
 pub use tool::register;
 
 use crate::session;

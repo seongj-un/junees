@@ -202,6 +202,12 @@ pub struct ClaudeTurn {
 struct LineOut<'a> {
     #[serde(flatten)]
     entry: &'a Entry,
+    /// The model of the calls a usage entry counts ([`Journal::record_usage`]).
+    /// An optional field, so older versions read such lines as before (they
+    /// ignore it) and no format change is needed; entries without it count
+    /// as the meta line's model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
     /// Unix seconds.
     ts: u64,
 }
@@ -219,6 +225,14 @@ struct LineIn {
 /// Somewhere the agent records its history changes.
 pub trait Journal: Send {
     fn record(&mut self, entry: &Entry) -> io::Result<()>;
+
+    /// Records a usage entry (`usage`, `summary_usage`, `subagent_usage`)
+    /// of calls made with `model`. Journals that keep no model record the
+    /// entry alone.
+    fn record_usage(&mut self, entry: &Entry, model: &str) -> io::Result<()> {
+        let _ = model;
+        self.record(entry)
+    }
 
     /// The journal's file, if it is one: subagents keep theirs next to it
     /// ([`SessionWriter::create_sub`]).
@@ -849,13 +863,13 @@ impl SessionWriter {
             .mode(0o600)
             .open(&self.path)?;
         lock(&file, &self.path)?;
-        write_line(&mut file, &Entry::Meta(self.meta.clone()))?;
+        write_line(&mut file, &Entry::Meta(self.meta.clone()), None)?;
         Ok(file)
     }
 }
 
-impl Journal for SessionWriter {
-    fn record(&mut self, entry: &Entry) -> io::Result<()> {
+impl SessionWriter {
+    fn write(&mut self, entry: &Entry, model: Option<&str>) -> io::Result<()> {
         let mut file = match self.file.take() {
             Some(file) => file,
             None => self.start()?,
@@ -864,14 +878,24 @@ impl Journal for SessionWriter {
         // A journal from an older version is continued in this one's
         // format; say so before the first line that may use it.
         if self.meta.format < FORMAT {
-            result = write_line(&mut file, &Entry::Format { format: FORMAT });
+            result = write_line(&mut file, &Entry::Format { format: FORMAT }, None);
             if result.is_ok() {
                 self.meta.format = FORMAT;
             }
         }
-        let result = result.and_then(|()| write_line(&mut file, entry));
+        let result = result.and_then(|()| write_line(&mut file, entry, model));
         self.file = Some(file);
         result
+    }
+}
+
+impl Journal for SessionWriter {
+    fn record(&mut self, entry: &Entry) -> io::Result<()> {
+        self.write(entry, None)
+    }
+
+    fn record_usage(&mut self, entry: &Entry, model: &str) -> io::Result<()> {
+        self.write(entry, Some(model))
     }
 
     fn file(&self) -> Option<&Path> {
@@ -895,9 +919,10 @@ fn lock(file: &File, path: &Path) -> io::Result<()> {
     ))
 }
 
-fn write_line(file: &mut File, entry: &Entry) -> io::Result<()> {
+fn write_line(file: &mut File, entry: &Entry, model: Option<&str>) -> io::Result<()> {
     let mut line = serde_json::to_vec(&LineOut {
         entry,
+        model,
         ts: unix_now(),
     })?;
     line.push(b'\n');
@@ -1398,6 +1423,42 @@ mod tests {
         assert_eq!(lines[1]["type"], "message");
         let session = Session::load(writer.path()).unwrap();
         assert_eq!(session.transcript.messages, [Message::user_text("hi")]);
+    }
+
+    #[test]
+    fn usage_lines_name_their_model_without_a_format_change() {
+        let home = tempfile::tempdir().unwrap();
+        let (_, mut writer) = SessionWriter::create(home.path(), Path::new("/w"), "m").unwrap();
+        let usage = Usage {
+            input_tokens: 7,
+            output_tokens: 2,
+            ..Usage::default()
+        };
+        writer
+            .record(&Entry::Message(Message::user_text("hi")))
+            .unwrap();
+        writer
+            .record_usage(&Entry::Usage(usage), "claude-other")
+            .unwrap();
+        writer
+            .record_usage(&Entry::SummaryUsage(usage), "claude-other")
+            .unwrap();
+        let data = fs::read_to_string(writer.path()).unwrap();
+        let lines: Vec<serde_json::Value> = data
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["format"], FORMAT);
+        assert_eq!(lines[1].get("model"), None, "{}", lines[1]);
+        assert_eq!(lines[2]["type"], "usage");
+        assert_eq!(lines[2]["model"], "claude-other");
+        assert_eq!(lines[3]["model"], "claude-other");
+        // Readers that do not know the field (this version's loader reads
+        // lines like every earlier one) still replay the session.
+        let session = Session::load(writer.path()).unwrap();
+        assert!(session.warning.is_none());
+        assert_eq!(session.transcript.usage.input_tokens, 14);
+        assert_eq!(session.transcript.context_tokens, 9);
     }
 
     #[test]
