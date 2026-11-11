@@ -25,6 +25,7 @@ use crate::cron::tz::TimeZone;
 use crate::cron::unix_now;
 use crate::gateway::config as discord;
 use crate::prompt_text::{escape_hidden, is_hidden};
+use crate::tools::secrets_dir;
 
 /// The setting of variables the tools do not see.
 const HIDDEN_ENV: &str = "JUNEES_HIDDEN_ENV";
@@ -130,6 +131,18 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         (None, Some(path)) => {
             let path = std::fs::canonicalize(&path)
                 .with_context(|| format!("cannot find {}", path.display()))?;
+            // The model's tools refuse that folder like the settings file;
+            // a secret it could read would let it sign requests itself.
+            let folder = secrets_dir(store.home());
+            let resolved = std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
+            if !path.starts_with(&resolved) {
+                bail!(
+                    "--secret-file must be in {} (`$JUNEES_HOME/secrets/`), which Junees's tools \
+                     may not read; move it there (`mkdir -m 700 -p {}`)",
+                    folder.display(),
+                    folder.display()
+                );
+            }
             let secret = Secret::File(path);
             secret.read(&|_| None)?;
             Some(secret)
@@ -455,9 +468,29 @@ mod tests {
         assert_eq!(route.dir, std::fs::canonicalize(home.path()).unwrap());
         assert_eq!(route.secret, Some(Secret::Env("PR_HOOK_SECRET".into())));
         assert_eq!(store.routes().unwrap(), [route]);
-        let secret_file = home.path().join("secret");
-        std::fs::write(&secret_file, "x").unwrap();
-        std::fs::set_permissions(&secret_file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        // Secret files: in `$JUNEES_HOME/secrets/` and private.
+        let secrets = home.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        let private = |path: &Path, mode: u32| {
+            std::fs::write(path, "x").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let secret_file = secrets.join("open");
+        private(&secret_file, 0o640);
+        let outside = home.path().join("outside");
+        private(&outside, 0o600);
+        let linked = secrets.join("link");
+        std::os::unix::fs::symlink(&outside, &linked).unwrap();
+        let good = secrets.join("good");
+        private(&good, 0o600);
+        let mut filed = args("filed");
+        filed.secret_env = None;
+        filed.secret_file = Some(good.clone());
+        let route = new_route(&store, &settings, filed).unwrap();
+        assert_eq!(
+            route.secret,
+            Some(Secret::File(std::fs::canonicalize(&good).unwrap()))
+        );
         for (change, wanted) in [
             (
                 Box::new(|_: &mut AddArgs| {}) as Box<dyn Fn(&mut AddArgs)>,
@@ -495,6 +528,20 @@ mod tests {
                 "chmod 600",
             ),
             (
+                Box::new(move |a: &mut AddArgs| {
+                    a.secret_env = None;
+                    a.secret_file = Some(outside.clone());
+                }),
+                "must be in",
+            ),
+            (
+                Box::new(move |a: &mut AddArgs| {
+                    a.secret_env = None;
+                    a.secret_file = Some(linked.clone());
+                }),
+                "must be in",
+            ),
+            (
                 Box::new(|a: &mut AddArgs| a.events = Some("pull request".into())),
                 "not an event",
             ),
@@ -519,7 +566,7 @@ mod tests {
             let err = new_route(&store, &settings, args).unwrap_err().to_string();
             assert!(err.contains(wanted), "{wanted}: {err}");
         }
-        assert_eq!(store.routes().unwrap().len(), 1);
+        assert_eq!(store.routes().unwrap().len(), 2);
     }
 
     #[test]

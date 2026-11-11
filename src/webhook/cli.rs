@@ -26,7 +26,8 @@ X-GitHub-Delivery and check X-Hub-Signature-256; generic routes read
 X-Junees-Event (default `webhook`), X-Junees-Delivery and check
 X-Junees-Signature (sha256=<hex HMAC-SHA256 of the body>). The secret is
 read from the environment variable or the private (0600) file named, never
-stored. A route without a secret is only served on a loopback address.
+stored; a file must be in $JUNEES_HOME/secrets/, which the model's tools
+may not read. A route without a secret is only served on a loopback address.
 --events keeps the events that run (`pull_request` or `pull_request.opened`;
 default every event); GitHub's ping is answered and does not run.
 

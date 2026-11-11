@@ -72,7 +72,8 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
 /// permission rule syntax (<https://code.claude.com/docs/en/permissions>).
 ///
 /// `Read` and `Edit` rules name the file and, unless the settings folder
-/// holds the repository or lies inside it, the whole folder (`/**`):
+/// holds the repository or lies inside it, the whole folder (`/**`), else
+/// at least its secrets folder (`secrets/**`, webhook secret files):
 /// sessions keep their state in the repository's `.junees/`, so they need
 /// nothing from `$JUNEES_HOME`. `//` starts an absolute path, and the
 /// pattern is gitignore syntax, so its special characters are escaped. A
@@ -98,12 +99,23 @@ pub fn settings_rules(file: &SettingsFile, root: &Path) -> Vec<String> {
         format!("Read(/{})", gitignore_escape(text)),
         format!("Edit(/{})", gitignore_escape(text)),
     ];
+    let secrets: Vec<String> = file
+        .resolved_secrets()
+        .as_deref()
+        .and_then(Path::to_str)
+        .map(|dir| {
+            let dir = gitignore_escape(dir);
+            vec![format!("Read(/{dir}/**)"), format!("Edit(/{dir}/**)")]
+        })
+        .unwrap_or_default();
     let Some(folder) = path.parent().filter(|folder| folder.parent().is_some()) else {
+        rules.extend(secrets);
         return rules;
     };
     let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
     let root = crate::tools::resolve(&root).unwrap_or(root);
     if root.starts_with(folder) || folder.starts_with(&root) {
+        rules.extend(secrets);
         return rules;
     }
     let Some(folder_text) = folder.to_str() else {

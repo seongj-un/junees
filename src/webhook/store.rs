@@ -53,7 +53,8 @@ impl Kind {
 pub enum Secret {
     /// An environment variable of `junees webhook serve`.
     Env(String),
-    /// A file only this user may read (0600).
+    /// A file only this user may read (0600), in `$JUNEES_HOME/secrets/`
+    /// where the model's tools cannot read it.
     File(PathBuf),
 }
 
@@ -222,6 +223,11 @@ impl Store {
 
     pub fn path(&self) -> PathBuf {
         self.dir.join("routes.json")
+    }
+
+    /// The state folder (`$JUNEES_HOME`) the store is in.
+    pub fn home(&self) -> &Path {
+        self.dir.parent().unwrap_or(&self.dir)
     }
 
     /// Takes the lock (waiting up to 10 seconds) and reads the routes.
