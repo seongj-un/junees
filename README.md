@@ -589,7 +589,9 @@ junees webhook add-github pr-flow --repo seongj-un/junees \
 
 위험: 리뷰와 반영은 남이 쓴 PR 본문, diff, 리뷰를 읽고 무인으로 bash를 쓰는 실행이다. 그 bash는 `git push`, git 설정 쓰기, git 자격 증명을 쓰지 못하지만(명령 정책의 웹훅 실행 규칙) 차단 목록일 뿐이다. 반영 단계는 그 코드와 테스트 명령을 사용자 권한으로 실행하고 흐름 코드가 사용자의 git 자격 증명으로 push한다(push는 그 PR 브랜치로만, force 없이). 믿는 사람만 PR을 열고 리뷰하는 저장소에만 켠다. `--allow-self-review`는 모델의 판정이 승인을 대신하므로, 프롬프트 주입이 "머지 가능"을 쓰게 만들면 사람 승인 없이 merge될 수 있다(체크 통과와 mergeable은 여전히 필요). 브랜치 보호 규칙은 확인하지 않는다(GitHub가 merge를 거절하면 그 이유를 코멘트한다).
 
-범위 밖: 포크 PR 반영, 리뷰 스레드 해결 표시(GraphQL), squash/rebase merge, 브랜치 보호 읽기, 여러 저장소를 한 경로로, claude-code 백엔드.
+격리의 한계: 명령 정책은 명령 문자열을 보는 차단 목록이라 쉬운 경로(`gh auth token`, `GH_CONFIG_DIR`/`HOME` 바꾸기, `git push`, 자격 증명 파일을 이름으로 읽기)만 막는다. 스크립트가 실행 중에 만드는 명령은 따라가지 못한다. 예를 들어 `python3 -c`로 환경에서 `GH_CONFIG_DIR`을 지우고 `gh`를 부르거나, 문자열을 이어 붙여 `~/.config/gh/hosts.yml`을 직접 읽으면 막히지 않는다. 무인 쓰기(`github_allow_unattended`)나 merge(`github_flow_merge`)를 켜면 모델의 bash는 GitHub 토큰이 디스크에 있는 사용자(`~/.config/gh/hosts.yml`, `~/.git-credentials`, ssh 키, config.toml의 `github_token`)로 돈다. 그러니 이 정책을 보안 경계로 믿지 말 것. 실제로 막으려면 OS 수준 격리가 필요하다: bubblewrap으로 그 경로들을 빈 tmpfs로 가리고 돌리거나, 자격 증명이 없는 별도 Unix 사용자로 돌리는 것. Junees는 아직 이것을 하지 않는다.
+
+범위 밖: 포크 PR 반영, 리뷰 스레드 해결 표시(GraphQL), squash/rebase merge, 브랜치 보호 읽기, 여러 저장소를 한 경로로, claude-code 백엔드, 모델 bash의 OS 수준 격리(bubblewrap, 별도 사용자).
 
 ### 플러그인
 
