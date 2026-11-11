@@ -539,6 +539,10 @@ After=network-online.target
 ExecStart=%h/.cargo/bin/junees webhook serve --listen 127.0.0.1:8650
 Restart=on-failure
 RestartSec=10
+# stop은 serve에만 SIGTERM을 보내고(도는 실행을 기다림), 끝난 뒤 남은 프로세스는 SIGKILL.
+KillMode=mixed
+# webhook_max_time(기본 30m)과 실행을 끊는 여유(1분 30초)보다 길게.
+TimeoutStopSec=35min
 # 시크릿 변수(PR_HOOK_SECRET 등)는 0600 파일에:
 EnvironmentFile=%h/.config/junees/webhook.env
 # 그 밖의 설정(api_key, discord_token)은 ~/.junees/config.toml.
@@ -553,7 +557,7 @@ systemctl --user enable --now junees-webhook
 journalctl --user -u junees-webhook -f   # 요청마다 경로, 답, 실행 시작/끝
 ```
 
-`systemctl --user stop`은 SIGTERM이므로 위처럼 도는 실행을 기다렸다가 끝난다(`TimeoutStopSec`을 `webhook_max_time`보다 길게 두거나, 두 번째 신호로 끊는다).
+`systemctl --user stop`은 SIGTERM이므로 위처럼 도는 실행을 기다렸다가 끝난다. `KillMode=mixed`가 있어야 그렇게 된다. 기본값 `control-group`은 유닛의 cgroup 안 모든 프로세스에 SIGTERM을 한꺼번에 보내서, `junees webhook run` 자식과 그 도구들도 바로 신호를 받아 실행이 끊긴다(자식이 프로세스 그룹을 따로 쓰는 것은 cgroup 단위 신호에는 소용이 없다). `mixed`는 SIGTERM을 주 프로세스(serve)에만 보내고, serve가 끝난 뒤나 `TimeoutStopSec`이 지난 뒤 남은 프로세스에 SIGKILL을 보낸다. 그래서 `TimeoutStopSec`은 실행 한 번의 최대 시간보다 길게 둔다(systemd 기본은 90초). 기다리지 않고 끊으려면 serve에만 두 번째 신호를 보낸다: `systemctl --user kill --kill-whom=main -s TERM junees-webhook`(systemd 252 이전은 `--kill-who`). 이 차이는 systemd 255의 `systemd-run --user`로 확인했다(SIGTERM을 받으면 자식을 기다리는 주 프로세스와 `setsid`로 띄운 자식: `control-group`에서는 자식도 SIGTERM을 받았고 `mixed`에서는 받지 않고 끝까지 돌았다).
 
 범위 밖, 한계: TLS, keep-alive, chunked 본문, 경로마다 다른 한도, 실패 시 재시도, 전체 동시 실행 상한, 서버를 다시 띄운 뒤의 중복 기억, 대화와 게이트웨이에서 경로를 추가/삭제하는 명령은 하지 않는다. GitHub PR 리뷰/수정/merge 흐름은 다음 단계(7단계 C)에서 GitHub 도구와 잇는다. 실제 GitHub, 실제 API, 실제 디스코드로는 확인하지 않았다(가짜 API, 가짜 REST, reqwest로 보낸 요청으로만).
 
