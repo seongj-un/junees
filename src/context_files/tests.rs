@@ -501,6 +501,21 @@ fn a_committed_read_outside_a_repository_reads_nothing() {
     let files = ContextFiles::load_committed(&top, None, &defaults());
     assert!(files.files.is_empty());
     assert_eq!(files.uncommitted, [top.join("AGENTS.md")]);
+
+    // A `.git` that is no repository inside one: git does not use the
+    // repository above (whose top holds an AGENTS.md of its own).
+    commit_all(&top);
+    let inner = top.join("inner");
+    fs::create_dir_all(inner.join(".git")).unwrap();
+    let files = ContextFiles::load_committed(&inner, None, &defaults());
+    assert!(files.files.is_empty(), "{:?}", files.files);
+    assert!(
+        files.skipped[0]
+            .why
+            .starts_with("cannot read the last commit"),
+        "{:?}",
+        files.skipped
+    );
     // Off is off.
     assert_eq!(
         ContextFiles::load_committed(&top, None, &[]),
