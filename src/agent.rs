@@ -799,8 +799,17 @@ impl Agent {
     /// and nothing more is recorded, so the file stays a clean prefix of the
     /// conversation instead of one with holes.
     fn record(&mut self, entry: Entry, on_event: &mut impl FnMut(Event<'_>)) {
+        let model = match entry {
+            Entry::Usage(_) | Entry::SummaryUsage(_) | Entry::SubagentUsage(_) => {
+                self.provider.model()
+            }
+            _ => None,
+        };
         if let Some(journal) = &mut self.journal
-            && let Err(err) = journal.record(&entry)
+            && let Err(err) = match model {
+                Some(model) => journal.record_usage(&entry, model),
+                None => journal.record(&entry),
+            }
         {
             self.journal = None;
             on_event(Event::Warning(&format!(
@@ -1706,6 +1715,87 @@ mod tests {
             self.0.lock().unwrap().push(entry.clone());
             Ok(())
         }
+    }
+
+    /// The type of a recorded entry and the model stamped on it.
+    type Stamp = (String, Option<String>);
+
+    /// Keeps the [`Stamp`] of each recorded entry.
+    #[derive(Clone, Default)]
+    struct Stamps(Arc<Mutex<Vec<Stamp>>>);
+
+    impl Stamps {
+        fn push(&self, entry: &Entry, model: Option<&str>) {
+            let kind = serde_json::to_value(entry).unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            self.0
+                .lock()
+                .unwrap()
+                .push((kind, model.map(str::to_string)));
+        }
+    }
+
+    impl Journal for Stamps {
+        fn record(&mut self, entry: &Entry) -> std::io::Result<()> {
+            self.push(entry, None);
+            Ok(())
+        }
+
+        fn record_usage(&mut self, entry: &Entry, model: &str) -> std::io::Result<()> {
+            self.push(entry, Some(model));
+            Ok(())
+        }
+    }
+
+    /// A [`Scripted`] provider that names its model.
+    struct Named(Scripted, &'static str);
+
+    #[async_trait]
+    impl Provider for Named {
+        async fn complete(
+            &self,
+            request: CompletionRequest<'_>,
+        ) -> Result<CompletionResponse, ProviderError> {
+            self.0.complete(request).await
+        }
+
+        fn model(&self) -> Option<&str> {
+            Some(self.1)
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_entries_carry_the_model_of_their_calls() {
+        let journal = Stamps::default();
+        let mut agent = agent(Scripted::new(vec![text("one")]), 5);
+        agent.set_provider(Box::new(Named(
+            Scripted::new(vec![text("one")]),
+            "claude-first",
+        )));
+        agent = agent.with_journal(Box::new(journal.clone()));
+        agent.run("a", |_| {}).await.unwrap();
+        // `/model` switches the provider; later calls name the new model.
+        agent.set_provider(Box::new(Named(
+            Scripted::new(vec![text("two")]),
+            "claude-second",
+        )));
+        agent.run("b", |_| {}).await.unwrap();
+        let stamps = journal.0.lock().unwrap().clone();
+        let usage: Vec<_> = stamps
+            .iter()
+            .filter(|(kind, _)| kind == "usage")
+            .map(|(_, model)| model.as_deref())
+            .collect();
+        assert_eq!(usage, [Some("claude-first"), Some("claude-second")]);
+        // Nothing else is stamped.
+        assert!(
+            stamps
+                .iter()
+                .all(|(kind, model)| (kind == "usage") == model.is_some()),
+            "{stamps:?}"
+        );
     }
 
     /// Fails every write and counts the attempts.
