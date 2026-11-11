@@ -9,19 +9,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Value, json};
 
 mod common;
-use common::{body_of, fake_api, text_reply};
-
-/// The binary with the test environment's Junees and API settings removed.
-fn junees() -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
-    for (name, _) in std::env::vars_os() {
-        let name = name.to_string_lossy();
-        if name.starts_with("JUNEES_") || name.starts_with("ANTHROPIC_") {
-            command.env_remove(name.as_ref());
-        }
-    }
-    command
-}
+use common::{body_of, fake_api, junees_binary, text_reply};
 
 /// Writes a journal by hand, last written `age` seconds ago.
 fn journal(
@@ -119,12 +107,10 @@ async fn the_model_searches_this_folders_sessions() {
         (200, text_reply("It was clippy.")),
     ])
     .await;
-    let out = junees()
+    let out = junees_binary(&work, dir.path())
         .args(["--no-session", "-p", "what broke last time?"])
-        .current_dir(&work)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", &url)
-        .env("HOME", dir.path())
         .env("JUNEES_HOME", &home)
         .env("JUNEES_STREAM", "0")
         .stdin(Stdio::null())
@@ -182,12 +168,10 @@ async fn the_model_searches_this_folders_sessions() {
 #[tokio::test]
 async fn people_search_with_the_slash_command_and_the_cli() {
     let (dir, home, work) = setup();
-    let mut child = junees()
+    let mut child = junees_binary(&work, dir.path())
         .args(["--no-session"])
-        .current_dir(&work)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
-        .env("HOME", dir.path())
         .env("JUNEES_HOME", &home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -241,10 +225,8 @@ async fn people_search_with_the_slash_command_and_the_cli() {
     );
 
     // The same from the command line, with no API key.
-    let out = junees()
+    let out = junees_binary(&work, dir.path())
         .args(["sessions", "search", "빌드 실패", "--limit", "1"])
-        .current_dir(&work)
-        .env("HOME", dir.path())
         .env("JUNEES_HOME", &home)
         .output()
         .await
