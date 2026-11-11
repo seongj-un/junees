@@ -73,9 +73,11 @@ pub struct FlowConfig {
     pub re_review: bool,
     #[serde(default = "default_runs")]
     pub max_runs_per_hour: u32,
-    /// `--approver`: the only logins whose reviews count (approvals,
-    /// change requests, starting the address step). Empty: everyone with
-    /// write access ([`access`]).
+    /// `--approver`: the only logins whose approvals count toward
+    /// `min_approvals`; their reviews count whatever their access. Change
+    /// requests of anyone with write access still block the merge and
+    /// start the address step. Empty: everyone with write access
+    /// ([`access`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvers: Vec<String>,
     /// `--require-check`: checks (check run names or status contexts)

@@ -79,9 +79,11 @@ $JUNEES_HOME/secrets/webhook-<name> and the events its steps need.
   that changes .github/workflows/ is never merged by the flow (it gets a
   comment saying so): it could write its own passing checks.
 Only reviews by people with write access count (author_association OWNER,
-MEMBER or COLLABORATOR and write, maintain or admin permission now), or,
-with --approver (repeatable, comma-separated), only those logins' reviews:
-for approvals, change requests and starting --address-reviews. A Junees
+MEMBER or COLLABORATOR and write, maintain or admin permission now) and by
+the --approver logins (repeatable, comma-separated): for approvals, change
+requests and starting --address-reviews. With --approver only those logins'
+approvals count toward --min-approvals; a change request of anyone with
+write access still blocks the merge. A Junees
 review of the head commit that is not 머지 가능 or lists 필수 items blocks
 the merge.
 Each step runs once per pull request and head commit; the token user's own

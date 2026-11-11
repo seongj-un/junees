@@ -1190,8 +1190,9 @@ async fn addresses_only_reviews_of_people_with_write_access() {
     assert!(github.writes().is_empty(), "{:?}", github.writes());
     assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
 
-    // With --approver only the listed logins start it: bob (write access)
-    // is not listed, erin is.
+    // With --approver the listed logins start it whatever GitHub says
+    // about them (erin, association NONE), and so does anyone with write
+    // access, the same reviews that block a merge; dave still does not.
     let mut listed = route.clone();
     let mut flow = listed.flow.clone().unwrap();
     flow.approvers = vec!["erin".into()];
@@ -1202,27 +1203,117 @@ async fn addresses_only_reviews_of_people_with_write_access() {
     };
     let report = run(
         &setup,
-        &reviewed("bob", "changes_requested", "fix", &head),
+        &reviewed("dave", "changes_requested", "fix", &head),
         1000,
     )
     .await;
     assert_eq!(
         report.lines,
-        ["#7 address: skipped: a review by bob (not an --approver)"]
+        ["#7 address: skipped: a review by dave (no write access)"]
     );
     assert!(engines.calls.lock().unwrap().is_empty());
-    let report = run(
-        &setup,
-        &reviewed("erin", "changes_requested", "fix", &head),
-        1000,
-    )
-    .await;
+    let mut erin = reviewed("erin", "changes_requested", "fix", &head);
+    erin.payload["review"]["author_association"] = json!("NONE");
+    let report = run(&setup, &erin, 1000).await;
     assert_eq!(report.status, RunStatus::Ok, "{report:?}");
     assert!(
         report.lines[0].starts_with("#7 address: pushed "),
         "{report:?}"
     );
     assert_eq!(engines.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn approver_lists_still_count_change_requests_of_people_with_write_access() {
+    // The review's case: --approver alice, admin bob requests changes,
+    // alice approves.
+    let home = tempfile::tempdir().unwrap();
+    let github = FakeGithub::start().await;
+    let flow = FlowConfig {
+        review: false,
+        address_reviews: false,
+        approvers: vec!["alice".into()],
+        ..config("o/n")
+    };
+    let route = route(home.path(), flow);
+    ready(&github);
+    permission(&github, "bob", "admin");
+    github.set(
+        "GET /repos/o/n/pulls/7/reviews",
+        200,
+        json!([
+            {"user": {"login": "bob"}, "author_association": "OWNER", "state": "CHANGES_REQUESTED", "commit_id": HEAD},
+            {"user": {"login": "alice"}, "author_association": "NONE", "state": "APPROVED", "commit_id": HEAD},
+        ]),
+    );
+    let engines = FakeEngines::default();
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: true,
+        unattended: ALL,
+    };
+    github.clear();
+    let report = run(&setup, &suite(HEAD), 1000).await;
+    assert!(report.quiet, "{report:?}");
+    assert_eq!(
+        report.lines,
+        ["#7 merge: not ready at 1111111: changes requested: by bob"]
+    );
+    assert!(github.writes().is_empty(), "{:?}", github.writes());
+    // bob's later approval clears his request, but only alice's counts.
+    github.set(
+        "GET /repos/o/n/pulls/7/reviews",
+        200,
+        json!([
+            {"user": {"login": "bob"}, "author_association": "OWNER", "state": "CHANGES_REQUESTED", "commit_id": HEAD},
+            {"user": {"login": "bob"}, "author_association": "OWNER", "state": "APPROVED", "commit_id": HEAD},
+            {"user": {"login": "alice"}, "author_association": "NONE", "state": "APPROVED", "commit_id": HEAD},
+        ]),
+    );
+    github.clear();
+    let report = run(&setup, &suite(HEAD), 1001).await;
+    assert_eq!(report.lines, ["#7 merge: merged 1111111; commented"]);
+    let body = github.writes()[1].1["body"].as_str().unwrap().to_string();
+    assert!(
+        body.contains(
+            "approvals: 1 of 1 on the head commit (alice); not counted (not an --approver): bob"
+        ),
+        "{body}"
+    );
+
+    // bob's change request starts the address step too.
+    let (home, _root, github, mut route, bare, head) = address_setup(None).await;
+    let mut flow = route.flow.clone().unwrap();
+    flow.approvers = vec!["alice".into()];
+    route.flow = Some(flow);
+    let engines = FakeEngines {
+        edit: Some("fixed.txt"),
+        ..FakeEngines::default()
+    };
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: false,
+        unattended: ALL,
+    };
+    let report = run(
+        &setup,
+        &reviewed("bob", "changes_requested", "fix", &head),
+        1000,
+    )
+    .await;
+    assert!(
+        report.lines[0].starts_with("#7 address: pushed "),
+        "{report:?}"
+    );
+    assert_ne!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
 }
 
 #[tokio::test]

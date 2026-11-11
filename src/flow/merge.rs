@@ -23,7 +23,9 @@
 //! Approvals of older commits do not count: the address step pushes
 //! commits no person has seen. Only the reviews of people with write
 //! access (or of the route's `--approver` logins) count, approvals and
-//! change requests alike ([`super::access`]).
+//! change requests alike ([`super::access`]); with `--approver`, only the
+//! listed logins' approvals count toward `--min-approvals`, while anyone
+//! with write access still blocks with a change request.
 
 use std::collections::BTreeMap;
 
@@ -63,6 +65,10 @@ pub struct ReviewFact {
     /// Whether the reviewer's approvals and change requests count (write
     /// access, or an `--approver`).
     pub counts: bool,
+    /// Whether the reviewer's approval counts toward `--min-approvals`
+    /// (it counts, and there is no `--approver` list or the reviewer is on
+    /// it).
+    pub approver: bool,
 }
 
 /// What the merge step reads about a pull request.
@@ -209,6 +215,7 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
     // Per reviewer the last review that sets a state, of the reviewers
     // whose reviews count.
     let mut last: BTreeMap<&str, &ReviewFact> = BTreeMap::new();
+    // Reviewers whose reviews do not count at all.
     let mut ignored: Vec<&str> = Vec::new();
     for review in &facts.reviews {
         if matches!(
@@ -238,7 +245,15 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
     ));
     let approvers: Vec<&str> = last
         .values()
-        .filter(|review| review.state == "APPROVED" && review.commit == facts.head_sha)
+        .filter(|review| {
+            review.state == "APPROVED" && review.commit == facts.head_sha && review.approver
+        })
+        .map(|review| review.user.as_str())
+        .collect();
+    // Approvals that block nothing but are not an --approver's.
+    let unlisted: Vec<&str> = last
+        .values()
+        .filter(|review| review.state == "APPROVED" && !review.approver)
         .map(|review| review.user.as_str())
         .collect();
     let enough = approvers.len() >= config.min_approvals as usize;
@@ -268,14 +283,15 @@ pub fn conditions(facts: &Facts, sha: &str, config: &FlowConfig, owner: &str) ->
     if !approvers.is_empty() {
         detail.push_str(&format!(" ({})", approvers.join(", ")));
     }
+    if !unlisted.is_empty() {
+        detail.push_str(&format!(
+            "; not counted (not an --approver): {}",
+            unlisted.join(", ")
+        ));
+    }
     if !ignored.is_empty() {
         detail.push_str(&format!(
-            "; not counted ({}): {}",
-            if config.approvers.is_empty() {
-                "no write access"
-            } else {
-                "not an --approver"
-            },
+            "; not counted (no write access): {}",
             ignored.join(", ")
         ));
     }
@@ -396,12 +412,14 @@ pub async fn facts(
             }
             _ => false,
         };
+        let approver = counts && access.approves(&user);
         facts.push(ReviewFact {
             user,
             state,
             commit: text(&review["commit_id"]),
             body: text(&review["body"]),
             counts,
+            approver,
         });
     }
     let reviews = facts;
@@ -461,6 +479,7 @@ mod tests {
             commit: commit.into(),
             body: body.into(),
             counts: true,
+            approver: true,
         }
     }
 
@@ -655,6 +674,7 @@ mod tests {
         facts.checks.truncate(1);
         let mut drive_by = review("drive-by-account", "APPROVED", HEAD, "");
         drive_by.counts = false;
+        drive_by.approver = false;
         facts.reviews = vec![
             review(
                 "junees-bot",
@@ -686,18 +706,28 @@ mod tests {
         let mut facts = green();
         let mut request = review("mallory", "CHANGES_REQUESTED", HEAD, "### 필수\n- x\n");
         request.counts = false;
+        request.approver = false;
         facts.reviews.push(request);
         assert!(failing(&facts, &config).is_empty());
-        // The wording follows --approver.
+        // With --approver, the approval of someone with write access who
+        // is not listed blocks nothing and does not count.
         let listed = FlowConfig {
             approvers: vec!["alice".into()],
             ..config.clone()
         };
-        let detail = missing(&conditions(&probe(), HEAD, &listed, "junees-bot"));
-        assert!(
-            detail.contains("not counted (not an --approver)"),
-            "{detail}"
+        let mut facts = green();
+        facts.reviews[0].approver = false;
+        let detail = missing(&conditions(&facts, HEAD, &listed, "junees-bot"));
+        assert_eq!(
+            detail,
+            "approvals: 0 of 1 on the head commit; not counted (not an --approver): alice"
         );
+        // A change request of such a reviewer blocks: --approver narrows
+        // only whose approvals count.
+        let mut request = review("bob", "CHANGES_REQUESTED", HEAD, "");
+        request.approver = false;
+        facts.reviews = vec![review("alice", "APPROVED", HEAD, ""), request];
+        assert_eq!(failing(&facts, &listed), ["changes requested"]);
     }
 
     #[test]

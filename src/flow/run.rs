@@ -570,19 +570,14 @@ async fn address_step(
         );
     }
     // Only reviews of people with write access (or --approver) start a
-    // model run with bash and a push.
+    // model run with bash and a push, the same reviews that block a merge.
     let association = review["author_association"].as_str().unwrap_or_default();
     match access.counts(reviewer, association).await {
         Ok(true) => {}
         Ok(false) => {
             let line = format!(
-                "skipped: a review by {} ({})",
+                "skipped: a review by {} (no write access)",
                 crate::prompt_text::escape_hidden(reviewer),
-                if cx.flow.approvers.is_empty() {
-                    "no write access"
-                } else {
-                    "not an --approver"
-                }
             );
             return step_line(cx, report, n, action, &line);
         }
