@@ -1,5 +1,6 @@
-//! MCP client over stdio: Junees starts the servers the user lists in
-//! `$JUNEES_HOME/mcp.json` ([`config`]) as child processes when a session
+//! MCP client: Junees starts the servers the user lists in
+//! `$JUNEES_HOME/mcp.json` ([`config`]) as child processes (stdio), or
+//! connects to them over Streamable HTTP ([`http`]), when a session
 //! starts, and offers their tools to the model as `mcp__<server>__<tool>`.
 //!
 //! Protocol: MCP 2026-07-28 (stdio transport, `server/discover`,
@@ -11,6 +12,7 @@
 pub mod config;
 pub mod conn;
 pub mod http;
+pub mod link;
 pub mod server;
 pub mod tool;
 
@@ -25,7 +27,7 @@ use crate::approval::ExternalTool;
 use crate::tools::ToolRegistry;
 
 pub use config::ServerConfig;
-pub use server::{Server, Status, Timeouts};
+pub use server::{EnvLookup, Server, Status, Timeouts};
 pub use tool::McpTool;
 
 /// The MCP servers of a session and the tools they offer. Dropping it
@@ -79,15 +81,26 @@ impl Mcp {
         workdir: &Path,
         timeouts: Timeouts,
     ) -> Self {
+        let env: EnvLookup = Arc::new(|name: &str| std::env::var(name).ok());
+        Self::start_servers_with_env(configs, hidden_env, workdir, timeouts, env).await
+    }
+
+    /// [`Mcp::start_servers`] with the HTTP header values read through
+    /// `env`.
+    pub async fn start_servers_with_env(
+        configs: Vec<ServerConfig>,
+        hidden_env: &[String],
+        workdir: &Path,
+        timeouts: Timeouts,
+        env: EnvLookup,
+    ) -> Self {
         let servers: Vec<Arc<Server>> = configs
             .into_iter()
             .map(|config| {
-                Arc::new(Server::new(
-                    config,
-                    hidden_env.to_vec(),
-                    workdir.to_path_buf(),
-                    timeouts,
-                ))
+                Arc::new(
+                    Server::new(config, hidden_env.to_vec(), workdir.to_path_buf(), timeouts)
+                        .with_env(Arc::clone(&env)),
+                )
             })
             .collect();
         let starts: Vec<_> = servers
@@ -169,9 +182,14 @@ impl Mcp {
             match server.status() {
                 Status::Disabled => {}
                 Status::Running { tools, .. } => lines.push(format!(
-                    "mcp: {} started ({tools} {})",
+                    "mcp: {} started ({tools} {}{})",
                     server.name(),
-                    if tools == 1 { "tool" } else { "tools" }
+                    if tools == 1 { "tool" } else { "tools" },
+                    if server.config.http.is_some() {
+                        ", over HTTP"
+                    } else {
+                        ""
+                    }
                 )),
                 Status::Failed(reason) | Status::Stopped(reason) => {
                     lines.push(format!("mcp: {} failed to start: {reason}", server.name()));
@@ -184,8 +202,9 @@ impl Mcp {
         lines
     }
 
-    /// What `/mcp` shows: each server's state and tool count. Never the
-    /// arguments or `env` values: they may hold tokens.
+    /// What `/mcp` shows: each server's state, transport and tool count.
+    /// Never the arguments, `env` or header values, or more of a URL than
+    /// its origin: they may hold tokens.
     pub fn overview(&self) -> String {
         let mut text = String::new();
         if let Some(problem) = &self.problem {
@@ -215,18 +234,32 @@ impl Mcp {
                 Status::Stopped(reason) => format!("stopped: {reason}"),
             };
             let env: Vec<&str> = server.config.env.keys().map(String::as_str).collect();
+            let place = match &server.config.http {
+                Some(http) => format!(
+                    "Streamable HTTP `{}`{}",
+                    http.origin(),
+                    if http.headers.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", headers {}", http.describe_headers())
+                    }
+                ),
+                None => format!(
+                    "stdio, command `{}`{}",
+                    crate::prompt_text::escape_hidden(&server.config.command),
+                    if env.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            ", env {}",
+                            crate::prompt_text::escape_hidden(&env.join(", "))
+                        )
+                    }
+                ),
+            };
             text.push_str(&format!(
-                "  {}: {state}\n     command `{}`{}; {exposed} tools offered to the model{}{}\n",
+                "  {}: {state}\n     {place}; {exposed} tools offered to the model{}{}\n",
                 server.name(),
-                crate::prompt_text::escape_hidden(&server.config.command),
-                if env.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        ", env {}",
-                        crate::prompt_text::escape_hidden(&env.join(", "))
-                    )
-                },
                 if server.config.trust {
                     ", trusted (no approval questions)"
                 } else {

@@ -41,6 +41,9 @@ pub enum CallError {
     Timeout(Duration),
     /// The server is gone, with why.
     Closed(String),
+    /// The request failed, with why; the server may still answer others
+    /// (HTTP).
+    Failed(String),
 }
 
 type Reply = Result<Value, RpcError>;
