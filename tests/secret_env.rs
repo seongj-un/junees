@@ -1,5 +1,5 @@
 //! The default bash tool must not leak the API key, the notification
-//! webhook, the Discord bot token or Claude Code's subscription token. This file holds a single test because it changes the process
+//! webhook, the Discord bot token, the GitHub token or Claude Code's subscription token. This file holds a single test because it changes the process
 //! environment.
 
 use junees::tools::{ToolRegistry, ToolSettings};
@@ -17,6 +17,7 @@ async fn default_bash_cannot_read_the_api_key() {
         );
         std::env::set_var("JUNEES_DISCORD_TOKEN", "bot-token-should-not-leak");
         std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token-should-not-leak");
+        std::env::set_var("JUNEES_GITHUB_TOKEN", "github-token-should-not-leak");
     }
     let registry = ToolRegistry::with_defaults(&ToolSettings::default());
 
@@ -53,6 +54,14 @@ async fn default_bash_cannot_read_the_api_key() {
         .dispatch(
             "bash",
             json!({"command": "printenv CLAUDE_CODE_OAUTH_TOKEN; env | grep -c oauth-token-should-not-leak"}),
+        )
+        .await;
+    assert!(output.content.starts_with("0\n"), "{}", output.content);
+
+    let output = registry
+        .dispatch(
+            "bash",
+            json!({"command": "printenv JUNEES_GITHUB_TOKEN; env | grep -c github-token-should-not-leak"}),
         )
         .await;
     assert!(output.content.starts_with("0\n"), "{}", output.content);
