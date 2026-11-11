@@ -823,7 +823,7 @@ src/
     signature.rs       sha256=<hex> HMAC-SHA256 서명과 상수 시간 확인(ring)
     store.rs           경로 저장 webhooks/routes.json(0600, 잠금, 원자적 쓰기), 종류, 시크릿 위치, 이벤트 필터, 이름 검사
     template.rs        프롬프트 템플릿({{event}}, {{payload.a.b}} 등), 값 정리와 상한, 무작위 이름의 데이터 태그
-    server.rs          junees webhook serve: 경로/메서드/서명/이벤트/중복 판단, 경로마다 줄 세우기(대기 20, 429), 실행마다 자식 프로세스, 결과 없이 끝난 실행 기록, 종료
+    server.rs          junees webhook serve: 경로/메서드/서명/이벤트/중복 판단, 시크릿 없는 경로의 요청 검사(Host, 브라우저/프록시 헤더, JSON), 동시 연결 상한, 경로마다 줄 세우기(대기 20, 429), 실행마다 자식 프로세스, 결과 없이 끝난 실행 기록, 종료
     run.rs             실행 하나: running 기록, 프롬프트, cron 엔진(세션 source webhook), 출력 파일 webhooks/output/<이름>/, 전달, 마지막 실행 기록
     cli.rs, command.rs junees webhook 인자 파싱과 명령(serve/add/list/remove/pause/resume/test/run)
     mod.rs             설정(webhook_max_time, webhook_max_tokens), /webhooks와 !webhooks 목록

@@ -27,7 +27,11 @@ X-Junees-Event (default `webhook`), X-Junees-Delivery and check
 X-Junees-Signature (sha256=<hex HMAC-SHA256 of the body>). The secret is
 read from the environment variable or the private (0600) file named, never
 stored; a file must be in $JUNEES_HOME/secrets/, which the model's tools
-may not read. A route without a secret is only served on a loopback address.
+may not read. A route without a secret is only served on a loopback address,
+to JSON requests sent straight to it: Host 127.0.0.1:<port>, localhost:<port>
+or [::1]:<port>, Content-Type application/json, no Origin or Sec-Fetch-*
+header (browsers) and no X-Forwarded-For, Forwarded, CF-Connecting-IP or
+X-Real-IP header (proxies and tunnels).
 --events keeps the events that run (`pull_request` or `pull_request.opened`;
 default every event); GitHub's ping is answered and does not run.
 
