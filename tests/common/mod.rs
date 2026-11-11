@@ -1,13 +1,53 @@
-//! A fake Anthropic API server shared by the integration tests.
+//! Helpers shared by the integration tests: the junees binary without the
+//! test's own settings and credentials, and a fake Anthropic API server.
 
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+
+/// Variables that change what the binary does or which account it uses:
+/// all of Junees's own settings, the API's, Claude Code's and the GitHub
+/// tokens. A developer's `JUNEES_BACKEND=claude-code` would otherwise make
+/// a test call the real `claude`.
+pub const SCRUBBED_PREFIXES: &[&str] = &["JUNEES_", "ANTHROPIC_", "CLAUDE_CODE_"];
+pub const SCRUBBED_NAMES: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
+
+/// Whether a binary test must not pass on the variable `name`.
+pub fn scrubbed(name: &str) -> bool {
+    SCRUBBED_NAMES.contains(&name)
+        || SCRUBBED_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// Removes from `command` each of `names` that [`scrubbed`] matches.
+pub fn scrub_env<I, S>(command: &mut tokio::process::Command, names: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    for name in names {
+        let name = name.as_ref();
+        if scrubbed(&name.to_string_lossy()) {
+            command.env_remove(name);
+        }
+    }
+}
+
+/// The junees binary, without any variable of the test's environment that
+/// [`scrubbed`] matches. Every binary test starts here and sets what it
+/// needs afterwards.
+pub fn junees_binary() -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    scrub_env(&mut command, std::env::vars_os().map(|(name, _)| name));
+    command
+}
 
 /// Serves the given (status, body) pairs to consecutive connections and
 /// returns every raw request it received. Error responses carry
