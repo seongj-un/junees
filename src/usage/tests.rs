@@ -296,7 +296,7 @@ fn every_usage_entry_kind_is_read_with_its_model() {
     text.push_str("{\"type\":\"usage\",\"input_tok\nnot json at all\n{\"type\":\"usage\",\"inp");
     fs::write(&path, text).unwrap();
 
-    let (records, stats) = read_session(&path).unwrap();
+    let (records, stats) = read_session(&path, &Prices::default()).unwrap();
     let created = at(2026, 11, 1, 0, 0);
     let expected = [
         (100, Kind::Call, "claude-opus-4-7", usage(10, 0, 0, 1, 0)),
@@ -325,6 +325,7 @@ fn every_usage_entry_kind_is_read_with_its_model() {
         kind,
         model: model.to_string(),
         usage,
+        one_call: kind != Kind::Subagents,
     });
     assert_eq!(records, expected);
     // `"many"`, the cut line, `not json` and the torn line.
@@ -332,11 +333,17 @@ fn every_usage_entry_kind_is_read_with_its_model() {
     assert_eq!(stats.journals, 1);
 
     // A session with no journal yet, and a file that is no journal.
-    let (records, _) = read_session(&home.path().join("missing.jsonl")).unwrap();
+    let (records, _) =
+        read_session(&home.path().join("missing.jsonl"), &Prices::default()).unwrap();
     assert!(records.is_empty());
     let other = home.path().join("other.jsonl");
     fs::write(&other, "{\"type\":\"usage\",\"input_tokens\":1}\n").unwrap();
-    assert!(read_session(&other).unwrap().0.is_empty());
+    assert!(
+        read_session(&other, &Prices::default())
+            .unwrap()
+            .0
+            .is_empty()
+    );
 }
 
 #[test]
@@ -353,7 +360,7 @@ fn lines_the_session_writer_writes_are_read() {
         .record_usage(&Entry::Usage(usage(1, 2, 3, 4, 0)), "claude-opus-5-5")
         .unwrap();
     writer.record(&Entry::Usage(usage(5, 0, 0, 6, 0))).unwrap();
-    let (records, stats) = read_session(writer.path()).unwrap();
+    let (records, stats) = read_session(writer.path(), &Prices::default()).unwrap();
     let models: Vec<&str> = records.iter().map(|r| r.model.as_str()).collect();
     assert_eq!(models, ["claude-opus-5-5", "claude-sonnet-4-6"]);
     assert_eq!(stats.broken_lines, 0);
@@ -373,7 +380,7 @@ fn claude_code_turns_count_as_subscription_tokens() {
                  "end": "answered", "ts": 100}),
         ],
     );
-    let (records, _) = read_session(&path).unwrap();
+    let (records, _) = read_session(&path, &Prices::default()).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].kind, Kind::ClaudeCode);
     let live = Live {
@@ -423,30 +430,35 @@ fn the_session_report_counts_every_kind_and_what_the_journal_missed() {
             kind: Kind::Call,
             model: "claude-sonnet-4-6".into(),
             usage: usage(1000, 2000, 30_000, 500, 2),
+            one_call: true,
         },
         Record {
             ts: 2,
             kind: Kind::Call,
             model: "claude-sonnet-4-6".into(),
             usage: usage(1000, 0, 0, 500, 0),
+            one_call: true,
         },
         Record {
             ts: 3,
             kind: Kind::Summary,
             model: "claude-sonnet-4-6".into(),
             usage: usage(4000, 0, 0, 1000, 0),
+            one_call: true,
         },
         Record {
             ts: 4,
             kind: Kind::Subagents,
             model: "claude-sonnet-4-6".into(),
             usage: usage(10_000, 0, 0, 2000, 0),
+            one_call: false,
         },
         Record {
             ts: 5,
             kind: Kind::Call,
             model: "mystery-model".into(),
             usage: usage(7, 0, 0, 7, 0),
+            one_call: true,
         },
     ];
     let mut saved = Usage::default();
@@ -742,6 +754,213 @@ fn no_sessions_folder_is_no_usage() {
     );
 }
 
+/// Writes the subagent journal `sessions/<parent>/sub-<n>.jsonl` by hand.
+fn sub_journal(home: &Path, parent: &str, n: usize, lines: &[Value]) {
+    let dir = home.join("sessions").join(parent);
+    fs::create_dir_all(&dir).unwrap();
+    let mut text = json!({
+        "type": "meta", "id": format!("{parent}/sub-{n}"), "format": 6,
+        "created_at": at(2026, 11, 11, 1, 0), "cwd": "/work", "model": "claude-haiku-5-5",
+        "version": "0",
+    })
+    .to_string()
+        + "\n";
+    for line in lines {
+        text.push_str(&line.to_string());
+        text.push('\n');
+    }
+    fs::write(dir.join(format!("sub-{n}.jsonl")), text).unwrap();
+}
+
+#[test]
+fn subagent_calls_with_long_prompts_are_priced_one_by_one() {
+    let home = tempfile::tempdir().unwrap();
+    let t = at(2026, 11, 11, 1, 0);
+    let id = "20261111-010000-hhhh";
+    let haiku = Some("claude-haiku-5-5");
+    journal(
+        home.path(),
+        id,
+        json!({"created_at": t, "model": "claude-haiku-5-5"}),
+        &[
+            usage_line("usage", t, 1000, 100, None),
+            // The first `delegate` call: sub-1 and sub-2.
+            usage_line("subagent_usage", t + 60, 151_000, 1_100, None),
+            // The second: its journal (sub-3) is missing.
+            usage_line("subagent_usage", t + 120, 2000, 200, None),
+        ],
+    );
+    // One call over 100,000 prompt tokens, one short call.
+    sub_journal(
+        home.path(),
+        id,
+        1,
+        &[usage_line("usage", t + 30, 150_000, 1000, haiku)],
+    );
+    sub_journal(
+        home.path(),
+        id,
+        2,
+        &[usage_line("usage", t + 40, 1000, 100, haiku)],
+    );
+    // A subagent of a run that ended before the parent recorded its
+    // `subagent_usage`: no entry of the parent covers it.
+    sub_journal(
+        home.path(),
+        id,
+        4,
+        &[usage_line("usage", t + 150, 5000, 500, haiku)],
+    );
+
+    let text = run(
+        home.path(),
+        1,
+        By::Model,
+        true,
+        "UTC",
+        at(2026, 11, 11, 12, 0),
+    );
+    let words: Vec<&str> = text
+        .lines()
+        .find(|line| line.starts_with("claude-haiku-5-5"))
+        .unwrap_or_else(|| panic!("{text}"))
+        .split_whitespace()
+        .collect();
+    // The tokens the parent counted, none twice.
+    assert_eq!((words[1], words[4]), ("154,000", "1,400"), "{text}");
+    // sub-1's call at the long-prompt rates ($0.50 input, $2.50 output):
+    // $0.0775; the parent's call, sub-2 and the second `delegate` call
+    // at the base rates ($0.10, $0.50): $0.00015 + $0.00015 + $0.0003.
+    assert_eq!(words[7], "$0.0781", "{text}");
+    // Only the second call's subagents are still a sum, and the report
+    // says what that means.
+    assert!(
+        text.lines()
+            .any(|line| line.contains("claude-haiku-5-5")
+                && line.contains("priced at the base rates")),
+        "{text}"
+    );
+}
+
+#[test]
+fn subagent_journals_are_matched_to_their_entries_in_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let (_, mut parent) =
+        SessionWriter::create(home.path(), Path::new("/w"), "claude-haiku-5-5").unwrap();
+    parent
+        .record(&Entry::Message(crate::message::Message::user_text("go")))
+        .unwrap();
+    let parent_path = parent.path().to_path_buf();
+    let sub = |n: usize, calls: &[(Entry, &str)]| {
+        let mut writer = SessionWriter::create_sub(&parent_path, &format!("sub-{n}")).unwrap();
+        for (entry, model) in calls {
+            writer.record_usage(entry, model).unwrap();
+        }
+    };
+    // After `/model`: a `delegate` call on Sonnet, priced the same per
+    // call or summed, so its journal is only matched to stay in step.
+    sub(
+        1,
+        &[(Entry::Usage(usage(300, 0, 0, 3, 0)), "claude-sonnet-4-6")],
+    );
+    parent
+        .record_usage(
+            &Entry::SubagentUsage(usage(300, 0, 0, 3, 0)),
+            "claude-sonnet-4-6",
+        )
+        .unwrap();
+    // Back on Haiku 5.5: a call whose subagent journal (sub-2) was never
+    // written.
+    parent
+        .record_usage(
+            &Entry::SubagentUsage(usage(130_000, 0, 0, 20, 0)),
+            "claude-haiku-5-5",
+        )
+        .unwrap();
+    // Then two subagents, one with a long prompt and a summary call.
+    let haiku = "claude-haiku-5-5";
+    sub(
+        3,
+        &[(Entry::Usage(usage(20_000, 0, 100_000, 10, 0)), haiku)],
+    );
+    sub(
+        4,
+        &[
+            (Entry::Usage(usage(1000, 0, 0, 10, 1)), haiku),
+            (Entry::SummaryUsage(usage(500, 0, 0, 5, 0)), haiku),
+        ],
+    );
+    parent
+        .record_usage(
+            &Entry::SubagentUsage(usage(21_500, 0, 100_000, 25, 1)),
+            haiku,
+        )
+        .unwrap();
+
+    let prices = Prices::default();
+    let (records, _) = read_session(parent.path(), &prices).unwrap();
+    let got: Vec<(Kind, &str, Usage, bool)> = records
+        .iter()
+        .map(|r| (r.kind, r.model.as_str(), r.usage, r.one_call))
+        .collect();
+    let sonnet = "claude-sonnet-4-6";
+    assert_eq!(
+        got,
+        [
+            (Kind::Subagents, sonnet, usage(300, 0, 0, 3, 0), false),
+            (Kind::Subagents, haiku, usage(130_000, 0, 0, 20, 0), false),
+            (
+                Kind::Subagents,
+                haiku,
+                usage(20_000, 0, 100_000, 10, 0),
+                true
+            ),
+            (Kind::Subagents, haiku, usage(1000, 0, 0, 10, 1), true),
+            (Kind::Subagents, haiku, usage(500, 0, 0, 5, 0), true),
+        ]
+    );
+
+    // `/usage`: one subagents row per model, the long call at the long
+    // rates, and a note for the sum left at the base rates.
+    let mut saved = Usage::default();
+    for record in &records {
+        saved.add(record.usage);
+    }
+    let live = Live {
+        usage: saved,
+        model: haiku.into(),
+        claude_code: false,
+    };
+    let text = session(Some("s"), &records, &Stats::default(), &live, &prices);
+    let cost = |label: &str| {
+        text.lines()
+            .find(|line| line.starts_with(label))
+            .unwrap_or_else(|| panic!("no {label} row in\n{text}"))
+            .split_whitespace()
+            .last()
+            .unwrap()
+            .to_string()
+    };
+    // 130,000 * $0.10 + 20 * $0.50; 20,000 * $0.50 + 100,000 * $0.05 + 10
+    // * $2.50; 1,000 * $0.10 + 10 * $0.50 + $0.01; 500 * $0.10 + 5 *
+    // $0.50, per million tokens: $0.0130 + $0.0150 + $0.0101 + $0.00005.
+    assert_eq!(cost("subagents (claude-haiku-5-5)"), "$0.0382", "{text}");
+    let note = text
+        .lines()
+        .find(|line| line.contains("priced at the base rates"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        note.starts_with("Some tokens of claude-haiku-5-5 are only known as sums"),
+        "{text}"
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("not in the journal")),
+        "{text}"
+    );
+}
+
 #[test]
 fn usage_arguments() {
     let parse = |args: &[&str]| args::parse(args.iter().map(|arg| arg.to_string()));
@@ -794,6 +1013,7 @@ fn totals_name_what_their_cost_leaves_out() {
         kind,
         model: model.into(),
         usage: usage(10, 0, 30, 1, 0),
+        one_call: true,
     };
     totals.add(&record(Kind::ClaudeCode, ""), &prices);
     assert_eq!(totals.cost_text(), "subscription");
