@@ -28,8 +28,12 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// [`Entry::Format`] line. Format 4 added `drop_server_calls`. Format 5
 /// added conversations run by Claude Code: the meta line's `backend` and
 /// `claude_turn` entries, which a format 4 Junees would replay as an empty
-/// API conversation. Format 6 added `subagent_usage`.
-pub const FORMAT: u32 = 6;
+/// API conversation. Format 6 added `subagent_usage`. Format 7 added
+/// images: `image` blocks and tool results with images, whose source names
+/// a file of the session's image folder ([`crate::images::store`]), and
+/// `append_content`; a format 6 Junees would send such sources to the API,
+/// or refuse a tool result whose content is a list as corrupt.
+pub const FORMAT: u32 = 7;
 
 /// [`Meta::backend`] of a conversation Claude Code runs (the `claude-code`
 /// backend).
@@ -98,10 +102,11 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 11] = [
+const ENTRY_TYPES: [&str; 12] = [
     "meta",
     "message",
     "append_text",
+    "append_content",
     "usage",
     "clear_tool_results",
     "summary_usage",
@@ -122,6 +127,11 @@ pub enum Entry {
     /// A text block was added to the trailing user message.
     AppendText {
         text: String,
+    },
+    /// Blocks were added to the trailing user message: an input with
+    /// images ([`Transcript::user_input_entry`]).
+    AppendContent {
+        content: Vec<ContentBlock>,
     },
     /// Token usage of one model call.
     Usage(Usage),
@@ -286,6 +296,17 @@ impl Transcript {
                     _ => self.messages.push(Message {
                         role: Role::User,
                         content: vec![block],
+                    }),
+                }
+            }
+            Entry::AppendContent { content } => {
+                self.unmeasured_tokens += estimate_tokens(&content);
+                self.reply_measured = false;
+                match self.messages.last_mut() {
+                    Some(last) if last.role == Role::User => last.content.extend(content),
+                    _ => self.messages.push(Message {
+                        role: Role::User,
+                        content,
                     }),
                 }
             }
@@ -632,6 +653,24 @@ impl Transcript {
         }
     }
 
+    /// The entry that adds user input with `images` before its text, as the
+    /// vision docs advise ("Claude works best when images come before
+    /// text"); without images, [`Transcript::user_text_entry`].
+    pub fn user_input_entry(&self, text: &str, images: Vec<crate::images::Image>) -> Entry {
+        if images.is_empty() {
+            return self.user_text_entry(text);
+        }
+        let mut content: Vec<ContentBlock> = images.into_iter().map(ContentBlock::Image).collect();
+        content.push(ContentBlock::text(text));
+        match self.messages.last() {
+            Some(last) if last.role == Role::User => Entry::AppendContent { content },
+            _ => Entry::Message(Message {
+                role: Role::User,
+                content,
+            }),
+        }
+    }
+
     /// If the history ends with tool calls that never got a result (the
     /// process stopped while they ran), the user message that answers each
     /// of them with an error.
@@ -920,9 +959,17 @@ impl SessionWriter {
                 self.meta.format = FORMAT;
             }
         }
-        let result = result.and_then(|()| write_line(&mut file, entry, model));
+        // Images go to files of the session's folder; the line names them.
+        let result = result
+            .and_then(|()| crate::images::store::stored_entry(entry, &self.images_dir()))
+            .and_then(|stored| write_line(&mut file, stored.as_ref().unwrap_or(entry), model));
         self.file = Some(file);
         result
+    }
+
+    /// Where the images of this journal's entries are kept.
+    fn images_dir(&self) -> PathBuf {
+        crate::images::store::dir_of(&self.path)
     }
 }
 
@@ -1048,6 +1095,7 @@ impl Session {
             bail!("{} is not a Junees session (no meta line)", path.display());
         };
         let mut transcript = Transcript::default();
+        let images = crate::images::store::dir_of(path);
         for entry in entries {
             match entry {
                 Entry::Meta(_) => bail!("{}: unexpected second meta line", path.display()),
@@ -1055,7 +1103,7 @@ impl Session {
                 Entry::Format { format } => meta.format = meta.format.max(format),
                 _ => {}
             }
-            transcript.apply(entry);
+            transcript.apply(crate::images::store::resolve_entry(entry, &images));
         }
         Ok(Self {
             path: path.to_path_buf(),
@@ -1417,6 +1465,120 @@ mod tests {
     }
 
     #[test]
+    fn inputs_with_images_put_them_first() {
+        let mut transcript = Transcript::default();
+        let entry = transcript.user_input_entry("what is this?", vec![picture(1), picture(2)]);
+        let Entry::Message(message) = &entry else {
+            panic!("{entry:?}");
+        };
+        assert_eq!(
+            message.content,
+            [
+                ContentBlock::Image(picture(1)),
+                ContentBlock::Image(picture(2)),
+                ContentBlock::text("what is this?")
+            ]
+        );
+        transcript.apply(entry);
+        // After a failed turn the input joins the trailing user message.
+        let entry = transcript.user_input_entry("and this?", vec![picture(3)]);
+        assert_eq!(
+            entry,
+            Entry::AppendContent {
+                content: vec![
+                    ContentBlock::Image(picture(3)),
+                    ContentBlock::text("and this?")
+                ]
+            }
+        );
+        transcript.apply(entry);
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].content.len(), 5);
+        assert_eq!(transcript.messages[0].text(), "what is this?\nand this?");
+        // Without images, as before.
+        assert!(matches!(
+            transcript.user_input_entry("plain", Vec::new()),
+            Entry::AppendText { .. }
+        ));
+        // A content entry with no user message to join starts one.
+        let mut empty = Transcript::default();
+        empty.apply(Entry::AppendContent {
+            content: vec![ContentBlock::text("x")],
+        });
+        assert_eq!(empty.messages, [Message::user_text("x")]);
+    }
+
+    #[test]
+    fn images_are_kept_as_files_and_come_back_on_resume() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let (meta, mut writer) =
+            SessionWriter::create(home.path(), Path::new("/work"), "m").unwrap();
+        let mut expected = Transcript::default();
+        let input = expected.user_input_entry("look", vec![picture(5)]);
+        let call = Entry::Message(tool_call("toolu_1"));
+        let result = Entry::Message(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "Image a.png".into(),
+                is_error: false,
+                images: vec![picture(6), picture(5)],
+            }],
+        });
+        for entry in [input, call, result] {
+            writer.record(&entry).unwrap();
+            expected.apply(entry);
+        }
+        drop(writer);
+
+        let path = sessions_dir(home.path()).join(format!("{}.jsonl", meta.id));
+        let journal = fs::read_to_string(&path).unwrap();
+        assert!(!journal.contains("\"base64\""), "{journal}");
+        assert_eq!(journal.matches("\"junees_file\"").count(), 3);
+        assert!(journal.contains("\"format\":7"), "{journal}");
+        let images = sessions_dir(home.path()).join(&meta.id).join("images");
+        let mut files: Vec<String> = fs::read_dir(&images)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 2, "{files:?}");
+        for file in &files {
+            assert!(file.ends_with(".png") && file.len() == 64 + 4, "{file}");
+            let mode = fs::metadata(images.join(file))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        let (session, writer) = Session::resume(&path).unwrap();
+        assert_eq!(session.transcript, expected);
+        assert_eq!(
+            session.transcript.messages[0].content[0],
+            ContentBlock::Image(picture(5))
+        );
+        drop(writer);
+
+        // A deleted image file leaves a note in its place.
+        for file in &files {
+            fs::remove_file(images.join(file)).unwrap();
+        }
+        let session = Session::load(&path).unwrap();
+        let first = &session.transcript.messages[0].content[0];
+        assert!(
+            matches!(first, ContentBlock::Text { text, .. } if text.contains("could not be read")),
+            "{first:?}"
+        );
+        assert!(
+            session.transcript.messages[2].content[0]
+                .images()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn clearing_drops_the_images_of_cleared_results() {
         let mut transcript = tool_rounds(4);
         if let ContentBlock::ToolResult { images, .. } = &mut transcript.messages[2].content[0] {
@@ -1649,6 +1811,9 @@ mod tests {
             meta(),
             Entry::Message(Message::user_text("hi")),
             Entry::AppendText { text: "x".into() },
+            Entry::AppendContent {
+                content: vec![ContentBlock::text("x")],
+            },
             Entry::Usage(Usage::default()),
             Entry::ClearToolResults {
                 upto: 1,
@@ -1679,7 +1844,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 6);
+        assert_eq!(value["format"], 7);
         // An API conversation has no backend field.
         assert!(value.get("backend").is_none(), "{value}");
         // Journals written before the field existed are format 1.

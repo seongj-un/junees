@@ -322,6 +322,14 @@ fn texts(entry: Entry, tools: &mut HashMap<String, String>) -> Vec<(String, Stri
             }
         }
         Entry::AppendText { text } => out.push(("user".to_string(), text, MAX_TEXT_BYTES)),
+        // An input with images: its text (the images are not searched).
+        Entry::AppendContent { content } => {
+            for block in content {
+                if let ContentBlock::Text { text, .. } = block {
+                    out.push(("user".to_string(), text, MAX_TEXT_BYTES));
+                }
+            }
+        }
         Entry::ClaudeTurn(turn) => {
             out.push(("user".to_string(), turn.input, MAX_TEXT_BYTES));
             out.push(("assistant".to_string(), turn.text, MAX_TEXT_BYTES));

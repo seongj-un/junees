@@ -19,6 +19,7 @@
 //! Session journals keep each image once, as a file of the session's own
 //! folder, and refer to it ([`store`]).
 
+pub mod store;
 
 use std::fmt;
 use std::io::Read;
