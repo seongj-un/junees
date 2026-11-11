@@ -175,6 +175,7 @@ impl Config {
             );
         }
         let home = crate::config_file::home_dir(get);
+        let context_files = crate::context_files::Setting::read(&lookup)?;
         let tools = ToolSettings {
             hidden_env: comma_list(get("JUNEES_HIDDEN_ENV")),
             deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),
@@ -186,6 +187,7 @@ impl Config {
             approval_gate: false,
             webhook: false,
             gh_config_dir: None,
+            instruction_files: context_files.names.clone(),
         };
         let approval = ApprovalMode::parse(get("JUNEES_APPROVAL").as_deref())?;
 
@@ -208,7 +210,6 @@ impl Config {
         let memory = Limits::read(get)?;
         let subagents = subagent::Settings::read(get)?;
         let github = crate::github::Settings::read(get)?;
-        let context_files = crate::context_files::Setting::read(&lookup)?;
 
         Ok(Self {
             api_key,
@@ -338,6 +339,10 @@ mod tests {
                     "/home/tester/.junees/config.toml",
                     Some(PathBuf::from("/home/tester")),
                 )),
+                instruction_files: crate::context_files::DEFAULT_NAMES
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect(),
                 ..ToolSettings::default()
             }
         );
@@ -376,6 +381,14 @@ mod tests {
         // Read as given: an empty value (`context_files = ""`) is off too.
         assert!(names("").unwrap().is_empty());
         assert!(names("off").unwrap().is_empty());
+        // The tools know them, to keep webhook runs from writing them.
+        let tools = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_CONTEXT_FILES", "RULES.md"),
+        ])
+        .unwrap()
+        .tools;
+        assert_eq!(tools.instruction_files, ["RULES.md"]);
         let err = names("docs/AGENTS.md").unwrap_err().to_string();
         assert!(err.contains("JUNEES_CONTEXT_FILES"), "{err}");
     }

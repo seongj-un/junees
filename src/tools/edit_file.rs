@@ -30,13 +30,17 @@ const MAX_OUTPUT_CHARS: usize = 20_000;
 #[derive(Default)]
 pub struct EditFile {
     settings_file: Option<SettingsFile>,
+    /// The instruction file names it refuses ([`ToolSettings::protected_instruction_files`]).
+    instruction_files: Vec<String>,
 }
 
 impl EditFile {
-    /// Refuses the settings file of `settings`.
+    /// Refuses the settings file of `settings`, and in a webhook run the
+    /// project instruction files.
     pub fn with_settings(settings: &ToolSettings) -> Self {
         Self {
             settings_file: settings.settings_file.clone(),
+            instruction_files: settings.protected_instruction_files(),
         }
     }
 }
@@ -96,6 +100,11 @@ impl Tool for EditFile {
             .and_then(|file| file.data_folder(Path::new(path)))
         {
             return ToolOutput::error(folder.refusal(path));
+        }
+        if let Some(name) =
+            super::instruction_files::path_named(Path::new(path), &self.instruction_files)
+        {
+            return ToolOutput::error(super::instruction_files::refusal(path, name));
         }
         match edit(path, old, new, replace_all).await {
             Ok(output) | Err(output) => output,
@@ -573,6 +582,7 @@ mod tests {
         std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
         let tool = EditFile {
             settings_file: Some(file),
+            ..EditFile::default()
         };
         for path in [
             config.clone(),
@@ -605,6 +615,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join(".junees/memory"), root.join("dirlink")).unwrap();
         let tool = EditFile {
             settings_file: Some(file),
+            ..EditFile::default()
         };
         for path in [
             user.clone(),
