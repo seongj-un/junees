@@ -1406,6 +1406,81 @@ fn the_origin_decides_the_repository_once() {
     );
 }
 
+#[tokio::test]
+async fn unattended_writes_need_the_repository_list() {
+    let fake = Fake::start(vec![
+        ("GET /repos/o/n/pulls", vec![reply(200, json!([]))]),
+        (
+            "POST /repos/o/n/issues/7/comments",
+            vec![reply(201, json!({"id": 1, "html_url": "u"}))],
+        ),
+    ])
+    .await;
+    // A working folder whose origin is o/n (any host counts for an API
+    // root other than api.github.com).
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", "https://github.com/o/n.git"],
+    ] {
+        let mut git = std::process::Command::new("git");
+        git.args(args).current_dir(dir.path());
+        for name in crate::task::git::REPO_ENV_VARS {
+            git.env_remove(name);
+        }
+        assert!(git.status().unwrap().success());
+    }
+    let comment = json!({"action": "pr_comment", "number": 7, "body": "hi"});
+    let origin_only = Settings {
+        unattended: vec![Write::Comment],
+        ..fake.settings()
+    };
+    let registered = |settings: &Settings, asks: bool| {
+        let mut tools = crate::tools::ToolRegistry::new();
+        register(&mut tools, settings, dir.path(), asks);
+        tools
+    };
+
+    // No question and no list: reads run, the allowed write does not.
+    let tools = registered(&origin_only, false);
+    let output = tools.dispatch("github", json!({"action": "pr_list"})).await;
+    assert!(!output.is_error, "{}", output.content);
+    let output = tools.dispatch("github", comment.clone()).await;
+    assert!(output.is_error);
+    assert_eq!(
+        output.content,
+        "not run: `pr_comment` writes to GitHub and no one is asked here; writes without a \
+         question need the user's JUNEES_GITHUB_REPOS (github_repos), because without it the \
+         repository comes from the working folder's origin, which an earlier run may have \
+         changed"
+    );
+    assert_eq!(fake.seen().len(), 1);
+    assert_eq!(fake.seen()[0].method, "GET");
+    assert!(
+        origin_only.describe(dir.path()).contains(
+            "writes without a question (-p, cron, webhooks): none (comment allowed, but they \
+             need JUNEES_GITHUB_REPOS: the working folder's origin is not enough)\n"
+        ),
+        "{}",
+        origin_only.describe(dir.path())
+    );
+
+    // With a question the origin is enough; with the list, no question is.
+    let output = registered(&origin_only, true)
+        .dispatch("github", comment.clone())
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    let listed = Settings {
+        repos: vec![Repo::parse("o/n").unwrap()],
+        ..origin_only.clone()
+    };
+    let output = registered(&listed, false)
+        .dispatch("github", comment.clone())
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    assert_eq!(fake.seen().len(), 3);
+}
+
 #[test]
 fn the_tool_is_there_only_with_a_token() {
     let dir = tempfile::tempdir().unwrap();

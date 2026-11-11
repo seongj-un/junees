@@ -211,6 +211,9 @@ pub struct GithubTool {
     /// `unattended` writes run.
     asks: bool,
     unattended: Vec<Write>,
+    /// Whether `allowed` is the working folder's origin, not the user's
+    /// JUNEES_GITHUB_REPOS: then no write runs without a question.
+    origin_only: bool,
 }
 
 impl GithubTool {
@@ -227,7 +230,16 @@ impl GithubTool {
             allowed,
             asks,
             unattended,
+            origin_only: false,
         }
+    }
+
+    /// Says that the allowed repositories come from the working folder's
+    /// origin. A run can change `.git/config` without a question, and so
+    /// the repository of the next run, so unattended writes are refused.
+    pub fn origin_only(mut self, origin_only: bool) -> Self {
+        self.origin_only = origin_only;
+        self
     }
 
     async fn call(&self, input: &Value) -> Result<String, String> {
@@ -251,15 +263,26 @@ impl GithubTool {
         }
         if let Some(write) = action.write(input)
             && !self.asks
-            && !self.unattended.contains(&write)
         {
-            return Err(format!(
-                "not run: `{}` writes to GitHub and no one is asked here (-p, scheduled runs, \
-                 webhooks or JUNEES_APPROVAL=off); the user's JUNEES_GITHUB_ALLOW_UNATTENDED \
-                 (github_allow_unattended) does not include `{}`",
-                action.name(),
-                write.name()
-            ));
+            if !self.unattended.contains(&write) {
+                return Err(format!(
+                    "not run: `{}` writes to GitHub and no one is asked here (-p, scheduled \
+                     runs, webhooks or JUNEES_APPROVAL=off); the user's \
+                     JUNEES_GITHUB_ALLOW_UNATTENDED (github_allow_unattended) does not include \
+                     `{}`",
+                    action.name(),
+                    write.name()
+                ));
+            }
+            if self.origin_only {
+                return Err(format!(
+                    "not run: `{}` writes to GitHub and no one is asked here; writes without a \
+                     question need the user's JUNEES_GITHUB_REPOS (github_repos), because \
+                     without it the repository comes from the working folder's origin, which \
+                     an earlier run may have changed",
+                    action.name()
+                ));
+            }
         }
         let r = repo.to_string();
         let body = match action {

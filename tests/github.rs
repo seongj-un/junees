@@ -133,7 +133,14 @@ fn repo(dir: &Path) {
     }
 }
 
-async fn junees(home: &Path, cwd: &Path, api: &str, github: &str, unattended: &str) -> Output {
+async fn junees(
+    home: &Path,
+    cwd: &Path,
+    api: &str,
+    github: &str,
+    unattended: &str,
+    repos: Option<&str>,
+) -> Output {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
     command
         .args(["-p", "review PR 7"])
@@ -146,10 +153,13 @@ async fn junees(home: &Path, cwd: &Path, api: &str, github: &str, unattended: &s
         .env("JUNEES_GITHUB_TOKEN", TOKEN)
         .env("JUNEES_GITHUB_API_URL", github)
         .env("JUNEES_GITHUB_ALLOW_UNATTENDED", unattended)
-        .env_remove("JUNEES_GITHUB_REPOS")
         .env_remove("JUNEES_APPROVAL")
         .env_remove("JUNEES_MODEL")
         .stdin(Stdio::null());
+    match repos {
+        Some(repos) => command.env("JUNEES_GITHUB_REPOS", repos),
+        None => command.env_remove("JUNEES_GITHUB_REPOS"),
+    };
     for name in junees::task::git::REPO_ENV_VARS {
         command.env_remove(name);
     }
@@ -213,7 +223,17 @@ async fn print_mode_views_a_pull_request_and_reviews_it() {
         (200, text_reply("Reviewed.")),
     ])
     .await;
-    let output = junees(home.path(), cwd.path(), &api, &github, "review").await;
+    // Writes without a question need the repository list: the origin
+    // alone could have been changed by an earlier run.
+    let output = junees(
+        home.path(),
+        cwd.path(),
+        &api,
+        &github,
+        "review",
+        Some("o/n"),
+    )
+    .await;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
@@ -319,7 +339,7 @@ async fn print_mode_does_not_review_without_the_allow_list() {
     ])
     .await;
     // Comments are allowed, approvals are not.
-    let output = junees(home.path(), cwd.path(), &api, &github, "comment").await;
+    let output = junees(home.path(), cwd.path(), &api, &github, "comment", None).await;
     assert!(
         output.status.success(),
         "{}",

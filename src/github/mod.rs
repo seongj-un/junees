@@ -6,7 +6,8 @@
 //! Writes go to the approval question in the conversation and the gateway
 //! (a merge every time, "always" does not cover it). Where no one is asked
 //! (`-p`, scheduled runs, `JUNEES_APPROVAL=off`) only the writes
-//! `JUNEES_GITHUB_ALLOW_UNATTENDED` names run. Every action is limited to
+//! `JUNEES_GITHUB_ALLOW_UNATTENDED` names run, and only when
+//! `JUNEES_GITHUB_REPOS` is set. Every action is limited to
 //! the repositories of `JUNEES_GITHUB_REPOS`, or to the working folder's
 //! `origin` when that is empty. What GitHub sends back (titles, bodies,
 //! comments, diffs) is written by other people, so the tool marks it as
@@ -238,6 +239,12 @@ impl Settings {
             "writes without a question (-p, cron, webhooks): {}\n",
             if writes.is_empty() {
                 "none".to_string()
+            } else if self.repos.is_empty() {
+                format!(
+                    "none ({} allowed, but they need {REPOS_ENV}: the working folder's origin \
+                     is not enough)",
+                    writes.join(", ")
+                )
             } else {
                 writes.join(", ")
             }
@@ -267,20 +274,25 @@ impl Settings {
 
 /// Registers the `github` tool when a token is set. `asks` says whether an
 /// approval gate asks about its writes; without one only the writes the
-/// settings allow unattended run. The repositories are decided now, so a
-/// session that changes `origin` cannot widen them.
+/// settings allow unattended run, and only with JUNEES_GITHUB_REPOS set.
+/// The repositories are decided now, so a session that changes `origin`
+/// cannot widen them; a later run reads the origin again, which is why
+/// writes without a question need the list.
 pub fn register(tools: &mut ToolRegistry, settings: &Settings, cwd: &Path, asks: bool) {
     let Some(token) = &settings.token else {
         return;
     };
     match Client::new(&settings.api_url, token.clone()) {
-        Ok(client) => tools.register(GithubTool::new(
-            client,
-            settings.origin(cwd),
-            settings.allowed_repos(cwd),
-            asks,
-            settings.unattended.clone(),
-        )),
+        Ok(client) => tools.register(
+            GithubTool::new(
+                client,
+                settings.origin(cwd),
+                settings.allowed_repos(cwd),
+                asks,
+                settings.unattended.clone(),
+            )
+            .origin_only(settings.repos.is_empty()),
+        ),
         Err(err) => eprintln!("  !! github tool not available: {err:#}"),
     }
 }
