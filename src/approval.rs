@@ -101,6 +101,10 @@ pub trait Ask: Send {
     async fn ask(&mut self, request: &Request) -> Answer;
 }
 
+/// Kinds ending in this are asked about every time (a GitHub merge): an
+/// "always" answer runs the call but does not cover the next one.
+pub const ASKED_EVERY_TIME: &str = "(asked every time)";
+
 /// The result of a declined call; the model reads it and changes its plan.
 pub fn declined(reason: &str) -> ToolOutput {
     ToolOutput::error(format!("the user declined: {reason}"))
@@ -211,6 +215,7 @@ impl Approval {
                     )
                 }
             }
+            crate::github::TOOL_NAME => crate::github::question(input)?,
             name => {
                 let external = self.external.get(name)?;
                 let target = format!(
@@ -300,7 +305,12 @@ impl Approval {
                 self.always
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .extend(request.kinds);
+                    .extend(
+                        request
+                            .kinds
+                            .into_iter()
+                            .filter(|kind| !kind.ends_with(ASKED_EVERY_TIME)),
+                    );
                 None
             }
             Answer::No => Some(declined("no reason given")),

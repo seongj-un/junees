@@ -2,13 +2,15 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use super::*;
-use crate::tools::Tool;
+use crate::approval::{Answer, Approval, ApprovalMode, Ask, Request, ToolGate};
+use crate::tools::{Tool, ToolSettings, Workspace};
 
 const TOKEN: &str = "test-token-must-not-leak-1234";
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1038,6 +1040,125 @@ async fn checks_of_a_branch_encode_its_name() {
         ),
         "{}",
         output.content
+    );
+}
+
+/// Answers from a list and records each question.
+#[derive(Clone, Default)]
+struct Scripted {
+    answers: Arc<Mutex<VecDeque<Answer>>>,
+    asked: Arc<Mutex<Vec<Request>>>,
+}
+
+#[async_trait]
+impl Ask for Scripted {
+    async fn ask(&mut self, request: &Request) -> Answer {
+        self.asked.lock().unwrap().push(request.clone());
+        self.answers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("asked too often")
+    }
+}
+
+#[tokio::test]
+async fn writes_are_asked_about_and_a_merge_every_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = Workspace::new(dir.path());
+    let risky = Approval::new(
+        ApprovalMode::Risky,
+        &ToolSettings::default(),
+        workspace.clone(),
+    );
+    assert_eq!(
+        risky.request("github", &json!({"action": "pr_view", "number": 1})),
+        None
+    );
+    assert_eq!(risky.request("github", &json!({"action": "nope"})), None);
+    let all = Approval::new(
+        ApprovalMode::All,
+        &ToolSettings::default(),
+        workspace.clone(),
+    );
+    assert_eq!(
+        all.request("github", &json!({"action": "pr_diff", "number": 1}))
+            .unwrap()
+            .kinds,
+        ["github: calls without a caution"]
+    );
+    let request = risky
+        .request(
+            "github",
+            &json!({"action": "pr_comment", "repo": "o/n", "number": 7,
+                    "body": "first\n\u{1b}[2Ksecond"}),
+        )
+        .unwrap();
+    assert_eq!(request.target, "pr_comment on o/n #7");
+    assert_eq!(request.reasons, ["posts a comment on GitHub as you"]);
+    assert_eq!(request.kinds, ["github: comment"]);
+    assert_eq!(
+        crate::approval::render(&request),
+        "  ?? approve github: pr_comment on o/n #7\n     * posts a comment on GitHub as you\n     \
+         body:\n       first\n       \\u{1b}[2Ksecond\n"
+    );
+    let approve = json!({"action": "review", "number": 7, "event": "APPROVE"});
+    assert_eq!(
+        risky.request("github", &approve).unwrap().kinds,
+        ["github: approve"]
+    );
+    let merge = json!({"action": "merge", "number": 7, "sha": HEAD});
+    let request = risky.request("github", &merge).unwrap();
+    assert_eq!(
+        request.target,
+        "merge on the working folder's repository #7"
+    );
+    assert_eq!(
+        request.reasons,
+        [
+            "merges the pull request into its base branch",
+            "a merge is asked about every time; \"always\" does not cover it"
+        ]
+    );
+    assert!(request.kinds[0].ends_with(crate::approval::ASKED_EVERY_TIME));
+    assert_eq!(
+        request.preview.as_deref(),
+        Some(format!("sha: {HEAD}\n").as_str())
+    );
+
+    // "always" covers later comments, never a later merge.
+    let asker = Scripted {
+        answers: Arc::new(Mutex::new(
+            [Answer::Always, Answer::Always, Answer::No].into(),
+        )),
+        ..Scripted::default()
+    };
+    let gate = Approval::new(ApprovalMode::Risky, &ToolSettings::default(), workspace)
+        .asking(Box::new(asker.clone()));
+    let comment = json!({"action": "pr_comment", "number": 7, "body": "a"});
+    assert_eq!(gate.check("github", &comment).await, None);
+    assert_eq!(gate.check("github", &comment).await, None);
+    assert_eq!(gate.check("github", &merge).await, None);
+    assert_eq!(
+        gate.check("github", &merge).await,
+        Some(crate::tools::ToolOutput::error(
+            "the user declined: no reason given"
+        ))
+    );
+    let asked: Vec<String> = asker
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.target.clone())
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            "pr_comment on the working folder's repository #7",
+            "merge on the working folder's repository #7",
+            "merge on the working folder's repository #7"
+        ]
     );
 }
 
