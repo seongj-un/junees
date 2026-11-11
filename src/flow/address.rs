@@ -179,6 +179,10 @@ pub fn push(worktree: &Path, origin: &str, branch: &str) -> Result<()> {
     .map(|_| ())
 }
 
+/// How many levels of `include.path` and `includeIf.*.path`
+/// [`ConfigSnapshot::take`] follows (git itself stops at 10).
+const INCLUDE_DEPTH: usize = 5;
+
 /// The git config files a push from a worktree reads, besides the
 /// system's (root's to change), with their contents at one moment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,7 +195,9 @@ impl ConfigSnapshot {
     /// The repository's `config` and `config.worktree`, the worktree's own
     /// `config.worktree`, and the user's `~/.gitconfig` and
     /// `$XDG_CONFIG_HOME/git/config` (`~/.config/git/config`) as they are
-    /// now.
+    /// now, and the files they include (`include.path`, and
+    /// `includeIf.<condition>.path` whatever the condition), up to
+    /// [`INCLUDE_DEPTH`] levels deep.
     pub fn take(worktree: &Path) -> Result<Self> {
         let folder = |args: &[&str]| -> Result<PathBuf> {
             Ok(worktree.join(run_git(worktree, args)?.trim()))
@@ -210,18 +216,26 @@ impl ConfigSnapshot {
         let xdg = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .filter(|dir| dir.is_absolute())
-            .or_else(|| home.map(|home| home.join(".config")));
+            .or_else(|| home.as_ref().map(|home| home.join(".config")));
         if let Some(xdg) = xdg {
             paths.push(xdg.join("git/config"));
         }
-        paths.dedup();
-        let files = paths
-            .into_iter()
-            .map(|path| {
-                let bytes = read_config(&path)?;
-                Ok((path, bytes))
-            })
-            .collect::<Result<_>>()?;
+        let mut files: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
+        let mut queue: Vec<(PathBuf, usize)> = paths.into_iter().map(|path| (path, 0)).collect();
+        let mut next = 0;
+        while let Some((path, depth)) = queue.get(next).cloned() {
+            next += 1;
+            if files.iter().any(|(known, _)| *known == path) {
+                continue;
+            }
+            let bytes = read_config(&path)?;
+            if depth < INCLUDE_DEPTH {
+                for include in includes(&path, bytes.as_deref(), home.as_deref()) {
+                    queue.push((include, depth + 1));
+                }
+            }
+            files.push((path, bytes));
+        }
         Ok(Self { files })
     }
 
@@ -264,6 +278,39 @@ impl ConfigSnapshot {
     }
 }
 
+/// The files config file `path` (its bytes `bytes`) includes, resolved as
+/// git does (git-config(1), "Includes"): `~/` is the home folder `home`,
+/// a relative path starts in the including file's folder.
+fn includes(path: &Path, bytes: Option<&[u8]>, home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(entries) = config_entries(bytes) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|(key, _)| {
+            *key == "include.path" || (key.starts_with("includeif.") && key.ends_with(".path"))
+        })
+        .flat_map(|(_, values)| values)
+        .filter_map(|value| include_path(path, value, home))
+        .collect()
+}
+
+/// Where include `value` of config file `from` points.
+fn include_path(from: &Path, value: &str, home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(rest) = value.strip_prefix("~/") {
+        return home.map(|home| home.join(rest));
+    }
+    let path = Path::new(value);
+    if value.is_empty() || value.starts_with('~') {
+        // `~user/`: another user's home, not one this user writes.
+        None
+    } else if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        from.parent().map(|dir| dir.join(path))
+    }
+}
+
 /// The bytes of config file `path`, `None` when it is not there.
 fn read_config(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
@@ -274,8 +321,9 @@ fn read_config(path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 /// The settings in config text `bytes` (key -> values in order), read by
-/// git itself (`git config --file - --list --null`, includes not
-/// followed); `None` when git cannot read it.
+/// git itself (`git config --file - --no-includes --list --null`: a
+/// relative include in text from standard input is an error otherwise);
+/// `None` when git cannot read it.
 fn config_entries(bytes: Option<&[u8]>) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
     use std::io::Write as _;
     let mut entries = std::collections::BTreeMap::new();
@@ -284,7 +332,7 @@ fn config_entries(bytes: Option<&[u8]>) -> Option<std::collections::BTreeMap<Str
     };
     let mut command = std::process::Command::new("git");
     command
-        .args(["config", "--file", "-", "--list", "--null"])
+        .args(["config", "--file", "-", "--no-includes", "--list", "--null"])
         .current_dir("/")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -595,6 +643,81 @@ pub(crate) mod tests {
             changes[0].ends_with("config: the file is no longer readable as git config"),
             "{changes:?}"
         );
+    }
+
+    #[test]
+    fn included_config_files_are_compared_too() {
+        // An include the model cannot add (git config is refused) but can
+        // change: a file the repository's config already includes.
+        let (root, clone, _bare, head) = remote_and_clone();
+        let repo = Repo::parse("o/n").unwrap();
+        let tree = prepare(&clone, &repo, 7, "feature", &head).unwrap();
+        let common = clone.join(".git");
+        sh_git(&clone, &["config", "include.path", "extra.cfg"]);
+        let conditional = root.path().join("conditional.cfg");
+        sh_git(
+            &clone,
+            &[
+                "config",
+                "includeIf.gitdir:/elsewhere/.path",
+                &conditional.to_string_lossy(),
+            ],
+        );
+        std::fs::write(
+            common.join("extra.cfg"),
+            "[include]\n\tpath = nested/more.cfg\n",
+        )
+        .unwrap();
+        std::fs::create_dir(common.join("nested")).unwrap();
+        std::fs::write(common.join("nested/more.cfg"), "[user]\n\tname = x\n").unwrap();
+        let snapshot = ConfigSnapshot::take(&tree.path).unwrap();
+        assert_eq!(snapshot.changes().unwrap(), Vec::<String>::new());
+        for (file, text) in [
+            (
+                common.join("extra.cfg"),
+                "[url \"/tmp/other\"]\n\tpushInsteadOf = x\n",
+            ),
+            (
+                common.join("nested/more.cfg"),
+                "[core]\n\tsshCommand = sh -c id\n",
+            ),
+            (conditional.clone(), "[credential]\n\thelper = store\n"),
+        ] {
+            let before = std::fs::read(&file).ok();
+            std::fs::write(&file, text).unwrap();
+            let changes = snapshot.changes().unwrap();
+            assert_eq!(changes.len(), 1, "{}: {changes:?}", file.display());
+            assert!(
+                changes[0].starts_with(&file.display().to_string()),
+                "{changes:?}"
+            );
+            match before {
+                Some(bytes) => std::fs::write(&file, bytes).unwrap(),
+                None => std::fs::remove_file(&file).unwrap(),
+            }
+        }
+        assert_eq!(snapshot.changes().unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn include_paths_resolve_as_git_resolves_them() {
+        let from = Path::new("/repo/.git/config");
+        let home = Some(Path::new("/home/u"));
+        for (value, wanted) in [
+            ("extra.cfg", Some("/repo/.git/extra.cfg")),
+            ("../shared/x", Some("/repo/.git/../shared/x")),
+            ("/etc/x.cfg", Some("/etc/x.cfg")),
+            ("~/x.cfg", Some("/home/u/x.cfg")),
+            ("~other/x.cfg", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                include_path(from, value, home).as_deref(),
+                wanted.map(Path::new),
+                "{value}"
+            );
+        }
+        assert_eq!(include_path(from, "~/x", None), None);
     }
 
     #[test]
