@@ -55,7 +55,7 @@ task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
 task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 ```
 
-그 밖의 키: `base_url`, `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `context_files`(쉼표로 구분한 문자열, 아래 프로젝트 지침 파일), `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`, `timezone`, `cron_max_time`, `cron_max_tokens`, `webhook_max_time`, `webhook_max_tokens`, `github_token`, `github_api_url`, `github_repos`, `github_allow_unattended`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `discord_*`는 `JUNEES_DISCORD_*`, `cron_*`는 `JUNEES_CRON_*`, `webhook_*`는 `JUNEES_WEBHOOK_*`, `github_*`는 `JUNEES_GITHUB_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
+그 밖의 키: `base_url`, `prices`(아래 사용량과 비용), `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `context_files`(쉼표로 구분한 문자열, 아래 프로젝트 지침 파일), `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`, `timezone`, `cron_max_time`, `cron_max_tokens`, `webhook_max_time`, `webhook_max_tokens`, `github_token`, `github_api_url`, `github_repos`, `github_allow_unattended`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `discord_*`는 `JUNEES_DISCORD_*`, `cron_*`는 `JUNEES_CRON_*`, `webhook_*`는 `JUNEES_WEBHOOK_*`, `github_*`는 `JUNEES_GITHUB_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
 파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령과, 이 파일이 든 폴더(`$JUNEES_HOME`)를 통째로 다루는 명령을 막는다(아래 명령 정책 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽은 차단 목록일 뿐 샌드박스가 아니어서 다른 변수나 실행 중에 만든 경로, 더 위 폴더를 통째로 다루는 명령으로는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
 
@@ -128,6 +128,27 @@ junees sessions search --source discord 회의록   # 디스코드 채널 세션
 - 도구가 있는 곳: 대화와 `-p`(api 백엔드), 디스코드 게이트웨이, 예약 작업 실행, task 세션, 그리고 이들의 서브에이전트(읽기만 하므로 `delegate`가 빌려준다). 게이트웨이, 예약 작업, task 세션의 모델은 채널 세션을 찾을 수 없다(길드 채널의 답은 물은 사람 말고도 읽는다). 웹훅 실행에는 도구를 주지 않는다: PR 본문 같은 남의 글이 모델을 움직이고 답이 GitHub로 나갈 수 있어서다. claude-code 백엔드의 모델은 Claude Code의 도구만 쓰므로 이 도구가 없다(사람용 명령은 그대로 쓴다). `JUNEES_HOME`과 `HOME`이 없으면 도구도 없다.
 - 데이터 표시: 모델에게 주는 결과는 세션마다 매번 무작위 이름의 요소(`<session-1a2b3c4d id="..." created="..." updated="..." cwd="..." source="...">`)로 감싸서 인용한 글이 요소를 닫을 수 없게 하고, 그 안은 지난 세션에서 인용한 데이터일 뿐 지시가 아니며 사용자나 규칙보다 앞서지 않는다는 줄을 앞에 둔다. 제어 문자와 방향 제어 문자는 모델 결과와 터미널 출력 모두 `prompt_text::escape_hidden`으로 이스케이프한다.
 - 성능: 색인 없이 파일을 줄 단위로 읽는다. 4 MiB가 넘는 줄은 메모리에 담지 않고 건너뛰고, 읽을 수 없는 줄(깨진 줄, 잘린 마지막 줄, 기록이 아닌 파일)도 건너뛰어 개수를 결과 끝에 알린다. 새 세션부터 읽다가 보여 줄 수를 채우면 멈추고, 시간 상한(모델 5초, 사람 15초)에 닿으면 그때까지 찾은 것과 "N개 중 M개 기록을 읽고 멈췄다"는 줄을 돌려준다.
+
+### 사용량과 비용
+
+대화의 `/usage`는 지금 세션이 쓴 토큰과 추정 비용을, `junees usage`는 지난 며칠의 합계를 표로 보여 준다. 둘 다 세션 기록(`$JUNEES_HOME/sessions/*.jsonl`)만 읽는다(API 키가 필요 없고 기록을 바꾸지 않는다).
+
+```bash
+junees usage                       # 지금 폴더의 세션, 오늘까지 7일, 날짜별
+junees usage --days 30 --by model  # 30일, 모델별
+junees usage --all --by folder     # 모든 폴더, 폴더별
+junees usage --by source           # 터미널, discord, cron, webhook별
+```
+
+- 세는 것: 대화의 모델 호출마다 남는 `usage`, 압축 요약 호출의 `summary_usage`, 서브에이전트(`delegate`)의 토큰을 모은 `subagent_usage`, Claude Code 턴(`claude_turn`)의 사용량. 서브에이전트의 기록(`sessions/<id>/sub-<n>.jsonl`)은 부모의 `subagent_usage`가 이미 세므로 다시 읽지 않는다. 열은 입력, 캐시 쓰기, 캐시 읽기, 출력, 웹 검색 횟수, 캐시 적중률(캐시 읽기 / (캐시 읽기 + 캐시 쓰기 + 입력)), 비용이다.
+- `/usage`: 지금 세션을 종류(model calls, summaries, subagents, Claude Code turns)와 모델별로 나누고 합계를 붙인다. 기록에 없는 사용량(`--no-session`, 기록 쓰기 실패 뒤)은 `not saved`/`not in the journal` 줄로 지금 모델의 가격으로 더한다. claude-code 백엔드에서는 턴 수와 Claude Code 세션 id도 함께 나온다.
+- `junees usage`: `--days N`(기본 7, 1이면 오늘만)은 오늘과 그 앞 N-1일이고, 날짜 경계는 `timezone` 설정(`JUNEES_TIMEZONE`, 없으면 시스템 시간대, 예약 작업과 같은 설정)의 자정이다. `--by day|model|folder|source`(기본 day), `--all`이면 모든 작업 폴더(기본은 지금 폴더에서 시작한 세션, `-c`와 같은 기준). 날짜별은 날짜 순, 나머지는 토큰이 많은 순.
+- 비용: Claude API 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing, 2026-11-11 확인)를 코드에 두고 추정한다. 표준 가격(직접 API, 전역 라우팅. 배치, fast mode, 미국 내 추론 배율은 반영하지 않음)이고, 캐시 쓰기는 5분 캐시 가격(Junees는 `ttl` 없이 캐시 지점을 표시하므로 5분 캐시), 캐시 읽기는 모델마다 표의 값(대부분 입력의 0.1배, Opus/Sonnet 5.5는 0.05배, Fable/Mythos 5.1과 5.2는 0.025배), 웹 검색은 1000회당 10달러다. Haiku 5.5는 프롬프트가 10만 토큰을 넘는 호출마다 높은 가격으로 계산하고, 여러 호출을 합친 `subagent_usage`는 기본 가격으로 계산한다. 날짜가 붙은 이전 모델 id(`claude-haiku-4-5-20251001`)는 날짜를 뗀 이름으로 찾는다.
+- 모델 이름: 각 `usage` 기록 줄에 그 호출의 모델(`model`)이 함께 남는다. `/model`로 바꾸거나 다른 모델로 `-c` 이어 가도 호출마다 제 가격으로 계산한다. 이 필드가 생기기 전의 줄은 세션 첫 줄의 모델로 센다.
+- 가격 덮어쓰기: `prices` 설정(`JUNEES_PRICES`)에 쉼표로 `<모델>=<입력>/<출력>` 또는 `<모델>=<입력>/<출력>/<캐시 쓰기>/<캐시 읽기>`(100만 토큰당 달러, 소수점 셋째 자리까지)를 적는다. 캐시 가격을 빼면 쓰기는 입력의 1.25배, 읽기는 0.1배다. 표에 없는 모델을 더하거나 표의 가격을 바꾼다. 예: `prices = "claude-opus-4-7=5/25, my-proxy-model=1/4"`.
+- 모르는 모델: 가격을 모르는 모델의 토큰은 세지만 비용에서 빼고, 비용 칸에 `no price`, 표 아래에 모델 이름과 `prices`로 정하라는 안내를 붙인다.
+- claude-code 백엔드: 구독으로 도는 Claude Code 턴은 비용 대신 `subscription`으로 표시하고 토큰만 센다. claude-code 백엔드의 task 세션은 세션 기록을 남기지 않으므로 `junees usage`에 들어가지 않는다.
+- 큰 기록: 세션 검색과 같은 줄 읽기로 파일을 스트리밍하고, 사용량이 아닌 줄(메시지 등)은 Junees가 쓴 줄의 앞부분(`{"type":"message"`)만 보고 파싱하지 않고 넘긴다. 4 MiB가 넘는 줄은 담지 않고 건너뛰며, 읽을 수 없는 사용량 줄(깨진 줄, 잘린 마지막 줄)과 함께 개수를 표 아래에 알린다. 마지막 수정 시각이 기간 시작보다 이른 기록 파일은 열지 않는다.
 
 ### 장기 작업 모드
 
@@ -888,6 +909,13 @@ src/
   config_file.rs     설정 파일 config.toml (단순 TOML 읽기/쓰기, 0600), Settings: 실행 중 변경 -> 환경 변수 -> 파일 순서로 찾기
   setup.rs           설정 마법사 (Prompter 트레이트, Claude Code 확인 ClaudeProbe, 키 입력 때 터미널 echo 끄기 EchoOff)
   slash.rs           대화 안 슬래시 명령 파싱, /sessions 번호 고르기
+  usage/             사용량과 비용 (/usage, junees usage)
+    mod.rs             기록 종류(Kind)와 사용량 기록(Record), 합계와 비용 표시(Totals)
+    prices.rs          모델 가격표(출처와 확인 날짜), prices 설정 덮어쓰기, 비용 계산(캐시 쓰기/읽기, 긴 프롬프트, 웹 검색)
+    scan.rs            기록 파일에서 사용량 줄만 읽기(서브에이전트 기록은 부모 subagent_usage로), 기간과 폴더 범위
+    report.rs          /usage의 세션 표(기록에 없는 사용량 포함)와 junees usage의 기간 표(날짜/모델/폴더/출처별), 안내 줄
+    args.rs            junees usage 옵션과 도움말
+    tests.rs           가격 계산, 덮어쓰기, 모르는 모델, 기록 종류별 합산, 깨진 줄, 날짜 경계(UTC와 시간대), 범위와 정렬 검증
   search/            세션 검색 (session_search 도구, /search, junees sessions search)
     mod.rs             검색 옵션과 결과, 상한(결과 수, 스니펫, 줄과 텍스트 크기, 시간), 출처 이름
     query.rs           질의 파싱(낱말 AND, 따옴표 구절), 대소문자 무시 매칭, 원래 글자로 스니펫
@@ -985,6 +1013,7 @@ tests/
   cron.rs              실제 바이너리와 가짜 API, 가짜 디스코드 REST로 cron add/list/run(전달, 출력 파일, 세션, 읽기 전용 도구)/pause/resume/rm, 데몬이 때가 된 작업을 자식 프로세스로 실행하고 실패를 전달하는지 검증
   github_flow.rs       실제 바이너리로 webhook add-github(시크릿 파일 0600, 안내, 형식 2), serve에 서명한 pull_request.opened -> 모델의 리뷰가 가짜 GitHub에 POST, 같은 커밋의 두 번째 전달은 아무것도 안 함, list의 최근 처리 검증
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
+  usage.rs             실제 바이너리와 가짜 API로 대화의 /usage(호출, /model 전환 뒤 다른 가격, 합계), 기록 줄의 모델, junees usage(모델별, 날짜별, prices 덮어쓰기, 폴더 범위와 --all, 도움말과 오류) 검증
   session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
