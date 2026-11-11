@@ -14,6 +14,7 @@
 
 pub mod http;
 pub mod run;
+pub mod server;
 pub mod signature;
 pub mod store;
 pub mod template;
