@@ -32,6 +32,8 @@ pub struct Bash {
     default_timeout: Duration,
     hidden_env: Vec<String>,
     policy: CommandPolicy,
+    /// Without git credentials ([`super::strip_git_credentials`]).
+    webhook: bool,
 }
 
 impl Default for Bash {
@@ -40,6 +42,7 @@ impl Default for Bash {
             default_timeout: Duration::from_secs(120),
             hidden_env: Vec::new(),
             policy: CommandPolicy::default(),
+            webhook: false,
         }
     }
 }
@@ -66,6 +69,33 @@ impl Bash {
             .hide_env(CLAUDE_CODE_SECRET_ENV_VARS.iter().copied())
             .hide_env(settings.hidden_env.iter().cloned())
             .policy(CommandPolicy::with_settings(settings))
+            .without_git_credentials(settings.webhook)
+    }
+
+    /// Runs commands without the user's git and GitHub CLI credentials
+    /// (a webhook run, [`ToolSettings::webhook`]).
+    pub fn without_git_credentials(mut self, webhook: bool) -> Self {
+        self.webhook = webhook;
+        self
+    }
+
+    /// The process that runs `command`.
+    fn command(&self, command: &str) -> Command {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true);
+        for name in &self.hidden_env {
+            cmd.env_remove(name);
+        }
+        if self.webhook {
+            super::strip_git_credentials(&mut cmd);
+        }
+        cmd
     }
 
     /// Replaces the policy that decides which commands may run.
@@ -118,18 +148,7 @@ impl Tool for Bash {
             return ToolOutput::error(format!("blocked by policy: {reason}"));
         }
 
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c")
-            .arg(command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .kill_on_drop(true);
-        for name in &self.hidden_env {
-            cmd.env_remove(name);
-        }
-        let mut child = match cmd.spawn() {
+        let mut child = match self.command(command).spawn() {
             Ok(child) => child,
             Err(err) => return ToolOutput::error(format!("failed to start bash: {err}")),
         };
@@ -463,6 +482,93 @@ mod tests {
             .await;
         assert!(output.is_error, "{}", output.content);
         assert_eq!(output.content, "[exit code 1]");
+    }
+
+    #[test]
+    fn webhook_runs_get_no_git_credentials() {
+        let webhook = ToolSettings {
+            webhook: true,
+            ..ToolSettings::default()
+        };
+        let command = Bash::with_settings(&webhook).command("true");
+        let envs: Vec<(String, Option<String>)> = command
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().to_string(),
+                    value.map(|value| value.to_string_lossy().to_string()),
+                )
+            })
+            .collect();
+        let get = |name: &str| {
+            envs.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, v)| v.clone())
+        };
+        for name in ["SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GH_TOKEN"] {
+            assert_eq!(get(name), Some(None), "{name} not removed: {envs:?}");
+        }
+        assert_eq!(get("GIT_CONFIG_COUNT"), Some(Some("1".into())));
+        assert_eq!(
+            get("GIT_CONFIG_KEY_0"),
+            Some(Some("credential.helper".into()))
+        );
+        assert_eq!(get("GIT_CONFIG_VALUE_0"), Some(Some(String::new())));
+        assert_eq!(get("GIT_TERMINAL_PROMPT"), Some(Some("0".into())));
+        // Other runs keep them.
+        let plain = Bash::with_settings(&ToolSettings::default()).command("true");
+        assert!(
+            !plain
+                .as_std()
+                .get_envs()
+                .any(|(name, _)| name == "SSH_AUTH_SOCK" || name == "GIT_CONFIG_COUNT")
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_runs_reach_no_credential_helper() {
+        // A repository whose own config has a helper that hands out a
+        // password; the shell of a webhook run must not get it.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().display().to_string();
+        let setup = format!(
+            "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR; git init -q {repo} && \
+             git -C {repo} config credential.helper '!f() {{ echo username=u; echo password=leaked-pw; }}; f'"
+        );
+        let output = Bash::default().run(json!({"command": setup})).await;
+        assert!(!output.is_error, "{}", output.content);
+        let fill = format!(
+            "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR; \
+             printf 'protocol=https\\nhost=git.invalid\\n\\n' | git -C {repo} credential fill; \
+             echo \"agent=[$SSH_AUTH_SOCK] askpass=[$GIT_ASKPASS]\""
+        );
+        // `git credential` is refused by the webhook policy itself; the
+        // environment is what this test checks.
+        let tools = |webhook| {
+            Bash::with_settings(&ToolSettings {
+                webhook,
+                ..ToolSettings::default()
+            })
+            .policy(CommandPolicy::default())
+        };
+        let plain = tools(false).run(json!({"command": fill})).await;
+        assert!(
+            plain.content.contains("password=leaked-pw"),
+            "{}",
+            plain.content
+        );
+        let webhook = tools(true).run(json!({"command": fill})).await;
+        assert!(
+            !webhook.content.contains("leaked-pw"),
+            "{}",
+            webhook.content
+        );
+        assert!(
+            webhook.content.contains("agent=[] askpass=[]"),
+            "{}",
+            webhook.content
+        );
     }
 
     #[tokio::test]

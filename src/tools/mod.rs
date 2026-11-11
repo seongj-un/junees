@@ -60,6 +60,46 @@ pub const CLAUDE_CODE_SECRET_ENV_VARS: &[&str] = &[
     "MCP_CLIENT_SECRET",
 ];
 
+/// Variables a webhook run's shell does not inherit ([`strip_git_credentials`]):
+/// the ssh agent, the programs git and ssh ask for passwords, `-c` settings
+/// passed down by a calling git, and GitHub CLI tokens.
+pub const WEBHOOK_REMOVED_ENV: &[&str] = &[
+    "SSH_AUTH_SOCK",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_CONFIG_PARAMETERS",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// Variables set on a webhook run's shell ([`strip_git_credentials`]): an
+/// empty `credential.helper` with command-line scope, which empties the
+/// list of helpers every config file set (git-config(1), "credential.helper";
+/// gitcredentials(7)); no terminal prompt for a password; and a GitHub CLI
+/// configuration folder that does not exist, so `gh` has no login (its
+/// `gh auth git-credential` helper and `gh auth token` included).
+pub const WEBHOOK_SET_ENV: &[(&str, &str)] = &[
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "credential.helper"),
+    ("GIT_CONFIG_VALUE_0", ""),
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GH_CONFIG_DIR", "/nonexistent/junees-webhook-run"),
+];
+
+/// Takes the user's git and GitHub CLI credentials away from `command`, a
+/// shell (or the claude-code backend) of a webhook run: the flow pushes
+/// with them itself, the model must not.
+pub fn strip_git_credentials(command: &mut tokio::process::Command) {
+    for name in WEBHOOK_REMOVED_ENV {
+        command.env_remove(name);
+    }
+    for (name, value) in WEBHOOK_SET_ENV {
+        command.env(name, value);
+    }
+}
+
 /// User settings for the default tools, read by [`crate::config::Config`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolSettings {
@@ -85,7 +125,9 @@ pub struct ToolSettings {
     /// included: anyone's text drives it. bash refuses `git push` and
     /// the other git commands that publish commits, change the
     /// repository's git configuration or reach git credentials
-    /// ([`CommandPolicy::webhook_run`]); the flow code pushes by itself.
+    /// ([`CommandPolicy::webhook_run`]), and runs without the user's git
+    /// and GitHub CLI credentials ([`strip_git_credentials`]); the flow
+    /// code pushes by itself.
     pub webhook: bool,
 }
 
