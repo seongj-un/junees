@@ -308,6 +308,11 @@ impl ApiEngine {
         if self.sandbox {
             tools.register(crate::tools::Bash::with_settings(&settings).sandboxed(dir));
         }
+        // Not in webhook runs: anyone's text drives them, and their
+        // replies can reach GitHub.
+        if let Trigger::Cron = spec.trigger {
+            crate::search::register(&mut tools, home, dir, false);
+        }
         skills::register(&mut tools, home, false);
         mcp.register(&mut tools);
         match spec.trigger {
@@ -619,6 +624,7 @@ mod tests {
         let (system, tools) = &seen[0];
         assert!(system.contains("scheduled job"), "{system}");
         assert!(tools.contains(&"skill_view".to_string()), "{tools:?}");
+        assert!(tools.contains(&"session_search".to_string()), "{tools:?}");
         for refused in ["memory", "skill_manage"] {
             assert!(!tools.contains(&refused.to_string()), "{tools:?}");
         }
@@ -719,9 +725,13 @@ mod tests {
                 context_dir: home.path(),
             },
         };
-        let (engine, _) = self::engine(home.path(), replies(), Duration::ZERO);
+        let (engine, seen) = self::engine(home.path(), replies(), Duration::ZERO);
         let outcome = engine.run(&webhook, &Cancel::new(), limits()).await;
         assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
+        // Anyone's text drives the run: it cannot search the user's sessions.
+        let tools = seen.lock().unwrap()[0].1.clone();
+        assert!(tools.contains(&"bash".to_string()), "{tools:?}");
+        assert!(!tools.contains(&"session_search".to_string()), "{tools:?}");
         let session = outcome.session.unwrap();
         let path = session::sessions_dir(home.path()).join(format!("{session}.jsonl"));
         let journal = std::fs::read_to_string(path).unwrap();

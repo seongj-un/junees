@@ -22,6 +22,7 @@ pub mod plugins;
 pub mod prompt;
 pub mod prompt_text;
 pub mod provider;
+pub mod search;
 pub mod secrets;
 pub mod session;
 pub mod setup;

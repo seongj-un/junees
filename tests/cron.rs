@@ -176,6 +176,7 @@ async fn adds_lists_runs_and_delivers_a_job() {
         "{tools:?}"
     );
     assert!(!tools.contains(&"skill_manage"), "{tools:?}");
+    assert!(tools.contains(&"session_search"), "{tools:?}");
     assert_eq!(body["messages"][0]["content"][0]["text"], "날씨를 알려 줘");
 
     let posts = posts.lock().unwrap().clone();

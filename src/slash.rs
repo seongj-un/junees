@@ -10,6 +10,9 @@ pub enum Slash {
     Task(Option<String>),
     Status,
     Sessions,
+    /// `/search <words>` searches the saved sessions; the text after the
+    /// command, options included ([`crate::search::args::HumanSearch`]).
+    Search(String),
     /// `/new` (or `/reset`).
     New,
     /// `/model` shows the model, `/model <name>` switches to it.
@@ -69,6 +72,12 @@ pub fn parse(line: &str) -> Option<Slash> {
         "task" => Slash::Task(arg),
         "status" => plain(Slash::Status),
         "sessions" => plain(Slash::Sessions),
+        "search" => match arg {
+            None => Slash::Bad(
+                "/search takes the words to look for, for example /search \"build failed\"".into(),
+            ),
+            Some(arg) => Slash::Search(arg),
+        },
         "new" | "reset" => plain(Slash::New),
         "model" => match arg {
             Some(model) if model.contains(char::is_whitespace) => {
@@ -155,6 +164,10 @@ mod tests {
         assert_eq!(parse("/task"), Some(Slash::Task(None)));
         assert_eq!(parse("/status"), Some(Slash::Status));
         assert_eq!(parse("/sessions"), Some(Slash::Sessions));
+        assert_eq!(
+            parse("/search  --all \"빌드 실패\" clippy "),
+            Some(Slash::Search("--all \"빌드 실패\" clippy".into()))
+        );
         assert_eq!(parse("/new"), Some(Slash::New));
         assert_eq!(parse("/reset"), Some(Slash::New));
         assert_eq!(parse("/model"), Some(Slash::Model(None)));
@@ -203,6 +216,7 @@ mod tests {
             "unknown command /wat; /help lists the commands"
         );
         assert_eq!(bad("/status now"), "/status takes no argument");
+        assert!(bad("/search").starts_with("/search takes the words"));
         assert!(bad("/backend codex").contains("unknown backend `codex`"));
         assert!(bad("/model two words").contains("no spaces"));
         assert_eq!(
