@@ -176,8 +176,19 @@ impl Config {
         }
         let home = crate::config_file::home_dir(get);
         let context_files = crate::context_files::Setting::read(&lookup)?;
+        let mut hidden_env = comma_list(get("JUNEES_HIDDEN_ENV"));
+        // Header values of MCP HTTP servers come from these variables.
+        for name in home
+            .as_deref()
+            .map(crate::mcp::config::header_env_names)
+            .unwrap_or_default()
+        {
+            if !hidden_env.contains(&name) {
+                hidden_env.push(name);
+            }
+        }
         let tools = ToolSettings {
-            hidden_env: comma_list(get("JUNEES_HIDDEN_ENV")),
+            hidden_env,
             deny_commands: comma_list(get("JUNEES_DENY_COMMANDS")),
             allow_dangerous: parse_flag(get("JUNEES_ALLOW_DANGEROUS"), "JUNEES_ALLOW_DANGEROUS")?,
             settings_file: crate::config_file::path(get).map(|path| {
@@ -567,6 +578,28 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(config.tools.hidden_env, ["DB_PASSWORD", "GITHUB_TOKEN"]);
+    }
+
+    #[test]
+    fn hides_the_variables_of_mcp_http_headers() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("mcp.json");
+        std::fs::write(
+            &list,
+            r#"{"servers": {"docs": {"url": "https://docs.example/mcp",
+                "headers": {"Authorization": "Bearer env:DOCS_TOKEN", "X-Db": "env:DB_PASSWORD"}}}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&list, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let home = dir.path().display().to_string();
+        let config = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_HOME", &home),
+            ("JUNEES_HIDDEN_ENV", "DB_PASSWORD"),
+        ])
+        .unwrap();
+        assert_eq!(config.tools.hidden_env, ["DB_PASSWORD", "DOCS_TOKEN"]);
     }
 
     #[test]
