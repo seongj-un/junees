@@ -4,6 +4,13 @@
 //! once deleted or pushed for real. Policy-only checks (`policy.check`)
 //! are fine.
 //!
+//! Outside the test sandbox (binary tests, scripted model calls of a bash
+//! the test did not sandbox) the cwd might be the crate's repository, so
+//! there every `git push`, a recursive `rm` of `.`, `..`, `/` or `*`,
+//! `git reset --hard` and `git clean -f` count too. Test code that runs
+//! git itself may not have `push` among its arguments, except through a
+//! [`SAFE_PUSH`] helper.
+//!
 //! The scan splits each file into items (tests, helper functions,
 //! constants) and follows the names an item uses within its file (and
 //! `tests/common`), so a command kept in a helper counts for the test
@@ -144,6 +151,17 @@ pub(super) const UNSANDBOXED: &[(&str, &str, &str)] = &[
         "",
     ),
 ];
+
+/// Test helpers that push with git itself, as (file, name). Each
+/// pushes only from a repository in the system temp folder to a bare
+/// repository there named by its path (so no remote or upstream counts),
+/// and checks both paths before running git: its text must name every
+/// check of [`SAFE_PUSH_CHECKS`]. The scan does not follow them, so a test
+/// may push through them and nowhere else.
+const SAFE_PUSH: &[(&str, &str)] = &[("src/flow/address.rs", "push_to_temp_bare")];
+
+/// What a [`SAFE_PUSH`] helper must check.
+const SAFE_PUSH_CHECKS: &[&str] = &["temp_dir()", "CARGO_MANIFEST_DIR"];
 
 /// One item of a source file: a test, function or constant with the
 /// lines up to the next item at its level.
@@ -363,60 +381,126 @@ fn word_at(text: &str, word: &str) -> Option<usize> {
     None
 }
 
-/// Whether a simple command is a recursive `rm` of the home folder (`~`,
-/// `$HOME`, `${HOME}`, quoted or not, with or without a path after it),
-/// in any spelling of the options (`-rf`, `-fr`, `-r -f`, `-R`,
-/// `--recursive`).
-fn deletes_home(command: &str) -> bool {
-    let Some(at) = word_at(command, "rm") else {
-        return false;
-    };
+/// The targets of a recursive `rm` (`-r`, `-R`, `--recursive`, in any
+/// spelling of the options), or `None` if the simple command is not one.
+fn recursive_rm_targets(command: &str) -> Option<Vec<&str>> {
+    let at = word_at(command, "rm")?;
     let mut recursive = false;
-    let mut home = false;
+    let mut targets = Vec::new();
     for token in command[at + 2..].split_whitespace() {
         if let Some(long) = token.strip_prefix("--") {
             recursive |= long == "recursive";
         } else if let Some(short) = token.strip_prefix('-') {
             recursive |= short.contains(['r', 'R']);
         } else {
+            targets.push(token);
+        }
+    }
+    recursive.then_some(targets)
+}
+
+/// Whether a simple command is a recursive `rm` of the home folder (`~`,
+/// `$HOME`, `${HOME}`, quoted or not, with or without a path after it),
+/// in any spelling of the options (`-rf`, `-fr`, `-r -f`, `-R`,
+/// `--recursive`).
+fn deletes_home(command: &str) -> bool {
+    recursive_rm_targets(command)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|token| {
             let target = token.trim_start_matches(['"', '\'', '\\']);
             let after_home = target
                 .strip_prefix("${HOME}")
                 .or_else(|| target.strip_prefix("$HOME"));
-            home |= target.starts_with('~')
+            target.starts_with('~')
                 || after_home.is_some_and(|rest| {
                     !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_')
-                });
-        }
-    }
-    recursive && home
+                })
+        })
+}
+
+/// Whether a simple command is a recursive `rm` of the folder it runs in,
+/// a folder above it, everything in it or `/`: every part of a target is
+/// `.`, `..`, `*`, `.*` or empty (`.`, `./`, `..`, `../..`, `*`, `./*`,
+/// `/`, `/*`), quoted or not.
+fn deletes_a_whole_tree(command: &str) -> bool {
+    recursive_rm_targets(command)
+        .unwrap_or_default()
+        .into_iter()
+        .any(|token| {
+            token
+                .trim_matches(['"', '\'', '\\'])
+                .split('/')
+                .all(|part| matches!(part, "" | "." | ".." | "*" | ".*"))
+        })
+}
+
+/// What follows `git ... <subcommand>` in a simple command (options
+/// between `git` and the subcommand allowed), if it runs that subcommand.
+fn git_subcommand<'a>(command: &'a str, subcommand: &str) -> Option<&'a str> {
+    let git = word_at(command, "git")?;
+    let rest = &command[git + 3..];
+    let at = word_at(rest, subcommand)?;
+    Some(&rest[at + subcommand.len()..])
 }
 
 /// Whether a simple command is a `git push` naming `origin`, with any
 /// options between (`git push -u origin`, `git -C repo push --force
 /// origin main`).
 fn pushes_to_origin(command: &str) -> bool {
-    let Some(git) = word_at(command, "git") else {
-        return false;
-    };
-    let rest = &command[git + 3..];
-    let Some(push) = word_at(rest, "push") else {
-        return false;
-    };
-    word_at(&rest[push + 4..], "origin").is_some()
+    git_subcommand(command, "push").is_some_and(|rest| word_at(rest, "origin").is_some())
 }
 
-/// The first command in `text` that must not run for real.
+/// Whether a simple command throws git work away: `git reset --hard` or
+/// `git clean` with `-f` in any spelling (`-f`, `-fdx`, `-xdf`, `--force`).
+fn discards_git_work(command: &str) -> bool {
+    let hard =
+        git_subcommand(command, "reset").is_some_and(|rest| word_at(rest, "--hard").is_some());
+    let clean = git_subcommand(command, "clean").is_some_and(|rest| {
+        rest.split_whitespace().any(|token| {
+            token == "--force"
+                || token
+                    .strip_prefix('-')
+                    .is_some_and(|short| !short.starts_with('-') && short.contains('f'))
+        })
+    });
+    hard || clean
+}
+
+/// The first command in `text` that must not run for real, even in the
+/// test sandbox.
 fn forbidden(text: &str) -> Option<&str> {
     simple_commands(text).find(|command| deletes_home(command) || pushes_to_origin(command))
+}
+
+/// The first command in `text` that must not run outside the test
+/// sandbox, where the cwd may be the crate's repository: on top of
+/// [`forbidden`], any `git push` (a bare one goes to the upstream), a
+/// recursive `rm` of a whole tree ([`deletes_a_whole_tree`]) and throwing
+/// git work away ([`discards_git_work`]).
+fn forbidden_outside_the_sandbox(text: &str) -> Option<&str> {
+    simple_commands(text).find(|command| {
+        deletes_home(command)
+            || git_subcommand(command, "push").is_some()
+            || deletes_a_whole_tree(command)
+            || discards_git_work(command)
+    })
+}
+
+/// Code that runs git itself.
+const RUNS_GIT: &[&str] = &["Command::new(\"git\")", "Command::new(\"/usr/bin/git\")"];
+
+/// Whether code runs git itself with `push` as one of the separate
+/// strings of its arguments (`.args(["push", "origin", "HEAD:main"])`,
+/// or a helper's `git(dir, &["push", ...])`).
+fn git_arguments_push(code: &str, strings: &str) -> bool {
+    RUNS_GIT.iter().any(|mark| code.contains(mark)) && strings.lines().any(|s| s.trim() == "push")
 }
 
 /// The first program of [`RISKY`] (or `git push`) named in `text`.
 fn risky(text: &str) -> Option<String> {
     simple_commands(text).find_map(|command| {
-        if let Some(git) = word_at(command, "git")
-            && word_at(&command[git + 3..], "push").is_some()
-        {
+        if git_subcommand(command, "push").is_some() {
             return Some("git push".to_string());
         }
         RISKY
@@ -434,11 +518,14 @@ fn identifiers(text: &str) -> HashSet<&str> {
 }
 
 /// Each item's text together with the text of every item it uses by name,
-/// directly or through other items.
-fn closures(items: &[Item]) -> Vec<String> {
+/// directly or through other items. Items for which `opaque` holds are not
+/// followed into (their own closure still has their text).
+fn closures(items: &[Item], opaque: impl Fn(&Item) -> bool) -> Vec<String> {
     let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
-        if let Some(name) = &item.name {
+        if let Some(name) = &item.name
+            && !opaque(item)
+        {
             by_name.entry(name.as_str()).or_default().push(index);
         }
     }
@@ -506,6 +593,7 @@ fn scan(files: &[(String, String)], allowed: &[(&str, &str, &str)]) -> Vec<Strin
         .unwrap_or_default();
     let mut found = Vec::new();
     let mut unsandboxed = HashSet::new();
+    let mut safe_pushes = HashSet::new();
     for (path, text) in files {
         if path == SELF {
             continue;
@@ -520,15 +608,39 @@ fn scan(files: &[(String, String)], allowed: &[(&str, &str, &str)]) -> Vec<Strin
                     .collect::<String>(),
             ));
         }
-        let closures = closures(&all);
+        let safe_push = |item: &Item| {
+            SAFE_PUSH
+                .iter()
+                .any(|(file, name)| file == path && item.label() == *name)
+        };
+        let closures = closures(&all, safe_push);
         for (item, code) in all[..own].iter().zip(&closures) {
             let has = |marks: &[&str]| marks.iter().any(|mark| code.contains(mark));
             let strings = literals(code);
             let at = format!("{path}:{} `{}`", item.line, item.label());
-            if has(RUNS_BASH)
-                && let Some(command) = forbidden(&strings)
-            {
-                found.push(format!("{at} runs `{command}` through a real shell"));
+            if safe_push(item) {
+                safe_pushes.insert((path.clone(), item.label().to_string()));
+                for check in SAFE_PUSH_CHECKS {
+                    if !item.text.contains(check) {
+                        found.push(format!("{at} pushes without checking `{check}`"));
+                    }
+                }
+                continue;
+            }
+            if has(RUNS_BASH) {
+                let command = if has(SANDBOXED) {
+                    forbidden(&strings)
+                } else {
+                    forbidden_outside_the_sandbox(&strings)
+                };
+                if let Some(command) = command {
+                    found.push(format!("{at} runs `{command}` through a real shell"));
+                }
+            }
+            if git_arguments_push(code, &strings) {
+                found.push(format!(
+                    "{at} runs `git push` itself: push only through a SAFE_PUSH helper"
+                ));
             }
             if !(item.test && has(BUILDS_BASH) && has(EXECUTES) && !has(SANDBOXED)) {
                 continue;
@@ -560,6 +672,12 @@ fn scan(files: &[(String, String)], allowed: &[(&str, &str, &str)]) -> Vec<Strin
             found.push(format!(
                 "UNSANDBOXED lists {file} `{test}`, which runs no real bash outside the sandbox"
             ));
+        }
+    }
+    for (file, name) in SAFE_PUSH {
+        let present = files.iter().any(|(path, _)| path == file);
+        if present && !safe_pushes.contains(&(file.to_string(), name.to_string())) {
+            found.push(format!("SAFE_PUSH lists {file} `{name}`, which is gone"));
         }
     }
     found
@@ -852,4 +970,233 @@ mod tests {
             .any(|line| line.contains("`schedules` runs `junees`")),
         "{found:?}"
     );
+}
+
+/// In-memory samples only: nothing runs them.
+#[test]
+fn outside_the_sandbox_any_push_tree_delete_or_discard_is_found() {
+    for command in [
+        "git push",
+        "git push --force",
+        "git push -f",
+        "git -C repo push",
+        "git push nowhere HEAD:main",
+        "git push -u origin main",
+        "rm -rf .",
+        "rm -rf ./",
+        "rm -rf ..",
+        "rm -rf ../..",
+        "rm -rf /",
+        "rm -rf /*",
+        "rm -rf *",
+        "rm -rf ./*",
+        "rm -rf .*",
+        "rm -r -f '.'",
+        "rm -R \"..\"",
+        "rm --recursive *",
+        "cd sub && rm -rf ..",
+        "git reset --hard",
+        "git reset --hard HEAD~3",
+        "git -C x reset --hard origin/main",
+        "git clean -f",
+        "git clean -fdx",
+        "git clean -xdf",
+        "git clean -d --force",
+        "git reset --hard HEAD~3 && git clean -fdx",
+        "rm -rf ~",
+    ] {
+        assert!(
+            forbidden_outside_the_sandbox(command).is_some(),
+            "missed: {command}"
+        );
+    }
+    for command in [
+        "rm -rf ./x",
+        "rm -rf build",
+        "rm -r target/tmp",
+        "rm -f .",
+        "rm ./*",
+        "git reset --soft HEAD~1",
+        "git reset HEAD file",
+        "git clean -n",
+        "git clean -dn",
+        "git pull origin main",
+        "git config remote.origin.pushurl x",
+        "echo push",
+    ] {
+        assert!(
+            forbidden_outside_the_sandbox(command).is_none(),
+            "wrongly found: {command}"
+        );
+    }
+}
+
+/// A test of `kind` running `command`, as sample text.
+fn running(kind: &str, command: &str) -> Vec<(String, String)> {
+    let call = match kind {
+        "binary" => format!(
+            "let reply = json!({{\"command\": \"{command}\"}});\n    \
+             common::junees_binary(dir, dir).spawn();"
+        ),
+        "model" => format!(
+            "let reply = json!({{\"name\": \"bash\", \"input\": {{\"command\": \"{command}\"}}}});"
+        ),
+        _ => format!("Bash::for_test(dir).run(json!({{\"command\": \"{command}\"}})).await;"),
+    };
+    sample(
+        "tests/sample.rs",
+        &format!("\n#[tokio::test]\nasync fn runs_it() {{\n    {call}\n}}\n"),
+    )
+}
+
+/// The review's probes for binary and scripted model tests, as text.
+#[test]
+fn a_bare_push_or_a_repository_wipe_outside_the_sandbox_is_found() {
+    let probes = [
+        "git push",
+        "git push --force",
+        "rm -rf .",
+        "git reset --hard HEAD~3 && git clean -fdx",
+    ];
+    // The control the scan already found before.
+    let control = "git push -u origin main";
+    for kind in ["binary", "model"] {
+        for command in probes.iter().chain([&control]) {
+            let found = scan(&running(kind, command), &[]);
+            assert_eq!(found.len(), 1, "{kind} {command}: {found:?}");
+            assert!(
+                found[0].contains("through a real shell"),
+                "{kind} {command}: {found:?}"
+            );
+        }
+    }
+    // In the sandbox the cwd is a temporary folder: only the control.
+    for command in probes {
+        assert_eq!(
+            scan(&running("sandboxed", command), &[]),
+            Vec::<String>::new()
+        );
+    }
+    assert_eq!(scan(&running("sandboxed", control), &[]).len(), 1);
+}
+
+#[test]
+fn git_run_with_push_among_its_arguments_is_found() {
+    // The review's probe: separate strings, not one command line.
+    let direct = sample(
+        "tests/sample.rs",
+        r#"
+#[tokio::test]
+async fn pushes_the_crate() {
+    let child = common::junees_binary(dir, dir);
+    std::process::Command::new("git")
+        .args(["push", "origin", "HEAD:main"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output();
+}
+"#,
+    );
+    let found = scan(&direct, &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`pushes_the_crate` runs `git push` itself"));
+
+    // Through a helper, and with no remote named.
+    let helper = |args: &str| {
+        sample(
+            "tests/sample.rs",
+            &format!(
+                r#"
+fn git(dir: &Path, args: &[&str]) {{
+    tokio::process::Command::new("git").args(args).current_dir(dir).output();
+}}
+
+#[tokio::test]
+async fn runs_git() {{
+    git(dir, &[{args}]);
+}}
+"#
+            ),
+        )
+    };
+    let found = scan(&helper(r#""push""#), &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with("tests/sample.rs:6 `runs_git`"),
+        "{found:?}"
+    );
+    assert_eq!(
+        scan(&helper(r#""-C", "x", "push", "-q", "/tmp/bare.git""#), &[]).len(),
+        1
+    );
+    // Other git commands, and `push` as a webhook event in a test that
+    // runs no git.
+    assert_eq!(
+        scan(&helper(r#""log", "--oneline""#), &[]),
+        Vec::<String>::new()
+    );
+    let event = sample(
+        "tests/sample.rs",
+        "\n#[tokio::test]\nasync fn posts() {\n    post(\"X-GitHub-Event\", \"push\");\n}\n",
+    );
+    assert_eq!(scan(&event, &[]), Vec::<String>::new());
+}
+
+#[test]
+fn only_a_checked_safe_push_helper_may_push() {
+    let file = |checks: &str, extra: &str| {
+        sample(
+            "src/flow/address.rs",
+            &format!(
+                r#"
+#[cfg(test)]
+mod tests {{
+    fn sh_git(dir: &Path, args: &[&str]) {{
+        Command::new("git").args(args).current_dir(dir).output().unwrap();
+    }}
+
+    pub fn push_to_temp_bare(dir: &Path, bare: &Path, refs: &[&str]) {{
+        {checks}
+        sh_git(dir, &["push", "-q", bare, refs]);
+    }}
+
+    #[test]
+    fn seeds_a_remote() {{
+        sh_git(dir, &["init"]);
+        push_to_temp_bare(dir, bare, &["main"]);
+        {extra}
+    }}
+}}
+"#
+            ),
+        )
+    };
+    let checked = "let temp = std::env::temp_dir(); let me = env!(\"CARGO_MANIFEST_DIR\");";
+    assert_eq!(scan(&file(checked, ""), &[]), Vec::<String>::new());
+    // The helper must check where it pushes.
+    let found = scan(&file("", ""), &[]);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|line| line.contains("pushes without checking"))
+    );
+    // A push next to the helper still counts.
+    let found = scan(&file(checked, r#"sh_git(dir, &["push", "origin"]);"#), &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`seeds_a_remote` runs `git push` itself"));
+    // A helper of the same name elsewhere is not trusted.
+    let mut elsewhere = file(checked, "");
+    elsewhere[0].0 = "src/flow/other.rs".to_string();
+    let found = scan(&elsewhere, &[]);
+    assert!(
+        found
+            .iter()
+            .any(|line| line.contains("`push_to_temp_bare` runs `git push` itself")),
+        "{found:?}"
+    );
+    // The entry goes stale with the helper.
+    let gone = sample("src/flow/address.rs", "#[cfg(test)]\nmod tests {\n}\n");
+    let found = scan(&gone, &[]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("SAFE_PUSH lists"), "{found:?}");
 }

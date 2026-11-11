@@ -480,6 +480,38 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Pushes `refs` from the repository `dir` to the bare repository
+    /// `bare`, named by its path, so no remote or upstream of any
+    /// repository counts. Both must sit in the system temp folder and
+    /// apart from the crate, so a test push never reaches the crate's own
+    /// repository or its origin. The only test push `tools::test_scan`
+    /// allows.
+    pub fn push_to_temp_bare(dir: &Path, bare: &Path, refs: &[&str]) {
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .canonicalize()
+            .unwrap();
+        for path in [dir, bare] {
+            let path = path.canonicalize().unwrap();
+            assert!(
+                path.starts_with(&temp)
+                    && !path.starts_with(&crate_dir)
+                    && !crate_dir.starts_with(&path),
+                "{} is not a temporary folder",
+                path.display()
+            );
+        }
+        assert!(
+            bare.join("HEAD").is_file() && !bare.join(".git").exists(),
+            "{} is not a bare repository",
+            bare.display()
+        );
+        let bare_text = bare.to_string_lossy();
+        let mut args = vec!["push", "-q", bare_text.as_ref()];
+        args.extend(refs);
+        sh_git(dir, &args);
+    }
+
     /// A bare repository standing in for GitHub's `o/n` (branch `feature`
     /// one commit past `main`) and a clone of it whose origin reads
     /// `https://git.invalid/o/n.git` (git rewrites it to the bare one).
@@ -505,7 +537,7 @@ pub(crate) mod tests {
         std::fs::write(seed.join("lib.txt"), "one\ntwo\n").unwrap();
         sh_git(&seed, &["commit", "-q", "-am", "feature"]);
         let bare_text = bare.to_string_lossy().to_string();
-        sh_git(&seed, &["push", "-q", &bare_text, "main", "feature"]);
+        push_to_temp_bare(&seed, &bare, &["main", "feature"]);
         let head = sh_git(&seed, &["rev-parse", "HEAD"]);
         sh_git(root.path(), &["clone", "-q", &bare_text, "clone"]);
         sh_git(
