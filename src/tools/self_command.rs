@@ -66,6 +66,38 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
         does: "starts running the scheduled jobs",
     },
     SelfCommand {
+        words: &["webhook", "add"],
+        does: "adds a webhook route (requests then start runs)",
+    },
+    SelfCommand {
+        words: &["webhook", "remove"],
+        does: "removes a webhook route",
+    },
+    SelfCommand {
+        words: &["webhook", "rm"],
+        does: "removes a webhook route",
+    },
+    SelfCommand {
+        words: &["webhook", "pause"],
+        does: "pauses a webhook route",
+    },
+    SelfCommand {
+        words: &["webhook", "resume"],
+        does: "resumes a webhook route",
+    },
+    SelfCommand {
+        words: &["webhook", "serve"],
+        does: "starts receiving webhook requests",
+    },
+    SelfCommand {
+        words: &["webhook", "test"],
+        does: "runs a webhook route now and delivers its answer",
+    },
+    SelfCommand {
+        words: &["webhook", "run"],
+        does: "runs a webhook route now and delivers its answer",
+    },
+    SelfCommand {
         words: &["plugin", "install"],
         does: "installs a plugin (programs Junees runs)",
     },
@@ -184,6 +216,14 @@ mod tests {
             ("junees cron resume a1", "junees cron resume"),
             ("junees cron run a1", "junees cron run"),
             ("junees cron daemon", "junees cron daemon"),
+            ("junees webhook add pr --prompt x", "junees webhook add"),
+            ("junees webhook rm pr", "junees webhook rm"),
+            ("junees webhook resume pr", "junees webhook resume"),
+            (
+                "junees webhook serve --listen 0.0.0.0:80",
+                "junees webhook serve",
+            ),
+            ("junees webhook test pr p.json", "junees webhook test"),
             ("/usr/local/bin/junees cron add x y", "junees cron add"),
             ("./target/debug/junees cron rm a1", "junees cron rm"),
             (
@@ -211,6 +251,8 @@ mod tests {
         }
         for command in [
             "junees cron list",
+            "junees webhook list",
+            "junees webhook",
             "junees cron ls",
             "junees cron",
             "junees cron --help",

@@ -42,6 +42,10 @@ pub const DISCORD: &str = "discord";
 /// [`Meta::channel`] is the job id.
 pub const CRON: &str = "cron";
 
+/// [`Meta::source`] of a run started by a webhook request (`junees
+/// webhook`); its [`Meta::channel`] is the route name.
+pub const WEBHOOK: &str = "webhook";
+
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
 

@@ -151,6 +151,7 @@ async fn run() -> Result<ExitCode> {
         Command::Task(command) => run_task(command, &settings).await,
         Command::Gateway => discord_gateway(&settings).await,
         Command::Cron(command) => junees::cron::command::main(command, settings).await,
+        Command::Webhook(command) => junees::webhook::command::main(command, settings).await,
         Command::Setup | Command::Help | Command::Version | Command::Plugin(_) => {
             unreachable!("handled above")
         }
@@ -167,8 +168,10 @@ fn on_terminal() -> bool {
 /// key (nothing on the claude-code backend does).
 fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     // The gateway usually runs as a service, with no one to answer.
-    if matches!(command, Command::Gateway | Command::Cron(_))
-        || settings.file_exists()
+    if matches!(
+        command,
+        Command::Gateway | Command::Cron(_) | Command::Webhook(_)
+    ) || settings.file_exists()
         || settings.path().is_none()
         || settings.env("ANTHROPIC_API_KEY").is_some()
     {
@@ -1077,6 +1080,14 @@ impl Repl {
             Slash::Cron => print!(
                 "{}",
                 junees::cron::listing(
+                    self.config.home.as_deref(),
+                    &|key| self.settings.get(key),
+                    true
+                )
+            ),
+            Slash::Webhooks => print!(
+                "{}",
+                junees::webhook::listing(
                     self.config.home.as_deref(),
                     &|key| self.settings.get(key),
                     true
