@@ -1,34 +1,28 @@
-//! What the bot does with Discord's events: which messages are for it,
-//! the `!` commands, and a worker per channel that runs its turns in order
-//! (while other channels run at the same time, up to a limit).
+//! What the bot does with Discord's events: which messages are for it and
+//! the `!` commands. The channels themselves (a worker per channel, the
+//! queue, sessions, approvals) are the shared engine of
+//! [`super::channels`]; [`Discord`] is its Discord side.
 
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::Semaphore;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::task::JoinHandle;
 
-use super::Log;
-use super::ask::{AnswerSlot, DiscordAsk, fence_safe};
+use super::ask::fence_safe;
+use super::channels::{Channels, Shared};
 use super::config::DiscordConfig;
-use super::engine::{Conversation, Engines, Progress};
+use super::platform::Platform;
 use super::rest::Rest;
-use super::sessions::{self, SessionIndex};
 use super::shard::Dispatch;
-use super::split::{MESSAGE_LIMIT, split_message};
-use crate::agent::Cancelled;
-use crate::cancel::Cancel;
-use crate::claude_code::UsageLimit;
+use super::split::MESSAGE_LIMIT;
+use crate::approval::Request;
+use crate::images::Image;
 use crate::images::discord::{self as attached, Attachment, Fetcher};
-use crate::memory::Memory;
-use crate::prompt_text::escape_hidden;
-use crate::provider::ProviderError;
-use crate::skills;
+
+pub use super::channels::Command;
 
 /// Message types that carry what a user wrote: DEFAULT and REPLY.
 const USER_MESSAGE_TYPES: [u64; 2] = [0, 19];
@@ -45,120 +39,63 @@ pub const HELP: &str = "\
 `!help` this list
 In a server channel, mention the bot (`@Junees !stop`) unless the channel is one of discord_channels.";
 
-/// What the gateway shares with every channel's worker.
-pub struct Shared {
+/// Discord as the channel engine's platform: posts and typing through the
+/// REST API, images from Discord's CDN.
+pub struct Discord {
     pub rest: Arc<Rest>,
     /// Downloads the images attached to messages.
     pub fetcher: Fetcher,
-    pub engines: Arc<dyn Engines>,
-    pub config: DiscordConfig,
-    pub home: Option<PathBuf>,
-    pub cwd: PathBuf,
-    pub memory: Option<Memory>,
-    pub index: Mutex<SessionIndex>,
-    /// One per turn that may run at the same time.
-    pub permits: Arc<Semaphore>,
-    /// How often the typing indicator is renewed during a turn (it lasts
-    /// 10 seconds).
-    pub typing_every: Duration,
-    pub log: Log,
-    /// Set when the gateway stops: cancelled turns say why.
-    pub closing: AtomicBool,
 }
 
-impl Shared {
-    /// Posts `text`, cut into messages; failures go to the log.
-    pub async fn say(&self, channel: &str, text: &str) {
-        for part in split_message(text, MESSAGE_LIMIT) {
-            if let Err(err) = self.rest.create_message(channel, &part).await {
-                (self.log)(&format!("cannot post to channel {channel}: {err:#}"));
-                return;
-            }
-        }
+#[async_trait]
+impl Platform for Discord {
+    type Attachment = Attachment;
+
+    fn place(&self) -> &'static str {
+        "channel"
     }
-}
 
-/// A channel's live state, read by the commands.
-#[derive(Default)]
-pub struct ChannelState {
-    running: AtomicBool,
-    /// A turn waits for a free slot (`discord_parallel`).
-    waiting: AtomicBool,
-    /// A turn downloads the images attached to its message, before it
-    /// waits for a slot.
-    preparing: AtomicBool,
-    queued: AtomicUsize,
-    /// Raised by `!stop`; queued jobs of an older epoch are dropped.
-    epoch: AtomicU64,
-    answers: Arc<AnswerSlot>,
-    session: Mutex<String>,
-    usage: Mutex<String>,
-}
-
-impl ChannelState {
-    /// A turn runs, waits for a slot or downloads its attachments.
-    fn busy(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
-            || self.waiting.load(Ordering::SeqCst)
-            || self.preparing.load(Ordering::SeqCst)
+    fn message_limit(&self) -> usize {
+        MESSAGE_LIMIT
     }
-}
 
-fn locked<T: Clone>(mutex: &Mutex<T>) -> T {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-}
-
-fn store<T>(mutex: &Mutex<T>, value: T) {
-    *mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
-}
-
-enum Job {
-    Input {
-        text: String,
-        /// Images attached to the message, downloaded when its turn starts.
-        attachments: Vec<Attachment>,
-        /// Attachments left out, and why.
-        notes: Vec<String>,
-        epoch: u64,
-    },
-    New {
-        epoch: u64,
-    },
-}
-
-impl Job {
-    fn epoch(&self) -> u64 {
-        match self {
-            Job::Input { epoch, .. } | Job::New { epoch } => *epoch,
-        }
+    async fn post(&self, channel: &str, text: &str) -> Result<()> {
+        self.rest.create_message(channel, text).await
     }
-}
 
-struct Channel {
-    jobs: UnboundedSender<Job>,
-    state: Arc<ChannelState>,
-    cancel: Cancel,
-    worker: JoinHandle<()>,
-}
+    async fn typing(&self, channel: &str) -> Result<()> {
+        self.rest.typing(channel).await
+    }
 
-/// A `!` command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Command {
-    New,
-    Stop,
-    Status,
-    Memory,
-    Skills,
-    Cron,
-    Webhooks,
-    Help,
-    Task,
-    Unknown(String),
+    async fn fetch_all(&self, attachments: &[Attachment]) -> (Vec<Image>, Vec<String>) {
+        attached::fetch_all(&self.fetcher, attachments).await
+    }
+
+    fn command(&self, word: &str) -> String {
+        format!("`!{word}`")
+    }
+
+    fn help(&self) -> String {
+        HELP.to_string()
+    }
+
+    fn task_note(&self) -> String {
+        "`!task` is not available in the gateway yet; run `junees task \"<goal>\"` on the \
+         machine (task progress can go to a Discord webhook, notify_webhook)."
+            .to_string()
+    }
+
+    fn tool_lines(&self, lines: &str) -> String {
+        format!("```\n{}\n```", fence_safe(lines))
+    }
+
+    fn private_place(&self) -> &'static str {
+        "a direct message"
+    }
+
+    fn question(request: &Request, timeout: Duration) -> String {
+        super::ask::question(request, timeout)
+    }
 }
 
 /// The command `text` is, if it starts with `!` and a word.
@@ -168,7 +105,13 @@ pub fn parse_command(text: &str) -> Option<Command> {
         .split_whitespace()
         .next()
         .filter(|_| rest.starts_with(|c: char| !c.is_whitespace()))?;
-    if !word.chars().all(|c| c.is_ascii_alphabetic()) {
+    command_word(word)
+}
+
+/// The command a word names, if it is one word of ASCII letters (a known
+/// command or [`Command::Unknown`]).
+pub fn command_word(word: &str) -> Option<Command> {
+    if word.is_empty() || !word.chars().all(|c| c.is_ascii_alphabetic()) {
         return None;
     }
     Some(match word.to_ascii_lowercase().as_str() {
@@ -195,8 +138,8 @@ pub fn strip_mention(text: &str, bot: &str) -> String {
 
 /// The bot: routes events to the channels.
 pub struct Bot {
-    shared: Arc<Shared>,
-    channels: HashMap<String, Channel>,
+    channels: Channels<Discord>,
+    config: DiscordConfig,
     /// The bot's own user id, from Ready.
     me: Option<String>,
     /// Threads the bot answers in without a mention: its own, and those
@@ -207,10 +150,10 @@ pub struct Bot {
 }
 
 impl Bot {
-    pub fn new(shared: Arc<Shared>) -> Self {
+    pub fn new(shared: Arc<Shared<Discord>>, config: DiscordConfig) -> Self {
         Self {
-            shared,
-            channels: HashMap::new(),
+            channels: Channels::new(shared),
+            config,
             me: None,
             threads: HashSet::new(),
             strangers: HashSet::new(),
@@ -247,7 +190,7 @@ impl Bot {
         let owner = thread.get("owner_id").and_then(Value::as_str);
         let parent = thread.get("parent_id").and_then(Value::as_str);
         let ours = owner.is_some() && owner == self.me.as_deref();
-        let listed = parent.is_some_and(|parent| self.shared.config.channels.contains(parent));
+        let listed = parent.is_some_and(|parent| self.config.channels.contains(parent));
         if let (Some(id), true) = (id, ours || listed) {
             self.threads.insert(id.to_string());
         }
@@ -265,9 +208,9 @@ impl Bot {
         if !USER_MESSAGE_TYPES.contains(&kind) {
             return;
         }
-        if !self.shared.config.allowed_users.contains(user) {
+        if !self.config.allowed_users.contains(user) {
             if self.strangers.insert(user.to_string()) {
-                (self.shared.log)(&format!(
+                (self.channels.shared().log)(&format!(
                     "ignoring messages of user {user}: not in discord_allowed_users"
                 ));
             }
@@ -281,12 +224,8 @@ impl Bot {
                 .flatten()
                 .any(|user| user.get("id").and_then(Value::as_str) == Some(me))
         });
-        let listed =
-            self.shared.config.channels.contains(channel) || self.threads.contains(channel);
-        let answering = self
-            .channels
-            .get(channel)
-            .is_some_and(|known| known.state.answers.waiting());
+        let listed = self.config.channels.contains(channel) || self.threads.contains(channel);
+        let answering = self.channels.answering(channel);
         if !(direct || mentioned || listed || answering) {
             return;
         }
@@ -299,582 +238,18 @@ impl Bot {
         if content.is_empty() && attachments.is_empty() && notes.is_empty() {
             return;
         }
-        let channel = channel.to_string();
         if let Some(command) = parse_command(&content) {
-            self.command(&channel, command, direct);
+            self.channels.command(channel, command, direct);
             return;
         }
-        if attachments.is_empty()
-            && !content.is_empty()
-            && let Some(known) = self.channels.get(&channel)
-            && known.state.answers.answer(content.clone())
-        {
-            return;
-        }
-        if content.is_empty() && attachments.is_empty() {
-            // Only files that are not images: nothing to run.
-            let shared = Arc::clone(&self.shared);
-            let text = notes_text(&notes);
-            tokio::spawn(async move { shared.say(&channel, &text).await });
-            return;
-        }
-        let known = self.channel(&channel);
-        let epoch = known.state.epoch.load(Ordering::SeqCst);
-        known.state.queued.fetch_add(1, Ordering::SeqCst);
-        let _ = known.jobs.send(Job::Input {
-            text: content,
-            attachments,
-            notes,
-            epoch,
-        });
-    }
-
-    /// The channel's worker, started on first use.
-    fn channel(&mut self, id: &str) -> &Channel {
-        // A worker that could not start its conversation has ended; the
-        // next message tries again.
-        if self
-            .channels
-            .get(id)
-            .is_some_and(|known| known.worker.is_finished())
-        {
-            self.channels.remove(id);
-        }
-        self.channels.entry(id.to_string()).or_insert_with(|| {
-            let (jobs, receiver) = mpsc::unbounded_channel();
-            let state = Arc::new(ChannelState::default());
-            let cancel = Cancel::new();
-            let worker = tokio::task::spawn_local(worker(
-                Arc::clone(&self.shared),
-                id.to_string(),
-                Arc::clone(&state),
-                cancel.clone(),
-                receiver,
-            ));
-            Channel {
-                jobs,
-                state,
-                cancel,
-                worker,
-            }
-        })
-    }
-
-    /// Runs a `!` command; `direct` when it came in a DM.
-    fn command(&mut self, channel: &str, command: Command, direct: bool) {
-        let reply = match command {
-            Command::New => {
-                let known = self.channel(channel);
-                let epoch = known.state.epoch.load(Ordering::SeqCst);
-                known.state.queued.fetch_add(1, Ordering::SeqCst);
-                let _ = known.jobs.send(Job::New { epoch });
-                return;
-            }
-            Command::Stop => match self.channels.get(channel) {
-                Some(known)
-                    if known.state.busy() || known.state.queued.load(Ordering::SeqCst) > 0 =>
-                {
-                    known.state.epoch.fetch_add(1, Ordering::SeqCst);
-                    let dropped = known.state.queued.swap(0, Ordering::SeqCst);
-                    let busy = known.state.busy();
-                    known.cancel.cancel();
-                    match (busy, dropped) {
-                        // The worker says when the turn stopped.
-                        (true, 0) => return,
-                        (true, n) => format!("(stopping; dropped {n} queued)"),
-                        (false, n) => format!("(dropped {n} queued)"),
-                    }
-                }
-                _ => "(nothing is running here)".to_string(),
-            },
-            Command::Status => self.status(channel),
-            Command::Memory => match &self.shared.memory {
-                Some(memory) if direct => memory.overview(),
-                Some(memory) => memory_counts(memory),
-                None => "memory is off: neither JUNEES_HOME nor HOME is set".to_string(),
-            },
-            Command::Skills => self.skills(),
-            // Prompts and folders only in DMs, like the memory.
-            Command::Cron => crate::cron::listing_from_env(self.shared.home.as_deref(), direct),
-            Command::Webhooks => {
-                crate::webhook::listing_from_env(self.shared.home.as_deref(), direct)
-            }
-            Command::Help => HELP.to_string(),
-            Command::Task => {
-                "`!task` is not available in the gateway yet; run `junees task \"<goal>\"` \
-                              on the machine (task progress can go to a Discord webhook, \
-                              notify_webhook)."
-                    .to_string()
-            }
-            Command::Unknown(word) => format!(
-                "unknown command `!{}`; `!help` lists them",
-                fence_safe(&escape_hidden(&word))
-            ),
-        };
-        let shared = Arc::clone(&self.shared);
-        let channel = channel.to_string();
-        tokio::spawn(async move { shared.say(&channel, &reply).await });
-    }
-
-    fn status(&self, channel: &str) -> String {
-        let shared = &self.shared;
-        let running = self
-            .channels
-            .values()
-            .filter(|known| known.state.running.load(Ordering::SeqCst))
-            .count();
-        let mut lines = vec![format!(
-            "Junees {} on the {}; turns running: {running} (at most {} at once)",
-            env!("CARGO_PKG_VERSION"),
-            shared.engines.describe(),
-            shared.config.parallel
-        )];
-        lines.push(if shared.engines.asks() {
-            format!(
-                "risky tool calls are asked about here (approval {})",
-                super::ask::human(shared.config.approval_timeout)
-            )
-        } else {
-            "no approval questions on this backend or setting; only the command policy applies"
-                .to_string()
-        });
-        match self.channels.get(channel) {
-            Some(known) => {
-                let state = &known.state;
-                lines.push(format!(
-                    "this channel: {}; {}, {} queued{}",
-                    locked(&state.session),
-                    if state.running.load(Ordering::SeqCst) {
-                        "a turn is running"
-                    } else if state.waiting.load(Ordering::SeqCst) {
-                        "a turn waits for a free slot"
-                    } else if state.preparing.load(Ordering::SeqCst) {
-                        "a turn downloads its attachments"
-                    } else {
-                        "idle"
-                    },
-                    state.queued.load(Ordering::SeqCst),
-                    if state.answers.waiting() {
-                        "; an approval question waits for its answer"
-                    } else {
-                        ""
-                    }
-                ));
-                let usage = locked(&state.usage);
-                if !usage.is_empty() {
-                    lines.push(usage);
-                }
-            }
-            None => lines.push("this channel: no conversation yet".to_string()),
-        }
-        lines.join("\n")
-    }
-
-    fn skills(&self) -> String {
-        let Some(home) = &self.shared.home else {
-            return "no skills: neither JUNEES_HOME nor HOME is set".to_string();
-        };
-        let index = skills::Index::load(&skills::dir(home));
-        if index.skills.is_empty() {
-            return "(no skills)".to_string();
-        }
-        let mut text = format!("{} skills:", index.skills.len());
-        for entry in &index.skills {
-            text.push_str(&format!(
-                "\n- {}: {}",
-                escape_hidden(&entry.name),
-                escape_hidden(&entry.description)
-            ));
-        }
-        text
+        self.channels.input(channel, content, attachments, notes);
     }
 
     /// Stops every channel: running turns are cancelled (and recorded as
     /// such), queued messages dropped, and the workers waited for.
     pub async fn shutdown(self, grace: Duration) {
-        self.shared.closing.store(true, Ordering::SeqCst);
-        let mut workers = Vec::new();
-        for (_, known) in self.channels {
-            known.state.epoch.fetch_add(1, Ordering::SeqCst);
-            known.cancel.cancel();
-            drop(known.jobs);
-            workers.push(known.worker);
-        }
-        let all = async {
-            for worker in workers {
-                let _ = worker.await;
-            }
-        };
-        if tokio::time::timeout(grace, all).await.is_err() {
-            (self.shared.log)("some channels did not stop in time");
-        }
+        self.channels.shutdown(grace).await;
     }
-}
-
-/// What `!memory` shows in a server channel, where everyone who reads the
-/// channel sees the answer: how much each store holds, not what (the user
-/// store holds facts about the user), and no paths.
-fn memory_counts(memory: &Memory) -> String {
-    let mut lines: Vec<String> = memory
-        .snapshot()
-        .stores
-        .iter()
-        .map(|store| match &store.error {
-            Some(_) => format!("{}: cannot read", store.target.name()),
-            None => format!(
-                "{}: {} entries, {}/{} characters",
-                store.target.name(),
-                store.entries,
-                store.chars(),
-                store.limit
-            ),
-        })
-        .collect();
-    lines.push(
-        "The contents show only in a direct message: send `!memory` to the bot there.".to_string(),
-    );
-    lines.join("\n")
-}
-
-/// Runs a channel's jobs one after the other.
-async fn worker(
-    shared: Arc<Shared>,
-    channel: String,
-    state: Arc<ChannelState>,
-    cancel: Cancel,
-    mut jobs: UnboundedReceiver<Job>,
-) {
-    let (out, mut progress) = mpsc::unbounded_channel();
-    let ask = DiscordAsk::new(
-        out.clone(),
-        Arc::clone(&state.answers),
-        shared.config.approval_timeout,
-    );
-    let mut conversation = match shared.engines.open(Box::new(ask), cancel.clone()) {
-        Ok(conversation) => conversation,
-        Err(err) => {
-            (shared.log)(&format!("channel {channel}: cannot start: {err:#}"));
-            shared
-                .say(
-                    &channel,
-                    &format!("error: cannot start a conversation: {err:#}"),
-                )
-                .await;
-            return;
-        }
-    };
-    // The channel's session is opened before the first input, and again
-    // before each later one while it is unavailable for now.
-    let mut ready = false;
-    while let Some(job) = jobs.recv().await {
-        if job.epoch() < state.epoch.load(Ordering::SeqCst) {
-            continue;
-        }
-        let mut queued = state.queued.load(Ordering::SeqCst);
-        while queued > 0 {
-            match state.queued.compare_exchange(
-                queued,
-                queued - 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(now) => queued = now,
-            }
-        }
-        match job {
-            Job::New { .. } => {
-                let status = match shared.home.as_deref() {
-                    Some(home) => {
-                        let mut index = shared
-                            .index
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        sessions::start(
-                            &mut index,
-                            home,
-                            &shared.cwd,
-                            shared.engines.as_ref(),
-                            &channel,
-                            conversation.as_mut(),
-                        )
-                    }
-                    None => {
-                        conversation.reset(None);
-                        "session not saved".to_string()
-                    }
-                };
-                ready = true;
-                (shared.log)(&format!("channel {channel}: new conversation, {status}"));
-                shared
-                    .say(&channel, &format!("(new conversation) {status}"))
-                    .await;
-                store(&state.session, status);
-                store(&state.usage, String::new());
-            }
-            Job::Input {
-                text,
-                attachments,
-                notes,
-                ..
-            } => {
-                if !ready {
-                    let opened = {
-                        let mut index = shared
-                            .index
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        sessions::open(
-                            &mut index,
-                            shared.home.as_deref(),
-                            &shared.cwd,
-                            shared.engines.as_ref(),
-                            &channel,
-                            conversation.as_mut(),
-                        )
-                    };
-                    (shared.log)(&format!("channel {channel}: {}", opened.status));
-                    store(&state.session, opened.status.clone());
-                    ready = opened.ready;
-                    if !ready {
-                        shared
-                            .say(
-                                &channel,
-                                &format!(
-                                    "(not run) {}. It stays this channel's conversation: send \
-                                     the message again once the other Junees has closed it, or \
-                                     `!new` to start a new one here.",
-                                    opened.status
-                                ),
-                            )
-                            .await;
-                        continue;
-                    }
-                }
-                let input = Input {
-                    text,
-                    attachments,
-                    notes,
-                };
-                turn(
-                    &shared,
-                    &channel,
-                    &state,
-                    &cancel,
-                    conversation.as_mut(),
-                    input,
-                    &out,
-                    &mut progress,
-                )
-                .await;
-            }
-        }
-    }
-}
-
-/// A message for the conversation: its text and attachments.
-struct Input {
-    text: String,
-    attachments: Vec<Attachment>,
-    notes: Vec<String>,
-}
-
-/// The attachments left out of a message, as one post.
-fn notes_text(notes: &[String]) -> String {
-    format!("(attachments left out: {})", notes.join("; "))
-}
-
-/// Downloads the images of `input`, says which attachments were left out,
-/// and returns the text and images to run; `None` when nothing is left
-/// to run or a `!stop` came meanwhile.
-async fn prepare(
-    shared: &Shared,
-    channel: &str,
-    state: &ChannelState,
-    cancel: &Cancel,
-    input: Input,
-) -> Option<(String, Vec<crate::images::Image>)> {
-    let Input {
-        text,
-        attachments,
-        mut notes,
-    } = input;
-    let images = if attachments.is_empty() {
-        Vec::new()
-    } else {
-        // Marked busy meanwhile, so `!stop` cancels the download (it can
-        // take 30 seconds per attachment) and `!status` tells.
-        state.preparing.store(true, Ordering::SeqCst);
-        let got = tokio::select! {
-            got = attached::fetch_all(&shared.fetcher, &attachments) => Some(got),
-            _ = cancel.cancelled() => None,
-        };
-        state.preparing.store(false, Ordering::SeqCst);
-        let Some((images, failed)) = got else {
-            shared.say(channel, "(stopped before it started)").await;
-            return None;
-        };
-        notes.extend(failed);
-        // The kind and size only: the log never holds what users sent.
-        for image in &images {
-            (shared.log)(&format!(
-                "channel {channel}: attached {}",
-                attached::log_line(image)
-            ));
-        }
-        images
-    };
-    if !notes.is_empty() {
-        shared.say(channel, &notes_text(&notes)).await;
-    }
-    if text.is_empty() && images.is_empty() {
-        return None;
-    }
-    let mut text = if text.is_empty() {
-        crate::images::NO_TEXT.to_string()
-    } else {
-        text
-    };
-    // The model should not answer about a picture it never got.
-    if !notes.is_empty() {
-        text.push_str(&format!("\n\n{}", notes_text(&notes)));
-    }
-    Some((text, images))
-}
-
-/// Runs one input in the channel: waits for a free slot, shows typing,
-/// posts the reply's text blocks as they finish and the tool calls as
-/// short lines, and ends with the error if there is one.
-#[allow(clippy::too_many_arguments)]
-async fn turn(
-    shared: &Shared,
-    channel: &str,
-    state: &ChannelState,
-    cancel: &Cancel,
-    conversation: &mut dyn Conversation,
-    input: Input,
-    out: &UnboundedSender<Progress>,
-    progress: &mut UnboundedReceiver<Progress>,
-) {
-    cancel.reset();
-    let Some((input, images)) = prepare(shared, channel, state, cancel, input).await else {
-        return;
-    };
-    let permits = Arc::clone(&shared.permits);
-    let permit = match permits.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            state.waiting.store(true, Ordering::SeqCst);
-            shared
-                .say(
-                    channel,
-                    &format!(
-                        "(waiting for a free slot: at most {} turns run at once)",
-                        shared.config.parallel
-                    ),
-                )
-                .await;
-            let permit = tokio::select! {
-                permit = permits.acquire_owned() => permit.ok(),
-                _ = cancel.cancelled() => None,
-            };
-            state.waiting.store(false, Ordering::SeqCst);
-            match permit {
-                Some(permit) => permit,
-                None => {
-                    shared.say(channel, "(stopped before it started)").await;
-                    return;
-                }
-            }
-        }
-    };
-    state.running.store(true, Ordering::SeqCst);
-    let mut tools: Vec<String> = Vec::new();
-    let result = {
-        let run = conversation.turn_with_images(&input, images, out);
-        tokio::pin!(run);
-        let mut typing = tokio::time::interval(shared.typing_every);
-        // Posting can wait out a rate limit; no burst of typing after it.
-        typing.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                biased;
-                Some(item) = progress.recv() => show(shared, channel, &mut tools, item).await,
-                result = &mut run => break result,
-                _ = typing.tick() => {
-                    if !state.answers.waiting()
-                        && let Err(err) = shared.rest.typing(channel).await
-                    {
-                        (shared.log)(&format!("channel {channel}: typing: {err:#}"));
-                    }
-                }
-            }
-        }
-    };
-    while let Ok(item) = progress.try_recv() {
-        show(shared, channel, &mut tools, item).await;
-    }
-    flush_tools(shared, channel, &mut tools).await;
-    store(&state.usage, conversation.usage());
-    state.running.store(false, Ordering::SeqCst);
-    drop(permit);
-    match result {
-        Ok(()) => {}
-        Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
-            let why = if shared.closing.load(Ordering::SeqCst) {
-                "(stopped: Junees is shutting down)"
-            } else {
-                "(stopped)"
-            };
-            shared.say(channel, why).await;
-        }
-        Err(err) => {
-            (shared.log)(&format!("channel {channel}: turn failed: {err:#}"));
-            shared.say(channel, &error_text(&err)).await;
-        }
-    }
-}
-
-/// An error of a turn, with the hint the terminal would give.
-fn error_text(err: &anyhow::Error) -> String {
-    let mut text = format!("error: {err:#}");
-    if let Some(provider) = err.downcast_ref::<ProviderError>() {
-        if provider.is_context_overflow() {
-            text.push_str(
-                "\n(the conversation no longer fits the context window; `!new` starts a new one)",
-            );
-        } else if provider.is_auth() {
-            text.push_str("\n(check the API key on the machine running the gateway)");
-        }
-    }
-    if err.downcast_ref::<UsageLimit>().is_some() {
-        text.push_str(
-            "\n(the subscription's usage limit stopped the turn; once it resets, the next \
-             message continues the same conversation)",
-        );
-    }
-    text
-}
-
-async fn show(shared: &Shared, channel: &str, tools: &mut Vec<String>, item: Progress) {
-    match item {
-        Progress::Tool(line) => tools.push(line),
-        Progress::Text(text) | Progress::Note(text) | Progress::Question(text) => {
-            flush_tools(shared, channel, tools).await;
-            shared.say(channel, &text).await;
-        }
-    }
-}
-
-/// Posts the tool calls since the last text as one code block.
-async fn flush_tools(shared: &Shared, channel: &str, tools: &mut Vec<String>) {
-    if tools.is_empty() {
-        return;
-    }
-    let lines = std::mem::take(tools).join("\n");
-    shared
-        .say(channel, &format!("```\n{}\n```", fence_safe(&lines)))
-        .await;
 }
 
 #[cfg(test)]
