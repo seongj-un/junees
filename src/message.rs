@@ -3,8 +3,11 @@
 //! The shapes follow the Anthropic Messages API so they serialize directly
 //! into request bodies.
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
+
+use crate::images::{Image, MediaType, Source};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -13,21 +16,26 @@ pub enum Role {
     Assistant,
 }
 
-/// One block of a message. Junees works with text, tool calls and tool
-/// results; every other block the API sends (thinking, redacted_thinking,
-/// server tool calls and their results, ...) is kept as [`ContentBlock::Other`]
-/// and sent back as it came.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", try_from = "Value")]
+/// One block of a message. Junees works with text, images, tool calls and
+/// tool results; every other block the API sends (thinking,
+/// redacted_thinking, server tool calls and their results, ...) is kept as
+/// [`ContentBlock::Other`] and sent back as it came.
+///
+/// Written in the API's shape ([`Serialize`] below); read through a strict
+/// mirror of the known types (`try_from = "Value"`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "Value")]
 pub enum ContentBlock {
     Text {
         text: String,
         /// The sources the API attached to the text (web search results
         /// it cites), kept as it sent them: their `encrypted_index` must
         /// go back with the text in later requests.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         citations: Option<Value>,
     },
+    /// An image the user attached (`/image`, `--image`, a Discord
+    /// attachment).
+    Image(Image),
     ToolUse {
         id: String,
         name: String,
@@ -36,13 +44,14 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
-        #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
+        /// Images the tool gave back (`read_file` of a picture). With any,
+        /// `content` goes out as a list: a text block, then the images.
+        images: Vec<Image>,
     },
     /// A block of another type, kept as the JSON object the API sent,
     /// `type` included. The API rejects thinking blocks that come back
     /// changed (their `signature` covers them), so it is never edited.
-    #[serde(untagged)]
     Other(Value),
 }
 
@@ -52,6 +61,20 @@ impl ContentBlock {
         ContentBlock::Text {
             text: text.into(),
             citations: None,
+        }
+    }
+
+    /// A tool result without images.
+    pub fn tool_result(
+        tool_use_id: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.into(),
+            content: content.into(),
+            is_error,
+            images: Vec::new(),
         }
     }
 
@@ -67,6 +90,124 @@ impl ContentBlock {
     pub fn is_thinking(&self) -> bool {
         matches!(self.other_type(), Some("thinking" | "redacted_thinking"))
     }
+
+    /// The images of the block: an image block's own, a tool result's.
+    pub fn images(&self) -> &[Image] {
+        match self {
+            ContentBlock::Image(image) => std::slice::from_ref(image),
+            ContentBlock::ToolResult { images, .. } => images,
+            _ => &[],
+        }
+    }
+}
+
+impl Serialize for ContentBlock {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // A map, not a struct: the request wraps blocks in a flattened
+        // struct to add `cache_control`.
+        let mut map = serializer.serialize_map(None)?;
+        match self {
+            ContentBlock::Text { text, citations } => {
+                map.serialize_entry("type", "text")?;
+                map.serialize_entry("text", text)?;
+                if let Some(citations) = citations {
+                    map.serialize_entry("citations", citations)?;
+                }
+            }
+            ContentBlock::Image(image) => {
+                map.serialize_entry("type", "image")?;
+                map.serialize_entry("source", &SourceOut(image))?;
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                map.serialize_entry("type", "tool_use")?;
+                map.serialize_entry("id", id)?;
+                map.serialize_entry("name", name)?;
+                map.serialize_entry("input", input)?;
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                images,
+            } => {
+                map.serialize_entry("type", "tool_result")?;
+                map.serialize_entry("tool_use_id", tool_use_id)?;
+                if images.is_empty() {
+                    map.serialize_entry("content", content)?;
+                } else {
+                    map.serialize_entry("content", &ResultContentOut { content, images })?;
+                }
+                if *is_error {
+                    map.serialize_entry("is_error", &true)?;
+                }
+            }
+            // Always an object: only those with a string `type` are read.
+            ContentBlock::Other(value) => {
+                for (key, field) in value.as_object().into_iter().flatten() {
+                    map.serialize_entry(key, field)?;
+                }
+            }
+        }
+        map.end()
+    }
+}
+
+/// The `source` of an image block.
+struct SourceOut<'a>(&'a Image);
+
+impl Serialize for SourceOut<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(3))?;
+        match &self.0.source {
+            Source::Base64(data) => {
+                map.serialize_entry("type", "base64")?;
+                map.serialize_entry("media_type", self.0.media_type.as_str())?;
+                map.serialize_entry("data", &**data)?;
+            }
+            // Only in session journals ([`crate::images::store`]).
+            Source::Stored { sha256 } => {
+                map.serialize_entry("type", STORED_SOURCE)?;
+                map.serialize_entry("media_type", self.0.media_type.as_str())?;
+                map.serialize_entry("sha256", sha256)?;
+            }
+        }
+        map.end()
+    }
+}
+
+/// The `type` of an image source that names a file of the session's image
+/// folder; never sent to the API.
+pub const STORED_SOURCE: &str = "junees_file";
+
+/// The `content` of a tool result with images: its text, then the images.
+struct ResultContentOut<'a> {
+    content: &'a str,
+    images: &'a [Image],
+}
+
+impl Serialize for ResultContentOut<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(None)?;
+        if !self.content.is_empty() {
+            seq.serialize_element(&ContentBlock::text(self.content))?;
+        }
+        for image in self.images {
+            seq.serialize_element(&ImageOut(image))?;
+        }
+        seq.end()
+    }
+}
+
+struct ImageOut<'a>(&'a Image);
+
+impl Serialize for ImageOut<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("type", "image")?;
+        map.serialize_entry("source", &SourceOut(self.0))?;
+        map.end()
+    }
 }
 
 /// The block types Junees reads, in the API's shape. Blocks of these types
@@ -79,6 +220,9 @@ enum Known {
         #[serde(default)]
         citations: Option<Value>,
     },
+    Image {
+        source: SourceIn,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -86,10 +230,57 @@ enum Known {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ResultContentIn,
         #[serde(default)]
         is_error: bool,
     },
+}
+
+/// An image block's `source` as Junees writes it.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SourceIn {
+    Base64 {
+        media_type: String,
+        data: String,
+    },
+    #[serde(rename = "junees_file")]
+    Stored {
+        media_type: String,
+        sha256: String,
+    },
+}
+
+impl SourceIn {
+    fn image(self) -> Result<Image, String> {
+        let (media_type, source) = match self {
+            SourceIn::Base64 { media_type, data } => (media_type, Source::Base64(data.into())),
+            SourceIn::Stored { media_type, sha256 } => {
+                if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(format!("`{sha256}` is not a SHA-256 in hex"));
+                }
+                (media_type, Source::Stored { sha256 })
+            }
+        };
+        let media_type = MediaType::parse(&media_type)
+            .ok_or_else(|| format!("unsupported image media_type `{media_type}`"))?;
+        Ok(Image { media_type, source })
+    }
+}
+
+/// A tool result's `content`: text, or text and image blocks.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ResultContentIn {
+    Text(String),
+    Blocks(Vec<ResultBlockIn>),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ResultBlockIn {
+    Text { text: String },
+    Image { source: SourceIn },
 }
 
 impl TryFrom<Value> for ContentBlock {
@@ -100,30 +291,44 @@ impl TryFrom<Value> for ContentBlock {
             .get("type")
             .and_then(Value::as_str)
             .ok_or("a content block must be an object with a string `type`")?;
-        if !matches!(kind, "text" | "tool_use" | "tool_result") {
+        if !matches!(kind, "text" | "image" | "tool_use" | "tool_result") {
             return Ok(ContentBlock::Other(value));
         }
         Ok(
             match serde_json::from_value(value).map_err(|err| err.to_string())? {
                 // `citations: null` reads as `None`.
                 Known::Text { text, citations } => ContentBlock::Text { text, citations },
+                Known::Image { source } => ContentBlock::Image(source.image()?),
                 Known::ToolUse { id, name, input } => ContentBlock::ToolUse { id, name, input },
                 Known::ToolResult {
                     tool_use_id,
                     content,
                     is_error,
-                } => ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                },
+                } => {
+                    let (content, images) = match content {
+                        ResultContentIn::Text(text) => (text, Vec::new()),
+                        ResultContentIn::Blocks(blocks) => {
+                            let mut texts = Vec::new();
+                            let mut images = Vec::new();
+                            for block in blocks {
+                                match block {
+                                    ResultBlockIn::Text { text } => texts.push(text),
+                                    ResultBlockIn::Image { source } => images.push(source.image()?),
+                                }
+                            }
+                            (texts.join("\n"), images)
+                        }
+                    };
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        images,
+                    }
+                }
             },
         )
     }
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -249,6 +454,7 @@ mod tests {
             tool_use_id: "toolu_1".into(),
             content: "ok".into(),
             is_error: false,
+            images: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&block).unwrap(),
@@ -262,6 +468,7 @@ mod tests {
             tool_use_id: "toolu_1".into(),
             content: "boom".into(),
             is_error: true,
+            images: Vec::new(),
         };
         assert_eq!(serde_json::to_value(&block).unwrap()["is_error"], true);
     }
@@ -310,6 +517,138 @@ mod tests {
                 serde_json::from_value::<ContentBlock>(bad.clone()).is_err(),
                 "{bad} was accepted"
             );
+        }
+    }
+
+    fn png_image() -> Image {
+        Image::from_bytes(&crate::images::testing::png(4, 3))
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn image_blocks_take_the_api_shape() {
+        let image = png_image();
+        let Source::Base64(data) = &image.source else {
+            panic!();
+        };
+        let data = data.to_string();
+        let block = ContentBlock::Image(image.clone());
+        let value = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            value,
+            json!({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                               "data": data}})
+        );
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(value).unwrap(),
+            block
+        );
+
+        // A tool result with images: a text block, then the images.
+        let result = ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "Image a.png".into(),
+            is_error: false,
+            images: vec![image.clone()],
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            value,
+            json!({"type": "tool_result", "tool_use_id": "toolu_1", "content": [
+                {"type": "text", "text": "Image a.png"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                             "data": data}}
+            ]})
+        );
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(value).unwrap(),
+            result
+        );
+        assert_eq!(result.images(), std::slice::from_ref(&image));
+        assert!(ContentBlock::text("x").images().is_empty());
+
+        // Without images the content stays a string, as before.
+        assert_eq!(
+            serde_json::to_value(ContentBlock::tool_result("t", "ok", true)).unwrap(),
+            json!({"type": "tool_result", "tool_use_id": "t", "content": "ok", "is_error": true})
+        );
+        // Text-only lists (as the API also takes them) read as text.
+        let listed = json!({"type": "tool_result", "tool_use_id": "t",
+                            "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]});
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(listed).unwrap(),
+            ContentBlock::tool_result("t", "a\nb", false)
+        );
+    }
+
+    #[test]
+    fn stored_images_name_their_file() {
+        let sha = "ab".repeat(32);
+        let block = ContentBlock::Image(Image {
+            media_type: MediaType::Webp,
+            source: Source::Stored {
+                sha256: sha.clone(),
+            },
+        });
+        let value = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            value,
+            json!({"type": "image", "source": {"type": STORED_SOURCE, "media_type": "image/webp",
+                                               "sha256": sha}})
+        );
+        assert_eq!(
+            serde_json::from_value::<ContentBlock>(value).unwrap(),
+            block
+        );
+    }
+
+    #[test]
+    fn image_blocks_must_parse() {
+        for bad in [
+            json!({"type": "image"}),
+            json!({"type": "image", "source": {"type": "base64", "media_type": "image/svg+xml",
+                                               "data": "x"}}),
+            json!({"type": "image", "source": {"type": "url", "url": "https://x"}}),
+            json!({"type": "image", "source": {"type": "junees_file", "media_type": "image/png",
+                                               "sha256": "../../etc/passwd"}}),
+            json!({"type": "tool_result", "tool_use_id": "t",
+                   "content": [{"type": "document", "source": {}}]}),
+            json!({"type": "tool_result", "tool_use_id": "t", "content": 5}),
+        ] {
+            assert!(
+                serde_json::from_value::<ContentBlock>(bad.clone()).is_err(),
+                "{bad} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_blocks_and_cache_marks_still_serialize() {
+        // The request adds `cache_control` by flattening a block into a
+        // struct of its own.
+        #[derive(Serialize)]
+        struct Marked<'a> {
+            #[serde(flatten)]
+            block: &'a ContentBlock,
+            cache_control: Value,
+        }
+        let mark = json!({"type": "ephemeral"});
+        for (block, kind) in [
+            (ContentBlock::Image(png_image()), "image"),
+            (ContentBlock::text("hi"), "text"),
+            (
+                ContentBlock::Other(json!({"type": "server_tool_use", "id": "s"})),
+                "server_tool_use",
+            ),
+        ] {
+            let value = serde_json::to_value(Marked {
+                block: &block,
+                cache_control: mark.clone(),
+            })
+            .unwrap();
+            assert_eq!(value["type"], kind);
+            assert_eq!(value["cache_control"], mark);
         }
     }
 

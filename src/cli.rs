@@ -52,6 +52,8 @@ Advanced:
 
 Options:
   -p, --prompt <PROMPT>  run a single prompt non-interactively
+      --image <PATH>     send an image with the prompt (PNG, JPEG, GIF or WebP up to
+                         5 MB; repeat for more; api backend)
   -c, --continue         continue the latest session started in this folder
       --resume <ID>      continue the session with this id (a unique prefix is enough)
       --no-session       do not save this session
@@ -127,6 +129,9 @@ pub const REPL_HELP: &str = "\
 /search <words>    search the saved sessions of this folder (\"a phrase\" in quotes;
                    --all every folder, --limit N, --source discord|cron|webhook)
 /new               start a new conversation (also /reset)
+/image <path> [<question>]
+                   send an image with a question (PNG, JPEG, GIF or WebP up to
+                   5 MB; quote a path with spaces; api backend)
 /model [<name>]    show the model, or switch to another for this session
 /backend [api|claude-code]
                    show what runs the conversation and /task, or switch both
@@ -248,6 +253,8 @@ pub struct RunArgs {
     /// Run this one prompt instead of starting the interactive mode.
     pub prompt: Option<String>,
     pub session: SessionMode,
+    /// `--image` files sent with the prompt, in order.
+    pub images: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -355,6 +362,9 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                 set_session(SessionMode::Resume(id))?;
             }
             "--no-session" => set_session(SessionMode::Off)?,
+            "--image" => run
+                .images
+                .push(args.next().context("--image needs a file path")?),
             // Everything after it is the prompt, even if it starts with -.
             "--" => {
                 for text in args.by_ref() {
@@ -368,6 +378,12 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
             }
             _ => set_prompt(arg)?,
         }
+    }
+    if !run.images.is_empty() && prompt.is_none() {
+        bail!(
+            "--image goes with a prompt (junees --image shot.png \"what is wrong here?\"); \
+             in the conversation use /image <path> [<question>]"
+        );
     }
     run.prompt = prompt;
     Ok(Command::Run(run))
@@ -564,7 +580,40 @@ mod tests {
         Command::Run(RunArgs {
             prompt: prompt.map(Into::into),
             session,
+            images: Vec::new(),
         })
+    }
+
+    #[test]
+    fn images_go_with_a_prompt() {
+        assert_eq!(
+            parse(&[
+                "--image",
+                "a.png",
+                "-p",
+                "what is this?",
+                "--image",
+                "b b.jpg"
+            ])
+            .unwrap(),
+            Command::Run(RunArgs {
+                prompt: Some("what is this?".into()),
+                images: vec!["a.png".into(), "b b.jpg".into()],
+                ..RunArgs::default()
+            })
+        );
+        assert_eq!(
+            parse(&["보여 줘", "--image", "-dash.png"]).unwrap(),
+            Command::Run(RunArgs {
+                prompt: Some("보여 줘".into()),
+                images: vec!["-dash.png".into()],
+                ..RunArgs::default()
+            })
+        );
+        let err = parse(&["--image", "a.png"]).unwrap_err().to_string();
+        assert!(err.starts_with("--image goes with a prompt"), "{err}");
+        let err = parse(&["-p", "x", "--image"]).unwrap_err().to_string();
+        assert_eq!(err, "--image needs a file path");
     }
 
     #[test]

@@ -225,6 +225,7 @@ fn result_of(agent: &Agent, id: &str) -> (String, bool) {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } if tool_use_id == id => Some((content.clone(), *is_error)),
             _ => None,
         })
@@ -336,6 +337,7 @@ async fn a_subagent_cannot_delegate_further() {
             tool_use_id: "c1".into(),
             content: "unknown tool `delegate`".into(),
             is_error: true,
+            images: Vec::new(),
         }]
     );
     assert!(router.seen("deeper").is_empty());
@@ -474,6 +476,7 @@ async fn cancel_stops_every_subagent() {
                 tool_use_id: id.into(),
                 content: crate::agent::CANCELLED.into(),
                 is_error: true,
+                images: Vec::new(),
             }]
         );
     }
@@ -613,6 +616,7 @@ async fn subagents_ask_through_the_parent_gate() {
             tool_use_id: "b1".into(),
             content: "the user declined: not this one".into(),
             is_error: true,
+            images: Vec::new(),
         }]
     );
     assert!(

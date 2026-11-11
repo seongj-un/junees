@@ -5,6 +5,10 @@ use serde_json::{Value, json};
 
 use std::path::Path;
 
+use tokio::io::AsyncReadExt;
+
+use crate::images::{self, Image, MediaType};
+
 use super::{
     MAX_FILE_BYTES, SettingsFile, Tool, ToolOutput, ToolSettings, opt_u64_arg, str_arg,
     truncate_middle,
@@ -13,7 +17,8 @@ use super::{
 const DEFAULT_LIMIT: u64 = 2000;
 const MAX_OUTPUT_CHARS: usize = 50_000;
 
-/// Reads a text file and returns it with line numbers.
+/// Reads a text file and returns it with line numbers, or an image file as
+/// an image the model looks at ([`crate::images`]).
 #[derive(Default)]
 pub struct ReadFile {
     settings_file: Option<SettingsFile>,
@@ -36,7 +41,9 @@ impl Tool for ReadFile {
 
     fn description(&self) -> &str {
         "Read a text file. Lines come back numbered as `LINE<TAB>CONTENT`. \
-         Use offset and limit to page through long files."
+         Use offset and limit to page through long files. A PNG, JPEG, GIF or WebP \
+         image (up to 5 MB and 8000x8000 px) comes back as the image itself, for you \
+         to look at; offset and limit do not apply to it."
     }
 
     fn input_schema(&self) -> Value {
@@ -75,6 +82,9 @@ impl Tool for ReadFile {
                 return ToolOutput::error(format!("{path} is not a regular file"));
             }
             Ok(meta) if meta.len() > MAX_FILE_BYTES => {
+                if MediaType::detect(&head(path).await).is_some() {
+                    return ToolOutput::error(format!("{path}: {}", images::too_large(meta.len())));
+                }
                 return ToolOutput::error(format!(
                     "{path} is {} bytes; read_file reads files up to {} MB. \
                      Use bash (head, tail, sed -n, grep) to look at parts of it.",
@@ -89,6 +99,21 @@ impl Tool for ReadFile {
             Ok(bytes) => bytes,
             Err(err) => return ToolOutput::error(format!("cannot read {path}: {err}")),
         };
+        if MediaType::detect(&bytes).is_some() {
+            return match Image::from_bytes(&bytes) {
+                Ok((image, size)) => ToolOutput::image(
+                    format!(
+                        "Image {path} ({}, {}x{} px, {}), attached below.",
+                        image.media_type.as_str(),
+                        size.width,
+                        size.height,
+                        images::human_bytes(bytes.len() as u64)
+                    ),
+                    image,
+                ),
+                Err(err) => ToolOutput::error(format!("{path}: {err}")),
+            };
+        }
         if bytes.contains(&0) {
             return ToolOutput::error(format!("{path} looks like a binary file"));
         }
@@ -121,6 +146,16 @@ impl Tool for ReadFile {
         }
         ToolOutput::ok(truncate_middle(&out, MAX_OUTPUT_CHARS))
     }
+}
+
+/// The first bytes of the file at `path`, enough to tell an image; empty
+/// when it cannot be read.
+async fn head(path: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if let Ok(file) = tokio::fs::File::open(path).await {
+        let _ = file.take(16).read_to_end(&mut bytes).await;
+    }
+    bytes
 }
 
 #[cfg(test)]
@@ -210,6 +245,51 @@ mod tests {
         let output = read(json!({"path": file.path()})).await;
         assert!(output.is_error);
         assert!(output.content.contains("binary"));
+    }
+
+    #[tokio::test]
+    async fn images_come_back_as_images() {
+        let dir = tempfile::tempdir().unwrap();
+        // Told by its bytes, not its name.
+        let path = dir.path().join("diagram.txt");
+        std::fs::write(&path, crate::images::testing::png(640, 480)).unwrap();
+        let output = read(json!({"path": path, "offset": 3})).await;
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(
+            output.content,
+            format!(
+                "Image {} (image/png, 640x480 px, 45 B), attached below.",
+                path.display()
+            )
+        );
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(
+            output.images[0].bytes().unwrap(),
+            crate::images::testing::png(640, 480)
+        );
+
+        let wide = dir.path().join("wide.jpg");
+        std::fs::write(&wide, crate::images::testing::jpeg(9000, 10)).unwrap();
+        let output = read(json!({"path": wide})).await;
+        assert!(output.is_error && output.images.is_empty());
+        assert!(output.content.contains("9000x10 px"), "{}", output.content);
+
+        let big = dir.path().join("big.png");
+        let mut bytes = crate::images::testing::png(10, 10);
+        bytes.resize(crate::images::MAX_IMAGE_BYTES as usize + 1, 0);
+        std::fs::write(&big, &bytes).unwrap();
+        let output = read(json!({"path": big})).await;
+        assert!(output.is_error);
+        assert!(output.content.contains("up to 5 MB"), "{}", output.content);
+        // Over read_file's own limit: still named as an image.
+        bytes.resize(MAX_FILE_BYTES as usize + 1, 0);
+        std::fs::write(&big, &bytes).unwrap();
+        let output = read(json!({"path": big})).await;
+        assert!(
+            output.content.contains("images are sent up to 5 MB"),
+            "{}",
+            output.content
+        );
     }
 
     #[tokio::test]

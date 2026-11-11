@@ -11,6 +11,8 @@ readme = "README.md"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+# Already built for reqwest; images go to the API base64-encoded.
+base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

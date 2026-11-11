@@ -336,12 +336,23 @@ impl Agent {
     /// and the next input is appended to it, so the conversation stays valid.
     /// The exception is a reply the API paused (`pause_turn`): it is kept,
     /// and the next input follows it as a new user message.
-    pub async fn run(
+    pub async fn run(&mut self, input: &str, on_event: impl FnMut(Event<'_>)) -> Result<String> {
+        self.run_with_images(input, Vec::new(), on_event).await
+    }
+
+    /// [`Agent::run`] for an input that comes with images (`/image`,
+    /// `--image`, Discord attachments): they go before its text in the
+    /// same user message.
+    pub async fn run_with_images(
         &mut self,
         input: &str,
+        images: Vec<crate::images::Image>,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
-        let result = self.run_turn(input, &mut on_event).await;
+        let result = self.run_turn(input, images, &mut on_event).await;
+        if let Err(err) = &result {
+            self.forget_rejected_images(err, &mut on_event);
+        }
         if let Some(after_turn) = &self.after_turn {
             after_turn.after_turn(input, &result).await;
         }
@@ -351,10 +362,11 @@ impl Agent {
     async fn run_turn(
         &mut self,
         input: &str,
+        images: Vec<crate::images::Image>,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
         self.drop_open_server_calls(&mut on_event);
-        let entry = self.transcript.user_text_entry(input);
+        let entry = self.transcript.user_input_entry(input, images);
         self.record(entry, &mut on_event);
         let specs = self.tools.specs();
         let cancel = self.cancel.clone();
@@ -457,11 +469,7 @@ impl Agent {
                 on_event(Event::Warning(reason));
                 let results = tool_calls
                     .into_iter()
-                    .map(|(id, _, _)| ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content: reason.to_string(),
-                        is_error: true,
-                    })
+                    .map(|(id, _, _)| ContentBlock::tool_result(id, reason, true))
                     .collect();
                 let results = Message {
                     role: Role::User,
@@ -503,6 +511,7 @@ impl Agent {
                     tool_use_id: id,
                     content: output.content,
                     is_error: output.is_error,
+                    images: output.images,
                 });
             }
             let results = Message {
@@ -536,6 +545,31 @@ impl Agent {
             "dropped {count} web search call(s) the last turn stopped before running; \
              the model goes on from your new message"
         )));
+    }
+
+    /// After a turn failed because the API rejected an image: takes the
+    /// images out of the message the turn ended on (see
+    /// [`Transcript::clear_images_entry`]) and says so, so the next input
+    /// does not carry them to the same error.
+    fn forget_rejected_images(
+        &mut self,
+        err: &anyhow::Error,
+        on_event: &mut impl FnMut(Event<'_>),
+    ) {
+        if !err
+            .downcast_ref::<ProviderError>()
+            .is_some_and(ProviderError::is_image_rejected)
+        {
+            return;
+        }
+        let Some(entry) = self.transcript.clear_images_entry() else {
+            return;
+        };
+        self.record(entry, on_event);
+        on_event(Event::Warning(
+            "the API rejected an image in this message; it was taken out of the conversation, \
+             so your next message goes without it (attach a fixed copy to try again)",
+        ));
     }
 
     /// Runs one tool call, unless the gate turns it down.
@@ -961,6 +995,130 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn images_go_with_the_input_and_come_back_from_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, crate::images::testing::png(12, 8)).unwrap();
+        let provider = Scripted::new(vec![
+            tool_use("toolu_1", "read_file", json!({"path": shot})),
+            text("a small picture"),
+        ]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        agent.tools.register(crate::tools::ReadFile::default());
+        let attached = crate::images::Image::from_bytes(&crate::images::testing::png(3, 3))
+            .unwrap()
+            .0;
+        let answer = agent
+            .run_with_images("compare", vec![attached.clone()], |_| {})
+            .await
+            .unwrap();
+        assert_eq!(answer, "a small picture");
+
+        let seen = seen.lock().unwrap();
+        // The input: the image, then its text.
+        assert_eq!(
+            seen[0][0].content,
+            [ContentBlock::Image(attached), ContentBlock::text("compare")]
+        );
+        // The file the model read came back as an image in its result.
+        let ContentBlock::ToolResult {
+            content, images, ..
+        } = &seen[1][2].content[0]
+        else {
+            panic!("{:?}", seen[1][2]);
+        };
+        assert!(content.contains("(image/png, 12x8 px"), "{content}");
+        assert_eq!(
+            images[0].bytes().unwrap(),
+            crate::images::testing::png(12, 8)
+        );
+    }
+
+    fn rejected(message: &str) -> Reply {
+        Err(ProviderError::Api {
+            status: 400,
+            kind: Some("invalid_request_error".into()),
+            message: message.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn an_image_the_api_rejects_is_not_sent_again() {
+        let provider = Scripted::new(vec![
+            rejected(
+                "messages.0.content.0.image.source.base64: The image was specified using the \
+                 image/png media type, but does not appear to be a valid png image",
+            ),
+            text("no picture now"),
+        ]);
+        let seen = provider.seen.clone();
+        let journal = Memory::default();
+        let mut agent = agent(provider, 5).with_journal(Box::new(journal.clone()));
+        let broken = crate::images::Image::from_bytes(&crate::images::testing::png(3, 3))
+            .unwrap()
+            .0;
+        let mut log = Vec::new();
+        let err = agent
+            .run_with_images("what is it?", vec![broken.clone()], notable(&mut log))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("valid png image"), "{err}");
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(
+            log[0].starts_with("warning the API rejected an image in this message"),
+            "{log:?}"
+        );
+        assert_eq!(
+            agent.run("and now?", |_| {}).await.unwrap(),
+            "no picture now"
+        );
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0][0].content,
+            [
+                ContentBlock::Image(broken),
+                ContentBlock::text("what is it?")
+            ]
+        );
+        // The next request carries the note in place of the image.
+        assert_eq!(seen[1].len(), 1);
+        assert_eq!(
+            seen[1][0].content,
+            [
+                ContentBlock::text(session::REJECTED_IMAGES),
+                ContentBlock::text("what is it?"),
+                ContentBlock::text("and now?"),
+            ]
+        );
+        assert!(journal.0.lock().unwrap().contains(&Entry::ClearImages {
+            note: session::REJECTED_IMAGES.to_string()
+        }));
+    }
+
+    #[tokio::test]
+    async fn other_rejections_keep_the_images() {
+        let provider = Scripted::new(vec![rejected("tools.0.input_schema: invalid"), text("ok")]);
+        let seen = provider.seen.clone();
+        let mut agent = agent(provider, 5);
+        let picture = crate::images::Image::from_bytes(&crate::images::testing::png(3, 3))
+            .unwrap()
+            .0;
+        let mut log = Vec::new();
+        agent
+            .run_with_images("look", vec![picture.clone()], notable(&mut log))
+            .await
+            .unwrap_err();
+        assert!(log.is_empty(), "{log:?}");
+        agent.run("again", |_| {}).await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[1][0].content[0],
+            ContentBlock::Image(picture)
+        );
+    }
+
     /// A reply that searched the web once and cites `url`.
     fn searched(stop_reason: StopReason, text: &str, url: &str) -> Reply {
         Ok(CompletionResponse {
@@ -1301,7 +1459,7 @@ mod tests {
                 "TextEnd",
                 "ToolCall { name: \"upper\", input: Object {\"text\": String(\"abc\")} }",
                 "ToolResult { name: \"upper\", output: ToolOutput { content: \"ABC\", \
-                 is_error: false } }",
+                 is_error: false, images: [] } }",
                 "TextDelta(\"it is ABC\")",
                 "TextEnd",
             ]
@@ -1316,6 +1474,7 @@ mod tests {
                 tool_use_id: "toolu_1".into(),
                 content: "ABC".into(),
                 is_error: false,
+                images: Vec::new(),
             }]
         );
         // The second model call saw the tool result.
@@ -1524,6 +1683,7 @@ mod tests {
                 tool_use_id,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(tool_use_id, "toolu_1");
                 assert!(content.starts_with("not executed"));
@@ -1967,6 +2127,7 @@ mod tests {
                     tool_use_id,
                     content,
                     is_error,
+                    ..
                 } => Some((tool_use_id.as_str(), content.as_str(), *is_error)),
                 _ => None,
             })

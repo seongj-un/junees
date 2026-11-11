@@ -18,6 +18,7 @@ use junees::context_files::ContextFiles;
 use junees::gateway::Gateway;
 use junees::gateway::config::DiscordConfig;
 use junees::gateway::engine::{ApiEngines, ClaudeEngines, Engines};
+use junees::images::{self, Image};
 use junees::mcp::Mcp;
 use junees::memory::{Memory, MemoryTool, Mode, Target};
 use junees::notify::Notifier;
@@ -244,6 +245,13 @@ fn usage_report(args: &junees::usage::args::UsageArgs) -> Result<String> {
 }
 
 /// Whether questions can be asked: both stdin and stderr are terminals.
+/// `$HOME`, where `~` in an image path points.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
 fn on_terminal() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
@@ -370,10 +378,19 @@ impl Engine {
         }
     }
 
-    /// Runs one input.
-    async fn turn(&mut self, input: &str, on_event: impl FnMut(Event<'_>)) -> Result<()> {
+    /// Runs one input, with the images sent with it.
+    async fn turn(
+        &mut self,
+        input: &str,
+        images: Vec<Image>,
+        on_event: impl FnMut(Event<'_>),
+    ) -> Result<()> {
         match self {
-            Engine::Api(agent) => agent.run(input, on_event).await.map(drop),
+            Engine::Api(agent) => agent
+                .run_with_images(input, images, on_event)
+                .await
+                .map(drop),
+            Engine::Claude(_) if !images.is_empty() => bail!(images::NOT_ON_CLAUDE_CODE),
             Engine::Claude(chat) => chat.turn(input, on_event).await,
         }
     }
@@ -590,6 +607,18 @@ async fn conversation(
     let backend = Backend::from_lookup(|key| settings.get(key))?;
     let config = conversation_config(&settings, backend)?;
     let cwd = std::env::current_dir()?;
+    // Before anything starts: a wrong path should not cost a server start.
+    if !args.images.is_empty() && matches!(backend, Backend::ClaudeCode) {
+        bail!(images::NOT_ON_CLAUDE_CODE);
+    }
+    let mut attached = Vec::new();
+    for path in &args.images {
+        let (image, line) =
+            images::load_file(&images::resolve_path(path, &cwd, home_dir().as_deref()))
+                .map_err(anyhow::Error::msg)?;
+        eprintln!("(attached {line})");
+        attached.push(image);
+    }
     let cancel = Cancel::new();
     let interactive = args.prompt.is_none();
     let mcp = match backend {
@@ -633,7 +662,9 @@ async fn conversation(
             // stdout carries only the answer.
             eprintln!("{}", opened.status);
             let mut printer = Printer::new();
-            let result = engine.turn(&prompt, |event| printer.event(event)).await;
+            let result = engine
+                .turn(&prompt, attached, |event| printer.event(event))
+                .await;
             printer.end_line();
             mcp.shutdown().await;
             match result {
@@ -1094,7 +1125,7 @@ impl Repl {
                 continue;
             }
             let terminated = match slash::parse(input) {
-                None => self.turn(input).await,
+                None => self.turn(input, Vec::new()).await,
                 Some(Slash::Exit) => return Ok(ExitCode::SUCCESS),
                 Some(command) => self.command(command).await,
             };
@@ -1221,20 +1252,44 @@ impl Repl {
                      them, and the api backend uses the enabled ones"
                 ),
             },
+            Slash::Image { path, question } => return self.image(&path, question).await,
             Slash::Bad(message) => eprintln!("{message}"),
             Slash::Exit => {}
         }
         false
     }
 
+    /// `/image <path> [<question>]`: sends the image and the question (or
+    /// a note that there is none) as one input.
+    async fn image(&mut self, path: &str, question: Option<String>) -> bool {
+        if let Engine::Claude(_) = self.engine {
+            eprintln!("{}", images::NOT_ON_CLAUDE_CODE);
+            return false;
+        }
+        let path = images::resolve_path(path, &self.cwd, home_dir().as_deref());
+        match images::load_file(&path) {
+            Ok((image, line)) => {
+                eprintln!("(attached {line})");
+                let input = question.as_deref().unwrap_or(images::NO_TEXT);
+                self.turn(input, vec![image]).await
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                false
+            }
+        }
+    }
+
     /// Runs one input. A signal cancels the turn; returns whether it was
     /// SIGTERM, which also quits.
-    async fn turn(&mut self, input: &str) -> bool {
+    async fn turn(&mut self, input: &str, images: Vec<Image>) -> bool {
         self.cancel.reset();
         let mut printer = Printer::new();
         let mut terminated = false;
         let result = {
-            let run = self.engine.turn(input, |event| printer.event(event));
+            let run = self
+                .engine
+                .turn(input, images, |event| printer.event(event));
             tokio::pin!(run);
             loop {
                 tokio::select! {

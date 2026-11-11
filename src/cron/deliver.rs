@@ -166,6 +166,7 @@ fn discord_config(lookup: &Lookup) -> Result<DiscordConfig> {
         parallel: discord::DEFAULT_PARALLEL,
         approval_timeout: discord::DEFAULT_APPROVAL_TIMEOUT,
         api_url: api_url.trim_end_matches('/').to_string(),
+        cdn_url: None,
     })
 }
 

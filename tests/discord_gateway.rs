@@ -1547,3 +1547,260 @@ async fn risky_calls_wait_for_an_answer_in_the_channel() {
         "user: the user declined: no answer within 1s"
     );
 }
+
+// --------------------------------------------------------------- Images
+
+/// A PNG header of `width` x `height`: enough for Junees, which never
+/// decodes the pixels.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    bytes.extend_from_slice(b"\x00\x00\x00\x00IEND\xaeB`\x82");
+    bytes
+}
+
+/// A loopback stand-in for Discord's CDN serving `body` at every path;
+/// returns its base URL and the paths asked for.
+async fn fake_cdn(body: Vec<u8>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&asked);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let Some(request) = read_http(&mut socket).await else {
+                continue;
+            };
+            log.lock().unwrap().push(request.path);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+        }
+    });
+    (url, asked)
+}
+
+/// A loopback stand-in for Discord's CDN that reads each request, notes
+/// its path and never answers.
+async fn silent_cdn() -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&asked);
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            if let Some(request) = read_http(&mut socket).await {
+                log.lock().unwrap().push(request.path);
+            }
+            held.push(socket);
+        }
+    });
+    (url, asked)
+}
+
+fn with_attachments(mut message: Value, attachments: Value) -> Value {
+    message["attachments"] = attachments;
+    message
+}
+
+#[tokio::test]
+async fn a_turn_downloading_its_attachments_can_be_stopped() {
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (cdn, asked) = silent_cdn().await;
+    let cdn_base = format!("{cdn}/attachments/");
+    let running = start(
+        discord(&rest.url, &[("JUNEES_DISCORD_CDN_URL", &cdn_base)]),
+        fake(Duration::ZERO),
+        None,
+        dir.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        with_attachments(
+            message("505", USER, "what is this?", false, &[]),
+            json!([{"id": "1", "filename": "shot.png", "content_type": "image/png",
+                    "size": 45, "url": format!("{cdn_base}1/2/shot.png")}]),
+        ),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while asked.lock().unwrap().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the CDN was never asked"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "!status", false, &[]),
+    )
+    .await;
+    rest.wait_post("505", |p| {
+        p.contains("a turn downloads its attachments, 0 queued")
+    })
+    .await;
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "!stop", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "(stopped before it started)")
+        .await;
+    // The stopped message never ran; the channel goes on.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "after", false, &[]))
+        .await;
+    let posts = rest.wait_post("505", |p| p == "reply 1: after").await;
+    assert!(
+        !posts.iter().any(|p| p == "(nothing is running here)"),
+        "{posts:#?}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn attached_images_reach_the_model() {
+    use base64::Engine as _;
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let picture = png(20, 10);
+    let (cdn, asked) = fake_cdn(picture.clone()).await;
+    let (api, served) = common::fake_api(vec![
+        (200, common::text_reply("A small chart.")),
+        (200, common::text_reply("No second picture.")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let cdn_base = format!("{cdn}/attachments/");
+    let running = start(
+        discord(&rest.url, &[("JUNEES_DISCORD_CDN_URL", &cdn_base)]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    let shot = json!([{
+        "id": "1", "filename": "shot.png", "content_type": "image/png", "size": picture.len(),
+        "url": format!("{cdn_base}1/2/shot.png?ex=1&hm=signed")
+    }]);
+
+    // A stranger's attachment is never downloaded.
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        with_attachments(message("505", STRANGER, "", false, &[]), shot.clone()),
+    )
+    .await;
+    // Only an image (and a file that is not one).
+    let mut both = shot.as_array().unwrap().clone();
+    both.push(
+        json!({"id": "2", "filename": "notes.txt", "content_type": "text/plain",
+                     "size": 5, "url": format!("{cdn_base}1/3/notes.txt")}),
+    );
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        with_attachments(message("505", USER, "", false, &[]), json!(both)),
+    )
+    .await;
+    rest.wait_post("505", |p| p == "A small chart.").await;
+    // A link that is not Discord's CDN is not fetched.
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        with_attachments(
+            message("505", USER, "and this one?", false, &[]),
+            json!([{"id": "3", "filename": "x.png", "content_type": "image/png", "size": 5,
+                    "url": "http://127.0.0.1:9/attachments/x.png"}]),
+        ),
+    )
+    .await;
+    let posts = rest.wait_post("505", |p| p == "No second picture.").await;
+    let log = running.stop().await;
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+
+    assert_eq!(
+        asked.lock().unwrap().clone(),
+        ["/attachments/1/2/shot.png?ex=1&hm=signed"]
+    );
+    assert!(
+        posts.contains(
+            &"(attachments left out: `notes.txt` is not an image; only images are read)"
+                .to_string()
+        ),
+        "{posts:#?}"
+    );
+    assert!(
+        posts
+            .iter()
+            .any(|p| p.contains("`x.png` is not on Discord's CDN; not downloaded")),
+        "{posts:#?}"
+    );
+    let first = common::body_of(&requests[0]);
+    let content = &first["messages"][0]["content"];
+    assert_eq!(
+        content[0],
+        json!({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+            "data": base64::engine::general_purpose::STANDARD.encode(&picture)}})
+    );
+    assert_eq!(
+        content[1]["text"],
+        "(sent with no text)\n\n(attachments left out: `notes.txt` is not an image; only images \
+         are read)"
+    );
+    let second = common::body_of(&requests[1]);
+    let last = second["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["content"].as_array().unwrap().len(), 1);
+    assert!(
+        last["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("and this one?\n\n(attachments left out: `x.png` is not on"),
+        "{last}"
+    );
+    // The first image goes again with the history.
+    assert_eq!(second["messages"][0]["content"][0], content[0]);
+
+    // The log names the format and size, not the file or the URL.
+    assert!(
+        log.iter()
+            .any(|line| line == "channel 505: attached image/png, 20x10 px (45 B)"),
+        "{log:#?}"
+    );
+    assert!(
+        !log.iter().any(|line| line.contains("shot.png")),
+        "{log:#?}"
+    );
+    // The channel's session keeps the image as a file of its own.
+    let index: Value = serde_json::from_str(
+        &std::fs::read_to_string(home.path().join("gateway/discord-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    let id = index["505"].as_str().unwrap();
+    let images: Vec<_> = std::fs::read_dir(home.path().join(format!("sessions/{id}/images")))
+        .unwrap()
+        .collect();
+    assert_eq!(images.len(), 1);
+}

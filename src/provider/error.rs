@@ -60,6 +60,29 @@ impl ProviderError {
         }
     }
 
+    /// The API rejected the request because of an image in it: a 400
+    /// `invalid_request_error` whose message names an image (`messages.0
+    /// .content.0.image.source.base64: ... does not appear to be a valid
+    /// png image`, `image exceeds 5 MB maximum`, the smaller limit of
+    /// many-image requests). A 400 that does not mention one (a bad tool
+    /// schema, a rejected thinking budget) leaves the images alone, and so
+    /// does a context overflow, which compaction handles.
+    pub fn is_image_rejected(&self) -> bool {
+        match self {
+            Self::Api {
+                status: 400,
+                kind,
+                message,
+            } => {
+                kind.as_deref()
+                    .is_none_or(|kind| kind == "invalid_request_error")
+                    && message.to_lowercase().contains("image")
+                    && !self.is_context_overflow()
+            }
+            _ => false,
+        }
+    }
+
     /// The credentials were rejected.
     pub fn is_auth(&self) -> bool {
         matches!(
@@ -153,6 +176,25 @@ mod tests {
         assert!(overflow.is_context_overflow());
         assert!(!api(400, None, "messages: field required").is_context_overflow());
         assert!(!api(500, None, "prompt is too long").is_context_overflow());
+    }
+
+    #[test]
+    fn image_rejections_are_told_apart() {
+        let broken = api(
+            400,
+            Some("invalid_request_error"),
+            "messages.0.content.0.image.source.base64: The image was specified using the \
+             image/png media type, but does not appear to be a valid png image",
+        );
+        assert!(broken.is_image_rejected());
+        assert!(api(400, None, "Image exceeds 5 MB maximum").is_image_rejected());
+        // Other 400s, other statuses and overflows leave images alone.
+        assert!(
+            !api(400, Some("invalid_request_error"), "tools.0: bad schema").is_image_rejected()
+        );
+        assert!(!api(400, Some("other_error"), "image").is_image_rejected());
+        assert!(!api(500, Some("api_error"), "image service down").is_image_rejected());
+        assert!(!api(400, None, "prompt is too long: image tokens").is_image_rejected());
     }
 
     #[test]

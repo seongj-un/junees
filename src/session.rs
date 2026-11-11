@@ -28,8 +28,14 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// [`Entry::Format`] line. Format 4 added `drop_server_calls`. Format 5
 /// added conversations run by Claude Code: the meta line's `backend` and
 /// `claude_turn` entries, which a format 4 Junees would replay as an empty
-/// API conversation. Format 6 added `subagent_usage`.
-pub const FORMAT: u32 = 6;
+/// API conversation. Format 6 added `subagent_usage`. Format 7 added
+/// images: `image` blocks and tool results with images, whose source names
+/// a file of the session's image folder ([`crate::images::store`]), and
+/// `append_content`; a format 6 Junees would send such sources to the API,
+/// or refuse a tool result whose content is a list as corrupt. Format 8
+/// added `clear_images`, which a format 7 Junees would refuse as a corrupt
+/// line.
+pub const FORMAT: u32 = 8;
 
 /// [`Meta::backend`] of a conversation Claude Code runs (the `claude-code`
 /// backend).
@@ -51,6 +57,11 @@ pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool fini
 
 /// What a tool result says once its output was cleared to save context.
 pub const CLEARED: &str = "[tool output cleared to save context]";
+
+/// What takes the place of the images of a message the API rejected
+/// ([`Entry::ClearImages`]).
+pub const REJECTED_IMAGES: &str =
+    "[image removed: the API rejected the request that carried it, so it is not sent again]";
 
 /// Tool result messages whose output is never cleared: the most recent ones.
 pub const KEEP_TOOL_RESULTS: usize = 3;
@@ -98,10 +109,11 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 11] = [
+const ENTRY_TYPES: [&str; 13] = [
     "meta",
     "message",
     "append_text",
+    "append_content",
     "usage",
     "clear_tool_results",
     "summary_usage",
@@ -110,6 +122,7 @@ const ENTRY_TYPES: [&str; 11] = [
     "drop_server_calls",
     "claude_turn",
     "subagent_usage",
+    "clear_images",
 ];
 
 /// One line of a journal.
@@ -122,6 +135,11 @@ pub enum Entry {
     /// A text block was added to the trailing user message.
     AppendText {
         text: String,
+    },
+    /// Blocks were added to the trailing user message: an input with
+    /// images ([`Transcript::user_input_entry`]).
+    AppendContent {
+        content: Vec<ContentBlock>,
     },
     /// Token usage of one model call.
     Usage(Usage),
@@ -176,6 +194,15 @@ pub enum Entry {
     /// a task's budget) but say nothing about this conversation's context
     /// size; their own histories are in journals of their own.
     SubagentUsage(Usage),
+    /// The images of the trailing user message were replaced by `note`:
+    /// the API rejected the request that carried them (a file whose header
+    /// looks right but whose data is broken, for one), so sending them
+    /// again would fail the same way ([`Transcript::clear_images_entry`]).
+    /// An input image becomes the note; a tool result loses its images and
+    /// gets the note after its output.
+    ClearImages {
+        note: String,
+    },
 }
 
 /// One turn of a conversation Claude Code runs.
@@ -289,6 +316,17 @@ impl Transcript {
                     }),
                 }
             }
+            Entry::AppendContent { content } => {
+                self.unmeasured_tokens += estimate_tokens(&content);
+                self.reply_measured = false;
+                match self.messages.last_mut() {
+                    Some(last) if last.role == Role::User => last.content.extend(content),
+                    _ => self.messages.push(Message {
+                        role: Role::User,
+                        content,
+                    }),
+                }
+            }
             Entry::Usage(usage) => {
                 self.usage.add(usage);
                 // A call that searched the web reports the cache reads of
@@ -312,8 +350,13 @@ impl Transcript {
             } => {
                 for message in self.messages.iter_mut().take(upto) {
                     for block in &mut message.content {
-                        if let ContentBlock::ToolResult { content, .. } = block {
+                        // Images a tool gave back go with its output.
+                        if let ContentBlock::ToolResult {
+                            content, images, ..
+                        } = block
+                        {
                             *content = CLEARED.to_string();
+                            images.clear();
                         }
                     }
                 }
@@ -337,16 +380,20 @@ impl Transcript {
                     _ => {
                         // The cut was inside the turn of the first message's
                         // input. That input is the task the turn works on,
-                        // so it stays as typed rather than only summarized.
+                        // so it stays as typed rather than only summarized,
+                        // with the images it came with.
                         let mut content = vec![block];
                         if let Some(input) = dropped.first() {
                             content.extend(
                                 input
                                     .content
                                     .iter()
-                                    .filter(|block| {
-                                        matches!(block, ContentBlock::Text { text, .. }
-                                            if !text.starts_with(SUMMARY_HEADER))
+                                    .filter(|block| match block {
+                                        ContentBlock::Text { text, .. } => {
+                                            !text.starts_with(SUMMARY_HEADER)
+                                        }
+                                        ContentBlock::Image(_) => true,
+                                        _ => false,
                                     })
                                     .cloned(),
                             );
@@ -380,6 +427,43 @@ impl Transcript {
                 if turn.claude_session.is_some() {
                     self.claude_session = turn.claude_session;
                 }
+            }
+            Entry::ClearImages { note } => {
+                let Some(last) = self.messages.last_mut() else {
+                    return;
+                };
+                if last.role != Role::User {
+                    return;
+                }
+                let before = estimate_tokens(&last.content);
+                let mut content = Vec::with_capacity(last.content.len());
+                let mut noted = false;
+                for mut block in std::mem::take(&mut last.content) {
+                    match &mut block {
+                        // All of the message's input images become one note.
+                        ContentBlock::Image(_) => {
+                            if !noted {
+                                content.push(ContentBlock::text(note.clone()));
+                                noted = true;
+                            }
+                            continue;
+                        }
+                        ContentBlock::ToolResult {
+                            content: output,
+                            images,
+                            ..
+                        } if !images.is_empty() => {
+                            images.clear();
+                            output.push_str(&format!("\n{note}"));
+                        }
+                        _ => {}
+                    }
+                    content.push(block);
+                }
+                last.content = content;
+                let after = estimate_tokens(&last.content);
+                self.unmeasured_tokens = (self.unmeasured_tokens + after).saturating_sub(before);
+                self.reply_measured = false;
             }
             Entry::DropServerCalls { ids } => {
                 let dropped = |block: &ContentBlock| {
@@ -623,6 +707,41 @@ impl Transcript {
         }
     }
 
+    /// The entry that adds user input with `images` before its text, as the
+    /// vision docs advise ("Claude works best when images come before
+    /// text"); without images, [`Transcript::user_text_entry`].
+    pub fn user_input_entry(&self, text: &str, images: Vec<crate::images::Image>) -> Entry {
+        if images.is_empty() {
+            return self.user_text_entry(text);
+        }
+        let mut content: Vec<ContentBlock> = images.into_iter().map(ContentBlock::Image).collect();
+        content.push(ContentBlock::text(text));
+        match self.messages.last() {
+            Some(last) if last.role == Role::User => Entry::AppendContent { content },
+            _ => Entry::Message(Message {
+                role: Role::User,
+                content,
+            }),
+        }
+    }
+
+    /// The entry that takes the images out of the trailing user message,
+    /// or `None` when the history does not end with a user message holding
+    /// images. Called after the API rejected a request because of an image
+    /// ([`crate::provider::ProviderError::is_image_rejected`]): a failed
+    /// turn leaves its input as the last message and the next input joins
+    /// it, so without this the rejected image would go with every later
+    /// request, and compaction keeps the latest inputs whole. Only the
+    /// trailing message changes, so no thinking block sees an edited
+    /// prefix; images the API took in earlier turns stay.
+    pub fn clear_images_entry(&self) -> Option<Entry> {
+        let last = self.messages.last()?;
+        (last.role == Role::User && last.content.iter().any(|block| !block.images().is_empty()))
+            .then(|| Entry::ClearImages {
+                note: REJECTED_IMAGES.to_string(),
+            })
+    }
+
     /// If the history ends with tool calls that never got a result (the
     /// process stopped while they ran), the user message that answers each
     /// of them with an error.
@@ -635,11 +754,9 @@ impl Transcript {
             .content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::ToolUse { id, .. } => Some(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: INTERRUPTED.to_string(),
-                    is_error: true,
-                }),
+                ContentBlock::ToolUse { id, .. } => {
+                    Some(ContentBlock::tool_result(id.clone(), INTERRUPTED, true))
+                }
                 _ => None,
             })
             .collect();
@@ -654,9 +771,39 @@ impl Transcript {
 const SERVER_CALL_TYPES: [&str; 2] = ["server_tool_use", "mcp_tool_use"];
 
 /// A rough token count of content blocks: [`estimate_text_tokens`] of
-/// their JSON.
+/// their JSON, but images by their size in pixels
+/// ([`crate::images::Image::estimate_tokens`]), not by their base64.
 pub fn estimate_tokens(content: &[ContentBlock]) -> u64 {
-    serde_json::to_string(content).map_or(0, |json| estimate_text_tokens(&json))
+    if content.iter().all(|block| block.images().is_empty()) {
+        return json_tokens(content);
+    }
+    content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Image(image) => image.estimate_tokens(),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                images,
+            } => {
+                json_tokens(&ContentBlock::tool_result(
+                    tool_use_id.as_str(),
+                    content.as_str(),
+                    *is_error,
+                )) + images
+                    .iter()
+                    .map(|image| image.estimate_tokens())
+                    .sum::<u64>()
+            }
+            block => json_tokens(block),
+        })
+        .sum()
+}
+
+/// [`estimate_text_tokens`] of the JSON of `value`.
+fn json_tokens<T: Serialize + ?Sized>(value: &T) -> u64 {
+    serde_json::to_string(value).map_or(0, |json| estimate_text_tokens(&json))
 }
 
 /// A rough token count of `text`, counted per character: a quarter token
@@ -883,9 +1030,17 @@ impl SessionWriter {
                 self.meta.format = FORMAT;
             }
         }
-        let result = result.and_then(|()| write_line(&mut file, entry, model));
+        // Images go to files of the session's folder; the line names them.
+        let result = result
+            .and_then(|()| crate::images::store::stored_entry(entry, &self.images_dir()))
+            .and_then(|stored| write_line(&mut file, stored.as_ref().unwrap_or(entry), model));
         self.file = Some(file);
         result
+    }
+
+    /// Where the images of this journal's entries are kept.
+    fn images_dir(&self) -> PathBuf {
+        crate::images::store::dir_of(&self.path)
     }
 }
 
@@ -1011,6 +1166,7 @@ impl Session {
             bail!("{} is not a Junees session (no meta line)", path.display());
         };
         let mut transcript = Transcript::default();
+        let images = crate::images::store::dir_of(path);
         for entry in entries {
             match entry {
                 Entry::Meta(_) => bail!("{}: unexpected second meta line", path.display()),
@@ -1018,7 +1174,7 @@ impl Session {
                 Entry::Format { format } => meta.format = meta.format.max(format),
                 _ => {}
             }
-            transcript.apply(entry);
+            transcript.apply(crate::images::store::resolve_entry(entry, &images));
         }
         Ok(Self {
             path: path.to_path_buf(),
@@ -1373,6 +1529,191 @@ mod tests {
         assert_eq!(transcript.messages[0].text(), "first\nsecond");
     }
 
+    fn picture(width: u32) -> crate::images::Image {
+        crate::images::Image::from_bytes(&crate::images::testing::png(width, 10))
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn inputs_with_images_put_them_first() {
+        let mut transcript = Transcript::default();
+        let entry = transcript.user_input_entry("what is this?", vec![picture(1), picture(2)]);
+        let Entry::Message(message) = &entry else {
+            panic!("{entry:?}");
+        };
+        assert_eq!(
+            message.content,
+            [
+                ContentBlock::Image(picture(1)),
+                ContentBlock::Image(picture(2)),
+                ContentBlock::text("what is this?")
+            ]
+        );
+        transcript.apply(entry);
+        // After a failed turn the input joins the trailing user message.
+        let entry = transcript.user_input_entry("and this?", vec![picture(3)]);
+        assert_eq!(
+            entry,
+            Entry::AppendContent {
+                content: vec![
+                    ContentBlock::Image(picture(3)),
+                    ContentBlock::text("and this?")
+                ]
+            }
+        );
+        transcript.apply(entry);
+        assert_eq!(transcript.messages.len(), 1);
+        assert_eq!(transcript.messages[0].content.len(), 5);
+        assert_eq!(transcript.messages[0].text(), "what is this?\nand this?");
+        // Without images, as before.
+        assert!(matches!(
+            transcript.user_input_entry("plain", Vec::new()),
+            Entry::AppendText { .. }
+        ));
+        // A content entry with no user message to join starts one.
+        let mut empty = Transcript::default();
+        empty.apply(Entry::AppendContent {
+            content: vec![ContentBlock::text("x")],
+        });
+        assert_eq!(empty.messages, [Message::user_text("x")]);
+    }
+
+    #[test]
+    fn images_are_kept_as_files_and_come_back_on_resume() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let (meta, mut writer) =
+            SessionWriter::create(home.path(), Path::new("/work"), "m").unwrap();
+        let mut expected = Transcript::default();
+        let input = expected.user_input_entry("look", vec![picture(5)]);
+        let call = Entry::Message(tool_call("toolu_1"));
+        let result = Entry::Message(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "Image a.png".into(),
+                is_error: false,
+                images: vec![picture(6), picture(5)],
+            }],
+        });
+        for entry in [input, call, result] {
+            writer.record(&entry).unwrap();
+            expected.apply(entry);
+        }
+        drop(writer);
+
+        let path = sessions_dir(home.path()).join(format!("{}.jsonl", meta.id));
+        let journal = fs::read_to_string(&path).unwrap();
+        assert!(!journal.contains("\"base64\""), "{journal}");
+        assert_eq!(journal.matches("\"junees_file\"").count(), 3);
+        assert!(
+            journal.contains(&format!("\"format\":{FORMAT}")),
+            "{journal}"
+        );
+        let images = sessions_dir(home.path()).join(&meta.id).join("images");
+        let mut files: Vec<String> = fs::read_dir(&images)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 2, "{files:?}");
+        for file in &files {
+            assert!(file.ends_with(".png") && file.len() == 64 + 4, "{file}");
+            let mode = fs::metadata(images.join(file))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        let (session, writer) = Session::resume(&path).unwrap();
+        assert_eq!(session.transcript, expected);
+        assert_eq!(
+            session.transcript.messages[0].content[0],
+            ContentBlock::Image(picture(5))
+        );
+        drop(writer);
+
+        // A deleted image file leaves a note in its place.
+        for file in &files {
+            fs::remove_file(images.join(file)).unwrap();
+        }
+        let session = Session::load(&path).unwrap();
+        let first = &session.transcript.messages[0].content[0];
+        assert!(
+            matches!(first, ContentBlock::Text { text, .. } if text.contains("could not be read")),
+            "{first:?}"
+        );
+        assert!(
+            session.transcript.messages[2].content[0]
+                .images()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn clearing_drops_the_images_of_cleared_results() {
+        let mut transcript = tool_rounds(4);
+        if let ContentBlock::ToolResult { images, .. } = &mut transcript.messages[2].content[0] {
+            images.push(picture(3));
+        }
+        let entry = transcript.clear_entry(false).unwrap();
+        transcript.apply(entry);
+        assert_eq!(
+            transcript.messages[2].content[0],
+            ContentBlock::tool_result("toolu_0", CLEARED, true)
+        );
+    }
+
+    #[test]
+    fn compacting_inside_a_turn_keeps_the_input_images() {
+        let mut transcript = tool_rounds(4);
+        transcript.messages[0]
+            .content
+            .insert(0, ContentBlock::Image(picture(8)));
+        let keep_from = transcript.compact_point(false).unwrap();
+        transcript.apply(Entry::Compact {
+            summary: "did 0 to 1".into(),
+            keep_from,
+            keep_thinking: false,
+        });
+        assert_eq!(
+            transcript.messages[0].content,
+            [
+                ContentBlock::text(format!("{SUMMARY_HEADER}did 0 to 1")),
+                ContentBlock::Image(picture(8)),
+                ContentBlock::text("go"),
+            ]
+        );
+    }
+
+    #[test]
+    fn images_are_estimated_by_their_size_not_their_base64() {
+        let mut bytes = crate::images::testing::png(100, 100);
+        // Megabytes of data a small picture can still have.
+        bytes.resize(3 * 1024 * 1024, 0);
+        let image = crate::images::Image::from_bytes(&bytes).unwrap().0;
+        let content = [ContentBlock::Image(image.clone()), ContentBlock::text("hi")];
+        let estimate = estimate_tokens(&content);
+        // 4x4 patches, plus the JSON of the text block.
+        assert!((16..40).contains(&estimate), "{estimate}");
+        let result = [ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "Image".into(),
+            is_error: false,
+            images: vec![image],
+        }];
+        let estimate = estimate_tokens(&result);
+        assert!((16..60).contains(&estimate), "{estimate}");
+        // Text alone as before.
+        let text = [ContentBlock::text("hello")];
+        assert_eq!(
+            estimate_tokens(&text),
+            estimate_text_tokens(&serde_json::to_string(&text).unwrap())
+        );
+    }
+
     #[test]
     fn writes_and_loads_a_session() {
         let home = tempfile::tempdir().unwrap();
@@ -1544,6 +1885,9 @@ mod tests {
             meta(),
             Entry::Message(Message::user_text("hi")),
             Entry::AppendText { text: "x".into() },
+            Entry::AppendContent {
+                content: vec![ContentBlock::text("x")],
+            },
             Entry::Usage(Usage::default()),
             Entry::ClearToolResults {
                 upto: 1,
@@ -1559,6 +1903,7 @@ mod tests {
             Entry::DropServerCalls { ids: vec![] },
             Entry::ClaudeTurn(claude_turn(Some("c-1"), "hi")),
             Entry::SubagentUsage(Usage::default()),
+            Entry::ClearImages { note: "n".into() },
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -1574,7 +1919,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 6);
+        assert_eq!(value["format"], 8);
         // An API conversation has no backend field.
         assert!(value.get("backend").is_none(), "{value}");
         // Journals written before the field existed are format 1.
@@ -1682,6 +2027,7 @@ mod tests {
                 tool_use_id: id.into(),
                 content: output.into(),
                 is_error,
+                images: Vec::new(),
             }],
         }
     }
@@ -1943,6 +2289,89 @@ mod tests {
                 keep_thinking: false
             }
         );
+    }
+
+    #[test]
+    fn rejected_images_leave_only_the_trailing_message() {
+        let input = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image(picture(1)), ContentBlock::text("look")],
+        };
+        let call = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "toolu_1".into(),
+                name: "read_file".into(),
+                input: json!({}),
+            }],
+        };
+        let result = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "read shot.png".into(),
+                is_error: false,
+                images: vec![picture(2000)],
+            }],
+        };
+        // Nothing to clear when the history ends with a reply or holds no
+        // image at its end.
+        assert!(
+            transcript_of(vec![input.clone()])
+                .clear_images_entry()
+                .is_some()
+        );
+        assert!(
+            transcript_of(vec![input.clone(), assistant("ok")])
+                .clear_images_entry()
+                .is_none()
+        );
+        assert!(
+            transcript_of(vec![
+                input.clone(),
+                assistant("ok"),
+                Message::user_text("more")
+            ])
+            .clear_images_entry()
+            .is_none()
+        );
+
+        let mut transcript = transcript_of(vec![input.clone(), call.clone(), result]);
+        let entry = transcript.clear_images_entry().unwrap();
+        assert_eq!(
+            entry,
+            Entry::ClearImages {
+                note: REJECTED_IMAGES.to_string()
+            }
+        );
+        let before = transcript.context_size();
+        transcript.apply(entry);
+        // The images the API took earlier stay; the result loses its own.
+        assert_eq!(transcript.messages[..2], [input, call]);
+        assert_eq!(
+            transcript.messages[2].content,
+            [ContentBlock::tool_result(
+                "toolu_1",
+                format!("read shot.png\n{REJECTED_IMAGES}"),
+                false
+            )]
+        );
+        assert!(transcript.context_size() < before);
+
+        // Several input images become one note before the text.
+        let mut transcript = Transcript::default();
+        transcript.apply(transcript.user_input_entry("both", vec![picture(1), picture(2)]));
+        transcript.apply(transcript.user_input_entry("and this", vec![picture(3)]));
+        transcript.apply(transcript.clear_images_entry().unwrap());
+        assert_eq!(
+            transcript.messages[0].content,
+            [
+                ContentBlock::text(REJECTED_IMAGES),
+                ContentBlock::text("both"),
+                ContentBlock::text("and this"),
+            ]
+        );
+        assert!(transcript.clear_images_entry().is_none());
     }
 
     fn assistant(text: &str) -> Message {
@@ -2557,6 +2986,7 @@ mod tests {
                 tool_use_id: "toolu_9".into(),
                 content: INTERRUPTED.into(),
                 is_error: true,
+                images: Vec::new(),
             }],
         };
         assert_eq!(session.transcript.messages.len(), 3);

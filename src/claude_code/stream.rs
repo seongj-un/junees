@@ -233,6 +233,7 @@ impl Stream {
             let output = ToolOutput {
                 content: content_text(&block["content"]),
                 is_error: block["is_error"].as_bool().unwrap_or(false),
+                images: Vec::new(),
             };
             report(Event::ToolResult {
                 name,

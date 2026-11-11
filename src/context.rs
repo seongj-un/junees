@@ -38,9 +38,18 @@ pub fn summary_request(messages: &[Message]) -> Message {
                     tool_use_id,
                     content,
                     is_error,
+                    images,
                 } => {
                     let error = if *is_error { ", error" } else { "" };
                     text.push_str(&format!("[tool result {tool_use_id}{error}]\n{content}\n"));
+                    for image in images {
+                        text.push_str(&format!("[image: {}]\n", image.describe()));
+                    }
+                }
+                // Images by their format and size: the summary call is
+                // text only, and the model saw them when they came.
+                ContentBlock::Image(image) => {
+                    text.push_str(&format!("[{role}: image, {}]\n", image.describe()));
                 }
                 // Thinking is the model's own working; its outcome is in
                 // the text and tool calls around it.
@@ -69,6 +78,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn images_are_named_not_sent() {
+        let image = crate::images::Image::from_bytes(&crate::images::testing::png(30, 20))
+            .unwrap()
+            .0;
+        let messages = [
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Image(image.clone()),
+                    ContentBlock::text("what is it?"),
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".into(),
+                    content: "Image a.png".into(),
+                    is_error: false,
+                    images: vec![image],
+                }],
+            },
+        ];
+        let request = summary_request(&messages);
+        assert_eq!(request.content.len(), 1);
+        let text = request.text();
+        assert!(
+            text.contains("[user: image, image/png, 30x20 px]\n[user]\nwhat is it?\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[tool result toolu_1]\nImage a.png\n[image: image/png, 30x20 px]\n"),
+            "{text}"
+        );
+        assert!(!text.contains("iVBOR"), "{text}");
+    }
+
+    #[test]
     fn renders_the_conversation_as_text() {
         let messages = [
             Message::user_text("list files"),
@@ -86,6 +132,7 @@ mod tests {
                     tool_use_id: "toolu_1".into(),
                     content: "no such dir".into(),
                     is_error: true,
+                    images: Vec::new(),
                 }],
             },
         ];

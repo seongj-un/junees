@@ -17,6 +17,11 @@ pub enum Slash {
     New,
     /// `/model` shows the model, `/model <name>` switches to it.
     Model(Option<String>),
+    /// `/image <path> [<question>]` sends an image with a question.
+    Image {
+        path: String,
+        question: Option<String>,
+    },
     /// `/backend` shows what runs the conversation and `/task`,
     /// `/backend <name>` switches both.
     Backend(Option<Backend>),
@@ -92,6 +97,7 @@ pub fn parse(line: &str) -> Option<Slash> {
             Some(Ok(backend)) => Slash::Backend(Some(backend)),
             Some(Err(err)) => Slash::Bad(format!("{err}")),
         },
+        "image" => image(arg.as_deref()),
         "compact" => plain(Slash::Compact),
         "context" => plain(Slash::Context),
         "usage" => plain(Slash::Usage),
@@ -130,6 +136,33 @@ fn memory(arg: Option<&str>) -> Slash {
         },
         (Some("clear"), None, _) => Slash::Bad(format!("which memory? {USAGE}")),
         _ => Slash::Bad(USAGE.into()),
+    }
+}
+
+/// `/image <path> [<question>]`: the path is the first word, or a text in
+/// double quotes when it has spaces.
+fn image(arg: Option<&str>) -> Slash {
+    const USAGE: &str = "/image takes an image file and a question, for example \
+                         /image shot.png what does this error mean?";
+    let Some(arg) = arg else {
+        return Slash::Bad(USAGE.into());
+    };
+    let (path, rest) = match arg.strip_prefix('"') {
+        Some(quoted) => match quoted.split_once('"') {
+            Some((path, rest)) if rest.is_empty() || rest.starts_with(char::is_whitespace) => {
+                (path, rest)
+            }
+            _ => return Slash::Bad(format!("{USAGE} (a quoted path needs its closing quote)")),
+        },
+        None => arg.split_once(char::is_whitespace).unwrap_or((arg, "")),
+    };
+    if path.is_empty() {
+        return Slash::Bad(USAGE.into());
+    }
+    let question = rest.trim();
+    Slash::Image {
+        path: path.to_string(),
+        question: (!question.is_empty()).then(|| question.to_string()),
     }
 }
 
@@ -206,6 +239,37 @@ mod tests {
             ("/quit", Slash::Exit),
         ] {
             assert_eq!(parse(line), Some(command), "{line}");
+        }
+    }
+
+    #[test]
+    fn parses_image_commands() {
+        let image = |path: &str, question: Option<&str>| {
+            Some(Slash::Image {
+                path: path.into(),
+                question: question.map(Into::into),
+            })
+        };
+        assert_eq!(parse("/image shot.png"), image("shot.png", None));
+        assert_eq!(
+            parse("/image  ~/shot.png   이 오류는 뭐야? "),
+            image("~/shot.png", Some("이 오류는 뭐야?"))
+        );
+        assert_eq!(
+            parse("/image \"my shots/a b.png\" what is \"this\"?"),
+            image("my shots/a b.png", Some("what is \"this\"?"))
+        );
+        assert_eq!(parse("/image \"a b.png\""), image("a b.png", None));
+        for bad in [
+            "/image",
+            "/image \"a b.png",
+            "/image \"a\"b",
+            "/image \"\" hi",
+        ] {
+            assert!(
+                matches!(parse(bad), Some(Slash::Bad(message)) if message.starts_with("/image takes")),
+                "{bad}"
+            );
         }
     }
 

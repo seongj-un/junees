@@ -34,6 +34,7 @@ fn result(id: &str, content: &str) -> ContentBlock {
         tool_use_id: id.into(),
         content: content.into(),
         is_error: false,
+        images: Vec::new(),
     }
 }
 
@@ -394,6 +395,62 @@ fn tool_results_say_their_tool_and_skip_old_searches() {
         .collect();
     assert_eq!(labels, ["tool bash", "summary", "user"]);
     assert_eq!(found.hits[0].matches, 4);
+}
+
+#[test]
+fn sessions_with_images_are_searched_by_their_text() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let picture = || {
+        crate::images::Image::from_bytes(&crate::images::testing::png(9, 9))
+            .unwrap()
+            .0
+    };
+    let id = session(
+        home,
+        "/w",
+        None,
+        &[
+            Entry::Message(Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Image(picture()),
+                    ContentBlock::text("스크린샷의 빌드 오류"),
+                ],
+            }),
+            assistant(vec![call("toolu_1", "read_file")]),
+            results(vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "Image /w/shot.png (image/png, 9x9 px, 45 B), attached below.".into(),
+                is_error: false,
+                images: vec![picture()],
+            }]),
+            Entry::AppendContent {
+                content: vec![
+                    ContentBlock::Image(picture()),
+                    ContentBlock::text("another screenshot"),
+                ],
+            },
+        ],
+        0,
+    );
+    // The images are files of the session's folder, not in the journal.
+    let line = std::fs::read_to_string(journal(home, &id)).unwrap();
+    assert!(!line.contains("base64"), "{line}");
+    for (query, label) in [
+        ("빌드 오류", "user"),
+        ("shot.png", "tool read_file"),
+        ("another screenshot", "user"),
+    ] {
+        let found = search(home, &options(query, Some("/w"))).unwrap();
+        assert_eq!(ids(&found), [id.as_str()], "{query}");
+        assert_eq!(found.hits[0].snippets[0].label, label, "{query}");
+    }
+    // Nothing of an image is searched.
+    for query in ["junees_file", "image/png\"", "iVBOR"] {
+        let found = search(home, &options(query, Some("/w"))).unwrap();
+        assert!(found.hits.is_empty(), "{query}");
+    }
 }
 
 #[test]
