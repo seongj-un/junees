@@ -21,6 +21,7 @@ junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작�
 - `/task <목표>`: 지금 폴더의 git 저장소에서 장기 작업을 계획하고 바로 실행한다(`junees task "목표"`와 같음). `/task`만 쓰면 멈춘 작업을 이어서 한다(`junees task`).
 - `/status`: 작업 상태(`junees status`와 같음).
 - `/sessions`: 최근 세션 10개를 번호와 함께 보여 주고, 번호를 넣으면 그 세션으로 이어 간다(Enter는 그대로). 디스코드 게이트웨이의 채널 세션과 예약 작업 실행 세션은 번호 없이 따로 보여 주기만 한다(아래 디스코드 게이트웨이, 예약 작업).
+- `/search <낱말>`: 저장된 세션에서 낱말을 찾아 번호와 함께 보여 준다(아래 세션 검색).
 - `/new`: 새 대화(예전 이름 `/reset`도 됨).
 - `/model [이름]`: 지금 모델을 보여 주거나, 이 실행 동안만 다른 모델로 바꾼다(claude-code 백엔드에서는 Claude Code에 `--model`로 넘긴다).
 - `/backend [api|claude-code]`: 대화와 `/task`를 무엇으로 돌릴지 보여 주거나, 이 실행 동안만 둘 다 바꾼다. 대화를 바꾸면 새 세션으로 시작한다(아래 구독 모드).
@@ -29,7 +30,7 @@ junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작�
 - `/cron`: 예약 작업 목록(아래 예약 작업).
 - `/compact`, `/context`(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), `/usage`, `/help`, `/exit`.
 
-명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `cron`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `cron`, `sessions`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
 ### 설정 파일과 처음 설정
 
@@ -105,6 +106,27 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - `JUNEES_HOME`과 `HOME`이 둘 다 없으면(cron, 일부 서비스와 컨테이너) 기록 없이 실행하고 "session not saved" 한 줄로 알린다. 이때 `-c`와 `--resume`만 오류다.
 - 토큰 사용량도 기록되고, 이어 가면 그 세션의 누적값부터 다시 센다.
 - 기록 쓰기가 실패하면 경고를 한 번 띄우고 그 세션의 나머지는 기록하지 않는다(파일이 대화의 빈틈 없는 앞부분으로 남도록).
+
+### 세션 검색
+
+지난 세션에서 한 일을 찾는다. 모델 도구 `session_search`, 대화의 `/search <낱말>`, 명령줄 `junees sessions search <낱말>`이 같은 검색을 쓴다.
+
+```bash
+junees sessions search "빌드 실패" clippy        # 지금 폴더의 세션, 새것부터 5개
+junees sessions search --all --limit 10 배포     # 모든 폴더, 10개까지
+junees sessions search --source discord 회의록   # 디스코드 채널 세션만
+```
+
+대화 안에서는 `/search "빌드 실패" clippy`처럼 쓴다(옵션도 같다). 결과는 번호, 세션 id, 마지막 기록 시각(UTC), 작업 폴더, 출처 표시(`[discord <채널>]`, `[cron <작업>]`), 맞는 곳의 한 줄 스니펫(`user:`, `assistant:`, `summary:`, `tool bash:`)이고, 끝에 `junees --resume <id>`로 이어 가라는 안내가 붙는다.
+
+- 찾는 곳: `$JUNEES_HOME/sessions/*.jsonl`과 서브에이전트 기록(`sessions/<id>/*.jsonl`)의 사용자 입력, 모델 텍스트, 압축 요약, Claude Code 턴의 입력과 답, 도구 결과의 앞부분. 입력과 텍스트는 메시지마다 앞 64 KiB, 도구 결과는 앞 4 KiB만 본다(명령이 찍은 모든 줄이나 읽은 파일 전체가 아니라 무엇에 대한 결과인지). 비워진 도구 결과와 이전 `session_search`의 결과는 빼서, 검색이 자기 결과를 다시 찾지 않는다.
+- 맞추기: 공백으로 나눈 낱말이 모두 한 메시지(텍스트 블록이나 도구 결과 하나) 안에 있어야 한다. 대소문자는 무시하고 한글은 그대로 찾는다. `"빌드 실패"`처럼 큰따옴표로 묶으면 구절로 찾는다(공백과 줄바꿈 차이는 무시). 낱말은 16개, 질의는 500자까지.
+- 결과: 마지막으로 기록된(파일 수정 시각) 세션부터 기본 5개(최대 20). 세션마다 맞는 곳 3개를 240자 안팎의 한 줄로 보여 주고 나머지는 개수만 센다.
+- 범위: 기본은 지금 폴더에서 시작한 세션이다(기록의 `cwd`가 같은 것, `-c`와 같은 기준이라 하위 폴더는 다른 폴더). 모델은 `all: true`, 사람은 `--all`이면 모든 폴더. `session`(사람은 `--session`)에 id나 id 앞부분을 주면 그 세션과 서브에이전트 기록만, 폴더와 상관없이 찾는다.
+- 출처: 모델 도구는 기본으로 터미널에서 시작한 세션(대화, `-p`, task 세션)만 찾는다. 디스코드 채널, 예약 작업, 웹훅 실행 세션은 터미널의 대화와 `-p`에서만 `sources: ["discord", "cron", "webhook"]`(또는 `"terminal"`)로 더할 수 있다. 사람의 `/search`와 `junees sessions search`는 기본으로 모든 출처를 보여 주고 `--source terminal|discord|cron|webhook|all`(반복하거나 쉼표로)로 좁힌다.
+- 도구가 있는 곳: 대화와 `-p`(api 백엔드), 디스코드 게이트웨이, 예약 작업 실행, task 세션, 그리고 이들의 서브에이전트(읽기만 하므로 `delegate`가 빌려준다). 게이트웨이, 예약 작업, task 세션의 모델은 채널 세션을 찾을 수 없다(길드 채널의 답은 물은 사람 말고도 읽는다). 웹훅 실행에는 도구를 주지 않는다: PR 본문 같은 남의 글이 모델을 움직이고 답이 GitHub로 나갈 수 있어서다. claude-code 백엔드의 모델은 Claude Code의 도구만 쓰므로 이 도구가 없다(사람용 명령은 그대로 쓴다). `JUNEES_HOME`과 `HOME`이 없으면 도구도 없다.
+- 데이터 표시: 모델에게 주는 결과는 세션마다 매번 무작위 이름의 요소(`<session-1a2b3c4d id="..." created="..." updated="..." cwd="..." source="...">`)로 감싸서 인용한 글이 요소를 닫을 수 없게 하고, 그 안은 지난 세션에서 인용한 데이터일 뿐 지시가 아니며 사용자나 규칙보다 앞서지 않는다는 줄을 앞에 둔다. 제어 문자와 방향 제어 문자는 모델 결과와 터미널 출력 모두 `prompt_text::escape_hidden`으로 이스케이프한다.
+- 성능: 색인 없이 파일을 줄 단위로 읽는다. 4 MiB가 넘는 줄은 메모리에 담지 않고 건너뛰고, 읽을 수 없는 줄(깨진 줄, 잘린 마지막 줄, 기록이 아닌 파일)도 건너뛰어 개수를 결과 끝에 알린다. 새 세션부터 읽다가 보여 줄 수를 채우면 멈추고, 시간 상한(모델 5초, 사람 15초)에 닿으면 그때까지 찾은 것과 "N개 중 M개 기록을 읽고 멈췄다"는 줄을 돌려준다.
 
 ### 장기 작업 모드
 
@@ -845,6 +867,14 @@ src/
   config_file.rs     설정 파일 config.toml (단순 TOML 읽기/쓰기, 0600), Settings: 실행 중 변경 -> 환경 변수 -> 파일 순서로 찾기
   setup.rs           설정 마법사 (Prompter 트레이트, Claude Code 확인 ClaudeProbe, 키 입력 때 터미널 echo 끄기 EchoOff)
   slash.rs           대화 안 슬래시 명령 파싱, /sessions 번호 고르기
+  search/            세션 검색 (session_search 도구, /search, junees sessions search)
+    mod.rs             검색 옵션과 결과, 상한(결과 수, 스니펫, 줄과 텍스트 크기, 시간), 출처 이름
+    query.rs           질의 파싱(낱말 AND, 따옴표 구절), 대소문자 무시 매칭, 원래 글자로 스니펫
+    scan.rs            기록 파일 목록(서브에이전트 포함, 새것부터), 큰 줄을 담지 않는 줄 읽기, 범위 판단, 항목에서 찾을 글 고르기
+    format.rs          모델용 결과(무작위 태그, 데이터 안내)와 사람용 번호 목록, 읽지 못한 것 안내
+    tool.rs            session_search 도구(입력 검사, 채널 세션 허용 여부)와 등록
+    args.rs            /search와 junees sessions search의 옵션
+    tests.rs           실제 기록 파일로 매칭, 정렬과 상한, 폴더/출처 범위, 깨진 줄과 큰 줄, 시간 상한, 도구 출력 검증
   skills/            스킬 ($JUNEES_HOME/skills/<이름>/SKILL.md)
     mod.rs             이름과 앞머리 검사, 목록(Index)과 상한, 모드별 시스템 프롬프트 절
     store.rs           읽기/만들기/패치/파일 쓰기와 지우기/휴지통, 경로 탈출과 심볼릭 링크 거절, 크기 제한, 원자적 쓰기(0600/0700)
@@ -931,6 +961,7 @@ tests/
   cron.rs              실제 바이너리와 가짜 API, 가짜 디스코드 REST로 cron add/list/run(전달, 출력 파일, 세션, 읽기 전용 도구)/pause/resume/rm, 데몬이 때가 된 작업을 자식 프로세스로 실행하고 실패를 전달하는지 검증
   github_flow.rs       실제 바이너리로 webhook add-github(시크릿 파일 0600, 안내, 형식 2), serve에 서명한 pull_request.opened -> 모델의 리뷰가 가짜 GitHub에 POST, 같은 커밋의 두 번째 전달은 아무것도 안 함, list의 최근 처리 검증
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
+  session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
 
