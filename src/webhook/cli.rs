@@ -14,6 +14,7 @@ Usage:
                      [--secret-env <VAR> | --secret-file <path>]
                      [--events pull_request.opened,issue_comment,...]
                      [--dir <folder>] [--deliver discord:<channel id>|webhook|local]
+                     [--github-allow comment,review,approve,pr_create,merge]
   junees webhook list              the routes and their last runs
   junees webhook remove <name>     (also rm)
   junees webhook pause <name>
@@ -45,6 +46,12 @@ questions, the command policy, the memory and skills read only, up to
 webhook_max_time (default 30m) and webhook_max_tokens (default 1000000).
 One run per route at a time; up to 20 more wait. The answer goes to
 $JUNEES_HOME/webhooks/output/<name>/ and to --deliver (default local).
+
+GitHub writes: a webhook run's `github` tool makes no write by default,
+even those github_allow_unattended allows scheduled jobs, because the
+request that starts it (pull request bodies, comments) is anyone's text.
+--github-allow names the writes this route's runs may make; each must be
+in github_allow_unattended too (and github_repos must be set).
 ";
 
 /// `junees webhook ...`.
@@ -83,6 +90,7 @@ pub struct AddArgs {
     pub events: Option<String>,
     pub dir: Option<PathBuf>,
     pub deliver: Option<String>,
+    pub github_allow: Option<String>,
 }
 
 /// Parses the arguments after `webhook`.
@@ -186,6 +194,7 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
             "--events",
             "--dir",
             "--deliver",
+            "--github-allow",
         ],
         "add",
     )?;
@@ -199,6 +208,7 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
             "--secret-file" => args.secret_file = Some(PathBuf::from(value)),
             "--events" => args.events = Some(value),
             "--dir" => args.dir = Some(PathBuf::from(value)),
+            "--github-allow" => args.github_allow = Some(value),
             _ => args.deliver = Some(value),
         }
     }
@@ -206,7 +216,8 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
         Ok([name]) => name,
         Err(_) => bail!(
             "usage: junees webhook add <name> --prompt \"<template>\" [--kind ...] \
-             [--secret-env VAR | --secret-file path] [--events ...] [--dir ...] [--deliver ...]"
+             [--secret-env VAR | --secret-file path] [--events ...] [--dir ...] [--deliver ...] \
+             [--github-allow ...]"
         ),
     };
     args.prompt = prompt.context("`junees webhook add` needs --prompt \"<template>\"")?;
@@ -307,6 +318,7 @@ mod tests {
                 "/srv",
                 "--deliver",
                 "discord:42",
+                "--github-allow=comment,review",
             ])
             .unwrap(),
             WebhookCommand::Add(AddArgs {
@@ -318,6 +330,7 @@ mod tests {
                 events: Some("pull_request.opened,issue_comment".into()),
                 dir: Some(PathBuf::from("/srv")),
                 deliver: Some("discord:42".into()),
+                github_allow: Some("comment,review".into()),
             })
         );
         assert_eq!(

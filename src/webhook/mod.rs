@@ -93,6 +93,12 @@ pub fn overview(routes: &[Route], tz: &TimeZone, detail: bool) -> String {
         if route.secret.is_none() {
             line.push_str(", no secret (loopback only)");
         }
+        if !route.github_allow.is_empty() {
+            line.push_str(&format!(
+                ", github writes: {}",
+                crate::github::Write::join(&route.github_allow)
+            ));
+        }
         if route.paused {
             line.push_str(", paused");
         }
@@ -150,10 +156,30 @@ pub fn listing(
         Err(err) => return format!("cannot read the webhook routes: {err:#}\n"),
     };
     let mut out = overview(&routes, &tz, detail);
+    if routes.iter().any(|route| !route.github_allow.is_empty()) {
+        out.push_str(&github_line(lookup));
+    }
     if !routes.is_empty() && !is_serving(home) {
         out.push_str("(no `junees webhook serve` is running: requests are not received)\n");
     }
     out
+}
+
+/// Under routes with `github writes`: a write also needs the user's
+/// github_allow_unattended.
+fn github_line(lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    let settings = crate::github::Settings::read(|key| {
+        lookup(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    });
+    match settings {
+        Ok(settings) => format!(
+            "(github writes run only where github_allow_unattended allows them too: now {})\n",
+            crate::github::Write::join(&settings.unattended)
+        ),
+        Err(err) => format!("(the GitHub settings are not readable: {err:#})\n"),
+    }
 }
 
 /// [`listing`] with the settings of the environment and the settings file
@@ -214,6 +240,39 @@ mod tests {
             assert!(!short.contains(hidden), "{hidden}: {short}");
         }
         assert!(overview(&[], &tz, false).contains("no webhook routes"));
+    }
+
+    #[test]
+    fn listings_show_the_github_writes_of_a_route_and_the_users_list() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::new(home.path());
+        let mut locked = store.lock().unwrap();
+        locked.routes.push(route("plain"));
+        let mut writes = route("writes");
+        writes.github_allow = vec![crate::github::Write::Comment, crate::github::Write::Merge];
+        locked.routes.push(writes);
+        locked.save().unwrap();
+        drop(locked);
+        let set = |key: &str| {
+            (key == crate::github::UNATTENDED_ENV).then(|| "review, comment".to_string())
+        };
+        for detail in [true, false] {
+            let text = listing(Some(home.path()), &set, detail);
+            assert!(
+                text.contains("writes (github): every event, github writes: comment, merge\n"),
+                "{text}"
+            );
+            assert!(text.contains("plain (github): every event\n"), "{text}");
+            assert!(
+                text.contains(
+                    "(github writes run only where github_allow_unattended allows them too: \
+                     now review, comment)\n"
+                ),
+                "{text}"
+            );
+        }
+        let text = listing(Some(home.path()), &|_| None, true);
+        assert!(text.contains("allows them too: now none)"), "{text}");
     }
 
     #[test]

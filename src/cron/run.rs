@@ -39,6 +39,20 @@ pub const CRON_NOTE: &str = "\n\nYou are running a scheduled job (`junees cron`)
     about. Do the job, then end with the result: your final message is delivered as the \
     job's output. The saved memory and skills can be read but not changed here.";
 
+/// What started an unattended run. It decides the GitHub writes that run
+/// without a question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger<'a> {
+    /// A scheduled job: the user's JUNEES_GITHUB_ALLOW_UNATTENDED.
+    Cron,
+    /// A request to webhook route `route`, which is anyone's text: only
+    /// the writes both its `github_allow` and the user's list allow.
+    Webhook {
+        route: &'a str,
+        github_allow: &'a [crate::github::Write],
+    },
+}
+
 /// What one unattended run does.
 #[derive(Debug, Clone, Copy)]
 pub struct Spec<'a> {
@@ -50,6 +64,7 @@ pub struct Spec<'a> {
     pub channel: &'a str,
     /// Added to the system prompt ([`CRON_NOTE`] for a job).
     pub note: &'a str,
+    pub trigger: Trigger<'a>,
 }
 
 impl Job {
@@ -61,6 +76,7 @@ impl Job {
             source: session::CRON,
             channel: &self.id,
             note: CRON_NOTE,
+            trigger: Trigger::Cron,
         }
     }
 }
@@ -218,7 +234,19 @@ impl ApiEngine {
         let mut tools = ToolRegistry::with_defaults(&config.tools);
         skills::register(&mut tools, home, false);
         mcp.register(&mut tools);
-        crate::github::register(&mut tools, &config.github, dir, false);
+        match spec.trigger {
+            Trigger::Cron => crate::github::register(&mut tools, &config.github, dir, false),
+            Trigger::Webhook {
+                route,
+                github_allow,
+            } => crate::github::register_webhook(
+                &mut tools,
+                &config.github,
+                dir,
+                route,
+                github_allow,
+            ),
+        }
         let system = prompt::system_prompt(dir)
             + spec.note
             + crate::subagent::prompt_note(config.subagents)
