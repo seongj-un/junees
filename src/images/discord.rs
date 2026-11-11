@@ -163,16 +163,42 @@ impl Fetcher {
         {
             return Err(format!("`{name}`: {}", too_large(len)));
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(failed)? {
-            bytes.extend_from_slice(&chunk);
-            if bytes.len() as u64 > MAX_IMAGE_BYTES {
-                return Err(format!("`{name}`: {}", too_large(bytes.len() as u64)));
-            }
-        }
+        let bytes = match read_capped(&mut response, MAX_IMAGE_BYTES).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(len)) => return Err(format!("`{name}`: {}", too_large(len))),
+            Err(err) => return Err(failed(err)),
+        };
         let (image, _) = Image::from_bytes(&bytes).map_err(|err| format!("`{name}`: {err}"))?;
         Ok(image)
     }
+}
+
+/// A response body read chunk by chunk.
+trait Body {
+    type Error;
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, Self::Error>;
+}
+
+impl Body for reqwest::Response {
+    type Error = reqwest::Error;
+
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, reqwest::Error> {
+        Ok(self.chunk().await?.map(|chunk| chunk.to_vec()))
+    }
+}
+
+/// The whole body, or `Err(bytes read)` as soon as more than `limit`
+/// bytes came, without reading on: a server need not say the length,
+/// and the length it says is checked apart.
+async fn read_capped<B: Body>(body: &mut B, limit: u64) -> Result<Result<Vec<u8>, u64>, B::Error> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next_chunk().await? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() as u64 > limit {
+            return Ok(Err(bytes.len() as u64));
+        }
+    }
+    Ok(Ok(bytes))
 }
 
 fn is_allowed(url: &Url, extra: Option<&Url>) -> bool {
@@ -338,10 +364,15 @@ mod tests {
                     .find(|(p, ..)| *p == path)
                     .map(|(_, s, h, b)| (*s, h.clone(), b.clone()))
                     .unwrap_or((404, String::new(), Vec::new()));
-                let reply = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n{headers}\r\n",
-                    body.len()
-                );
+                // `x-no-length` leaves the length out: the body ends when
+                // the connection closes.
+                let length = if headers.contains("x-no-length") {
+                    String::new()
+                } else {
+                    format!("content-length: {}\r\n", body.len())
+                };
+                let reply =
+                    format!("HTTP/1.1 {status} X\r\n{length}connection: close\r\n{headers}\r\n");
                 let _ = socket.write_all(reply.as_bytes()).await;
                 let _ = socket.write_all(&body).await;
             }
@@ -370,7 +401,13 @@ mod tests {
                 String::new(),
                 b"hello".to_vec(),
             ),
-            ("/cdn/big.png?hm=signed", 200, String::new(), big),
+            ("/cdn/big.png?hm=signed", 200, String::new(), big.clone()),
+            (
+                "/cdn/unsized.png?hm=signed",
+                200,
+                "x-no-length: 1\r\n".into(),
+                big,
+            ),
             ("/cdn/gone.png?hm=signed", 404, String::new(), Vec::new()),
             (
                 "/cdn/away.png?hm=signed",
@@ -414,6 +451,8 @@ mod tests {
         };
         assert!(err("/cdn/text.png").await.contains("text.png`: not a PNG"));
         assert!(err("/cdn/big.png").await.contains("up to 5 MB"));
+        // Without a length too.
+        assert!(err("/cdn/unsized.png").await.contains("up to 5 MB"));
         assert!(err("/cdn/gone.png").await.ends_with("HTTP 404 Not Found"));
         let away = err("/cdn/away.png").await;
         assert!(away.contains("redirect"), "{away}");
@@ -442,6 +481,37 @@ mod tests {
         .await;
         assert_eq!(images.len(), 1);
         assert_eq!(notes.len(), 1);
+    }
+
+    /// `chunks` chunks of 1 MiB, counting how many were read.
+    struct Chunks {
+        left: usize,
+        read: usize,
+    }
+
+    impl Body for Chunks {
+        type Error = ();
+        async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, ()> {
+            if self.left == 0 {
+                return Ok(None);
+            }
+            self.left -= 1;
+            self.read += 1;
+            Ok(Some(vec![0; 1024 * 1024]))
+        }
+    }
+
+    #[tokio::test]
+    async fn reading_stops_at_the_limit() {
+        // Far more than the limit: reading stops right after passing it.
+        let mut body = Chunks { left: 64, read: 0 };
+        let read = read_capped(&mut body, MAX_IMAGE_BYTES).await.unwrap();
+        assert_eq!(read, Err(6 * 1024 * 1024));
+        assert_eq!(body.read, 6);
+        // Up to the limit the whole body comes back.
+        let mut body = Chunks { left: 5, read: 0 };
+        let read = read_capped(&mut body, MAX_IMAGE_BYTES).await.unwrap();
+        assert_eq!(read.unwrap().len(), 5 * 1024 * 1024);
     }
 
     #[tokio::test]
