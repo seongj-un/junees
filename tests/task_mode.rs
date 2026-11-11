@@ -68,18 +68,12 @@ fn junees_command(
     args: &[&str],
     vars: &[(&str, &str)],
 ) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(args)
-        .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", url)
         .env("JUNEES_HOME", home.join("junees"))
-        .env_remove("JUNEES_MODEL")
-        .env_remove("JUNEES_MAX_TOKENS")
-        .env_remove("JUNEES_MAX_TURNS")
-        .env_remove("JUNEES_NOTIFY_WEBHOOK")
-        .env_remove("JUNEES_NOTIFY_EACH_SESSION")
         .envs(vars.iter().copied())
         .stdin(Stdio::null());
     isolate_git(&mut command, home);
@@ -89,12 +83,10 @@ fn junees_command(
 /// `junees task status` with the given arguments, without an API key: the
 /// status needs none.
 async fn status(cwd: &Path, home: &Path, args: &[&str]) -> Output {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary(cwd, home);
     command
         .args(["task", "status"])
         .args(args)
-        .current_dir(cwd)
-        .env_remove("ANTHROPIC_API_KEY")
         .env("JUNEES_HOME", home.join("junees"))
         .stdin(Stdio::null());
     isolate_git(&mut command, home);
@@ -749,10 +741,9 @@ async fn status_without_a_task_says_to_run_init() {
 async fn task_mode_refuses_folders_outside_git() {
     let home = tempfile::tempdir().unwrap();
     let plain = tempfile::tempdir().unwrap();
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary(plain.path(), home.path());
     command
         .args(["task", "init", "goal"])
-        .current_dir(plain.path())
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
         .stdin(Stdio::null());
@@ -817,18 +808,15 @@ async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
     let (hook, webhook) = fake_api(vec![(204, json!({}))]).await;
     let hook = format!("{hook}/api/webhooks/7/{HOOK_TOKEN}");
 
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_junees"));
+    let mut command = common::junees_binary(root, home.path());
     command
         .args(["task", "run"])
-        .current_dir(root)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", &url)
         .env("JUNEES_HOME", home.path().join("junees"))
         // After the signal only the stop is posted, not the session line.
         .env("JUNEES_NOTIFY_WEBHOOK", &hook)
         .env("JUNEES_NOTIFY_EACH_SESSION", "1")
-        .env_remove("JUNEES_TASK_MAX_TOKENS")
-        .env_remove("JUNEES_TASK_MAX_TIME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

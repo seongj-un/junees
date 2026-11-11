@@ -847,7 +847,7 @@ src/
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
-  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks, flows)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 도구 호출 전 훅 PreTool
+  tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks, flows)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 도구 호출 전 훅 PreTool, 테스트 전용: 테스트 bash의 sandbox(bash.rs의 `testing::confine`, 환경 변수 수준이라 절대 경로와 프록시를 무시하는 프로그램은 막지 못함)와 테스트 코드가 홈 삭제나 origin push를 실제 셸로 돌리지 않는지, sandbox 밖(바이너리 테스트, 모델 응답으로 부르는 bash)에서는 원격과 상관없는 모든 `git push`, `.`/`..`/`/`/`*`의 재귀 삭제, `git reset --hard`, `git clean -f`도 돌리지 않는지, `Command::new("git")` 인자에 `push`가 있으면 임시 폴더의 bare 저장소로만 미는 헬퍼(SAFE_PUSH)를 거치는지, sandbox 밖 실제 bash 테스트가 허용 목록(파일과 모듈 경로까지 맞춘 테스트, 무해한 명령 또는 명령 없음)만 쓰는지 보는 소스 스캔(test_scan.rs)
   mcp/               MCP 클라이언트 (stdio)
     config.rs          $JUNEES_HOME/mcp.json 읽기와 검사 (0600, 자기 소유, 값을 되풀이하지 않는 오류)
     conn.rs            서버 프로세스(프로세스 그룹, 환경 정리)와 JSON-RPC 2.0 줄 메시지, 요청 id와 답 대기, 취소 알림, 서버 요청(ping) 답, stderr 꼬리, 종료(입력 닫기 -> SIGTERM -> SIGKILL)
@@ -936,7 +936,8 @@ src/
     cli.rs, command.rs junees webhook 인자 파싱과 명령(serve/add/add-github/list/remove/pause/resume/test/run), 흐름 경로의 실행 연결
     mod.rs             설정(webhook_max_time, webhook_max_tokens), /webhooks와 !webhooks 목록
 tests/
-  common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림)
+  common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림), 테스트 환경의 JUNEES_*/ANTHROPIC_*/CLAUDE_CODE_* 변수와 GH_TOKEN/GITHUB_TOKEN/GH_ENTERPRISE_TOKEN/GITHUB_ENTERPRISE_TOKEN/GH_CONFIG_DIR을 지우고, 인자로 받은 임시 cwd와 HOME에서 도는 바이너리 명령(junees_binary(cwd, home), 크레이트 폴더나 그 안, 그 위의 폴더는 거부, 모든 바이너리 테스트가 이것으로 시작)
+  binary_env.rs        junees_binary가 지우는 변수와 남기는 변수, 주어진 임시 폴더에서만 돌고 크레이트 쪽 폴더는 거부하는지, 모든 바이너리 테스트가 그 헬퍼를 쓰는지 검증(명령은 실행하지 않음)
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행, 이어 간 세션의 thinking 블록 보존 검증
   secret_env.rs        기본 bash에서 API 키, 웹훅 URL, 디스코드 토큰, GitHub 토큰, Claude Code 토큰이 보이지 않는지 검증
