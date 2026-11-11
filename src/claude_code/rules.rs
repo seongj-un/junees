@@ -66,8 +66,13 @@ pub fn deny_rules(settings: &ToolSettings) -> Vec<String> {
         // A webhook run (anyone's text): no push, no change of git's
         // configuration, no credentials, no aliases from `-c` (Junees's
         // own bash allows reading the configuration; these rules cannot
-        // tell reading from writing).
+        // tell reading from writing), no GitHub CLI login (`gh auth`, or
+        // GH_CONFIG_DIR pointed back at the user's folder).
         for rule in [
+            "gh auth",
+            "gh auth *",
+            "gh alias *",
+            "*GH_CONFIG_DIR*",
             "git push",
             "git push *",
             "git -C * push*",
@@ -258,6 +263,9 @@ mod tests {
             "Bash(git config *)",
             "Bash(git credential*)",
             "Bash(git -c *)",
+            "Bash(gh auth *)",
+            "Bash(gh alias *)",
+            "Bash(*GH_CONFIG_DIR*)",
         ] {
             assert!(rules.iter().any(|r| r == rule), "{rule} missing");
         }

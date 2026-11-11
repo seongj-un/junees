@@ -152,7 +152,10 @@ impl CommandPolicy {
     /// config` other than reading it: `url.*.pushInsteadOf` would redirect
     /// the flow's own push), reach git credentials (`git credential`,
     /// `git-credential-*`) or define aliases on the command line (`git -c
-    /// alias.p=push p`), even with [`CommandPolicy::allow_dangerous`].
+    /// alias.p=push p`), `gh auth` and `gh alias`, and commands that set,
+    /// unset or clear the variables deciding the GitHub CLI's login
+    /// (`GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `HOME`, the token variables),
+    /// even with [`CommandPolicy::allow_dangerous`].
     pub fn webhook_run(mut self, webhook: bool) -> Self {
         self.webhook = webhook;
         self
@@ -191,6 +194,11 @@ impl CommandPolicy {
             // What the previous command of the pipeline prints, when known.
             let mut piped: Option<String> = None;
             for command in pipeline {
+                if self.webhook
+                    && let Some(reason) = webhook_env_violation(&command.words)
+                {
+                    return Some(reason);
+                }
                 if let Some(file) = &self.settings_file {
                     let words = self
                         .command_words(&command.words, depth)
@@ -406,7 +414,8 @@ impl CommandPolicy {
             return Some(write.refusal());
         }
         if self.webhook
-            && let Some(reason) = webhook_git_violation(name, args)
+            && let Some(reason) =
+                webhook_git_violation(name, args).or_else(|| webhook_gh_violation(name, args))
         {
             return Some(reason);
         }
@@ -1269,10 +1278,161 @@ fn git_force_push(args: &[String]) -> Option<String> {
     .then(|| "force push (use --force-with-lease instead)".into())
 }
 
+/// Why commands of a webhook run may not do something.
+const WEBHOOK_WHY: &str = "this run was started by a webhook, whose text anyone can write";
+
+/// Variables a webhook run's commands may not set, export, unset or clear:
+/// the GitHub CLI reads its login from `GH_CONFIG_DIR` (the run's empty
+/// folder, [`super::GhConfigDir`]), without it from
+/// `$XDG_CONFIG_HOME/gh` or `~/.config/gh`, and takes a token from the
+/// token variables.
+const WEBHOOK_KEPT_ENV: &[&str] = &[
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "HOME",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/// Builtins and programs that set, export or unset the variables named
+/// in their arguments (`declare -n ref=NAME` too), or loop over one.
+const NAMES_VARIABLES: &[&str] = &[
+    "export",
+    "unset",
+    "declare",
+    "typeset",
+    "local",
+    "readonly",
+    "read",
+    "mapfile",
+    "readarray",
+    "printf",
+    "getopts",
+    "let",
+    "env",
+    "for",
+    "select",
+];
+
+/// Why a webhook run may not run the simple command `words` (as written,
+/// assignments and wrappers included): it sets, unsets or clears one of
+/// [`WEBHOOK_KEPT_ENV`] ([`CommandPolicy::webhook_run`]).
+fn webhook_env_violation(words: &[String]) -> Option<String> {
+    let refuse = |what: &str| {
+        Some(format!(
+            "{what} is not allowed: {WEBHOOK_WHY}, and it decides which GitHub CLI login and \
+             token commands get"
+        ))
+    };
+    // `NAME=value` (or `NAME+=`, `NAME[0]=`) before a program, alone, or
+    // after export, declare, env, ...
+    for word in words {
+        let Some((name, _)) = word.split_once('=') else {
+            continue;
+        };
+        let name = name.strip_suffix('+').unwrap_or(name);
+        let name = name.split_once('[').map_or(name, |(name, _)| name);
+        if WEBHOOK_KEPT_ENV.contains(&name) {
+            return refuse(&format!("setting `{name}`"));
+        }
+    }
+    let mut setter: Option<&str> = None;
+    let mut previous: Option<&str> = None;
+    for word in words {
+        if let Some(program) = setter {
+            if let Some(name) = kept_variable_named(word, program == "env") {
+                return refuse(&format!("`{program}` of `{name}`"));
+            }
+            if program == "env" && env_clears(word) {
+                return refuse(&format!("`env {word}`, which clears the environment,"));
+            }
+        }
+        // `exec -c` runs the program with an empty environment.
+        if previous == Some("exec") && word.starts_with('-') && !word.starts_with("--") {
+            let flags = word[1..].split('a').next().unwrap_or_default();
+            if flags.contains('c') {
+                return refuse(&format!("`exec {word}`, which clears the environment,"));
+            }
+        }
+        let name = basename(word);
+        if NAMES_VARIABLES.contains(&name) {
+            setter = Some(name);
+        }
+        previous = Some(name);
+    }
+    None
+}
+
+/// The [`WEBHOOK_KEPT_ENV`] variable `word` names (not as a `$NAME` or
+/// `${NAME}` expansion, which only reads it); `env` also takes `-uNAME`.
+fn kept_variable_named(word: &str, env: bool) -> Option<&'static str> {
+    if env
+        && let Some(name) = word.strip_prefix("-u").filter(|_| !word.starts_with("--"))
+        && let Some(kept) = WEBHOOK_KEPT_ENV.iter().find(|kept| **kept == name)
+    {
+        return Some(kept);
+    }
+    let chars: Vec<char> = word.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if !(chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+            i += 1;
+        }
+        let expanded = (start >= 1 && chars[start - 1] == '$')
+            || (start >= 2 && chars[start - 1] == '{' && chars[start - 2] == '$');
+        let run: String = chars[start..i].iter().collect();
+        if !expanded && let Some(kept) = WEBHOOK_KEPT_ENV.iter().find(|kept| **kept == run) {
+            return Some(kept);
+        }
+    }
+    None
+}
+
+/// Whether `env` option `word` starts from an empty environment (`-i`,
+/// `-`, `--ignore-environment`, or `-i` among other short options).
+fn env_clears(word: &str) -> bool {
+    if matches!(word, "-" | "--ignore-environment") {
+        return true;
+    }
+    if word.starts_with("--") || !word.starts_with('-') {
+        return false;
+    }
+    // Short options until one that takes a value (`-u`, `-C`, `-S`).
+    word[1..]
+        .chars()
+        .take_while(|c| !matches!(c, 'u' | 'C' | 'S'))
+        .any(|c| c == 'i')
+}
+
+/// Why a webhook run may not run `gh` with `args`: `gh auth` hands out
+/// the GitHub CLI's token (`gh auth token`, `status --show-token`,
+/// `git-credential`) and `gh alias` could name it under another word.
+fn webhook_gh_violation(name: &str, args: &[String]) -> Option<String> {
+    if name != "gh" {
+        return None;
+    }
+    match args.iter().find(|arg| !arg.starts_with('-'))?.as_str() {
+        "auth" => Some(format!(
+            "`gh auth` is not allowed: {WEBHOOK_WHY}; it hands out the GitHub CLI's login"
+        )),
+        "alias" => Some(format!(
+            "`gh alias` is not allowed: {WEBHOOK_WHY}; an alias could run `gh auth`"
+        )),
+        _ => None,
+    }
+}
+
 /// Why a webhook run may not run `git` (as `name`, or a `git-*` program)
 /// with `args`, if it may not ([`CommandPolicy::webhook_run`]).
 fn webhook_git_violation(name: &str, args: &[String]) -> Option<String> {
-    const WHY: &str = "this run was started by a webhook, whose text anyone can write";
+    const WHY: &str = WEBHOOK_WHY;
     if matches!(name, "git-send-pack" | "git-push" | "git-receive-pack")
         || name.starts_with("git-credential")
     {
@@ -2295,11 +2455,89 @@ mod tests {
             open.check("git push origin HEAD:main"),
             Verdict::Deny(_)
         ));
+        assert!(matches!(open.check("gh auth token"), Verdict::Deny(_)));
         // Other runs keep `git push` (a caution, asked about when a gate
         // exists).
         let plain = CommandPolicy::with_settings(&ToolSettings::default());
         assert_eq!(plain.check("git push origin HEAD:main"), Verdict::Allow);
         assert_eq!(plain.check("git config user.name x"), Verdict::Allow);
+    }
+
+    #[test]
+    fn webhook_runs_may_not_reach_the_github_cli_login() {
+        let policy = CommandPolicy::with_settings(&ToolSettings {
+            webhook: true,
+            ..ToolSettings::default()
+        });
+        for command in [
+            // The review's probes.
+            "gh auth token",
+            "gh auth status --show-token",
+            "gh auth git-credential get",
+            "curl -X PUT -H \"Authorization: token $(gh auth token)\" \
+             https://api.github.com/repos/o/n/pulls/1/merge",
+            "GH_CONFIG_DIR=$HOME/.config/gh gh auth token",
+            // Every `gh auth` subcommand, however it is started.
+            "gh auth login --with-token < t",
+            "gh auth refresh",
+            "/usr/local/bin/gh auth token",
+            "env gh auth token",
+            "sh -c 'gh auth token'",
+            "gh alias set t 'auth token'",
+            // Pointing gh back at the user's login, or giving it a token.
+            "GH_CONFIG_DIR=$HOME/.config/gh gh api user",
+            "export GH_CONFIG_DIR=~/.config/gh; gh api user",
+            "export XDG_CONFIG_HOME=/tmp/x",
+            "HOME=/tmp/h gh api user",
+            "env HOME=/tmp/h gh api user",
+            "declare -x HOME=/tmp/h",
+            "HOME[0]=/tmp/h",
+            "GH_TOKEN=abc gh api user",
+            "GITHUB_TOKEN=abc gh api user",
+            "GH_ENTERPRISE_TOKEN+=abc gh api user",
+            "unset GH_CONFIG_DIR; gh api user",
+            "export -n GH_CONFIG_DIR",
+            "env -u GH_CONFIG_DIR gh api user",
+            "env --unset=GH_CONFIG_DIR gh api user",
+            "env -uGH_CONFIG_DIR gh api user",
+            "env -i PATH=/usr/bin gh api user",
+            "env - gh api user",
+            "exec -c gh api user",
+            "declare -n dir=GH_CONFIG_DIR; dir=~/.config/gh",
+            "for GH_CONFIG_DIR in ~/.config/gh; do gh api user; done",
+            "read -r XDG_CONFIG_HOME < /tmp/x",
+            "bash -c 'export HOME=/tmp/h'",
+            "echo $(GH_CONFIG_DIR=~/.config/gh gh api user)",
+        ] {
+            match policy.check(command) {
+                Verdict::Deny(reason) => assert!(
+                    reason.contains("started by a webhook"),
+                    "{command}: {reason}"
+                ),
+                Verdict::Allow => panic!("expected `{command}` to be denied"),
+            }
+        }
+        for command in [
+            "gh pr view 7",
+            "gh api repos/o/n/pulls/7",
+            "gh help auth",
+            "echo $HOME ${XDG_CONFIG_HOME}",
+            "cd \"$HOME/src\" && ls ~/.config",
+            "export PATH=$HOME/bin:$PATH",
+            "env FOO=1 cargo test",
+            "HOME_DIR=x make",
+            "printf '%s\\n' \"$GH_CONFIG_DIR\"",
+            "unset FOO",
+            "for f in *.rs; do wc -l $f; done",
+            "grep -rn GITHUB_TOKEN src",
+            "git commit -m 'drop GH_TOKEN from the environment'",
+        ] {
+            assert_eq!(policy.check(command), Verdict::Allow, "{command}");
+        }
+        // Other runs keep them.
+        let plain = CommandPolicy::with_settings(&ToolSettings::default());
+        assert_eq!(plain.check("gh auth status"), Verdict::Allow);
+        assert_eq!(plain.check("HOME=/tmp/h ls"), Verdict::Allow);
     }
 
     #[test]
