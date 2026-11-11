@@ -22,6 +22,7 @@ pub mod address;
 pub mod merge;
 pub mod prompts;
 pub mod run;
+pub mod setup;
 pub mod state;
 
 #[cfg(test)]

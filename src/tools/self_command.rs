@@ -70,6 +70,10 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
         does: "adds a webhook route (requests then start runs)",
     },
     SelfCommand {
+        words: &["webhook", "add-github"],
+        does: "adds a GitHub flow route (reviews, pushes, merges)",
+    },
+    SelfCommand {
         words: &["webhook", "remove"],
         does: "removes a webhook route",
     },

@@ -15,6 +15,11 @@ Usage:
                      [--events pull_request.opened,issue_comment,...]
                      [--dir <folder>] [--deliver discord:<channel id>|webhook|local]
                      [--github-allow comment,review,approve,pr_create,merge]
+  junees webhook add-github <name> --repo owner/name [--review] [--address-reviews]
+                     [--merge-when-ready] [--dir <clone>] [--deliver ...]
+                     [--test-cmd \"<command>\"] [--min-approvals N] [--allow-self-review]
+                     [--re-review] [--max-runs-per-hour N]
+                                   a pull request flow (below)
   junees webhook list              the routes and their last runs
   junees webhook remove <name>     (also rm)
   junees webhook pause <name>
@@ -52,6 +57,26 @@ even those github_allow_unattended allows scheduled jobs, because the
 request that starts it (pull request bodies, comments) is anyone's text.
 --github-allow names the writes this route's runs may make; each must be
 in github_allow_unattended too (and github_repos must be set).
+
+GitHub flows (add-github): the route gets a random secret in
+$JUNEES_HOME/secrets/webhook-<name> and the events its steps need.
+--review: on pull_request opened/synchronize/ready_for_review the model
+  leaves a COMMENT review in the form of $JUNEES_HOME/flows/review.md
+  (drafts skipped; route write: review).
+--address-reviews: on a review that requests changes (or lists 필수/권장
+  items) of a branch of the repository itself (no forks), the model fixes
+  the code in <dir>/.junees-worktrees/pr-<n>; Junees commits, runs
+  --test-cmd, pushes a new commit (never forced, with your git
+  credentials) and comments (route write: comment). <dir> is a clone.
+--merge-when-ready: on check_suite, status and reviews the flow code (not
+  the model) merges when every check passed, no reviewer requests changes,
+  --min-approvals (default 1) approved the head commit (or with
+  --allow-self-review Junees's own review says 머지 가능 with no 필수 item)
+  and GitHub says mergeable; it also needs github_flow_merge = true.
+Each step runs once per pull request and head commit; the token user's own
+reviews and pushes (and the flow's pushes) are not reviewed again unless
+--re-review; at most --max-runs-per-hour (default 4) model runs per pull
+request.
 ";
 
 /// `junees webhook ...`.
@@ -61,6 +86,7 @@ pub enum WebhookCommand {
         listen: Option<String>,
     },
     Add(AddArgs),
+    AddGithub(crate::flow::setup::AddGithubArgs),
     List,
     Remove(String),
     Pause(String),
@@ -114,6 +140,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<WebhookCommand> {
         "-h" | "--help" | "help" => WebhookCommand::Help,
         "serve" => serve(rest)?,
         "add" => WebhookCommand::Add(add(rest)?),
+        "add-github" => WebhookCommand::AddGithub(add_github(rest)?),
         "list" | "ls" => match rest.first() {
             None => WebhookCommand::List,
             Some(other) => bail!("`junees webhook list` takes no arguments (got `{other}`)"),
@@ -149,6 +176,16 @@ type Options = Vec<(String, String)>;
 /// Splits `rest` into positional words and `(option, value)` pairs of
 /// `options`; `--` ends the options.
 fn split(rest: Vec<String>, options: &[&str], what: &str) -> Result<(Vec<String>, Options)> {
+    split_flags(rest, options, &[], what)
+}
+
+/// [`split`] that also takes the switches `flags` (with an empty value).
+fn split_flags(
+    rest: Vec<String>,
+    options: &[&str],
+    flags: &[&str],
+    what: &str,
+) -> Result<(Vec<String>, Options)> {
     let mut positional = Vec::new();
     let mut found = Vec::new();
     let mut args = rest.into_iter();
@@ -160,6 +197,10 @@ fn split(rest: Vec<String>, options: &[&str], what: &str) -> Result<(Vec<String>
         }
         if arg == "--" {
             options_done = true;
+            continue;
+        }
+        if flags.contains(&arg.as_str()) {
+            found.push((arg, String::new()));
             continue;
         }
         for option in options {
@@ -224,6 +265,52 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
     if args.secret_env.is_some() && args.secret_file.is_some() {
         bail!("give --secret-env or --secret-file, not both");
     }
+    Ok(args)
+}
+
+fn add_github(rest: Vec<String>) -> Result<crate::flow::setup::AddGithubArgs> {
+    let (positional, options) = split_flags(
+        rest,
+        &[
+            "--repo",
+            "--dir",
+            "--deliver",
+            "--test-cmd",
+            "--min-approvals",
+            "--max-runs-per-hour",
+        ],
+        &[
+            "--review",
+            "--address-reviews",
+            "--merge-when-ready",
+            "--allow-self-review",
+            "--re-review",
+        ],
+        "add-github",
+    )?;
+    let mut args = crate::flow::setup::AddGithubArgs::default();
+    for (option, value) in options {
+        match option.as_str() {
+            "--repo" => args.repo = Some(value),
+            "--dir" => args.dir = Some(PathBuf::from(value)),
+            "--deliver" => args.deliver = Some(value),
+            "--test-cmd" => args.test_cmd = Some(value),
+            "--min-approvals" => args.min_approvals = Some(value),
+            "--max-runs-per-hour" => args.max_runs_per_hour = Some(value),
+            "--review" => args.review = true,
+            "--address-reviews" => args.address_reviews = true,
+            "--merge-when-ready" => args.merge_when_ready = true,
+            "--allow-self-review" => args.allow_self_review = true,
+            _ => args.re_review = true,
+        }
+    }
+    args.name = match <[String; 1]>::try_from(positional) {
+        Ok([name]) => name,
+        Err(_) => bail!(
+            "usage: junees webhook add-github <name> --repo owner/name [--review] \
+             [--address-reviews] [--merge-when-ready] [--dir ...] [--deliver ...] [--test-cmd ...]"
+        ),
+    };
     Ok(args)
 }
 
@@ -334,6 +421,42 @@ mod tests {
             })
         );
         assert_eq!(
+            parse_words(&[
+                "add-github",
+                "--review",
+                "flow",
+                "--repo=o/n",
+                "--address-reviews",
+                "--merge-when-ready",
+                "--test-cmd",
+                "cargo test",
+                "--min-approvals",
+                "2",
+                "--allow-self-review",
+                "--re-review",
+                "--max-runs-per-hour=3",
+                "--dir",
+                "/srv",
+                "--deliver",
+                "local",
+            ])
+            .unwrap(),
+            WebhookCommand::AddGithub(crate::flow::setup::AddGithubArgs {
+                name: "flow".into(),
+                repo: Some("o/n".into()),
+                review: true,
+                address_reviews: true,
+                merge_when_ready: true,
+                dir: Some(PathBuf::from("/srv")),
+                deliver: Some("local".into()),
+                test_cmd: Some("cargo test".into()),
+                min_approvals: Some("2".into()),
+                allow_self_review: true,
+                re_review: true,
+                max_runs_per_hour: Some("3".into()),
+            })
+        );
+        assert_eq!(
             parse_words(&["test", "pr", "p.json", "--event", "push"]).unwrap(),
             WebhookCommand::Test {
                 name: "pr".into(),
@@ -379,6 +502,11 @@ mod tests {
             (&["run", "a"][..], "needs --run-id"),
             (&["run", "a", "--run-id", "../x"][..], "letters and digits"),
             (&["list", "x"][..], "no arguments"),
+            (
+                &["add-github", "--review"][..],
+                "usage: junees webhook add-github",
+            ),
+            (&["add-github", "a", "--review=yes"][..], "unknown option"),
             (&["start"][..], "unknown command"),
         ] {
             let err = parse_words(words).unwrap_err().to_string();

@@ -68,12 +68,28 @@ pub async fn main(command: WebhookCommand, settings: Settings) -> Result<ExitCod
                 );
             }
         }
+        WebhookCommand::AddGithub(args) => {
+            let added = crate::flow::setup::add(&store, &lookup, args, unix_now())?;
+            print!(
+                "{}",
+                crate::flow::setup::instructions(&added, super::is_serving(&home))
+            );
+        }
         WebhookCommand::List => print!("{}", super::listing(Some(&home), &*lookup, true)),
         WebhookCommand::Remove(name) => {
             let mut locked = store.lock()?;
             let index = locked.find(&name)?;
             let route = locked.routes.remove(index);
             locked.save()?;
+            drop(locked);
+            if let Some(Secret::File(path)) = &route.secret
+                && route.flow.is_some()
+            {
+                eprintln!(
+                    "  (its secret file {} stays; remove it when GitHub no longer sends to the route)",
+                    path.display()
+                );
+            }
             println!("removed route {}", route.name);
         }
         WebhookCommand::Pause(ref name) | WebhookCommand::Resume(ref name) => {
@@ -360,20 +376,38 @@ async fn run_now(
         escape_hidden(&incoming.label()),
         escape_hidden(&route.dir.display().to_string())
     );
-    let prompt = run::prompt(&route, incoming);
-    let outcome = match &prompt {
-        Err(err) => Outcome::failed(format!("cannot make the prompt: {err:#}")),
-        Ok(prompt) => match prepare(&hide_secrets(home, lookup), &route).await {
-            Ok((engine, limits)) => run::execute(&*engine, &route, prompt, &cancel, limits).await,
-            Err(err) => Outcome::failed(format!("{err:#}")),
-        },
+    let (outcome, prompt, quiet) = match &route.flow {
+        Some(flow) => {
+            let report = flow_run(home, lookup, &route, flow, incoming, &cancel).await;
+            let outcome = Outcome {
+                status: report.status,
+                answer: report.text(),
+                note: report.note(),
+                session: report.session.clone(),
+                tokens: report.tokens,
+            };
+            (outcome, report.prompt, report.quiet)
+        }
+        None => {
+            let prompt = run::prompt(&route, incoming);
+            let outcome = match &prompt {
+                Err(err) => Outcome::failed(format!("cannot make the prompt: {err:#}")),
+                Ok(prompt) => match prepare(&hide_secrets(home, lookup), &route).await {
+                    Ok((engine, limits)) => {
+                        run::execute(&*engine, &route, prompt, &cancel, limits).await
+                    }
+                    Err(err) => Outcome::failed(format!("{err:#}")),
+                },
+            };
+            (outcome, prompt.ok(), false)
+        }
     };
     let ended = Ended {
         run_id,
         started_at,
-        prompt: prompt.as_deref().ok(),
+        prompt: prompt.as_deref(),
         outcome: &outcome,
-        quiet: false,
+        quiet,
     };
     let last = run::finish(home, &tz, lookup, &route, incoming, &ended).await;
     if !outcome.answer.is_empty() {
@@ -422,6 +456,90 @@ fn hide_secrets(home: &Path, lookup: &Lookup) -> Lookup {
         list.extend(names.iter().cloned());
         Some(list.join(","))
     })
+}
+
+/// Makes the engines of a flow's model runs: like a webhook run's, in the
+/// folder the step works in.
+struct FlowEngines {
+    lookup: Lookup,
+}
+
+#[async_trait::async_trait(?Send)]
+impl crate::flow::run::Engines for FlowEngines {
+    async fn engine(&self, dir: &Path) -> Result<Box<dyn crate::cron::run::Engine>> {
+        if crate::claude_code::Backend::from_lookup(|key| (self.lookup)(key))?
+            == crate::claude_code::Backend::ClaudeCode
+        {
+            bail!(
+                "GitHub flows need the api backend: the claude-code backend has no `github` tool \
+                 whose writes the route limits"
+            );
+        }
+        engine_in(&self.lookup, dir).await
+    }
+}
+
+/// Runs the GitHub flow `flow` of `route` for `incoming`.
+async fn flow_run(
+    home: &Path,
+    lookup: &Lookup,
+    route: &Route,
+    flow: &crate::flow::FlowConfig,
+    incoming: &Incoming,
+    cancel: &Cancel,
+) -> crate::flow::run::Report {
+    let lookup = hide_secrets(home, lookup);
+    let prepared = (|| -> Result<_> {
+        let settings = crate::github::Settings::read(|key| {
+            lookup(key)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })?;
+        let token = settings.token.clone().with_context(|| {
+            format!(
+                "GitHub flows need github_token ({})",
+                crate::github::TOKEN_ENV
+            )
+        })?;
+        let repo = crate::github::Repo::parse(&flow.repo).context("the route's repository")?;
+        if !settings.repos.contains(&repo) {
+            bail!(
+                "github_repos ({}) must list {repo} for the flow to use it",
+                crate::github::REPOS_ENV
+            );
+        }
+        let client = crate::github::Client::new(&settings.api_url, token)?;
+        let merge = crate::flow::merge_enabled(&*lookup)?;
+        let limits = super::limits(&*lookup)?;
+        let hidden: Vec<String> = lookup(HIDDEN_ENV)
+            .unwrap_or_default()
+            .split(',')
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+        Ok((settings.unattended, client, merge, limits, hidden))
+    })();
+    let (unattended, client, merge_setting, limits, hidden) = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => return crate::flow::run::Report::failed(format!("{err:#}")),
+    };
+    let engines = FlowEngines {
+        lookup: Arc::clone(&lookup),
+    };
+    let cx = crate::flow::run::Context {
+        home,
+        route,
+        flow,
+        client: &client,
+        engines: &engines,
+        cancel,
+        limits,
+        merge_setting,
+        unattended: &unattended,
+        hidden: &hidden,
+        now: unix_now(),
+    };
+    crate::flow::run::handle(&cx, incoming).await
 }
 
 async fn prepare(
