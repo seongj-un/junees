@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,18 +11,24 @@ use crate::webhook::store::tests::route;
 
 const SECRET: &str = "s3cret";
 
-/// Records each run, then waits for a permit of `gate`.
+/// Records each run, then waits for a permit of `gate`, then ends `ok`
+/// unless `fail` is set.
 struct FakeRunner {
     runs: Mutex<Vec<(String, Incoming)>>,
     gate: Semaphore,
     interrupted: AtomicBool,
+    fail: AtomicBool,
+    finished: AtomicUsize,
 }
 
 #[async_trait]
 impl Runner for FakeRunner {
-    async fn run(&self, name: &str, incoming: Incoming) {
+    async fn run(&self, name: &str, incoming: Incoming) -> bool {
         self.runs.lock().unwrap().push((name.to_string(), incoming));
         self.gate.acquire().await.unwrap().forget();
+        let ok = !self.fail.load(Ordering::SeqCst);
+        self.finished.fetch_add(1, Ordering::SeqCst);
+        ok
     }
 
     fn interrupt(&self) {
@@ -37,6 +43,8 @@ impl Default for FakeRunner {
             runs: Mutex::default(),
             gate: Semaphore::new(0),
             interrupted: AtomicBool::new(false),
+            fail: AtomicBool::new(false),
+            finished: AtomicUsize::new(0),
         }
     }
 }
@@ -53,6 +61,17 @@ impl FakeRunner {
                 tokio::time::Instant::now() < deadline,
                 "only {} run(s) started",
                 self.started()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_finished(&self, count: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while self.finished.load(Ordering::SeqCst) < count {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "runs did not finish"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -438,6 +457,60 @@ async fn a_repeated_delivery_runs_once() {
 }
 
 #[tokio::test]
+async fn a_failed_run_may_be_delivered_again() {
+    let server = start(true, READ_TIMEOUT).await;
+    let url = &server.url;
+    let runner = &server.runner;
+    let opened = r#"{"action":"opened"}"#;
+    runner.fail.store(true, Ordering::SeqCst);
+    assert_eq!(github(url, "pull_request", "again", opened).await.0, 202);
+    runner.wait_started(1).await;
+    assert_eq!(
+        github(url, "pull_request", "again", opened).await,
+        (200, "duplicate".into()),
+        "while it runs"
+    );
+    runner.gate.add_permits(1);
+    runner.wait_finished(1).await;
+    // GitHub's "Redeliver" sends the same delivery id. The id is
+    // forgotten right after the run returns.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, text) = github(url, "pull_request", "again", opened).await;
+        if status == 202 {
+            assert_eq!(text, "queued");
+            break;
+        }
+        assert_eq!((status, text.as_str()), (200, "duplicate"));
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the failed delivery is still remembered"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    runner.wait_started(2).await;
+    // This time it ends ok: the id stays remembered.
+    runner.fail.store(false, Ordering::SeqCst);
+    runner.gate.add_permits(1);
+    runner.wait_finished(2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        github(url, "pull_request", "again", opened).await,
+        (200, "duplicate".into())
+    );
+    assert_eq!(runner.started(), 2);
+
+    let mut state = State::default();
+    for key in ["a", "b", "c"] {
+        state.remember(key.into());
+    }
+    state.forget("b");
+    state.forget("x");
+    assert_eq!(state.seen, ["a", "c"]);
+    assert!(!state.seen_set.contains("b"));
+}
+
+#[tokio::test]
 async fn runs_one_request_per_route_at_a_time_and_refuses_past_the_queue() {
     let server = start(true, READ_TIMEOUT).await;
     let url = &server.url;
@@ -640,9 +713,10 @@ async fn a_run_that_records_nothing_is_recorded_as_failed() {
     save_routes(home.path(), vec![route("pr")]);
     let incoming = Incoming::new("push", Some("d1"), json!({}), 5);
     // `true` ends at once without recording the run.
-    process_runner(home.path(), "/bin/true")
+    let ok = process_runner(home.path(), "/bin/true")
         .run("pr", incoming.clone())
         .await;
+    assert!(!ok);
     let stored = Store::new(home.path()).routes().unwrap().remove(0);
     let last = stored.last.unwrap();
     assert_eq!(last.status, RunStatus::Failed);
@@ -658,9 +732,10 @@ async fn a_run_that_records_nothing_is_recorded_as_failed() {
     // A run that crashed after recording its start is concluded too...
     let runner = process_runner(home.path(), "/bin/true");
     crate::webhook::run::start(home.path(), "pr", "r2", 10, 5).unwrap();
-    runner
+    let status = runner
         .conclude("pr", &incoming, "r2", 10, "gone".into())
         .await;
+    assert_eq!(status, RunStatus::Failed);
     let last = Store::new(home.path()).routes().unwrap()[0]
         .last
         .clone()
@@ -671,14 +746,25 @@ async fn a_run_that_records_nothing_is_recorded_as_failed() {
     );
     assert_eq!(last.started_at, 10);
     // ... but one that recorded its end is left alone.
-    runner
+    let status = runner
         .conclude("pr", &incoming, "r2", 10, "again".into())
         .await;
+    assert_eq!(status, RunStatus::Failed);
     let again = Store::new(home.path()).routes().unwrap()[0]
         .last
         .clone()
         .unwrap();
     assert_eq!(again.note, "gone");
+    // A run that recorded `ok` ended ok.
+    let store = Store::new(home.path());
+    let mut locked = store.lock().unwrap();
+    locked.routes[0].last.as_mut().unwrap().status = RunStatus::Ok;
+    locked.save().unwrap();
+    drop(locked);
+    let status = runner
+        .conclude("pr", &incoming, "r2", 10, "again".into())
+        .await;
+    assert_eq!(status, RunStatus::Ok);
 }
 
 #[test]

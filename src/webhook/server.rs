@@ -9,7 +9,9 @@
 //! ([`Server::check_unsigned`]), 415 for such a request that is not JSON,
 //! 400 for a request it cannot use, 200 `pong` for GitHub's `ping`, 503 while
 //! paused or stopping, 202 `ignored` for events the route does not want,
-//! 200 `duplicate` for a delivery id it has seen (the last [`REMEMBERED`]),
+//! 200 `duplicate` for a delivery id it has seen (the last [`REMEMBERED`];
+//! the id of a run that did not end `ok` is forgotten, so it may be sent
+//! again),
 //! 429 when [`MAX_WAITING`] requests already wait for the route, else 202
 //! `queued`.
 //!
@@ -62,8 +64,8 @@ pub const PROXY_HEADERS: &[&str] = &[
 /// Runs accepted requests.
 #[async_trait]
 pub trait Runner: Send + Sync {
-    /// Runs `incoming` on route `name` to its end.
-    async fn run(&self, name: &str, incoming: Incoming);
+    /// Runs `incoming` on route `name` to its end; whether it ended `ok`.
+    async fn run(&self, name: &str, incoming: Incoming) -> bool;
     /// Asks the runs going on to stop.
     fn interrupt(&self);
 }
@@ -106,6 +108,13 @@ impl State {
             {
                 self.seen_set.remove(&old);
             }
+        }
+    }
+
+    /// Forgets `key`, so a repeat of it is taken.
+    fn forget(&mut self, key: &str) {
+        if self.seen_set.remove(key) {
+            self.seen.retain(|seen| seen != key);
         }
     }
 }
@@ -449,7 +458,14 @@ impl Server {
                     }
                 }
             };
-            self.runner.run(&name, next).await;
+            let key = next.delivery.as_ref().map(|id| format!("{name}/{id}"));
+            // A failed run may be sent again (GitHub's "Redeliver" keeps
+            // the delivery id): forget it.
+            if !self.runner.run(&name, next).await
+                && let Some(key) = key
+            {
+                self.state.lock().unwrap().forget(&key);
+            }
         }
         self.busy.send_modify(|n| *n -= 1);
     }
@@ -539,7 +555,8 @@ impl ProcessRunner {
         command
     }
 
-    /// Records a failure for a run that did not record its end.
+    /// Records a failure for a run that did not record its end. The run's
+    /// status in the end.
     async fn conclude(
         &self,
         name: &str,
@@ -547,24 +564,24 @@ impl ProcessRunner {
         run_id: &str,
         started: i64,
         note: String,
-    ) {
+    ) -> RunStatus {
         let route = match Store::new(&self.home).routes() {
             Ok(routes) => routes.into_iter().find(|route| route.name == name),
             Err(err) => {
                 (self.log)(&format!("cannot read the routes: {err:#}"));
-                return;
+                return RunStatus::Failed;
             }
         };
         let Some(route) = route else {
             (self.log)(&format!("route {name}: {note}; it was removed"));
-            return;
+            return RunStatus::Failed;
         };
         let last = route.last.as_ref().filter(|last| last.run_id == run_id);
         if let Some(last) = last
             && last.status != RunStatus::Running
         {
             (self.log)(&format!("route {name}: run {}", last.status.word()));
-            return;
+            return last.status;
         }
         (self.log)(&format!("route {name}: {note}"));
         let outcome = Outcome {
@@ -587,12 +604,13 @@ impl ProcessRunner {
             },
         )
         .await;
+        RunStatus::Failed
     }
 }
 
 #[async_trait]
 impl Runner for ProcessRunner {
-    async fn run(&self, name: &str, incoming: Incoming) {
+    async fn run(&self, name: &str, incoming: Incoming) -> bool {
         let run_id = random_hex(8);
         let started = unix_now();
         // The run does not need any route's secret.
@@ -600,12 +618,13 @@ impl Runner for ProcessRunner {
             Ok(child) => child,
             Err(err) => {
                 let note = format!("cannot start the run: {err}");
-                return self.conclude(name, &incoming, &run_id, started, note).await;
+                return self.conclude(name, &incoming, &run_id, started, note).await
+                    == RunStatus::Ok;
             }
         };
         let Some(pid) = child.id().map(|pid| pid as i32) else {
             let note = "the run ended at once".to_string();
-            return self.conclude(name, &incoming, &run_id, started, note).await;
+            return self.conclude(name, &incoming, &run_id, started, note).await == RunStatus::Ok;
         };
         (self.log)(&format!(
             "route {name}: run {run_id} started ({})",
@@ -625,7 +644,7 @@ impl Runner for ProcessRunner {
         }
         self.groups.lock().unwrap().remove(&run_id);
         let note = format!("the run ended without a result ({exit})");
-        self.conclude(name, &incoming, &run_id, started, note).await;
+        self.conclude(name, &incoming, &run_id, started, note).await == RunStatus::Ok
     }
 
     fn interrupt(&self) {
