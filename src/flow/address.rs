@@ -235,6 +235,28 @@ pub fn commit(worktree: &Worktree, message: &str) -> Result<Option<String>> {
     Ok(Some(head(worktree)?))
 }
 
+/// The files under `.github/` ([`crate::flow::merge::GITHUB_DIR`]) that
+/// the worktree's head changes from `base` (old and new names of a
+/// rename). The flow does not push such a change: a workflow it pushes
+/// runs with the repository's secrets.
+pub fn github_changes(worktree: &Worktree, base: &str) -> Result<Vec<String>> {
+    let names = worktree.repo().git(&[
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        base,
+        "HEAD",
+    ])?;
+    Ok(names
+        .split('\0')
+        .filter(|name| name.starts_with(crate::flow::merge::GITHUB_DIR))
+        .map(str::to_string)
+        .collect())
+}
+
 /// The worktree's head commit.
 pub fn head(worktree: &Worktree) -> Result<String> {
     Ok(worktree
@@ -488,6 +510,7 @@ pub fn test_sandbox(tools: &crate::tools::ToolSettings, gh_config: &Path) -> Opt
         github_allow: &[],
         gh_config,
         context_dir: Path::new("/"),
+        approvers: &[],
     };
     Sandbox::for_tools(&trigger.tool_settings(tools))
 }

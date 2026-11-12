@@ -208,6 +208,7 @@ async fn scheduled_and_webhook_runs_get_the_scope_and_conversations_do_not() {
         github_allow: &[],
         gh_config: gh.path(),
         context_dir: &work,
+        approvers: &[],
     }
     .tool_settings(&settings);
     for unattended in [&cron, &webhook] {
@@ -250,6 +251,7 @@ async fn webhook_runs_do_not_read_saved_sessions() {
         github_allow: &[],
         gh_config: gh.path(),
         context_dir: &home,
+        approvers: &[],
     }
     .tool_settings(&settings);
     let output = ReadFile::with_settings(&webhook)

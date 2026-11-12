@@ -6,8 +6,15 @@
 //! So does everything in the secrets folder next to it
 //! ([`SECRETS_FOLDER`]): webhook secret files, which `junees webhook add`
 //! only takes from there, and the user's environment files. And so do
-//! the user's git and GitHub CLI credentials ([`CREDENTIALS`]): git's
-//! credential store and `gh`'s login, which push and merge as the user.
+//! the user's git, GitHub CLI and Claude Code credentials
+//! ([`CREDENTIALS`]): git's credential store and `gh`'s login, which push
+//! and merge as the user, and Claude Code's login (the user's
+//! subscription), user settings (whose hooks run outside the claude-code
+//! backend's deny rules) and account state (`~/.claude.json`: personal MCP
+//! servers, which start programs, and trust decisions). The rest of
+//! `~/.claude` (auto memory, `CLAUDE.md`, `rules/`) stays open, since
+//! Claude Code reads and writes it in its own sessions; webhook runs keep
+//! the whole folder away ([`SettingsFile::with_claude_folder`]).
 //!
 //! read_file, write_file and edit_file refuse it; the command policy refuses
 //! bash commands that name it (also through a glob or braces) or that use
@@ -36,11 +43,37 @@ pub fn secrets_dir(junees_home: &Path) -> PathBuf {
     junees_home.join(SECRETS_FOLDER)
 }
 
-/// The git and GitHub CLI credential files and folders under the home
-/// folder (`~/.git-credentials`, `~/.config/git/credentials`,
-/// `~/.config/gh`); `$XDG_CONFIG_HOME/git/credentials` and
+/// The git, GitHub CLI and Claude Code credential files and folders under
+/// the home folder; `$XDG_CONFIG_HOME/git/credentials` and
 /// `$XDG_CONFIG_HOME/gh` come from [`SettingsFile::with_config_home`].
-pub const CREDENTIALS: &[&str] = &[".git-credentials", ".config/git/credentials", ".config/gh"];
+/// Claude Code's are its login, its user settings (hooks; the local file
+/// counts when the home folder is the project), its account state
+/// `~/.claude.json` and the earlier copies of it in `backups/`.
+pub const CREDENTIALS: &[&str] = &[
+    ".git-credentials",
+    ".config/git/credentials",
+    ".config/gh",
+    ".claude/.credentials.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/backups",
+    CLAUDE_STATE,
+];
+
+/// Claude Code's folder under the home folder. Its credential and settings
+/// files are always protected ([`CREDENTIALS`]); webhook runs protect all
+/// of it ([`SettingsFile::with_claude_folder`]).
+pub const CLAUDE_FOLDER: &str = ".claude";
+
+/// Claude Code's account state file under the home folder.
+const CLAUDE_STATE: &str = ".claude.json";
+
+/// Why Claude Code's files are protected, for refusals.
+const CLAUDE_REASON: &str = "Claude Code's login, settings or account state \
+    (`~/.claude/.credentials.json`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, \
+    `~/.claude.json` and its copies in `~/.claude/backups/`), or in a webhook run anything in \
+    `~/.claude/`: the login is the user's Claude subscription, and the settings can run commands \
+    as hooks";
 
 /// How many symbolic links a dangling chain may have before giving up.
 const MAX_LINKS: usize = 40;
@@ -151,7 +184,8 @@ pub struct SettingsFile {
     path: PathBuf,
     /// What `~` and `$HOME` mean in bash commands.
     home: Option<PathBuf>,
-    /// The git and GitHub CLI credentials ([`CREDENTIALS`]), as given.
+    /// The git, GitHub CLI and Claude Code credentials ([`CREDENTIALS`]),
+    /// as given; all of `~/.claude` after [`Self::with_claude_folder`].
     credentials: Vec<PathBuf>,
 }
 
@@ -184,14 +218,42 @@ impl SettingsFile {
         self
     }
 
-    /// The protected credential files and folders, absolute and resolved
-    /// like [`Self::resolved_path`].
-    pub fn resolved_credentials(&self) -> Vec<PathBuf> {
-        self.credentials
+    /// Also protects everything else in Claude Code's folder (`~/.claude`:
+    /// auto memory, `CLAUDE.md`, `rules/`), for webhook runs: anyone's text
+    /// drives them, and what they wrote there would reach the user's own
+    /// Claude Code sessions as instructions.
+    pub fn with_claude_folder(mut self) -> Self {
+        self.credentials = self.claude_folder_credentials();
+        self
+    }
+
+    /// The credentials with Claude Code's files in `~/.claude` replaced by
+    /// the whole folder.
+    fn claude_folder_credentials(&self) -> Vec<PathBuf> {
+        let Some(folder) = self.home.as_ref().map(|home| home.join(CLAUDE_FOLDER)) else {
+            return self.credentials.clone();
+        };
+        let mut paths: Vec<PathBuf> = self
+            .credentials
             .iter()
-            .filter_map(|path| std::path::absolute(path).ok())
-            .map(|path| resolve(&path).unwrap_or(path))
-            .collect()
+            .filter(|path| !path.starts_with(&folder))
+            .cloned()
+            .collect();
+        paths.push(folder);
+        paths
+    }
+
+    /// The protected credential files and folders, absolute and resolved
+    /// like [`Self::resolved_path`]: what the file tools, the command
+    /// policy and the claude-code deny rules refuse.
+    pub fn resolved_protected(&self) -> Vec<PathBuf> {
+        resolve_all(&self.credentials)
+    }
+
+    /// The credential files and folders a webhook run's sandbox hides,
+    /// absolute and resolved: the protected ones with all of `~/.claude`.
+    pub fn resolved_credentials(&self) -> Vec<PathBuf> {
+        resolve_all(&self.claude_folder_credentials())
     }
 
     /// The file as an absolute path (relative ones start from the current
@@ -311,6 +373,13 @@ impl SettingsFile {
 
     /// The error a file tool returns for `path`.
     pub fn refusal(&self, path: &str) -> String {
+        let cwd = std::env::current_dir().ok();
+        if self.claude_code_owns(self.locate(path, cwd.as_deref())) {
+            return format!(
+                "{path} is {CLAUDE_REASON}. Junees tools do not read or change it; ask the user \
+                 to change it in Claude Code itself."
+            );
+        }
         format!(
             "{path} is the user's private Junees settings file, a secret next to it, or a git or \
              GitHub CLI credential file (it holds the API key and other secrets). Junees tools do \
@@ -318,13 +387,36 @@ impl SettingsFile {
         )
     }
 
-    /// Why the command policy refuses a command that names it as `word`.
-    pub fn named_reason(&self, word: &str) -> String {
+    /// Why the command policy refuses a command that names it as `word`
+    /// (relative paths taken from `cwd`).
+    pub fn named_reason(&self, word: &str, cwd: Option<&Path>) -> String {
+        if self.claude_code_owns(self.locate(word, cwd)) {
+            return format!(
+                "`{word}` is {CLAUDE_REASON}; commands may not read or change it. Ask the user \
+                 to change it in Claude Code itself."
+            );
+        }
         format!(
             "`{word}` is the user's private Junees settings file, a secret next to it, or a git \
              or GitHub CLI credential file (it holds the API key and other secrets); commands may \
              not read or change it. Ask the user to change settings with `junees setup` instead."
         )
+    }
+
+    /// Whether the absolute `path` is Claude Code's: in `~/.claude` or
+    /// `~/.claude.json`, as written or resolved.
+    fn claude_code_owns(&self, path: Option<PathBuf>) -> bool {
+        let (Some(path), Some(home)) = (path, &self.home) else {
+            return false;
+        };
+        let resolved = lands(&path);
+        [home.join(CLAUDE_FOLDER), home.join(CLAUDE_STATE)]
+            .into_iter()
+            .flat_map(|owned| [resolve(&owned), Some(owned)])
+            .flatten()
+            .any(|owned| {
+                path.starts_with(&owned) || resolved.as_ref().is_some_and(|p| p.starts_with(&owned))
+            })
     }
 
     /// Why the command policy refuses a command that uses the whole folder
@@ -395,7 +487,7 @@ impl SettingsFile {
             // into; a file (or a path not there yet) only what it
             // matches whole.
             let credentials = self
-                .resolved_credentials()
+                .resolved_protected()
                 .into_iter()
                 .any(|path| prefix.starts_with(&path) || matches(&path, !path.is_dir()));
             (secrets || credentials).then_some(Named::File)
@@ -479,7 +571,7 @@ impl SettingsFile {
             || self.lands(path).is_some_and(|path| {
                 self.resolved_secrets()
                     .into_iter()
-                    .chain(self.resolved_credentials())
+                    .chain(self.resolved_protected())
                     .any(|dir| path.starts_with(dir))
             })
     }
@@ -505,6 +597,15 @@ impl SettingsFile {
             _ => false,
         }
     }
+}
+
+/// `paths`, absolute and resolved like [`SettingsFile::resolved_path`].
+fn resolve_all(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter_map(|path| std::path::absolute(path).ok())
+        .map(|path| resolve(&path).unwrap_or(path))
+        .collect()
 }
 
 /// Where writing to the absolute `path` lands: `.`, `..` and symbolic
@@ -753,6 +854,8 @@ mod tests {
             "~/.config/g?/hosts.yml",
             "~/.git-cred*",
             "~/.config/gh",
+            "~/.claude/.credentials.json",
+            "$HOME/.claude/settings.json",
         ] {
             assert_eq!(file.names(word, Some(&root)), Some(Named::File), "{word}");
         }
@@ -765,6 +868,103 @@ mod tests {
         assert!(file.is(&xdg.join("git/credentials")));
         let file = file.with_config_home(Some(PathBuf::from("relative")));
         assert!(!file.is(&root.join("relative/gh")));
+    }
+
+    /// Claude Code's own memory and instruction files in `~/.claude`.
+    const CLAUDE_CODE_OPEN: &[&str] = &[
+        ".claude",
+        ".claude/CLAUDE.md",
+        ".claude/rules/style.md",
+        ".claude/projects/-home-u-repo/memory/MEMORY.md",
+    ];
+
+    #[test]
+    fn knows_claude_codes_login_and_settings_but_not_its_memory() {
+        let (_dir, root, file) = home();
+        std::fs::create_dir_all(root.join(".claude/projects/-home-u-repo/memory")).unwrap();
+        std::fs::write(root.join(".claude/.credentials.json"), "{}").unwrap();
+        std::fs::write(root.join(".claude.json"), "{}").unwrap();
+        symlink(root.join(".claude.json"), root.join("state-link")).unwrap();
+        let protected = [
+            ".claude/.credentials.json",
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+            ".claude/backups/.claude.json.backup.1",
+            ".claude.json",
+            "state-link",
+            ".claude/x/../settings.json",
+        ];
+        for path in protected {
+            assert!(file.is(&root.join(path)), "{path}");
+        }
+        for path in CLAUDE_CODE_OPEN {
+            assert!(!file.is(&root.join(path)), "{path}");
+        }
+        for word in [
+            "~/.claude/.credentials.json",
+            "$HOME/.claude/settings.json",
+            "~/.claude/*.json",
+            "~/.claude.json",
+            "~/.claude/backups",
+        ] {
+            assert_eq!(file.names(word, Some(&root)), Some(Named::File), "{word}");
+        }
+        for word in [
+            "~/.claude",
+            "~/.claude/CLAUDE.md",
+            "~/.claude/projects/p/memory/a.md",
+        ] {
+            assert_eq!(file.names(word, Some(&root)), None, "{word}");
+        }
+        // A webhook run keeps all of it away.
+        let webhook = file.clone().with_claude_folder();
+        for path in protected.iter().chain(CLAUDE_CODE_OPEN) {
+            assert!(webhook.is(&root.join(path)), "{path}");
+        }
+        assert_eq!(
+            webhook.names("~/.claude/CLAUDE.md", Some(&root)),
+            Some(Named::File)
+        );
+        // The sandbox hides the whole folder either way, and only once.
+        let hidden = file.resolved_credentials();
+        assert_eq!(hidden, webhook.resolved_credentials());
+        assert!(hidden.contains(&root.join(".claude")), "{hidden:?}");
+        assert!(hidden.contains(&root.join(".claude.json")), "{hidden:?}");
+        assert!(
+            !hidden.iter().any(
+                |path| path.starts_with(root.join(".claude/")) && path != &root.join(".claude")
+            ),
+            "{hidden:?}"
+        );
+    }
+
+    #[test]
+    fn refusals_name_claude_code_for_its_files() {
+        let (_dir, root, file) = home();
+        let settings = root.join(".claude/settings.json");
+        let refusal = file.refusal(&settings.display().to_string());
+        assert!(
+            refusal.contains("Claude Code's login, settings")
+                && refusal.contains("in Claude Code itself")
+                && !refusal.contains("junees setup"),
+            "{refusal}"
+        );
+        let reason = file.named_reason("~/.claude.json", Some(&root));
+        assert!(reason.contains("Claude Code's login"), "{reason}");
+        let reason = file
+            .clone()
+            .with_claude_folder()
+            .named_reason("../.claude/CLAUDE.md", Some(&root.join("repo")));
+        assert!(reason.contains("Claude Code's login"), "{reason}");
+        for word in ["~/.git-credentials", "~/.junees/config.toml"] {
+            let reason = file.named_reason(word, Some(&root));
+            assert!(
+                reason.contains("junees setup") && !reason.contains("Claude Code"),
+                "{reason}"
+            );
+        }
+        let refusal = file.refusal(&root.join(".config/gh/hosts.yml").display().to_string());
+        assert!(refusal.contains("GitHub CLI"), "{refusal}");
     }
 
     #[test]

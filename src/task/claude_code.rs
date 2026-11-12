@@ -236,6 +236,26 @@ mod tests {
             "Read(//home/tester/.config/gh/**)",
             "Edit(//home/tester/.config/gh)",
             "Edit(//home/tester/.config/gh/**)",
+            "Read(//home/tester/.claude/.credentials.json)",
+            "Read(//home/tester/.claude/.credentials.json/**)",
+            "Edit(//home/tester/.claude/.credentials.json)",
+            "Edit(//home/tester/.claude/.credentials.json/**)",
+            "Read(//home/tester/.claude/settings.json)",
+            "Read(//home/tester/.claude/settings.json/**)",
+            "Edit(//home/tester/.claude/settings.json)",
+            "Edit(//home/tester/.claude/settings.json/**)",
+            "Read(//home/tester/.claude/settings.local.json)",
+            "Read(//home/tester/.claude/settings.local.json/**)",
+            "Edit(//home/tester/.claude/settings.local.json)",
+            "Edit(//home/tester/.claude/settings.local.json/**)",
+            "Read(//home/tester/.claude/backups)",
+            "Read(//home/tester/.claude/backups/**)",
+            "Edit(//home/tester/.claude/backups)",
+            "Edit(//home/tester/.claude/backups/**)",
+            "Read(//home/tester/.claude.json)",
+            "Read(//home/tester/.claude.json/**)",
+            "Edit(//home/tester/.claude.json)",
+            "Edit(//home/tester/.claude.json/**)",
             "Read(//home/tester/.junees/**)",
             "Edit(//home/tester/.junees/**)",
             "Bash(*/home/tester/.junees*)",
@@ -270,6 +290,26 @@ mod tests {
         assert_eq!(args[start - 1], "--disallowedTools");
         assert_eq!(args[start..args.len() - expected.len()], kept[..]);
         assert_eq!(args[args.len() - expected.len()..], expected);
+
+        // Claude Code's memory and instruction files stay open, except in
+        // a webhook run.
+        assert!(!expected.iter().any(|rule| rule.ends_with("/.claude/**)")));
+        let webhook = settings_rules(&file.clone().with_claude_folder(), Path::new("/repo"));
+        for rule in [
+            "Read(//home/tester/.claude)",
+            "Read(//home/tester/.claude/**)",
+            "Edit(//home/tester/.claude)",
+            "Edit(//home/tester/.claude/**)",
+            "Read(//home/tester/.claude.json)",
+        ] {
+            assert!(webhook.contains(&rule.to_string()), "{rule}: {webhook:?}");
+        }
+        assert!(
+            !webhook
+                .iter()
+                .any(|rule| rule.contains(".claude/settings.json")),
+            "{webhook:?}"
+        );
 
         // `..` is resolved, as Claude Code compares resolved paths.
         let dotted = SettingsFile::new("/nonexistent-junees/a/../j/config.toml", None);

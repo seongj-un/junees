@@ -754,6 +754,34 @@ async fn untrusted_servers_are_asked_about_trusted_ones_are_not() {
     mcp.shutdown().await;
 }
 
+#[tokio::test]
+async fn unattended_runs_get_only_trusted_servers_tools() {
+    let fake = Fake::new();
+    let mut trusted = fake.config("trusted", "modern");
+    trusted.trust = true;
+    let mcp = start(vec![fake.config("fake", "modern"), trusted]).await;
+    let mut registry = ToolRegistry::new();
+    assert_eq!(mcp.register_trusted(&mut registry), ["fake"]);
+    let names: Vec<String> = registry.specs().into_iter().map(|spec| spec.name).collect();
+    assert!(!names.is_empty(), "{names:?}");
+    assert!(
+        names.iter().all(|name| name.starts_with("mcp__trusted__")),
+        "{names:?}"
+    );
+    let refused = registry
+        .dispatch("mcp__fake__echo", json!({"text": "x"}))
+        .await;
+    assert!(refused.is_error, "{refused:?}");
+    let echoed = registry
+        .dispatch("mcp__trusted__echo", json!({"text": "hello"}))
+        .await;
+    assert!(
+        !echoed.is_error && echoed.content.contains("hello"),
+        "{echoed:?}"
+    );
+    mcp.shutdown().await;
+}
+
 /// What one model call was sent: its conversation, tool names and messages.
 type Seen = (String, Vec<String>, Vec<Message>);
 

@@ -138,8 +138,9 @@ pub fn settings_rules(file: &SettingsFile, root: &Path) -> Vec<String> {
         format!("Read(/{})", gitignore_escape(text)),
         format!("Edit(/{})", gitignore_escape(text)),
     ];
-    // git's and the GitHub CLI's credentials (a file or a folder).
-    for path in file.resolved_credentials() {
+    // git's, the GitHub CLI's and Claude Code's credentials (a file or a
+    // folder; all of `~/.claude` in a webhook run).
+    for path in file.resolved_protected() {
         if let Some(path) = path.to_str() {
             let path = gitignore_escape(path);
             for tool in ["Read", "Edit"] {

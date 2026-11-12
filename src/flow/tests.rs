@@ -227,7 +227,9 @@ impl Engine for FakeEngine {
             allow: github_allow.to_vec(),
         });
         if let Some(name) = self.edit {
-            std::fs::write(spec.dir.join(name), "fixed\n").unwrap();
+            let path = spec.dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "fixed\n").unwrap();
         }
         if let Some((key, value)) = &self.git_config {
             sh_git(spec.dir, &["config", key, value]);
@@ -646,6 +648,42 @@ async fn does_not_push_when_the_tests_fail_or_nothing_changed() {
     );
     assert!(github.writes().is_empty());
     assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
+}
+
+#[tokio::test]
+async fn does_not_push_changes_under_dot_github() {
+    let (home, _root, github, route, bare, head) = address_setup(None).await;
+    let engines = FakeEngines {
+        edit: Some(".github/workflows/ci.yml"),
+        ..FakeEngines::default()
+    };
+    let client = github.client();
+    let setup = Setup {
+        home: home.path(),
+        route: &route,
+        client: &client,
+        engines: &engines,
+        merge: false,
+        unattended: ALL,
+    };
+    let report = run(
+        &setup,
+        &reviewed("bob", "changes_requested", "please fix the parser", &head),
+        1000,
+    )
+    .await;
+    assert_eq!(report.status, RunStatus::Failed, "{report:?}");
+    assert!(
+        report.lines[0]
+            .starts_with("#7 address: failed: changes under .github/, not pushed; commented"),
+        "{report:?}"
+    );
+    assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
+    let writes = github.writes();
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    let body = writes[0].1["body"].as_str().unwrap();
+    assert!(body.contains("`.github/workflows/ci.yml`"), "{body}");
+    assert!(body.contains("push하지 않았습니다"), "{body}");
 }
 
 #[tokio::test]

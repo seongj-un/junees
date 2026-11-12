@@ -319,9 +319,13 @@ pub fn register_webhook(
     cwd: &Path,
     route: &str,
     allow: &[Write],
+    approvers: &[String],
 ) {
     if let Some(tool) = tool(settings, cwd, false) {
-        tools.register(tool.for_webhook(route, allow));
+        tools.register(
+            tool.for_webhook(route, allow)
+                .comments_from_writers(approvers),
+        );
     }
 }
 

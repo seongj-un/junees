@@ -64,6 +64,9 @@ pub const MODEL_ENV: &str = "JUNEES_CLAUDE_MODEL";
 /// (<https://code.claude.com/docs/en/env-vars#what-the-subprocess-environment-scrub-removes>).
 /// Junees turns it on for every session unless the user turned it off.
 pub const SCRUB_ENV: &str = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB";
+/// Lets scheduled jobs and webhook runs use the claude-code backend
+/// ([`check_unattended`]); off by default.
+pub const UNATTENDED_ENV: &str = "JUNEES_CLAUDE_CODE_UNATTENDED";
 
 /// The oldest Claude Code that knows every flag Junees passes:
 /// `--permission-prompts` came in 2.1.259.
@@ -173,6 +176,44 @@ impl Backend {
             Some(value) => Self::parse(&value).context(BACKEND_ENV),
         }
     }
+}
+
+/// Whether an unattended run (a scheduled job, a webhook run) may use the
+/// claude-code backend. Claude Code runs its own tools, Bash included and
+/// allowed without a question ([`TOOLS`]), and Junees cannot confine them
+/// with its sandbox: only the deny rules, which match words as written,
+/// stand between a webhook's text (anyone's) and the user's files and
+/// keys. So it runs only when the user allowed it ([`UNATTENDED_ENV`]),
+/// and never when the user asked for `sandbox = require` explicitly.
+/// `sandbox` is the sandbox setting as read, `None` without one.
+pub fn check_unattended(
+    lookup: impl Fn(&str) -> Option<String>,
+    sandbox: Option<&crate::sandbox::Settings>,
+) -> Result<()> {
+    if sandbox.and_then(|settings| settings.mode) == Some(crate::sandbox::Mode::Require) {
+        bail!(
+            "the claude-code backend cannot run scheduled jobs or webhook runs with \
+             sandbox = require: Junees cannot confine the commands Claude Code runs. Use the \
+             api backend for them (JUNEES_BACKEND=api in the environment of `junees cron \
+             daemon` or `junees webhook serve`); see docs/safety.md"
+        );
+    }
+    let allowed = crate::config::parse_flag(
+        lookup(UNATTENDED_ENV)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        UNATTENDED_ENV,
+    )?;
+    if !allowed {
+        bail!(
+            "scheduled jobs and webhook runs refuse the claude-code backend: Claude Code runs \
+             its commands (Bash) without Junees's sandbox, and nobody watches an unattended \
+             run. Use the api backend for them (JUNEES_BACKEND=api in the environment of \
+             `junees cron daemon` or `junees webhook serve`), or allow it with \
+             claude_code_unattended = 1 ({UNATTENDED_ENV}); see docs/safety.md"
+        );
+    }
+    Ok(())
 }
 
 /// How to run Claude Code. Holds no credential: `claude` finds its own
@@ -987,6 +1028,41 @@ mod tests {
                 .iter()
                 .any(|(name, _)| name == "GIT_CONFIG_KEY_0")
         );
+    }
+
+    #[test]
+    fn unattended_runs_need_the_users_permission() {
+        let get = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        let sandbox = |mode| crate::sandbox::Settings {
+            mode,
+            ..crate::sandbox::Settings::read(|_| None).unwrap()
+        };
+        let err = check_unattended(get(&[]), None).unwrap_err().to_string();
+        assert!(err.contains("claude_code_unattended = 1"), "{err}");
+        assert!(err.contains("JUNEES_BACKEND=api"), "{err}");
+        for off in ["0", "no", " "] {
+            let lookup = move |key: &str| (key == UNATTENDED_ENV).then(|| off.to_string());
+            assert!(check_unattended(lookup, Some(&sandbox(None))).is_err());
+        }
+        let bad = check_unattended(get(&[(UNATTENDED_ENV, "maybe")]), None).unwrap_err();
+        assert!(bad.to_string().contains(UNATTENDED_ENV), "{bad}");
+        let allowed = get(&[(UNATTENDED_ENV, " 1 ")]);
+        check_unattended(allowed, None).unwrap();
+        // The unattended default (`require` when unset) does not count as
+        // the user's choice; an explicit one does.
+        check_unattended(allowed, Some(&sandbox(None))).unwrap();
+        check_unattended(allowed, Some(&sandbox(Some(crate::sandbox::Mode::Auto)))).unwrap();
+        let err = check_unattended(allowed, Some(&sandbox(Some(crate::sandbox::Mode::Require))))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sandbox = require"), "{err}");
     }
 
     #[test]

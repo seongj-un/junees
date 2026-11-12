@@ -178,6 +178,24 @@ impl Mcp {
         }
     }
 
+    /// Adds only the tools of the trusted servers (`"trust": true`) that
+    /// started to `registry`, for a run nobody watches (a scheduled job, a
+    /// webhook run). A conversation asks before an untrusted server's tool
+    /// runs; there nobody could answer, so they are left out. Returns the
+    /// names of the servers whose tools were left out.
+    pub fn register_trusted(&self, registry: &mut ToolRegistry) -> Vec<String> {
+        let mut left_out: Vec<String> = Vec::new();
+        for (name, index, remote) in &self.tools {
+            let server = &self.servers[*index];
+            if server.config.trust {
+                registry.register(McpTool::new(name.clone(), remote, Arc::clone(server)));
+            } else if !left_out.iter().any(|other| other == server.name()) {
+                left_out.push(server.name().to_string());
+            }
+        }
+        left_out
+    }
+
     /// The tools for the approval questions ([`crate::approval::Approval::with_external_tools`]).
     pub fn external_tools(&self) -> Vec<(String, ExternalTool)> {
         self.tools

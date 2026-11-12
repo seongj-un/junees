@@ -106,13 +106,18 @@ async fn start_with(loopback: bool, configure: impl FnOnce(Server) -> Server) ->
     let mut open = route("open");
     open.kind = Kind::Generic;
     open.secret = None;
+    open.no_secret = true;
+    // Added before secrets were required: no secret, no --no-secret.
+    let mut legacy = route("legacy");
+    legacy.kind = Kind::Generic;
+    legacy.secret = None;
     let mut off = route("off");
     off.paused = true;
     off.secret = Some(Secret::Env("HOOK_SECRET".into()));
     off.deliver = Delivery::Local;
     let store = Store::new(home.path());
     let mut locked = store.lock().unwrap();
-    locked.routes = vec![pr, open, off];
+    locked.routes = vec![pr, open, legacy, off];
     locked.save().unwrap();
     drop(locked);
     let runner = Arc::new(FakeRunner::default());
@@ -387,6 +392,10 @@ async fn routes_without_a_secret_refuse_browsers_and_proxies() {
     assert_eq!(raw(url, no_type.as_bytes()).await.0, 415);
     let no_host = "POST /hooks/open HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
     assert_eq!(raw(url, no_host.as_bytes()).await.0, 403);
+    // A route without a secret that was not added with --no-secret.
+    let (status, text) = post(url, "legacy", &[], "{}").await;
+    assert_eq!(status, 403, "{text}");
+    assert!(text.contains("--no-secret"), "{text}");
     assert_eq!(server.runner.started(), 0, "nothing ran");
     // What a program on this machine sends (curl, a local tool).
     let localhost = format!("LocalHost:{port}");

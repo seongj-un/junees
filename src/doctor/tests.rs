@@ -867,8 +867,12 @@ async fn webhook_secrets_and_server_are_checked() {
     by_file.secret = Some(Secret::File(secret.clone()));
     let mut open = crate::webhook::store::tests::route("unsigned");
     open.secret = None;
+    open.no_secret = true;
     open.paused = true;
-    locked.routes.extend([by_env, by_file, open]);
+    let mut legacy = crate::webhook::store::tests::route("legacy");
+    legacy.secret = None;
+    legacy.paused = true;
+    locked.routes.extend([by_env, by_file, open, legacy]);
     locked.save().unwrap();
     drop(locked);
 
@@ -897,9 +901,16 @@ async fn webhook_secrets_and_server_are_checked() {
     expect(
         &report,
         "webhooks",
+        "route legacy",
+        Status::Warn,
+        "the server refuses its requests",
+    );
+    expect(
+        &report,
+        "webhooks",
         "server",
         Status::Warn,
-        "3 routes, 2 not paused; the server is not running",
+        "4 routes, 2 not paused; the server is not running",
     );
 
     fixture.set("DOCTOR_HOOK_SECRET", "env-secret-value");

@@ -13,8 +13,8 @@
 //! branch protection, a change request of anyone with write access still
 //! blocks the merge and starts the address step.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::github::Client;
 
@@ -29,8 +29,9 @@ pub struct Access<'a> {
     client: &'a Client,
     repo: String,
     approvers: &'a [String],
-    /// Lowercase login -> write access.
-    known: RefCell<HashMap<String, bool>>,
+    /// Lowercase login -> write access. A mutex, not a `RefCell`, so the
+    /// `github` tool's (`Send`) futures can hold an `Access` too.
+    known: Mutex<HashMap<String, bool>>,
 }
 
 impl<'a> Access<'a> {
@@ -41,7 +42,7 @@ impl<'a> Access<'a> {
             client,
             repo: repo.to_string(),
             approvers,
-            known: RefCell::new(HashMap::new()),
+            known: Mutex::new(HashMap::new()),
         }
     }
 
@@ -74,12 +75,12 @@ impl<'a> Access<'a> {
             return Ok(false);
         }
         let key = login.to_ascii_lowercase();
-        let cached = self.known.borrow().get(&key).copied();
+        let cached = self.known.lock().unwrap().get(&key).copied();
         if let Some(known) = cached {
             return Ok(known);
         }
         let writes = self.writes(login).await?;
-        self.known.borrow_mut().insert(key, writes);
+        self.known.lock().unwrap().insert(key, writes);
         Ok(writes)
     }
 

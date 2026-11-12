@@ -247,7 +247,7 @@ impl CommandPolicy {
                     if let Some(file) = &self.settings_file {
                         let reason = targets.iter().find_map(|&(word, writes)| {
                             match file.names(word, cwd.as_deref())? {
-                                Named::File => Some(file.named_reason(word)),
+                                Named::File => Some(file.named_reason(word, cwd.as_deref())),
                                 Named::Folder if !lists_folder => Some(file.folder_reason(word)),
                                 Named::Folder => None,
                                 Named::Data(index) if writes => {
