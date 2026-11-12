@@ -18,6 +18,9 @@ use crate::tools::{Tool, ToolOutput};
 pub const MAX_TEXT: usize = 20_000;
 /// Characters of an `evaluate` result.
 pub const MAX_RESULT: usize = 10_000;
+/// Characters of a page title and of a page address in a result.
+pub const MAX_TITLE: usize = 300;
+pub const MAX_URL: usize = 2_000;
 /// The largest screenshot sent, in bytes; a larger one is sent as JPEG.
 pub const MAX_SCREENSHOT_BYTES: usize = 2 * 1024 * 1024;
 
@@ -423,7 +426,7 @@ impl BrowserTool {
                 slot.take();
                 *self.known() = Known::default();
             }
-            return ToolOutput::error(with_notes(message, &notes));
+            return ToolOutput::error(error_with_notes(message, &notes));
         }
         self.page_output(browser, 0)
             .await
@@ -460,6 +463,11 @@ impl BrowserTool {
     /// Refuses an action whose risk needs a question this run cannot ask,
     /// or one the question did not cover because the page changed.
     fn allowed(&self, asked_about: &str, now: &str) -> Result<(), Failure> {
+        // The risks name labels from the page.
+        let (asked_about, now) = (
+            &crate::prompt_text::escape_hidden(asked_about),
+            &crate::prompt_text::escape_hidden(now),
+        );
         if !self.inner.asks && !(asked_about.is_empty() && now.is_empty()) {
             let risk = if now.is_empty() { asked_about } else { now };
             return Err(Failure::Error(format!(
@@ -491,11 +499,11 @@ impl BrowserTool {
         let point = browser.element_call(&format!("point({n})")).await?;
         match point["error"].as_str() {
             Some("covered") => {
-                return Err(err(format!(
+                return Err(err(wrap(&format!(
                     "not clicked: element {n} is covered by another element ({}), which {}",
                     text_of(&point["covered"]),
                     text_of(&point["risk"])
-                )));
+                ))));
             }
             Some("not visible") => {
                 return Err(err(format!("element {n} is not visible")));
@@ -653,10 +661,12 @@ impl BrowserTool {
         Ok(ToolOutput::image(
             wrap(&with_notes(
                 format!(
-                    "screenshot of the visible part ({}x{} px, {}) of: {title} ({url})",
+                    "screenshot of the visible part ({}x{} px, {}) of: {} ({})",
                     size.width,
                     size.height,
-                    crate::images::human_bytes(bytes.len() as u64)
+                    crate::images::human_bytes(bytes.len() as u64),
+                    page::cut(&title, MAX_TITLE),
+                    page::cut(&url, MAX_URL)
                 ),
                 &notes,
             )),
@@ -715,6 +725,12 @@ fn text_of(value: &Value) -> String {
 
 /// `message` with what the browser noted since the last call.
 fn with_notes(mut message: String, notes: &Notes) -> String {
+    if notes.more > 0 {
+        message.push_str(&format!(
+            "\n({} earlier notes of blocked requests, dialogs or downloads not shown)",
+            notes.more
+        ));
+    }
     for line in notes
         .blocked
         .iter()
@@ -727,6 +743,16 @@ fn with_notes(mut message: String, notes: &Notes) -> String {
         message.push(')');
     }
     message
+}
+
+/// An error `message` of Junees's own, then the notes (text from the
+/// page) marked like page content.
+fn error_with_notes(message: String, notes: &Notes) -> String {
+    let notes = with_notes(String::new(), notes);
+    if notes.is_empty() {
+        return message;
+    }
+    format!("{message}\n{}", wrap(notes.trim_start()))
 }
 
 /// The line in front of anything from the page.
@@ -751,7 +777,11 @@ fn render(snapshot: &Snapshot, offset: usize, notes: &Notes) -> String {
     let total = snapshot.text.chars().count();
     let shown: String = snapshot.text.chars().skip(offset).take(MAX_TEXT).collect();
     let end = offset.saturating_add(MAX_TEXT).min(total);
-    let mut body = format!("title: {}\nurl: {}\n", snapshot.title, snapshot.url);
+    let mut body = format!(
+        "title: {}\nurl: {}\n",
+        page::cut(&snapshot.title, MAX_TITLE),
+        page::cut(&snapshot.url, MAX_URL)
+    );
     if offset > 0 {
         body.push_str(&format!("(page text from character {offset} of {total})\n"));
     }
@@ -781,6 +811,11 @@ fn render(snapshot: &Snapshot, offset: usize, notes: &Notes) -> String {
 #[cfg(test)]
 pub(crate) fn test_render(snapshot: &Snapshot, offset: usize, notes: &Notes) -> String {
     render(snapshot, offset, notes)
+}
+
+#[cfg(test)]
+pub(crate) fn test_error_with_notes(message: &str, notes: &Notes) -> String {
+    error_with_notes(message.to_string(), notes)
 }
 
 #[cfg(test)]

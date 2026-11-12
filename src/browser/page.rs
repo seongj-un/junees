@@ -23,6 +23,12 @@ const START_WAIT: Duration = Duration::from_millis(400);
 /// The snapshot script ([`Snapshot`]).
 const SNAPSHOT_JS: &str = include_str!("snapshot.js");
 
+/// Notes of one kind kept until the model looks; older ones are only
+/// counted ([`Notes::more`]), so a page cannot fill the result with them.
+pub const MAX_NOTES: usize = 20;
+/// Characters of one note.
+pub const MAX_NOTE: usize = 300;
+
 /// Things that happened since the model last looked, reported with the
 /// next result.
 #[derive(Debug, Default)]
@@ -30,8 +36,34 @@ pub struct Notes {
     pub blocked: Vec<String>,
     pub dialogs: Vec<String>,
     pub downloads: Vec<String>,
+    /// Notes dropped to keep each list at [`MAX_NOTES`].
+    pub more: usize,
     /// Page targets opened by the page (popups, `target=_blank`).
     pub popups: Vec<String>,
+}
+
+impl Notes {
+    pub fn block(&mut self, reason: &str) {
+        keep(&mut self.blocked, &mut self.more, reason);
+    }
+
+    pub fn dialog(&mut self, line: &str) {
+        keep(&mut self.dialogs, &mut self.more, line);
+    }
+
+    pub fn download(&mut self, line: &str) {
+        keep(&mut self.downloads, &mut self.more, line);
+    }
+}
+
+/// Adds `line` (cut to [`MAX_NOTE`] characters) to `list`, keeping the
+/// newest [`MAX_NOTES`].
+fn keep(list: &mut Vec<String>, more: &mut usize, line: &str) {
+    if list.len() >= MAX_NOTES {
+        list.remove(0);
+        *more += 1;
+    }
+    list.push(cut(line, MAX_NOTE));
 }
 
 /// A snapshot: the page's text with numbered elements, and what the tool
@@ -326,8 +358,7 @@ impl Browser {
                 self.notes
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .dialogs
-                    .push("the page opened a new tab; the browser went on in it".into());
+                    .dialog("the page opened a new tab; the browser went on in it");
             } else {
                 self.target = old;
             }
@@ -653,8 +684,7 @@ async fn guard(
                             notes
                                 .lock()
                                 .unwrap_or_else(PoisonError::into_inner)
-                                .blocked
-                                .push(reason);
+                                .block(&reason);
                             (
                                 "Fetch.failRequest",
                                 json!({"requestId": id, "errorReason": "BlockedByClient"}),
@@ -678,8 +708,7 @@ async fn guard(
                 notes
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .dialogs
-                    .push(format!(
+                    .dialog(&format!(
                         "the page showed a {kind} dialog (dismissed): {message}"
                     ));
                 // Leaving the page (beforeunload) goes on; alert, confirm
@@ -702,8 +731,7 @@ async fn guard(
                 notes
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .downloads
-                    .push(format!("a download was refused: {}", cut(url, 200)));
+                    .download(&format!("a download was refused: {}", cut(url, 200)));
             }
             "Target.targetCreated"
                 if event.params["targetInfo"]["type"] == "page"
@@ -723,7 +751,8 @@ async fn guard(
     }
 }
 
-fn cut(text: &str, max: usize) -> String {
+/// `text` cut to `max` characters, with `...` when cut.
+pub fn cut(text: &str, max: usize) -> String {
     let mut out: String = text.chars().take(max).collect();
     if out.len() < text.len() {
         out.push_str("...");
