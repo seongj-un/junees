@@ -372,6 +372,29 @@ async fn a_webhook_run_cannot_read_git_and_github_credentials() {
     std::fs::create_dir_all(hosts.parent().unwrap()).unwrap();
     std::fs::write(&hosts, "oauth_token: fake-gh-token\n").unwrap();
     let command = format!("cat {} || echo refused", hosts.display());
+    webhook_hides(&layout, &command, "fake-gh-token").await;
+}
+
+#[tokio::test]
+async fn a_webhook_run_cannot_read_claude_code_or_saved_sessions() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let login = layout.path("home/.claude/.credentials.json");
+    std::fs::create_dir_all(login.parent().unwrap()).unwrap();
+    std::fs::write(&login, "{\"token\": \"fake-claude-login\"}\n").unwrap();
+    let command = format!("cat {} || echo refused", login.display());
+    webhook_hides(&layout, &command, "fake-claude-login").await;
+    let session = layout.path("home/.junees/sessions/s.jsonl");
+    std::fs::write(&session, "{\"secret\": \"fake-session-output\"}\n").unwrap();
+    let command = format!("cat {} || echo refused", session.display());
+    webhook_hides(&layout, &command, "fake-session-output").await;
+}
+
+/// Runs `command`, which prints `secret` or `refused`, outside and inside
+/// a webhook run: only the webhook run is refused.
+async fn webhook_hides(layout: &Layout, command: &str, secret: &str) {
     let tools = |webhook| ToolSettings {
         settings_file: Some(layout.settings_file()),
         sandbox: Some(settings()),
@@ -379,14 +402,10 @@ async fn a_webhook_run_cannot_read_git_and_github_credentials() {
         ..ToolSettings::default()
     };
     let work = layout.path("work");
-    let plain = run(&work, Sandbox::for_tools(&tools(false)).unwrap(), &command).await;
-    assert!(plain.content.contains("fake-gh-token"), "{}", plain.content);
-    let webhook = run(&work, Sandbox::for_tools(&tools(true)).unwrap(), &command).await;
-    assert!(
-        !webhook.content.contains("fake-gh-token"),
-        "{}",
-        webhook.content
-    );
+    let plain = run(&work, Sandbox::for_tools(&tools(false)).unwrap(), command).await;
+    assert!(plain.content.contains(secret), "{}", plain.content);
+    let webhook = run(&work, Sandbox::for_tools(&tools(true)).unwrap(), command).await;
+    assert!(!webhook.content.contains(secret), "{}", webhook.content);
     assert!(webhook.content.contains("refused"), "{}", webhook.content);
 }
 
@@ -894,6 +913,9 @@ fn the_tools_sandbox_follows_the_settings() {
         webhook.hidden
     );
     assert!(webhook.hidden.contains(&layout.path("home/.config/gh")));
+    assert!(webhook.hidden.contains(&layout.path("home/.claude")));
+    assert!(webhook.hidden.contains(&junees.join("sessions")));
+    assert!(!webhook.read_only.contains(&junees.join("sessions")));
 }
 
 #[test]
