@@ -121,6 +121,7 @@ const HOME_PAGE: &str = r#"<!doctype html><html><head><title>Test page</title></
 <form action="/login" method="get">
   <label for="user">User</label><input id="user" name="user">
   <label for="pw">Password</label><input id="pw" type="password" name="pw">
+  <input id="keep" type="checkbox" name="keep"><label for="keep">Keep me signed in</label>
   <button type="submit">Sign in</button>
 </form>
 <button>Buy now</button>
@@ -582,6 +583,10 @@ async fn risky_actions_need_an_approval() {
             "password field",
         ),
         (
+            json!({"action": "press", "ref": number(&page, "checkbox", "Keep me signed in"), "key": "Enter"}),
+            "password field",
+        ),
+        (
             json!({"action": "evaluate", "expression": "document.title"}),
             "nobody is asked",
         ),
@@ -595,6 +600,21 @@ async fn risky_actions_need_an_approval() {
         );
         assert!(output.content.contains(risk), "{input}: {}", output.content);
     }
+    // Space toggles a checkbox of the password form, which sends nothing.
+    let keep = number(&page, "checkbox", "Keep me signed in");
+    let output = run(
+        &tool,
+        json!({"action": "press", "ref": keep, "key": "space"}),
+    )
+    .await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output
+            .content
+            .contains(&format!("[{keep} checkbox \"Keep me signed in\" checked]")),
+        "{}",
+        output.content
+    );
     let output = run(&tool, json!({"action": "type", "ref": user, "text": "me"})).await;
     assert!(!output.is_error, "{}", output.content);
     // Enter in the field just typed into still submits the password form.
@@ -883,6 +903,414 @@ async fn the_page_cannot_steer_typing_or_hide_form_fields() {
 }
 
 #[tokio::test]
+async fn the_page_cannot_change_the_target_after_the_check() {
+    let Some(program) = chromium("the_page_cannot_change_the_target_after_the_check") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    // A frame from another site (127.0.0.2 is another site than 127.0.0.1).
+    let (other, _) = serve(
+        "127.0.0.2",
+        HashMap::from([(
+            "/chat",
+            (
+                200,
+                "",
+                "<title>Chat</title><input aria-label=\"Message\">".to_string(),
+            ),
+        )]),
+    )
+    .await;
+    let pay = r#"<button id="pay" style="position:fixed;left:900px;top:600px"
+  onmouseup="fetch('/paid-up')" onclick="fetch('/paid')">Pay now</button>"#;
+    let form = r#"<form action="/login"><input aria-label="User" id="user" name="user">
+<input type="password" aria-label="Password" name="pw"><button>Sign in</button></form>"#;
+    let (address, seen) = serve(
+        "127.0.0.1",
+        HashMap::from([
+            (
+                "/move",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Move</title>{pay}
+<button id="next" onclick="fetch('/next')" onmousemove="const r = this.getBoundingClientRect();
+  const p = document.getElementById('pay'); p.style.left = r.left + 'px'; p.style.top = r.top + 'px';
+  p.style.width = r.width + 'px'; p.style.height = r.height + 'px'">Next</button>"#
+                    ),
+                ),
+            ),
+            (
+                "/down",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Down</title>{pay}
+<button id="next" onclick="fetch('/next')" onmousedown="const r = this.getBoundingClientRect();
+  const p = document.getElementById('pay'); p.style.left = r.left + 'px'; p.style.top = r.top + 'px';
+  p.style.width = r.width + 'px'; p.style.height = r.height + 'px'">Next</button>"#
+                    ),
+                ),
+            ),
+            (
+                "/key",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Key</title>{form}
+<input aria-label="Search" onkeydown="document.getElementById('user').focus()">"#
+                    ),
+                ),
+            ),
+            (
+                "/frame",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Frame</title><p>outer</p>
+<iframe id="chat" src="http://{other}/chat"></iframe>"#
+                    ),
+                ),
+            ),
+            (
+                "/frame-focus",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Frame</title><p>outer</p>
+<iframe id="chat" src="http://{other}/chat" onload="this.focus()"></iframe>"#
+                    ),
+                ),
+            ),
+            ("/login", (200, "", "<p>logged in</p>".to_string())),
+        ]),
+    )
+    .await;
+    let base = format!("http://{address}");
+    let got = |prefix: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.starts_with(prefix))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let tool = BrowserTool::new(settings(&program), Vec::new(), false);
+
+    // A mousemove handler puts a payment button under the pointer after
+    // the check: the click is not sent.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/move")}),
+    )
+    .await
+    .content;
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "button", "Next")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("not clicked") && output.content.contains("Pay now"),
+        "{}",
+        output.content
+    );
+
+    // A mousedown handler does it: the guard stops the release on the
+    // payment button.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/down")}),
+    )
+    .await
+    .content;
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "button", "Next")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("the click was stopped")
+            && output.content.contains("payment or purchase button"),
+        "{}",
+        output.content
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(got("/paid"), Vec::<String>::new());
+
+    // A keydown handler moves the focus into a password form: the guard
+    // stops the rest of the key press, so the form is not sent.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/key")}),
+    )
+    .await
+    .content;
+    let output = run(
+        &tool,
+        json!({"action": "press", "ref": number(&page, "textbox", "Search"), "key": "Enter"}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("the key press was stopped")
+            && output
+                .content
+                .contains("submits a form with a password field"),
+        "{}",
+        output.content
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(got("/login"), Vec::<String>::new());
+    // Other keys still go through.
+    let output = run(
+        &tool,
+        json!({"action": "press", "ref": number(&page, "textbox", "Search"), "key": "Tab"}),
+    )
+    .await;
+    assert!(!output.is_error, "{}", output.content);
+
+    // The focus in a frame of another site: Enter there is risky.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/frame")}),
+    )
+    .await
+    .content;
+    assert!(
+        page.contains("[frame from another site: not shown]"),
+        "{page}"
+    );
+    run(&tool, json!({"action": "close"})).await;
+    let tool = BrowserTool::new(settings(&program), Vec::new(), true);
+    let gate = Approval::new(
+        ApprovalMode::Risky,
+        &ToolSettings::default(),
+        Workspace::new(&std::env::temp_dir()),
+    )
+    .with_questions(TOOL_NAME, Some(tool.questions()));
+    let kinds = |input: Value| gate.request(TOOL_NAME, &input).map(|request| request.kinds);
+    // Approved actions on the element asked about go through the guard.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/down")}),
+    )
+    .await
+    .content;
+    let click = json!({"action": "click", "ref": number(&page, "button", "Pay now")});
+    assert_eq!(kinds(click.clone()), Some(vec![KIND_SUBMIT.to_string()]));
+    let output = run(&tool, click).await;
+    assert!(!output.is_error, "{}", output.content);
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/key")}),
+    )
+    .await
+    .content;
+    let press = json!({"action": "press", "ref": number(&page, "textbox", "User"), "key": "Enter"});
+    assert_eq!(kinds(press.clone()), Some(vec![KIND_SUBMIT.to_string()]));
+    let output = run(&tool, press).await;
+    assert!(output.content.contains("logged in"), "{}", output.content);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(got("/paid"), ["/paid-up", "/paid"]);
+    assert_eq!(got("/login").len(), 1);
+
+    run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/frame")}),
+    )
+    .await;
+    assert_eq!(kinds(json!({"action": "press", "key": "Enter"})), None);
+    // The page moves the focus into the frame after the snapshot: the
+    // key press is refused with a hint to take a snapshot.
+    run(
+        &tool,
+        json!({"action": "evaluate", "expression": "document.getElementById('chat').focus()"}),
+    )
+    .await;
+    let output = run(&tool, json!({"action": "press", "key": "Enter"})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("frame from another site")
+            && output.content.contains("take a snapshot"),
+        "{}",
+        output.content
+    );
+    // After a snapshot the approval question names it, and the approved
+    // key press goes into the frame.
+    run(&tool, json!({"action": "snapshot"})).await;
+    let request = gate
+        .request(TOOL_NAME, &json!({"action": "press", "key": "Enter"}))
+        .unwrap();
+    assert_eq!(request.kinds, [KIND_SUBMIT]);
+    assert!(
+        format!("{request:?}").contains("frame from another site"),
+        "{request:?}"
+    );
+    let output = run(&tool, json!({"action": "press", "key": "Enter"})).await;
+    assert!(!output.is_error, "{}", output.content);
+    run(&tool, json!({"action": "close"})).await;
+
+    // Nobody to ask: refused.
+    let tool = BrowserTool::new(settings(&program), Vec::new(), false);
+    run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/frame-focus")}),
+    )
+    .await;
+    let output = run(&tool, json!({"action": "press", "key": "Enter"})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("nobody is asked")
+            && output.content.contains("frame from another site"),
+        "{}",
+        output.content
+    );
+    run(&tool, json!({"action": "close"})).await;
+}
+
+/// The page of the review of #64: a password form and a buy button
+/// inside closed shadow roots, whose hosts look like plain buttons.
+const CLOSED_PAGE: &str = r#"<title>Closed</title>
+<x-next role="button" aria-label="Next" style="display:inline-block"></x-next>
+<x-more role="button" aria-label="Continue" style="display:inline-block"></x-more>
+<script>
+document.querySelector('x-next').attachShadow({mode: 'closed'}).innerHTML =
+  '<form action="/login"><input type="password" name="pw" value="pre" hidden>'
+  + '<button style="width:120px;height:40px">Go</button></form>';
+document.querySelector('x-more').attachShadow({mode: 'closed'}).innerHTML =
+  '<button style="width:120px;height:40px" onclick="fetch(\'/bought\')">Buy now</button>';
+</script>"#;
+
+/// A plain button whose mousemove handler puts a host with a closed
+/// shadow root (a buy button inside) over it, after the snapshot.
+const LATE_CLOSED_PAGE: &str = r#"<title>Late</title>
+<button id="next" onclick="fetch('/next')" onmousemove="cover(this)">Next</button>
+<script>
+function cover(next) {
+  if (document.querySelector('x-buy')) return;
+  const r = next.getBoundingClientRect();
+  const host = document.createElement('x-buy');
+  host.style.cssText = 'position:fixed;display:block;left:' + r.left + 'px;top:' + r.top
+    + 'px;width:' + r.width + 'px;height:' + r.height + 'px';
+  host.attachShadow({mode: 'closed'}).innerHTML =
+    '<button style="width:100%;height:100%" onclick="fetch(\'/bought\')">Buy now</button>';
+  document.body.append(host);
+}
+</script>"#;
+
+#[tokio::test]
+async fn closed_shadow_roots_need_an_approval() {
+    let Some(program) = chromium("closed_shadow_roots_need_an_approval") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    let (address, seen) = serve(
+        "127.0.0.1",
+        HashMap::from([
+            ("/closed", (200, "", CLOSED_PAGE.to_string())),
+            ("/late", (200, "", LATE_CLOSED_PAGE.to_string())),
+            ("/login", (200, "", "<p>logged in</p>".to_string())),
+        ]),
+    )
+    .await;
+    let base = format!("http://{address}");
+    let got = |prefix: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.starts_with(prefix))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    // Nobody to ask: clicks into a closed shadow root are refused.
+    let tool = BrowserTool::new(settings(&program), Vec::new(), false);
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/closed")}),
+    )
+    .await
+    .content;
+    for label in ["Next", "Continue"] {
+        let output = run(
+            &tool,
+            json!({"action": "click", "ref": number(&page, "button", label)}),
+        )
+        .await;
+        assert!(output.is_error, "{label}: {}", output.content);
+        assert!(
+            output.content.contains("nobody is asked")
+                && output.content.contains(page::CLOSED_RISK),
+            "{label}: {}",
+            output.content
+        );
+    }
+    // A host put over a plain button after the snapshot is seen at the
+    // check under the pointer.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/late")}),
+    )
+    .await
+    .content;
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "button", "Next")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("not clicked") && output.content.contains(page::CLOSED_RISK),
+        "{}",
+        output.content
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(got("/login"), Vec::<String>::new());
+    assert_eq!(got("/bought"), Vec::<String>::new());
+    assert_eq!(got("/next"), Vec::<String>::new());
+    run(&tool, json!({"action": "close"})).await;
+
+    // With a gate the click is asked about, and runs once approved.
+    let tool = BrowserTool::new(settings(&program), Vec::new(), true);
+    let gate = Approval::new(
+        ApprovalMode::Risky,
+        &ToolSettings::default(),
+        Workspace::new(&std::env::temp_dir()),
+    )
+    .with_questions(TOOL_NAME, Some(tool.questions()));
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/closed")}),
+    )
+    .await
+    .content;
+    let click = json!({"action": "click", "ref": number(&page, "button", "Next")});
+    let request = gate.request(TOOL_NAME, &click).unwrap();
+    assert_eq!(request.kinds, [KIND_SUBMIT]);
+    assert!(
+        format!("{request:?}").contains("closed shadow root"),
+        "{request:?}"
+    );
+    let output = run(&tool, click).await;
+    assert!(output.content.contains("logged in"), "{}", output.content);
+    assert_eq!(got("/login").len(), 1);
+    run(&tool, json!({"action": "close"})).await;
+    // The guard and the snapshot name the same risk as the tool.
+    assert!(
+        page::GUARD_JS.contains(&format!("const CLOSED_RISK = '{}';", page::CLOSED_RISK)),
+        "CLOSED_RISK differs between guard.js and page.rs"
+    );
+}
+
+#[tokio::test]
 async fn the_browser_goes_away_when_dropped_or_cancelled() {
     let Some(program) = chromium("the_browser_goes_away_when_dropped_or_cancelled") else {
         return;
@@ -972,6 +1400,7 @@ fn questions_follow_the_latest_snapshot() {
             kind: "button".into(),
             click_risk: "submits a form with a password field".into(),
             enter_risk: "submits a form with a password field".into(),
+            space_risk: "submits a form with a password field".into(),
             ..Element::default()
         },
     ];
@@ -1010,6 +1439,12 @@ fn questions_follow_the_latest_snapshot() {
         q(None, json!({"action": "press", "ref": 3, "key": "space"})).2,
         [KIND_SUBMIT]
     );
+    // Space in a field of a password form sends nothing: not asked.
+    assert!(
+        q(None, json!({"action": "press", "ref": 2, "key": "space"}))
+            .2
+            .is_empty()
+    );
     assert!(
         q(Some(2), json!({"action": "press", "key": "Tab"}))
             .2
@@ -1022,6 +1457,30 @@ fn questions_follow_the_latest_snapshot() {
     assert_eq!(
         q(None, json!({"action": "open", "url": "https://x.test/"})).0,
         "open https://x.test/"
+    );
+}
+
+#[test]
+fn a_key_press_into_a_frame_of_another_site_is_asked_about() {
+    let (target, reasons, kinds, _) =
+        tool::test_question_in_frame(&json!({"action": "press", "key": "Enter"}));
+    assert_eq!(target, "press on http://example.test/");
+    assert_eq!(kinds, [KIND_SUBMIT]);
+    assert_eq!(reasons, [format!("the key press {}", page::FRAME_RISK)]);
+    assert!(
+        tool::test_question_in_frame(&json!({"action": "press", "key": "space"}))
+            .2
+            .contains(&KIND_SUBMIT.to_string())
+    );
+    assert!(
+        tool::test_question_in_frame(&json!({"action": "press", "key": "Tab"}))
+            .2
+            .is_empty()
+    );
+    // The guard and the snapshot name the same risk as the tool.
+    assert!(
+        page::GUARD_JS.contains(&format!("const FRAME_RISK = '{}';", page::FRAME_RISK)),
+        "FRAME_RISK differs between guard.js and page.rs"
     );
 }
 
@@ -1041,6 +1500,7 @@ fn page_text_is_marked_escaped_and_capped() {
         url: "https://x.test/".into(),
         text: "가".repeat(tool::MAX_TEXT + 5),
         refs: Vec::new(),
+        frame_focus: false,
     };
     let notes = page::Notes::default();
     let first = tool::test_render(&snapshot, 0, &notes);
@@ -1079,6 +1539,7 @@ fn titles_addresses_and_notes_are_capped() {
         url: format!("https://x.test/?{}", "u".repeat(300_000)),
         text: "body".into(),
         refs: Vec::new(),
+        frame_focus: false,
     };
     let out = tool::test_render(&snapshot, 0, &notes);
     let limit =
@@ -1171,6 +1632,131 @@ fn profiles_go_in_the_state_folder_and_chromes_socket_stays_short() {
     assert_eq!((mode(&path), mode(&temp)), (0o700, 0o700));
     drop(profile);
     assert!(!path.exists() && !temp.exists());
+}
+
+#[test]
+fn profiles_left_by_a_process_that_is_gone_are_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    let state = tempfile::tempdir_in("/tmp").unwrap();
+    let folder = state.path().join("browser");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A live profile of this process: its lock is held.
+    let live = process::Profile::new(Some(&folder)).unwrap();
+    // It got its final name once locked.
+    let name = live.path().file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{name}"
+    );
+    // A profile whose owner died: its lock file is there, unlocked; it
+    // names Chrome's separate temporary folder, which goes too.
+    let dead = folder.join("00112233445566aa");
+    std::fs::create_dir(&dead).unwrap();
+    std::fs::write(dead.join("junees.lock"), "").unwrap();
+    std::fs::write(dead.join("Cookies"), "secret").unwrap();
+    let temp = Path::new("/tmp").join(format!(
+        "junees-browser-{}",
+        crate::cron::store::random_hex(16)
+    ));
+    std::fs::create_dir(&temp).unwrap();
+    std::fs::write(
+        dead.join("junees-temp"),
+        temp.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    // A dead profile naming a folder Junees did not make: that folder stays.
+    let other = state.path().join("keep-me");
+    std::fs::create_dir(&other).unwrap();
+    let dead_other = folder.join("00112233445566bb");
+    std::fs::create_dir(&dead_other).unwrap();
+    std::fs::write(dead_other.join("junees.lock"), "").unwrap();
+    std::fs::write(
+        dead_other.join("junees-temp"),
+        other.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    // Without a lock file: kept while new (it may be starting), removed
+    // when old (from before the lock).
+    let young = folder.join("00112233445566cc");
+    std::fs::create_dir(&young).unwrap();
+    let old = folder.join("00112233445566dd");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::File::open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
+        .unwrap();
+    // Being made by another process (its lock file not locked yet): kept;
+    // left half made long ago: removed.
+    let making = folder.join(".new-00112233445566ab");
+    std::fs::create_dir(&making).unwrap();
+    std::fs::write(making.join("junees.lock"), "").unwrap();
+    let half = folder.join(".new-00112233445566ac");
+    std::fs::create_dir(&half).unwrap();
+    std::fs::write(half.join("junees.lock"), "").unwrap();
+    std::fs::File::open(&half)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
+        .unwrap();
+    // Not profiles: another name, and a link with a profile's name.
+    let note = folder.join("notes");
+    std::fs::create_dir(&note).unwrap();
+    std::fs::write(note.join("junees.lock"), "").unwrap();
+    let link = folder.join("00112233445566ee");
+    std::os::unix::fs::symlink(&other, &link).unwrap();
+    std::fs::write(other.join("junees.lock"), "").unwrap();
+
+    // The next start removes the dead ones.
+    let next = process::Profile::new(Some(&folder)).unwrap();
+    for gone in [&dead, &dead_other, &old, &temp, &half] {
+        assert!(!gone.exists(), "{} is still there", gone.display());
+    }
+    for kept in [live.path(), next.path(), &young, &making, &note, &other] {
+        assert!(kept.exists(), "{} was removed", kept.display());
+    }
+    assert!(link.symlink_metadata().is_ok());
+    drop(next);
+
+    // A profile whose lock another process holds is kept until that
+    // process is gone.
+    let held = folder.join("00112233445566ff");
+    std::fs::create_dir(&held).unwrap();
+    let lock = held.join("junees.lock");
+    std::fs::write(&lock, "").unwrap();
+    let mut owner = std::process::Command::new("flock")
+        .arg(&lock)
+        .args(["sleep", "60"])
+        .process_group(0)
+        .spawn()
+        .expect("flock(1) runs");
+    let taken = || {
+        let file = std::fs::File::open(&lock).unwrap();
+        // SAFETY: flock on a descriptor `file` owns; closing it unlocks.
+        unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                libc::LOCK_EX | libc::LOCK_NB,
+            ) != 0
+        }
+    };
+    let mut waited = 0;
+    while !taken() {
+        assert!(waited < 100, "flock(1) did not take the lock");
+        std::thread::sleep(Duration::from_millis(50));
+        waited += 1;
+    }
+    drop(process::Profile::new(Some(&folder)).unwrap());
+    assert!(held.exists());
+    // SAFETY: kills the process group this test started (flock and its
+    // sleep, which shares the locked descriptor).
+    unsafe {
+        libc::killpg(owner.id() as i32, libc::SIGKILL);
+    }
+    owner.wait().unwrap();
+    drop(process::Profile::new(Some(&folder)).unwrap());
+    assert!(!held.exists());
+    drop(live);
 }
 
 #[test]

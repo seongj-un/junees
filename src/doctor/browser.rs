@@ -1,5 +1,6 @@
 //! The `browser` tool's program: found, and `--version` (offline: Chrome
-//! prints its version and exits).
+//! prints its version and exits); and a profiles folder too long to hold
+//! Chrome's socket.
 
 use std::ffi::OsStr;
 
@@ -23,6 +24,21 @@ pub(super) async fn check(report: &mut Report, settings: &SettingsFile, path: Op
             format!("the browser tool is off (browser = on, {ENABLE_ENV}, turns it on)"),
         );
         return;
+    }
+    if let Some(profiles) = browser.profiles.as_deref().filter(|_| browser.enabled)
+        && !process::profiles_hold_socket(profiles)
+    {
+        report.warn(
+            AREA,
+            "profiles",
+            format!(
+                "the profiles folder {} is longer than {} bytes: Chrome's socket and temporary \
+                 files go in a separate temporary folder, which sandboxed commands can reach",
+                shown(profiles),
+                process::MAX_PROFILES_FOLDER
+            ),
+            "use a shorter JUNEES_HOME",
+        );
     }
     let fix = format!("install Chromium or Chrome, or point browser_path ({PATH_ENV}) at it");
     let program = match process::find(&browser, path) {

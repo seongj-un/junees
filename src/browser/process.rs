@@ -11,6 +11,7 @@
 
 use std::ffi::OsStr;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -126,6 +127,35 @@ pub fn socket_fits(temp: &Path) -> bool {
     temp.as_os_str().len() + SOCKET_SUFFIX <= MAX_SOCKET_PATH
 }
 
+/// Whether the profiles in `folder` can be Chrome's temporary folder
+/// (else its socket and temporary files go in a separate folder in the
+/// temporary folder, which sandboxed commands can reach).
+pub fn profiles_hold_socket(folder: &Path) -> bool {
+    socket_fits(&folder.join("0".repeat(PROFILE_HEX)))
+}
+
+/// The longest profiles folder whose profiles hold Chrome's socket.
+pub const MAX_PROFILES_FOLDER: usize = MAX_SOCKET_PATH - SOCKET_SUFFIX - 1 - PROFILE_HEX;
+
+/// Hex digits of a profile's name in the profiles folder.
+const PROFILE_HEX: usize = 16;
+/// The file in a profile its owner holds an exclusive `flock` on for as
+/// long as the profile is in use: a profile whose lock is free belongs
+/// to a process that is gone (killed, crashed) and is removed by the
+/// next browser start ([`remove_stale`]).
+const LOCK_FILE: &str = "junees.lock";
+/// The file in a profile naming Chrome's separate temporary folder, so
+/// that [`remove_stale`] removes it too.
+const TEMP_FILE: &str = "junees-temp";
+/// A profile without a lock file (from before the lock), or one left
+/// half made ([`MAKING`]), is removed only after this long untouched.
+const UNLOCKED_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// The name prefix of a profile while it is made: its lock file exists
+/// but is not locked yet, so [`remove_stale`] (in another process) would
+/// take it for a dead one under its final name. It gets that name once
+/// locked.
+const MAKING: &str = ".new-";
+
 /// A private (0700) profile folder, removed when dropped, and Chrome's
 /// temporary folder (TMPDIR), so what Chrome puts there (its
 /// single-instance socket folder) goes with it.
@@ -142,28 +172,63 @@ pub struct Profile {
     path: PathBuf,
     /// Chrome's temporary folder, when it is not the profile.
     temp: Option<PathBuf>,
+    /// The locked [`LOCK_FILE`] of a profile in the profiles folder.
+    _lock: Option<std::fs::File>,
 }
 
 impl Profile {
     /// A new profile in `folder` (made 0700 if missing), or in the
-    /// temporary folder when `None`.
+    /// temporary folder when `None`. Profiles left in `folder` by a
+    /// process that is gone are removed first.
     pub fn new(folder: Option<&Path>) -> std::io::Result<Self> {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let Some(folder) = folder else {
             let path = private_folder(&profile_base(&std::env::temp_dir()))?;
-            return Ok(Self { path, temp: None });
+            return Ok(Self {
+                path,
+                temp: None,
+                _lock: None,
+            });
         };
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(folder)?;
-        let path = folder.join(crate::cron::store::random_hex(16));
+        remove_stale(folder);
+        let name = crate::cron::store::random_hex(PROFILE_HEX);
+        let making = folder.join(format!("{MAKING}{name}"));
         // Fails when the name is taken: never a folder someone else made.
-        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        std::fs::DirBuilder::new().mode(0o700).create(&making)?;
         // From here on a failure drops `profile`, which removes it.
-        let mut profile = Self { path, temp: None };
+        let mut profile = Self {
+            path: making,
+            temp: None,
+            _lock: None,
+        };
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(profile.path.join(LOCK_FILE))?;
+        if !crate::flock::try_exclusive(&lock)? {
+            return Err(std::io::Error::other("cannot lock the new browser profile"));
+        }
+        profile._lock = Some(lock);
+        // Locked: from now on it may carry a name `remove_stale` looks at
+        // (the lock stays with the renamed file).
+        let path = folder.join(&name);
+        std::fs::rename(&profile.path, &path)?;
+        profile.path = path;
         if !socket_fits(&profile.path) {
-            profile.temp = Some(private_folder(&profile_base(&std::env::temp_dir()))?);
+            let temp = private_folder(&profile_base(&std::env::temp_dir()))?;
+            profile.temp = Some(temp.clone());
+            let mut note = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(profile.path.join(TEMP_FILE))?;
+            note.write_all(temp.as_os_str().as_encoded_bytes())?;
         }
         Ok(profile)
     }
@@ -176,6 +241,96 @@ impl Profile {
     pub fn temp(&self) -> &Path {
         self.temp.as_deref().unwrap_or(&self.path)
     }
+}
+
+/// Removes the profiles in the profiles folder `folder` whose owner is
+/// gone: their [`LOCK_FILE`] can be locked (a live owner holds the lock;
+/// a dead one's lock went with it). A profile without a lock file is
+/// removed only when it has not changed for [`UNLOCKED_AGE`], and so is
+/// one left half made ([`MAKING`]). Entries that are not profile folders
+/// (other names, links) are left alone.
+pub fn remove_stale(folder: &Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let (hex, making) = match name.strip_prefix(MAKING) {
+            Some(hex) => (hex, true),
+            None => (&*name, false),
+        };
+        if hex.len() != PROFILE_HEX || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.elapsed().ok())
+            .is_some_and(|age| age > UNLOCKED_AGE);
+        // Its lock file may be there but not locked yet.
+        if making && !old {
+            continue;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path.join(LOCK_FILE));
+        // Held (when there is one) until the profile is gone.
+        let _held = match lock {
+            Ok(lock) => {
+                // No retry: a lock that only looks taken (a fork in another
+                // thread holds a copy for a moment) keeps the profile,
+                // which is the safe side.
+                // SAFETY: flock on a descriptor `lock` owns.
+                if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                    continue;
+                }
+                Some(lock)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if !old {
+                    continue;
+                }
+                None
+            }
+            Err(_) => continue,
+        };
+        if let Some(temp) = stale_temp(&path) {
+            remove(&temp);
+        }
+        remove(&path);
+    }
+}
+
+/// The separate temporary folder a stale profile names in [`TEMP_FILE`],
+/// if it is one Junees makes: `junees-browser-<16 hex>` in the temporary
+/// folder or `/tmp`, a folder (not a link) of this user.
+fn stale_temp(profile: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let text = std::fs::read(profile.join(TEMP_FILE)).ok()?;
+    let temp = PathBuf::from(std::ffi::OsString::from_vec(text));
+    let name = temp.file_name()?.to_str()?;
+    let hex = name.strip_prefix("junees-browser-")?;
+    if hex.len() != 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let base = temp.parent()?;
+    if base != std::env::temp_dir() && base != Path::new("/tmp") {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(&temp).ok()?;
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    (meta.is_dir() && meta.uid() == me).then_some(temp)
 }
 
 /// A new private (0700) `junees-browser-<random>` folder in `base`.

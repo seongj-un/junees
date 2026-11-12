@@ -1661,4 +1661,20 @@ async fn the_browser_program_and_its_version() {
     fixture.set("JUNEES_BROWSER_PATH", "/nonexistent/chrome");
     let report = fixture.run(false).await;
     expect(&report, "browser", "program", Status::Warn, "is not a file");
+
+    // On, with a state folder too long for Chrome's socket in the
+    // profiles: a warning (the socket goes in a shared temporary folder).
+    fixture.set("JUNEES_BROWSER", "on");
+    fixture.set("JUNEES_HOME", &format!("/tmp/{}", "h".repeat(40)));
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "browser",
+        "profiles",
+        Status::Warn,
+        "sandboxed commands can reach",
+    );
+    fixture.set("JUNEES_HOME", "/tmp/junees-short");
+    let report = fixture.run(false).await;
+    assert!(!has(&report, "browser", "profiles"), "{}", report.text());
 }
