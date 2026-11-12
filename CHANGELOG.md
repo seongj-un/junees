@@ -10,8 +10,9 @@
   - 웹훅 실행의 파일 도구가 `sandbox_read`의 폴더를 읽고 있었다면 그 폴더를 `webhook_sandbox_read`에 옮겨 적습니다. 여기에 자격 증명(`~/.ssh` 등)을 적어도 웹훅 실행은 읽지 않습니다.
   - 예약 작업과 대화는 그대로입니다: 예약 작업의 파일 도구와 bash는 계속 `sandbox_read`를 따르고, 거기 적은 자격 증명을 예약 작업의 bash가 다시 읽습니다. 웹훅 실행의 bash 읽기도 계속 `sandbox_read`를 따릅니다(주면 좁아질 뿐이고, 자격 증명은 0.2.0처럼 모두 숨깁니다).
 - **작업 폴더가 홈인 무인 실행의 bash (#75 남은 위험)**
-  - 예약 작업과 웹훅 실행의 bash는 이제 파일 도구와 같이 셸 시작 파일(`~/.bashrc`, `~/.profile` 등), systemd user 유닛(`~/.config/systemd`, `~/.local/share/systemd`), `~/.config/autostart`, `~/.gitconfig`, `~/.config/git`, `~/.ssh/authorized_keys*`, `~/.local/bin`, `~/bin`, 그리고 데몬 `PATH`에 든 홈 아래 폴더(`~/.cargo/bin` 등)에 쓰지 못합니다(읽기는 됩니다). 파일 도구의 쓰기 거절 목록에도 `~/.local/bin`, `~/bin`, PATH 폴더가 더해졌습니다.
-  - 작업 폴더가 홈이면 무인 실행의 bash는 홈, `~/.config`, `~/.local/share` 바로 아래에 새 파일이나 폴더를 만들지 못합니다(이미 있는 하위 폴더 안은 됩니다). 예약 작업이 `cargo install`이나 `pip install --user`로 `~/.cargo/bin`, `~/.local/bin`에 설치하던 경우도 실패합니다. 작업과 웹훅 경로에는 프로젝트 폴더를 주세요.
+  - 예약 작업과 웹훅 실행의 bash는 이제 파일 도구와 같이 셸 시작 파일(`~/.bashrc`, `~/.profile` 등), systemd user 유닛(`~/.config/systemd`, `~/.local/share/systemd`), `~/.config/autostart`, `~/.gitconfig`, `~/.config/git`, cargo 설정(`~/.cargo/config.toml`, `~/.cargo/config`), `~/.ssh`의 `known_hosts*`를 뺀 모든 항목(`config`, `rc`, `environment`, `authorized_keys*`, `config`가 부르는 스크립트와 `Include` 파일), `~/.local/bin`, `~/bin`, 그리고 데몬 `PATH`에 든 홈 아래 폴더(`~/.cargo/bin` 등)에 쓰지 못합니다(읽기는 됩니다). 파일 도구의 쓰기 거절 목록에도 cargo 설정, `~/.local/bin`, `~/bin`, PATH 폴더가 더해졌습니다(`~/.ssh`는 파일 도구가 원래 통째로 거절합니다).
+  - 작업 폴더가 그런 프로그램 폴더이거나 그 안에 있으면(`~/scripts`가 `PATH`에 있고 작업 폴더가 `~/scripts/job`) 그 폴더는 작업 폴더에 대해서만 보호하지 않으므로 작업 폴더에는 그대로 씁니다. 작업 폴더가 프로그램 폴더 자체면 실행을 시작할 때 경고합니다(그 실행이 쓴 프로그램은 다음 셸에서 돕니다).
+  - 작업 폴더가 홈이면 무인 실행의 bash는 홈, `~/.config`, `~/.local/share` 바로 아래에 새 파일이나 폴더를 만들지 못합니다(이미 있는 하위 폴더 안은 됩니다). 예약 작업이 `cargo install`이나 `pip install --user`로 `~/.cargo/bin`, `~/.local/bin`에 설치하던 경우도 실패합니다. `ControlPath`를 `~/.ssh` 안에 둔 ssh 다중화도 소켓을 만들지 못합니다. 작업과 웹훅 경로에는 프로젝트 폴더를 주세요.
   - 대화, `-p`, `task` 모드는 그대로입니다.
 - **게이트웨이 승인 버튼 (#79, #80)**
   - 디스코드, 텔레그램, Slack 게이트웨이의 승인 질문에 버튼(Allow, Always allow, Decline)이 붙습니다. 글 답장 `y`/`n`/`a`도 그대로 됩니다.
