@@ -328,7 +328,14 @@ impl ApiEngine {
             crate::search::register(&mut tools, home, dir, false);
         }
         skills::register(&mut tools, home, false);
-        mcp.register(&mut tools);
+        // Nobody can answer the question an untrusted server's tool needs.
+        for server in mcp.register_trusted(&mut tools) {
+            eprintln!(
+                "  !! MCP server `{}` is not trusted: its tools are left out of unattended \
+                 runs (set \"trust\": true in mcp.json to allow them)",
+                crate::prompt_text::escape_hidden(&server)
+            );
+        }
         match spec.trigger {
             Trigger::Cron => crate::github::register(&mut tools, &config.github, dir, false),
             Trigger::Webhook {
