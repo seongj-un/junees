@@ -159,13 +159,21 @@ async fn read_loop(
     events: mpsc::UnboundedSender<Event>,
 ) {
     let mut buffer: Vec<u8> = Vec::new();
+    // How much of `buffer` holds no message end: a large message arrives
+    // in many reads, and each read looks only at its new bytes.
+    let mut scanned = 0;
     let mut chunk = vec![0u8; 64 * 1024];
     let why = loop {
         // Every complete message in the buffer first.
-        while let Some(end) = buffer.iter().position(|&b| b == 0) {
-            let message: Vec<u8> = buffer.drain(..=end).collect();
-            dispatch(&inner, &events, &message[..end]);
+        let mut start = 0;
+        while let Some(at) = buffer[scanned..].iter().position(|&b| b == 0) {
+            let end = scanned + at;
+            dispatch(&inner, &events, &buffer[start..end]);
+            start = end + 1;
+            scanned = start;
         }
+        buffer.drain(..start);
+        scanned = buffer.len();
         if buffer.len() > MAX_MESSAGE {
             break "the browser sent a message over 64 MB".to_string();
         }
@@ -217,5 +225,50 @@ fn dispatch(inner: &Inner, events: &mpsc::UnboundedSender<Event>, message: &[u8]
                 .and_then(Value::as_str)
                 .map(str::to_string),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+
+    use super::*;
+
+    /// A large answer in many small writes, and several events (the last
+    /// one split) in one write, all arrive whole and in order.
+    #[tokio::test]
+    async fn messages_arrive_whole_however_the_reads_cut_them() {
+        let (mut browser_reads, to_browser) = std::io::pipe().unwrap();
+        let (from_browser, mut browser_writes) = std::io::pipe().unwrap();
+        let (connection, _reader, mut events) = Connection::new(
+            pipe::Receiver::from_owned_fd(from_browser.into()).unwrap(),
+            pipe::Sender::from_owned_fd(to_browser.into()).unwrap(),
+        );
+        let browser = std::thread::spawn(move || {
+            let mut command = Vec::new();
+            let mut byte = [0u8];
+            while browser_reads.read_exact(&mut byte).is_ok() && byte[0] != 0 {
+                command.push(byte[0]);
+            }
+            let command: Value = serde_json::from_slice(&command).unwrap();
+            let mut answer =
+                json!({"id": command["id"], "result": {"text": "가".repeat(1_000_000)}})
+                    .to_string()
+                    .into_bytes();
+            answer.push(0);
+            for piece in answer.chunks(4096) {
+                browser_writes.write_all(piece).unwrap();
+            }
+            browser_writes
+                .write_all(b"{\"method\":\"A\"}\0{\"method\":\"B\"}\0{\"method\":")
+                .unwrap();
+            browser_writes.write_all(b"\"C\"}\0").unwrap();
+        });
+        let answer = connection.call("Test.big", json!({}), None).await.unwrap();
+        assert_eq!(answer["text"].as_str().unwrap().chars().count(), 1_000_000);
+        for method in ["A", "B", "C"] {
+            assert_eq!(events.recv().await.unwrap().method, method);
+        }
+        browser.join().unwrap();
     }
 }
