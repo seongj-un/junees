@@ -292,6 +292,56 @@ async fn reads_can_be_narrowed() {
 }
 
 #[tokio::test]
+async fn a_missing_state_folder_leaves_the_working_folder_whole() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("sub-home");
+    std::fs::create_dir_all(&home).unwrap();
+    // The settings file would be in sub-home/.junees, which does not exist.
+    let sandbox = Sandbox::for_tools(&ToolSettings {
+        settings_file: Some(SettingsFile::new(
+            home.join(".junees/config.toml"),
+            Some(home.clone()),
+        )),
+        sandbox: Some(settings()),
+        ..ToolSettings::default()
+    })
+    .unwrap();
+    let command = format!("echo a > {}/top && echo top-ok", home.display());
+    let output = run(&home, sandbox, &command).await;
+    assert_eq!(output, ToolOutput::ok("top-ok\n[exit code 0]"));
+}
+
+#[tokio::test]
+async fn unconfined_processes_environment_is_out_of_reach() {
+    // Landlock's ptrace rule: a confined process cannot read the memory
+    // or environment of a process outside its domain, such as this test
+    // process (or Junees, or an MCP server).
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let work = layout.path("work");
+    let command = format!(
+        "tr '\\0' '\\n' < /proc/{}/environ > /dev/null && echo environ-read || \
+         echo environ-refused",
+        std::process::id()
+    );
+    let confined = run(&work, layout.sandbox(settings()), &command).await;
+    assert!(
+        confined.content.contains("environ-refused"),
+        "{}",
+        confined.content
+    );
+    let open = Bash::for_test(&work)
+        .run(json!({ "command": command }))
+        .await;
+    assert!(open.content.contains("environ-read"), "{}", open.content);
+}
+
+#[tokio::test]
 async fn commands_run_with_no_new_privs() {
     if !landlock() {
         return;
@@ -456,13 +506,18 @@ fn reads_the_settings() {
     assert_eq!(defaults.read, None);
     assert!(defaults.write.is_empty());
     assert_eq!(
-        defaults.temp,
+        defaults.temp[..3],
         [
             PathBuf::from("/tmp"),
             PathBuf::from("/var/tmp"),
             PathBuf::from("/dev/shm")
         ]
     );
+    // And this process's temporary folder, once.
+    assert!(defaults.temp.contains(&std::env::temp_dir()));
+    let mut unique = defaults.temp.clone();
+    unique.dedup();
+    assert_eq!(unique, defaults.temp);
     let unattended = Settings {
         unattended: true,
         ..defaults.clone()
@@ -496,10 +551,10 @@ fn reads_the_settings() {
         Some(vec![PathBuf::from("/usr"), PathBuf::from("/etc")])
     );
     assert!(!set.network);
-    assert_eq!(set.temp.last(), Some(&PathBuf::from("/scratch")));
+    assert!(set.temp.contains(&PathBuf::from("/scratch")));
     // A relative TMPDIR is not a folder to allow.
     let relative = read(&[("TMPDIR", "scratch")]).unwrap();
-    assert_eq!(relative.temp.len(), 3);
+    assert!(!relative.temp.contains(&PathBuf::from("scratch")));
 
     let error = |pairs: &[(&str, &str)]| read(pairs).err().unwrap().to_string();
     // Without HOME, `~` stays relative.

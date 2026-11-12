@@ -114,10 +114,15 @@ impl Settings {
             raw => crate::config::parse_flag(raw, NETWORK_ENV)?,
         };
         let mut temp: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
-        if let Some(dir) = get("TMPDIR").map(PathBuf::from)
-            && dir.is_absolute()
+        // The process's own temporary folder too: the commands inherit it.
+        for dir in get("TMPDIR")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain([std::env::temp_dir()])
         {
-            temp.push(dir);
+            if dir.is_absolute() && !temp.contains(&dir) {
+                temp.push(dir);
+            }
         }
         Ok(Self {
             mode,
@@ -330,11 +335,21 @@ impl Sandbox {
     fn build(&self, abi: u32, work: &Path) -> io::Result<(Confinement, bool)> {
         use landlock::{READ, Ruleset, WRITE, WRITE_EXISTING, real_path};
         let ruleset = Ruleset::new(abi, !self.settings.network)?;
-        let hidden: Vec<PathBuf> = self.hidden.iter().map(|path| real_path(path)).collect();
+        // Paths in a folder that does not exist (no state folder yet) need
+        // no exception: leaving them out keeps the folders above them
+        // whole.
+        let real = |paths: &[PathBuf]| -> Vec<PathBuf> {
+            paths
+                .iter()
+                .map(|path| real_path(path))
+                .filter(|path| path.parent().is_some_and(Path::is_dir))
+                .collect()
+        };
+        let hidden = real(&self.hidden);
         let no_write: Vec<PathBuf> = hidden
             .iter()
             .cloned()
-            .chain(self.read_only.iter().map(|path| real_path(path)))
+            .chain(real(&self.read_only))
             .collect();
         let work = real_path(work);
         let holds = no_write.iter().any(|path| path.starts_with(&work));

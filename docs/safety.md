@@ -37,11 +37,12 @@
 
 api 백엔드의 `bash` 도구가 실행하는 명령(대화, `-p`, 작업 모드, 예약 작업, 웹훅 실행)은 Linux Landlock으로 묶인 채 돈다. 명령 정책을 통과한 명령에만 그 위에 겹쳐 적용되고, 정책이 문자열만 보고는 놓치는 경로(변수나 실행 중에 만든 경로, 스크립트 파일, 다른 언어로 연 파일)도 커널이 막는다. 규칙은 명령마다 Junees가 만들어 두고, 자식 프로세스가 bash를 실행하기 직전에 `no_new_privs`와 함께 자기에게 건다. 묶인 명령과 그 명령이 띄운 모든 프로세스는:
 
-- 쓰기: 작업 폴더(명령이 도는 폴더), 임시 폴더(`/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`), `sandbox_write`의 폴더 아래에서만 파일을 만들고 바꾸고 지우고 옮길 수 있다. `/dev` 아래 이미 있는 파일(`/dev/null`, 터미널)에는 쓸 수 있다. 그 밖에서는 `Permission denied`.
+- 쓰기: 작업 폴더(명령이 도는 폴더), 임시 폴더(`/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`과 Junees 프로세스의 임시 폴더), `sandbox_write`의 폴더 아래에서만 파일을 만들고 바꾸고 지우고 옮길 수 있다. `/dev` 아래 이미 있는 파일(`/dev/null`, 터미널)에는 쓸 수 있다. 그 밖에서는 `Permission denied`.
 - 읽기: 기본은 어디든 읽고 실행할 수 있다. `sandbox_read`를 주면 그 폴더들과 쓸 수 있는 폴더만 읽는다(bash가 시작하려면 `/usr`, `/lib`, `/lib64`, `/bin`, `/etc` 같은 시스템 폴더가 들어 있어야 한다. `junees doctor`가 확인한다).
 - 언제나: 설정 파일(`$JUNEES_HOME/config.toml`), `mcp.json`, `$JUNEES_HOME/secrets/`(웹훅 시크릿, MCP OAuth 토큰)는 읽지도 바꾸지도 못하고(`/proc/self/root/...`로 돌아가도, 하드 링크를 새로 걸어도), 데이터 폴더(`memory`, `projects`, `skills`, `cron`, `plugins`, `webhooks`, `flows`)는 읽기만 된다. 작업 폴더가 이것들을 품어도(홈에서 실행) 마찬가지다. 웹훅 실행에서는 git과 GitHub CLI 자격 증명(`~/.git-credentials`, `~/.config/git/credentials`, `~/.config/gh/`)도 읽지 못한다. 다른 실행에서는 `gh`와 git push가 그 파일을 읽어야 하므로 명령 정책만 막는다.
 - 네트워크: `sandbox_network = 0`이면 TCP 연결과 bind를 모두 막는다(Landlock ABI 4 이상, Linux 6.7부터). 기본은 허용이다. UDP(DNS 포함)와 유닉스 소켓은 막지 않는다.
 - `no_new_privs`: setuid 프로그램(`sudo` 등)과 파일 capability가 권한을 주지 않는다.
+- 다른 프로세스: Landlock의 ptrace 규칙으로, 격리된 명령은 격리되지 않은 프로세스(Junees, MCP 서버, 같은 사용자의 다른 프로그램)를 추적하거나 그 `/proc/<pid>/environ`, `mem`을 읽지 못한다.
 
 `sandbox` 설정(`JUNEES_SANDBOX`):
 
@@ -67,7 +68,7 @@ sandbox_network = "1"
 한계:
 
 - Landlock은 경로 기준이다. 같은 파일을 다른 경로로 보여 주는 bind mount와 미리 있던 하드 링크는 막지 못한다.
-- 보호 경로를 품은 폴더(`/`, `/home`, 홈, `$JUNEES_HOME`, 그리고 그런 폴더가 작업 폴더일 때)에는 폴더 자체가 아니라 그 안의 항목마다 규칙을 준다. 그래서 명령이 시작된 뒤 그 폴더 바로 아래에 생긴 항목은 읽을 수 없고, 묶인 명령은 그 폴더 바로 아래에서 항목을 만들거나 지우지 못한다(홈에서 실행하면 `~/새파일`은 안 되고 `~/하위폴더/새파일`은 된다). 작업 폴더가 그런 폴더면 그 bash 도구의 첫 결과 끝에 `[sandbox: the working folder holds Junees's state folder, ...; work in a subfolder]` 한 줄로 알린다. 그 폴더에 쓰기를 통째로 허용하지 않는 것은, 그러면 같은 폴더 안에서 이름만 바꾸는 것(`mv config.toml x`, 폴더를 옮기지 않으므로 Landlock의 `REFER` 검사도 없다)을 막을 수 없어 다음 명령에서 새 이름으로 읽히기 때문이다.
+- 보호 경로를 품은 폴더(`/`, `/home`, 홈, `$JUNEES_HOME`, 그리고 그런 폴더가 작업 폴더일 때)에는 폴더 자체가 아니라 그 안의 항목마다 규칙을 준다. 그래서 명령이 시작된 뒤 그 폴더 바로 아래에 생긴 항목은 읽을 수 없고, 묶인 명령은 그 폴더 바로 아래에서 항목을 만들거나 지우지 못한다(홈에서 실행하면 `~/새파일`은 안 되고 `~/하위폴더/새파일`은 된다). 상태 폴더가 아직 없으면(보호할 파일이 없으면) 이 제한도 없다. 작업 폴더가 그런 폴더면 그 bash 도구의 첫 결과 끝에 `[sandbox: the working folder holds Junees's state folder, ...; work in a subfolder]` 한 줄로 알린다. 그 폴더에 쓰기를 통째로 허용하지 않는 것은, 그러면 같은 폴더 안에서 이름만 바꾸는 것(`mv config.toml x`, 폴더를 옮기지 않으므로 Landlock의 `REFER` 검사도 없다)을 막을 수 없어 다음 명령에서 새 이름으로 읽히기 때문이다.
 - 묶이지 않은 같은 사용자의 프로세스에 신호를 보내는 것과 이미 떠 있던 프로세스(예: 명령 전에 띄운 서버, Junees 자신)를 통한 우회는 막지 않는다. 묶인 명령이 백그라운드로 띄운 서버는 묶인 채로 남는다.
 - 커널이 지원하지 않으면 `auto`에서는 이전처럼 명령 정책만 남는다.
 
