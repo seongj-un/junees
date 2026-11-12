@@ -281,6 +281,14 @@ impl Inline<'_> {
                 at = after;
                 continue;
             }
+            // A bare web address is copied as written (GFM autolinks):
+            // `__init__` in its path is no bold, and Telegram links it.
+            if let Some(stop) = bare_url(chars, at, end) {
+                self.out
+                    .extend(chars[at..stop].iter().map(|&c| Atom::Char(c)));
+                at = stop;
+                continue;
+            }
             if matches!(c, '*' | '_' | '~')
                 && let Some((tag, width, close)) = emphasis(chars, at, end)
             {
@@ -411,6 +419,57 @@ fn link_address(raw: &str) -> Option<String> {
     .then(|| raw.to_string())
 }
 
+/// Where a bare `http://` or `https://` address starting at `at` ends
+/// (before `end`), as GFM's extended autolinks see it: not after a
+/// letter or digit, up to a space or `<`, without trailing `?!.,:*_~'"`
+/// and without a `)` that closes nothing inside it.
+fn bare_url(chars: &[char], at: usize, end: usize) -> Option<usize> {
+    if !matches!(chars[at], 'h' | 'H') || (at > 0 && chars[at - 1].is_alphanumeric()) {
+        return None;
+    }
+    let head: String = chars[at..end.min(at + 8)].iter().collect();
+    let head = head.to_ascii_lowercase();
+    let scheme = if head.starts_with("https://") {
+        8
+    } else if head.starts_with("http://") {
+        7
+    } else {
+        return None;
+    };
+    let mut stop = at + scheme;
+    while stop < end && !chars[stop].is_whitespace() && chars[stop] != '<' {
+        stop += 1;
+    }
+    while stop > at + scheme {
+        let last = chars[stop - 1];
+        let unbalanced = last == ')' && {
+            let inside = &chars[at..stop];
+            let open = inside.iter().filter(|&&c| c == '(').count();
+            let close = inside.iter().filter(|&&c| c == ')').count();
+            close > open
+        };
+        if "?!.,:*_~'\"".contains(last) || unbalanced {
+            stop -= 1;
+        } else {
+            break;
+        }
+    }
+    (stop > at + scheme).then_some(stop)
+}
+
+/// Characters that join the parts of a path or address
+/// (`pkg/__init__.py`, `a.__x__`): `_` next to them is no marker.
+fn joins_path(c: char) -> bool {
+    "/\\.:-=@#%+?&".contains(c)
+}
+
+/// Whether the marker run ending before `to` is glued to more of a path
+/// or file name (`__init__.py`).
+fn glued(chars: &[char], to: usize) -> bool {
+    chars.get(to).is_some_and(|&c| joins_path(c))
+        && chars.get(to + 1).is_some_and(|c| c.is_alphanumeric())
+}
+
 /// Unicode punctuation as CommonMark uses it, near enough: anything that
 /// is no letter, digit or space (symbols included).
 fn is_punctuation(c: char) -> bool {
@@ -440,8 +499,12 @@ fn can(chars: &[char], from: usize, to: usize, opening: bool) -> bool {
     let before = from.checked_sub(1).map(|at| chars[at]);
     let after = chars.get(to).copied();
     match chars[from] {
-        '_' if opening => left && (!right || before.is_some_and(is_punctuation)),
-        '_' => right && (!left || after.is_some_and(is_punctuation)),
+        // Not inside a path either: `src/pkg/__init__.py`.
+        '_' if opening => {
+            left && (!right || before.is_some_and(is_punctuation))
+                && !before.is_some_and(joins_path)
+        }
+        '_' => right && (!left || after.is_some_and(is_punctuation)) && !glued(chars, to),
         '*' if before.is_some_and(|c| c.is_ascii_digit())
             && after.is_some_and(|c| c.is_ascii_digit()) =>
         {
@@ -489,6 +552,10 @@ fn emphasis(chars: &[char], at: usize, end: usize) -> Option<(Tag, usize, usize)
             look = content.map_or(look + count, |(_, to)| to + count);
             continue;
         }
+        if let Some(stop) = bare_url(chars, look, end) {
+            look = stop;
+            continue;
+        }
         if c != marker {
             look += 1;
             continue;
@@ -497,6 +564,10 @@ fn emphasis(chars: &[char], at: usize, end: usize) -> Option<(Tag, usize, usize)
         let fits = length == width || (width == 2 && length == 3 && marker != '~');
         let after = look + length;
         let closes = fits && can(chars, look, after, false);
+        // `__main__.py`: the opener names a file, not emphasis.
+        if !closes && fits && marker == '_' && glued(chars, after) {
+            return None;
+        }
         if closes {
             let close = after - width;
             return (close > start).then_some((tag, width, close));
@@ -797,6 +868,33 @@ mod tests {
         assert_eq!(html("(**x**)"), "(<b>x</b>)");
         // `_` still needs a word boundary.
         assert_eq!(html("_설정_을 x_y_z"), "_설정_을 x_y_z");
+    }
+
+    #[test]
+    fn web_addresses_and_paths_keep_their_underscores() {
+        let url = "https://github.com/o/r/blob/main/pkg/__init__.py";
+        assert_eq!(html(&format!("see {url}")), format!("see {url}"));
+        let parts = render(&format!("see {url}"), false, LIMIT);
+        assert_eq!(parts[0].plain, format!("see {url}"));
+        assert_eq!(
+            html("edit src/pkg/__init__.py now"),
+            "edit src/pkg/__init__.py now"
+        );
+        assert_eq!(
+            html("run __main__.py or a.__x__"),
+            "run __main__.py or a.__x__"
+        );
+        assert_eq!(
+            html("HTTP://A.B/x_*y*_z and http://a.b/~~x~~"),
+            "HTTP://A.B/x_*y*_z and http://a.b/~~x~~"
+        );
+        // Trailing punctuation and markers are not part of the address.
+        assert_eq!(
+            html("**see https://a.b/x_y_z**, (https://a.b/c_(d)) _x_"),
+            "<b>see https://a.b/x_y_z</b>, (https://a.b/c_(d)) <i>x</i>"
+        );
+        // Bold and italic on their own still work.
+        assert_eq!(html("__bold__ and _it_."), "<b>bold</b> and <i>it</i>.");
     }
 
     #[test]
