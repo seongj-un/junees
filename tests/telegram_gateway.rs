@@ -842,6 +842,24 @@ async fn a_command_after_the_mention_is_a_command_in_a_group() {
 }
 
 #[tokio::test]
+async fn group_replies_mention_no_one() {
+    let bot = FakeBot::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    // The fake engine repeats the input: `@alice` in a group reply is
+    // broken with an invisible word joiner (#58), in private it stays.
+    bot.push(group(USER, "@junees_bot ask @alice, mail a@example.com"));
+    bot.wait_post(&GROUP.to_string(), |p| {
+        p == "reply 1: ask @\u{2060}alice, mail a@example.com"
+    })
+    .await;
+    bot.push(private(USER, "ask @alice"));
+    bot.wait_post(&USER.to_string(), |p| p == "reply 1: ask @alice")
+        .await;
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn forwarded_messages_are_marked_and_never_commands() {
     let bot = FakeBot::start().await;
     let dir = tempfile::tempdir().unwrap();

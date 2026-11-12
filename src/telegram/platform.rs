@@ -13,6 +13,7 @@ use super::api::{Api, Target};
 use crate::approval::{Request, render};
 use crate::gateway::ask::human;
 use crate::gateway::platform::Platform;
+use crate::gateway::split::split_plain;
 use crate::images::{Image, MAX_IMAGE_BYTES, too_large};
 use crate::prompt_text::escape_hidden;
 
@@ -26,6 +27,31 @@ pub const MAX_ATTACHMENTS: usize = 10;
 
 /// Time one download may take.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// U+2060 WORD JOINER: shows as nothing, and an `@name` with it after the
+/// `@` is no mention to Telegram.
+const NO_MENTION: char = '\u{2060}';
+
+/// `text` with each `@name` (an `@` not right after a letter, digit or
+/// `_`, followed by a letter, as usernames start) broken by an invisible
+/// word joiner after the `@`. A group reply then notifies no one: the
+/// model's text may repeat names from web pages or files, and the Bot
+/// API has no switch like Discord's `allowed_mentions`. E-mail addresses
+/// stay as they are.
+pub fn defuse_mentions(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut previous: Option<char> = None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        let starts_word = previous.is_none_or(|p| !(p.is_alphanumeric() || p == '_'));
+        if c == '@' && starts_word && chars.peek().is_some_and(|next| next.is_ascii_alphabetic()) {
+            out.push(NO_MENTION);
+        }
+        previous = Some(c);
+    }
+    out
+}
 
 /// An image attached to a message: a photo, or a document that is an
 /// image.
@@ -193,11 +219,22 @@ impl Platform for Telegram {
         false
     }
 
+    /// In a group (Telegram gives groups negative chat ids), `@name`s are
+    /// broken first ([`defuse_mentions`]); the few added characters may
+    /// need one more message.
     async fn post(&self, channel: &str, text: &str) -> Result<()> {
-        self.api
-            .send_message(Self::target(channel)?, text)
-            .await
-            .map_err(Into::into)
+        let target = Self::target(channel)?;
+        if target.chat >= 0 {
+            return self
+                .api
+                .send_message(target, text)
+                .await
+                .map_err(Into::into);
+        }
+        for part in split_plain(&defuse_mentions(text), MESSAGE_LIMIT) {
+            self.api.send_message(target, &part).await?;
+        }
+        Ok(())
     }
 
     async fn typing(&self, channel: &str) -> Result<()> {
@@ -266,6 +303,34 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn mentions_are_broken_and_addresses_kept() {
+        let broken = |name: &str| format!("@\u{2060}{name}");
+        assert_eq!(
+            defuse_mentions("@alice and (@bob_2), ask @carol."),
+            format!(
+                "{} and ({}), ask {}.",
+                broken("alice"),
+                broken("bob_2"),
+                broken("carol")
+            )
+        );
+        for kept in [
+            "mail me at a@example.com",
+            "x_@y",
+            "@ alone",
+            "@123",
+            "ends with @",
+            "한글@name",
+        ] {
+            assert_eq!(defuse_mentions(kept), kept, "{kept}");
+        }
+        assert_eq!(
+            defuse_mentions("줄\n@dave"),
+            format!("줄\n{}", broken("dave"))
+        );
+    }
 
     #[test]
     fn picks_the_largest_photo_within_the_limit_and_image_documents() {
