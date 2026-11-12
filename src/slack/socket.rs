@@ -14,6 +14,13 @@
 //!
 //! An event Slack did not see acknowledged in time comes again
 //! (`retry_attempt`); the router drops repeats by `event_id`.
+//!
+//! Button presses come the same way ("Using interactive features"): an
+//! envelope of type `interactive` whose payload is a `block_actions`
+//! payload. It is acknowledged with its `envelope_id` alone, at once like
+//! any other, which is the acknowledgment response Slack wants "within 3
+//! seconds" ("Handling user interaction"); the router answers the press
+//! afterwards through the Web API.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,8 +74,8 @@ enum End {
     Shutdown,
 }
 
-/// Keeps a Socket Mode connection open and hands every event payload to
-/// `events`.
+/// Keeps a Socket Mode connection open and hands the payload of every
+/// event and interaction to `events`.
 pub struct Socket {
     api: Arc<Api>,
     timing: Timing,
@@ -270,7 +277,8 @@ impl Socket {
                             return End::Again { fast: false };
                         }
                     }
-                    if envelope.get("type").and_then(Value::as_str) == Some("events_api")
+                    let kind = envelope.get("type").and_then(Value::as_str);
+                    if matches!(kind, Some("events_api" | "interactive"))
                         && let Some(payload) = envelope.get("payload")
                     {
                         let _ = events.send(payload.clone());

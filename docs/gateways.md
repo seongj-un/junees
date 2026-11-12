@@ -218,6 +218,8 @@ junees gateway telegram
          - message.im
          - message.channels
          - message.groups
+     interactivity:
+       is_enabled: true
      socket_mode_enabled: true
      org_deploy_enabled: false
      token_rotation_enabled: false
@@ -226,12 +228,13 @@ junees gateway telegram
    - 선택: `channels:history` + `message.channels`(공개 채널), `groups:history` + `message.groups`(비공개 채널). 이것이 있으면 봇이 답하는 스레드 안의 답글을 멘션 없이 받는다. 없으면 스레드에서도 매번 봇을 멘션해야 한다. 봇은 들어가 있는 채널의 메시지만 받고, 그 가운데 아래 조건에 맞는 것만 처리한다.
    - `im:read`, `users:read`는 쓰지 않는다(채널 정보나 사용자 정보를 묻지 않는다). `chat:write.public`도 없다: 봇은 초대된 채널에만 쓴다.
    - App Home의 Messages Tab을 켜야(`messages_tab_enabled`, 읽기 전용 끔) 사용자가 봇에게 DM을 보낼 수 있다.
+   - 승인 버튼을 쓰려면 **Interactivity & Shortcuts** 페이지에서 **Interactivity**를 켠다(manifest의 `settings.interactivity.is_enabled: true`). Socket Mode에서는 Request URL을 넣지 않는다: 문서대로 Socket Mode를 켜면 "your app settings doesn't require or even allow you to enter a Request URL"이고, 버튼 누름(`interactive` 봉투)도 이벤트와 같은 WebSocket으로 온다("you'll **only** receive events and interactive payloads over your WebSocket connections", [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode)). 따로 필요한 scope는 없다: 질문 메시지 수정(`chat.update`)과 누른 사람에게만 보이는 안내(`chat.postEphemeral`)도 `chat:write`로 된다. Interactivity가 꺼져 있으면 누름이 Junees에 오지 않으니 글 답장으로 답한다.
 2. Install App으로 워크스페이스에 설치하고 OAuth & Permissions 페이지의 **Bot User OAuth Token**(`xoxb-...`)을 `slack_bot_token`에 둔다. scope를 바꾸면 다시 설치해야 한다.
 3. Basic Information -> App-Level Tokens에서 scope `connections:write`로 토큰을 만들어(`xapp-...`) `slack_app_token`에 둔다. Socket Mode 연결 주소를 받는 `apps.connections.open`에만 쓴다.
 4. 내 member id(`U...`)를 알아 둔다: 슬랙에서 내 프로필 -> 더보기(⋮) -> Copy member ID. 이름이나 이메일은 받지 않는다.
 5. 채널에서 쓰려면 봇을 채널에 초대한다(`/invite @Junees`).
 
-`junees setup`은 슬랙을 묻지 않는다. 설정 파일이나 환경 변수로 둔다(환경 변수가 우선).
+`junees setup`의 마지막 선택 단계(`Set up the Slack app too (junees gateway slack, optional)? [y/N]`)에서 `y`로 답하면 봇 토큰(`xoxb-...`)과 앱 토큰(`xapp-...`)을 화면에 보이지 않게 입력받고(모양이 틀리거나 두 토큰을 바꿔 넣으면 값을 되풀이하지 않고 다시 묻는다), 허용할 member id 목록을 받아 설정 파일(0600)의 `slack_bot_token`, `slack_app_token`, `slack_allowed_users`에 저장한다. 디스코드 토큰과 같은 자리다. 다시 실행하면 Enter로 지금 값을 그대로 둔다. 손으로 설정 파일이나 환경 변수에 두어도 된다(환경 변수가 우선).
 
 ```toml
 slack_bot_token = "xoxb-..."           # JUNEES_SLACK_BOT_TOKEN (필수)
@@ -275,18 +278,20 @@ junees gateway slack
 - 길이: `chat.postMessage` 문서는 `text`를 4,000자 안으로 권하고 40,000자부터 자른다. 답을 3800 UTF-16 단위로 줄 단위로 나누고(디스코드처럼 잘린 코드 블록은 닫고 다음 메시지에서 다시 연다), 이스케이프로 늘어나는 몇 글자는 그 여유 안에 든다.
 - 도구 줄은 코드 블록 하나로 모아 보낸다(디스코드와 같다).
 - 타이핑 표시는 없다: 봇의 타이핑 표시는 은퇴한 RTM API에만 있었다.
-- 승인 질문은 굵은 제목 + 코드 블록(터미널과 같은 내용) + 답하는 법이고, `y`/`n`/`n <이유>`/`a`로 답한다. 채널에서는 그 스레드에 답글로 답한다(버튼, Block Kit 상호작용은 쓰지 않는다).
+- 승인 질문은 굵은 제목 + 코드 블록(터미널과 같은 내용) + 답하는 법이고, Block Kit 버튼(Allow, Always allow, Decline. Always allow는 매번 묻는 종류뿐이면 없다)이 달린다. 글 답장 `y`/`n`/`n <이유>`/`a`도 그대로 된다. 채널에서는 그 스레드에 답글로 답한다. 답한 직후(30초 안) 같은 사용자의 답 낱말 하나는 디스코드처럼 새 입력으로 넘기지 않고 이미 답했다고 알린다.
+- 승인 버튼의 동작([block_actions payload](https://docs.slack.dev/reference/interaction-payloads/block_actions-payload), [Button element](https://docs.slack.dev/reference/block-kit/block-elements/button-element), [chat.update](https://docs.slack.dev/reference/methods/chat.update)): 질문 메시지(길면 나뉘고 그 마지막 메시지)는 `chat.postMessage`의 `blocks`로 보낸다. mrkdwn `section` 하나(`verbatim: true`: 평문의 채널 이름이나 주소를 슬랙이 링크로 바꾸지 않게)와 `actions` 블록 하나이고, 각 버튼의 `action_id`와 `value`는 `junees:<질문 id>:<y|a|n>`(질문마다 새로 뽑은 128비트 난수)이다. `section` 글은 3000자까지라서, 이스케이프한 mrkdwn이 3000자를 넘으면 질문을 더 잘게 나눠 앞부분은 글로 보내고 마지막 부분에 버튼을 단다. `text`에도 같은 mrkdwn을 넣는다(알림용). 누르면 슬랙이 Socket Mode로 `interactive` 봉투(`block_actions`)를 보내고, Junees는 다른 봉투처럼 처리하기 전에 바로 `envelope_id`로 확인한다(문서: 확인은 3초 안). 누름이 받아들여지는 것은 누른 사람이 `slack_allowed_users`에 있고, 누른 메시지의 대화(채널, 채널이면 그 `thread_ts`)에서 지금 기다리는 질문의 id이며, 그 질문 메시지(`ts`)에서 눌렸고, 그 질문에 있는 버튼일 때뿐이다. 질문이 끝나면(버튼, 글 답장, 시간 초과, `!stop`) `chat.update`로 버튼을 없애고(`blocks`를 질문 `section`과 결과 `section` 둘로 바꾼다) 결과를 굵게 적는다(`Allowed by <사용자 이름>.`, `Declined.`, `No answer within 5m: declined.`, `Not answered: the turn stopped.` 등, 디스코드와 같은 문구). 결과 줄도 `&`, `<`, `>`를 이스케이프하므로 사용자 이름에 무엇이 있어도 멘션이나 링크가 되지 않는다. `chat.update`는 `parse`의 기본값이 `chat.postMessage`와 달리 `client`라서 `parse: none`을 보내고 `link_names`는 보내지 않는다. 그 밖의 누름(허용 목록 밖 사람, 끝났거나 시간이 지난 질문, 재시작 전 질문, 다른 대화나 다른 메시지, Junees의 것이 아닌 버튼)은 아무것도 바꾸지 않고 `chat.postEphemeral`로 누른 사람에게만 보이는 안내를 보낸다(`This question was already answered, timed out or stopped; the button does nothing now.`, 허용 목록 밖이면 `Only the users in slack_allowed_users can answer Junees.`, 허용 목록 밖 사용자는 로그에 한 번 남긴다). `response_url`은 쓰지 않는다(토큰 없이 쓰는 `hooks.slack.com` 주소라 받은 주소를 그대로 믿어야 한다). 버튼이 달린 질문을 보내지 못하면(예: `invalid_blocks`) 보내지 못한 부분만 버튼과 버튼 안내 없이(`Reply `y` to run it, ...`) 보내고 글 답장으로 받는다.
 - 이미지: 메시지의 `files` 가운데 MIME `image/png|jpeg|gif|webp`이고 5 MB 이하인 것(10개까지)을 그 턴이 시작할 때 `url_private_download`(없으면 `url_private`)에서 봇 토큰으로 30초 안에 스트리밍으로 받는다. 문서 "Downloading files"대로 토큰은 `https://files.slack.com`(파싱한 호스트가 정확히 같고 기본 포트, 사용자 정보 없음)에만 보내고, 리다이렉트는 자동으로 따르지 않고 세 번까지 같은 규칙으로 확인한 뒤 따른다. 원격 파일(`mode: external`, `is_external`, `filetype: remote`: 주소를 다른 앱이 정한다), 봇에게 열리지 않은 파일(`file_access`), 이미지가 아닌 파일, 큰 파일은 `(attachments left out: ...)`로 알린다. 받은 바이트가 네 형식이 아니면 버린다(토큰이 틀리면 슬랙은 로그인 HTML을 준다). claude-code 백엔드는 디스코드처럼 이미지를 거절한다.
 
 ### 연결, 재연결, 레이트 리밋
 
-- `apps.connections.open`(앱 토큰)으로 받은 주소에 연결하면 슬랙이 `hello`를 보낸다. 그 뒤 오는 봉투(envelope)마다 처리하기 전에 바로 `{"envelope_id": ...}`로 확인한다(문서: "Your app still needs to acknowledge receiving each event so that Slack knows whether to retry"). `events_api` 봉투만 처리하고 슬래시 명령과 상호작용 봉투는 확인만 한다.
+- `apps.connections.open`(앱 토큰)으로 받은 주소에 연결하면 슬랙이 `hello`를 보낸다. 그 뒤 오는 봉투(envelope)마다 처리하기 전에 바로 `{"envelope_id": ...}`로 확인한다(문서: "Your app still needs to acknowledge receiving each event so that Slack knows whether to retry"). `events_api` 봉투와 `interactive` 봉투 가운데 `block_actions`(승인 버튼 누름)만 처리하고, 슬래시 명령과 다른 상호작용 봉투는 확인만 한다.
 - 슬랙은 몇 시간마다 연결을 바꾼다: `disconnect`(`warning`, `refresh_requested`)가 오면 닫고 바로 새 주소를 받아 다시 연결한다(`link_disabled`, 즉 Socket Mode를 끈 경우는 기다렸다가). 연결이 끊기거나 닫히면, 그리고 30초마다 보내는 ping에도 90초 동안 아무것도 오지 않으면(연결 직후 `hello`는 30초) 다시 연결한다. 기준은 마지막으로 받은 프레임(pong 포함)의 시각이라, 보낸 ping은 이 시간을 늘리지 않는다. 실패하면 1초부터 두 배씩 60초까지 기다린다(`hello`를 받으면 초기화). `invalid_auth`, `not_authed`, `token_revoked`, `missing_scope` 같은 토큰 거절은 다시 하지 않고 이유와 함께 끝난다.
 - 429는 `Retry-After` 헤더의 초만큼 기다렸다 다시 보낸다(문서 "Rate limits", 다섯 번까지, 10분 넘게 기다리라면 실패). `chat.postMessage`에는 중복 방지 키가 없으므로 보내졌을 수 있는 실패(응답 전 끊김, 시간 초과, 5xx)는 다시 보내지 않고 로그에 남긴다. 연결 자체가 안 된 경우와 429만 다시 보낸다. 다른 메서드는 연결 오류, 시간 초과, 5xx를 세 번까지 다시 한다.
 
 ### 범위 밖, 한계
 
-- 슬래시 명령, 버튼과 Block Kit 승인, 메시지 편집 스트리밍, 반응 이모지, 타이핑 표시, Agent/Assistant 스레드(`assistant.threads.*`), 이미지가 아닌 파일 읽기, 여러 워크스페이스 설치(OAuth 배포), HTTP Events API(요청 URL) 방식, `!task`, setup 마법사의 슬랙 질문은 하지 않는다.
+- 슬래시 명령, 메시지 편집 스트리밍, 반응 이모지, 타이핑 표시, Agent/Assistant 스레드(`assistant.threads.*`), 이미지가 아닌 파일 읽기, 여러 워크스페이스 설치(OAuth 배포), HTTP Events API(요청 URL) 방식, `!task`는 하지 않는다.
+- 재시작하면 기다리던 질문은 사라지므로 그 전 질문 메시지에는 버튼이 남는다(눌러도 안내만 받는다). 슬랙은 Socket Mode 연결이 여럿이면 아무 연결로나 보낸다: 같은 앱으로 게이트웨이를 둘 띄우면 다른 쪽 질문의 누름은 "already answered"가 된다.
 - `junees doctor`는 토큰 모양과 허용 사용자를 오프라인으로 보고, `--online`이면 `auth.test`로 봇 토큰만 확인한다(앱 토큰은 `apps.connections.open`이 연결 주소를 새로 만들어서 묻지 않는다).
 - 확인(ack)한 뒤 처리 전에 프로세스가 죽은 이벤트는 다시 오지 않는다. 게이트웨이가 꺼진 동안의 메시지는 받지 못한다(Socket Mode는 연결된 동안만 보낸다).
-- 테스트는 테스트 안에서 띄운 가짜 Web API와 가짜 Socket Mode WebSocket 서버(루프백)로만 했다(`tests/slack_gateway.rs`). 실제 슬랙에는 연결해 보지 않았다.
+- 테스트는 테스트 안에서 띄운 가짜 Web API와 가짜 Socket Mode WebSocket 서버(루프백)로만 했다(`tests/slack_gateway.rs`). 실제 슬랙에는 연결해 보지 않았다. 승인 버튼도 가짜 서버로만 눌러 봤다.

@@ -50,7 +50,7 @@ junees doctor                       # 설치와 설정 점검
 
 ### 설정 파일과 처음 설정
 
-설정은 `$JUNEES_HOME/config.toml`(기본 `~/.junees/config.toml`)에 있다. 처음 실행할 때 설정 파일도 `ANTHROPIC_API_KEY`도 없고 터미널이면 설정 마법사가 먼저 뜬다(`junees setup`으로 언제든 다시). 마법사는 Claude에 닿는 방법(`1) Claude subscription` 또는 `2) Anthropic API key`)을 묻고, API 키면 대화 모델과 작업 기본 예산을, 마지막으로 디스코드 봇 설정(선택)을 묻는다. 터미널이 아니면(cron, 파이프) 마법사를 띄우지 않는다.
+설정은 `$JUNEES_HOME/config.toml`(기본 `~/.junees/config.toml`)에 있다. 처음 실행할 때 설정 파일도 `ANTHROPIC_API_KEY`도 없고 터미널이면 설정 마법사가 먼저 뜬다(`junees setup`으로 언제든 다시). 마법사는 Claude에 닿는 방법(`1) Claude subscription` 또는 `2) Anthropic API key`)을 묻고, API 키면 대화 모델과 작업 기본 예산을, 마지막으로 디스코드 봇과 슬랙 앱 설정(선택)을 묻는다. 터미널이 아니면(cron, 파이프) 마법사를 띄우지 않는다.
 
 파일은 TOML의 단순한 부분(한 줄에 `키 = 값`, 표와 배열은 받지 않음)만 쓴다. 키마다 환경 변수 하나에 대응하고 환경 변수가 있으면 파일보다 우선한다. 파일은 `0600`으로 만들고, 모델의 도구가 이 파일을 읽고 쓰는 것을 막는다(차단 목록이라 한계가 있다).
 
@@ -177,6 +177,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 10. 도구와 안전: 브라우저 도구(헤드리스 Chromium, [docs/browser.md](docs/browser.md)), bash 실행 격리(Landlock, [docs/safety.md](docs/safety.md)) (완료)
 11. 릴리스와 설치: `v*` 태그의 릴리스 워크플로(Linux musl, macOS, SHA256SUMS, 출처 증명), `install.sh`, `junees update` ([docs/install.md](docs/install.md)), 첫 릴리스 v0.1.0 (완료)
 12. 게이트웨이 확장: Slack(Socket Mode), 텔레그램 HTML 서식 ([docs/gateways.md](docs/gateways.md)) (완료)
+13. 승인 버튼: 디스코드, 텔레그램, Slack 게이트웨이의 승인 질문을 버튼으로 답하기, `junees setup`의 Slack 단계 ([docs/gateways.md](docs/gateways.md)) (완료)
 
 ## 개발
 

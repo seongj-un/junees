@@ -18,6 +18,16 @@
 //!   in time, and a mention in a channel the app reads arrives twice
 //!   (`message` and `app_mention`): each `event_id` and each message
 //!   (channel and `ts`) is handled once.
+//!
+//! Presses on the buttons of approval questions arrive as `block_actions`
+//! payloads ("block_actions payload": `user`, `channel`, `container`,
+//! `message`, `actions[].action_id`/`value`). A press answers only when
+//! the user is in `slack_allowed_users` and the button's value names the
+//! question that waits in the conversation of the pressed message (its
+//! channel, and its `thread_ts` in a channel) and the press comes from
+//! that question's message (`ts`); see [`Channels::press`]. Every other
+//! press changes nothing and its user gets a note only they see
+//! (`chat.postEphemeral`).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -26,10 +36,12 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::api::Me;
-use super::format::from_slack;
+use super::format::{escape, from_slack};
 use super::platform::{Slack, Target, attachments};
+use crate::gateway::ask::{Press, parse_button};
 use crate::gateway::bot::parse_command;
 use crate::gateway::channels::{Channels, Shared};
+use crate::prompt_text::escape_hidden;
 
 /// Event ids and messages remembered against repeats.
 const RECENT: usize = 4096;
@@ -39,6 +51,14 @@ const THREADS: usize = 4096;
 
 /// Subtypes that still carry what a user wrote.
 const USER_SUBTYPES: [&str; 2] = ["file_share", "thread_broadcast"];
+
+/// What a press that answered nothing gets back.
+pub const ALREADY_HANDLED: &str =
+    "This question was already answered, timed out or stopped; the button does nothing now.";
+/// What a press of a user not in `slack_allowed_users` gets back.
+pub const NOT_ALLOWED: &str = "Only the users in slack_allowed_users can answer Junees.";
+/// What a press of a button that is not Junees's gets back.
+const NOT_OURS: &str = "Junees does not know this button.";
 
 /// `text` without mentions of the bot (`<@U123>`, `<@U123|name>`),
 /// trimmed.
@@ -156,10 +176,12 @@ impl Router {
         }
     }
 
-    /// Handles the payload of an `events_api` envelope.
+    /// Handles the payload of an `events_api` or `interactive` envelope.
     pub fn handle(&mut self, payload: &Value) {
-        if payload.get("type").and_then(Value::as_str) != Some("event_callback") {
-            return;
+        match payload.get("type").and_then(Value::as_str) {
+            Some("event_callback") => {}
+            Some("block_actions") => return self.press(payload),
+            _ => return,
         }
         if let Some(id) = payload.get("event_id").and_then(Value::as_str)
             && !remember(&mut self.events, id.to_string())
@@ -244,6 +266,79 @@ impl Router {
             return;
         }
         self.channels.input(&key, user, content, files, notes);
+    }
+
+    /// A press on a button (module docs). The envelope was acknowledged
+    /// already; a press that answers nothing gets a note in the
+    /// background.
+    fn press(&mut self, payload: &Value) {
+        let text = |pointer: &str| payload.pointer(pointer).and_then(Value::as_str);
+        let (Some(user), Some(channel)) = (
+            text("/user/id"),
+            text("/channel/id").or_else(|| text("/container/channel_id")),
+        ) else {
+            return;
+        };
+        let message = text("/message/ts").or_else(|| text("/container/message_ts"));
+        let thread = text("/message/thread_ts").or_else(|| text("/container/thread_ts"));
+        let refusal = if !self.allowed.contains(user) {
+            if self.strangers.insert(user.to_string()) {
+                (self.channels.shared().log)(&format!(
+                    "ignoring button presses of user {}: not in slack_allowed_users",
+                    escape_hidden(user)
+                ));
+            }
+            Some(NOT_ALLOWED)
+        } else {
+            let button = payload
+                .pointer("/actions/0/value")
+                .and_then(Value::as_str)
+                .and_then(parse_button);
+            match (button, message) {
+                (Some((id, choice)), Some(message)) => {
+                    let key = Target {
+                        channel: channel.to_string(),
+                        thread_ts: thread.map(str::to_string),
+                    }
+                    .key();
+                    let name = text("/user/username")
+                        .or_else(|| text("/user/name"))
+                        .unwrap_or(user);
+                    let press = Press {
+                        id,
+                        choice,
+                        message: Some(message.to_string()),
+                        user: user.to_string(),
+                        by: escape_hidden(name),
+                    };
+                    if self.channels.press(&key, press) {
+                        None
+                    } else {
+                        Some(ALREADY_HANDLED)
+                    }
+                }
+                _ => Some(NOT_OURS),
+            }
+        };
+        let Some(note) = refusal else {
+            return;
+        };
+        let shared = self.channels.shared();
+        let api = Arc::clone(&shared.platform.api);
+        let log = Arc::clone(&shared.log);
+        let (channel, user, thread) = (
+            channel.to_string(),
+            user.to_string(),
+            thread.map(str::to_string),
+        );
+        tokio::spawn(async move {
+            if let Err(err) = api
+                .post_ephemeral(&channel, &user, thread.as_deref(), &escape(note))
+                .await
+            {
+                log(&format!("cannot answer a button press: {err}"));
+            }
+        });
     }
 
     /// Whether `key` has a saved session.

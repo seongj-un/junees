@@ -9,6 +9,17 @@
   - 그래서 예약 작업용으로 설정 파일에 `sandbox_read = "/, ~/.ssh"`를 적어도, 웹훅 실행의 `read_file`은 디스크 전체를 읽지 않습니다. 0.2.0에서 안내한 "`JUNEES_SANDBOX_READ`는 예약 작업 데몬의 환경에만" 우회는 더 필요 없습니다.
   - 웹훅 실행의 파일 도구가 `sandbox_read`의 폴더를 읽고 있었다면 그 폴더를 `webhook_sandbox_read`에 옮겨 적습니다. 여기에 자격 증명(`~/.ssh` 등)을 적어도 웹훅 실행은 읽지 않습니다.
   - 예약 작업과 대화는 그대로입니다: 예약 작업의 파일 도구와 bash는 계속 `sandbox_read`를 따르고, 거기 적은 자격 증명을 예약 작업의 bash가 다시 읽습니다. 웹훅 실행의 bash 읽기도 계속 `sandbox_read`를 따릅니다(주면 좁아질 뿐이고, 자격 증명은 0.2.0처럼 모두 숨깁니다).
+- **게이트웨이 승인 버튼 (#79, #80)**
+  - 디스코드, 텔레그램, Slack 게이트웨이의 승인 질문에 버튼(Allow, Always allow, Decline)이 붙습니다. 글 답장 `y`/`n`/`a`도 그대로 됩니다.
+  - 기존 Slack 앱은 앱 설정의 Interactivity & Shortcuts에서 Interactivity를 켜야 버튼이 동작합니다(Socket Mode라 Request URL은 필요 없습니다). 켜지 않으면 버튼을 눌러도 Junees에 아무것도 오지 않으니 글로 답합니다.
+  - 디스코드 앱 설정의 Interactions Endpoint URL은 비워 둡니다. 주소가 있으면 버튼 누름이 Gateway로 오지 않습니다.
+  - 질문에 답한 사람이 30초 안에 답 낱말 하나만(`y`, `n` 등) 다시 보내면 새 요청이 되지 않고 "이미 답했다"는 안내만 갑니다.
+
+### 새 기능
+
+- 디스코드와 텔레그램 승인 버튼 (#79), Slack Block Kit 승인 버튼 (#80)
+- `junees setup`의 Slack 단계(봇 토큰, 앱 토큰, 허용할 member id) (#80)
+- 웹훅 실행 전용 읽기 설정 `webhook_sandbox_read` (#78)
 
 ## 0.2.0 (2026-11-12)
 

@@ -8,7 +8,9 @@
 //! ordinary session and continued after a restart (index
 //! `gateway/slack-sessions.json`); messages of one conversation run in
 //! order, conversations at the same time up to `slack_parallel`. Only the
-//! users in `slack_allowed_users` are listened to.
+//! users in `slack_allowed_users` are listened to. Approval questions
+//! come with Block Kit buttons, pressed over the same socket
+//! (`interactive` envelopes, [`bot`]).
 
 pub mod api;
 pub mod bot;
@@ -134,9 +136,7 @@ impl SlackGateway {
             self.config.parallel
         ));
         let shared = Arc::new(Shared {
-            platform: Slack {
-                api: Arc::clone(&api),
-            },
+            platform: Slack::new(Arc::clone(&api)),
             engines: self.engines,
             parallel: self.config.parallel,
             approval_timeout: self.config.approval_timeout,
