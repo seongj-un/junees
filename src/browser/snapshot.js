@@ -14,7 +14,7 @@
   // The risk rules, shared with the input guard (guard.js, which runs
   // in front of this script).
   const {
-    clean, short, kind, label, typeRisk, clickRisk, enterRisk, pointRisk, closedFrame, FRAME_RISK,
+    clean, short, kind, label, typeRisk, clickRisk, enterRisk, pointRisk, closedFrame, closedHosts, FRAME_RISK,
   } = globalThis.__juneesLib;
   const LABEL = 80;
 
@@ -99,6 +99,7 @@
         line += ' [image "' + short(el.getAttribute('alt'), LABEL) + '"] ';
       }
       if (el.shadowRoot) walk(el.shadowRoot);
+      else if (closedHosts.has(el)) line += ' [closed shadow root: not shown] ';
     }
     for (const child of node.childNodes) walk(child);
     if (node.nodeType === Node.ELEMENT_NODE && BLOCK.has(node.tagName)) flush();

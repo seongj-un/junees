@@ -23,6 +23,12 @@
   // The risk of a key press or click that goes into a frame whose page
   // cannot be read (another site): what it does there is unknown.
   const FRAME_RISK = 'goes into a frame from another site, whose fields and buttons cannot be checked';
+  // The risk of a click or key press that goes into a closed shadow root
+  // (its inside is hidden from every script here, this one included).
+  const CLOSED_RISK = 'goes into a closed shadow root, whose fields and buttons cannot be checked';
+  // Elements the tool found (through DevTools, which sees them) to host a
+  // closed shadow root; see `closed` below.
+  const closedHosts = new WeakSet();
 
   const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
   const short = (text, max) => {
@@ -88,8 +94,20 @@
     return PAYMENT_NAME.test((el.name || '') + ' ' + (el.id || ''));
   }
 
+  // Whether `el` hosts a closed shadow root or sits in the light DOM of
+  // one (a slotted element is shown, and clicked, through the hidden
+  // tree).
+  function inClosed(el) {
+    for (let n = el; n; n = n.parentNode && n.parentNode.nodeType === Node.DOCUMENT_FRAGMENT_NODE
+      ? n.parentNode.host : n.parentNode) {
+      if (closedHosts.has(n)) return true;
+    }
+    return false;
+  }
+
   // Why typing into `el` needs the user's approval, or ''.
   function typeRisk(el) {
+    if (inClosed(el)) return 'a field with a closed shadow root, whose inside cannot be checked';
     if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password') return 'a password field';
     if (payment(el)) return 'a payment card or bank account field';
     return '';
@@ -126,6 +144,7 @@
   // Why clicking `el` needs the user's approval, or ''.
   function clickRisk(el) {
     if (closedFrame(el)) return FRAME_RISK;
+    if (inClosed(el)) return CLOSED_RISK;
     const k = kind(el);
     if (!k || ['textbox', 'password', 'select', 'checkbox', 'radio', 'range', 'color', 'file'].includes(k)) return '';
     if (submits(el)) {
@@ -141,6 +160,7 @@
   function enterRisk(el) {
     if (!el) return '';
     if (closedFrame(el)) return FRAME_RISK;
+    if (inClosed(el)) return CLOSED_RISK;
     const k = kind(el);
     if (k === 'textbox' || k === 'password' || k === 'checkbox' || k === 'radio' || k === 'select') return formRisk(el);
     return clickRisk(el);
@@ -148,6 +168,7 @@
 
   // The risk of clicking at `el` (what a click there activates).
   function pointRisk(el) {
+    if (inClosed(el)) return CLOSED_RISK;
     return clickRisk((el.closest && el.closest('a, button, input, [role]')) || el);
   }
 
@@ -200,7 +221,8 @@
   for (const type of [...MOUSE, ...KEYS]) addEventListener(type, guard, true);
 
   globalThis.__juneesLib = {
-    clean, short, kind, label, typeRisk, formRisk, clickRisk, enterRisk, pointRisk, closedFrame, FRAME_RISK,
+    clean, short, kind, label, typeRisk, formRisk, clickRisk, enterRisk, pointRisk, closedFrame, inClosed,
+    closedHosts, FRAME_RISK, CLOSED_RISK,
   };
   globalThis.__juneesGuard = {
     // Arms the guard for the next input events in this frame, for 5 s:
@@ -214,6 +236,13 @@
     arm(arm) {
       armed = arm ? Object.assign({ until: performance.now() + 5000 }, arm) : null;
       stopped.length = 0;
+    },
+    // Marks `el` as the host of a closed shadow root (the tool calls it
+    // on each host DevTools finds, before every check): the risk rules
+    // then treat a click or key press into it like one into a frame of
+    // another site.
+    closed(el) {
+      closedHosts.add(el);
     },
     // The events stopped since the guard was armed, and disarms it.
     take() {

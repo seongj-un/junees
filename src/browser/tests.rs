@@ -1156,6 +1156,140 @@ async fn the_page_cannot_change_the_target_after_the_check() {
     run(&tool, json!({"action": "close"})).await;
 }
 
+/// The page of the review of #64: a password form and a buy button
+/// inside closed shadow roots, whose hosts look like plain buttons.
+const CLOSED_PAGE: &str = r#"<title>Closed</title>
+<x-next role="button" aria-label="Next" style="display:inline-block"></x-next>
+<x-more role="button" aria-label="Continue" style="display:inline-block"></x-more>
+<script>
+document.querySelector('x-next').attachShadow({mode: 'closed'}).innerHTML =
+  '<form action="/login"><input type="password" name="pw" value="pre" hidden>'
+  + '<button style="width:120px;height:40px">Go</button></form>';
+document.querySelector('x-more').attachShadow({mode: 'closed'}).innerHTML =
+  '<button style="width:120px;height:40px" onclick="fetch(\'/bought\')">Buy now</button>';
+</script>"#;
+
+/// A plain button whose mousemove handler puts a host with a closed
+/// shadow root (a buy button inside) over it, after the snapshot.
+const LATE_CLOSED_PAGE: &str = r#"<title>Late</title>
+<button id="next" onclick="fetch('/next')" onmousemove="cover(this)">Next</button>
+<script>
+function cover(next) {
+  if (document.querySelector('x-buy')) return;
+  const r = next.getBoundingClientRect();
+  const host = document.createElement('x-buy');
+  host.style.cssText = 'position:fixed;display:block;left:' + r.left + 'px;top:' + r.top
+    + 'px;width:' + r.width + 'px;height:' + r.height + 'px';
+  host.attachShadow({mode: 'closed'}).innerHTML =
+    '<button style="width:100%;height:100%" onclick="fetch(\'/bought\')">Buy now</button>';
+  document.body.append(host);
+}
+</script>"#;
+
+#[tokio::test]
+async fn closed_shadow_roots_need_an_approval() {
+    let Some(program) = chromium("closed_shadow_roots_need_an_approval") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    let (address, seen) = serve(
+        "127.0.0.1",
+        HashMap::from([
+            ("/closed", (200, "", CLOSED_PAGE.to_string())),
+            ("/late", (200, "", LATE_CLOSED_PAGE.to_string())),
+            ("/login", (200, "", "<p>logged in</p>".to_string())),
+        ]),
+    )
+    .await;
+    let base = format!("http://{address}");
+    let got = |prefix: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.starts_with(prefix))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    // Nobody to ask: clicks into a closed shadow root are refused.
+    let tool = BrowserTool::new(settings(&program), Vec::new(), false);
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/closed")}),
+    )
+    .await
+    .content;
+    for label in ["Next", "Continue"] {
+        let output = run(
+            &tool,
+            json!({"action": "click", "ref": number(&page, "button", label)}),
+        )
+        .await;
+        assert!(output.is_error, "{label}: {}", output.content);
+        assert!(
+            output.content.contains("nobody is asked")
+                && output.content.contains(page::CLOSED_RISK),
+            "{label}: {}",
+            output.content
+        );
+    }
+    // A host put over a plain button after the snapshot is seen at the
+    // check under the pointer.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/late")}),
+    )
+    .await
+    .content;
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "button", "Next")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("not clicked") && output.content.contains(page::CLOSED_RISK),
+        "{}",
+        output.content
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(got("/login"), Vec::<String>::new());
+    assert_eq!(got("/bought"), Vec::<String>::new());
+    assert_eq!(got("/next"), Vec::<String>::new());
+    run(&tool, json!({"action": "close"})).await;
+
+    // With a gate the click is asked about, and runs once approved.
+    let tool = BrowserTool::new(settings(&program), Vec::new(), true);
+    let gate = Approval::new(
+        ApprovalMode::Risky,
+        &ToolSettings::default(),
+        Workspace::new(&std::env::temp_dir()),
+    )
+    .with_questions(TOOL_NAME, Some(tool.questions()));
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/closed")}),
+    )
+    .await
+    .content;
+    let click = json!({"action": "click", "ref": number(&page, "button", "Next")});
+    let request = gate.request(TOOL_NAME, &click).unwrap();
+    assert_eq!(request.kinds, [KIND_SUBMIT]);
+    assert!(
+        format!("{request:?}").contains("closed shadow root"),
+        "{request:?}"
+    );
+    let output = run(&tool, click).await;
+    assert!(output.content.contains("logged in"), "{}", output.content);
+    assert_eq!(got("/login").len(), 1);
+    run(&tool, json!({"action": "close"})).await;
+    // The guard and the snapshot name the same risk as the tool.
+    assert!(
+        page::GUARD_JS.contains(&format!("const CLOSED_RISK = '{}';", page::CLOSED_RISK)),
+        "CLOSED_RISK differs between guard.js and page.rs"
+    );
+}
+
 #[tokio::test]
 async fn the_browser_goes_away_when_dropped_or_cancelled() {
     let Some(program) = chromium("the_browser_goes_away_when_dropped_or_cancelled") else {

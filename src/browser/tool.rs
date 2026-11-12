@@ -518,7 +518,7 @@ impl BrowserTool {
         // (see guard.js): an approval covers this element alone.
         let approved = !meta.click_risk.is_empty();
         let point = browser
-            .element_call(&format!("point({n}, {approved})"))
+            .element_check(&format!("point({n}, {approved})"))
             .await?;
         match point["error"].as_str() {
             Some("covered") => {
@@ -572,7 +572,7 @@ impl BrowserTool {
     ) -> Result<(), Failure> {
         browser.move_mouse(x, y).await?;
         let again = browser
-            .element_call(&format!("recheck({n}, {x}, {y})"))
+            .element_check(&format!("recheck({n}, {x}, {y})"))
             .await?;
         if again["error"].as_str() == Some("covered") {
             let _ = browser.element_call("stopped()").await;
@@ -620,7 +620,7 @@ impl BrowserTool {
         let approved = !meta.type_risk.is_empty();
         let text_json = serde_json::to_string(text).unwrap_or_default();
         let typed = browser
-            .element_call(&format!("typeInto({n}, {text_json}, {clear}, {approved})"))
+            .element_check(&format!("typeInto({n}, {text_json}, {clear}, {approved})"))
             .await?;
         match typed["error"].as_str() {
             Some("not editable") => {
@@ -688,7 +688,7 @@ impl BrowserTool {
         // covers the element checked here alone.
         let approved = submits && !asked_about.is_empty();
         let armed = browser
-            .element_call(&format!(
+            .element_check(&format!(
                 "armKey({}, {submits}, {approved})",
                 element.map_or("null".to_string(), |n| n.to_string())
             ))

@@ -1,6 +1,7 @@
 //! One browser session: the process, its DevTools connection, the page
 //! the model drives and the guard that checks every request.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -31,6 +32,16 @@ const WORLD: &str = "junees";
 /// goes into a frame of another site (`FRAME_RISK` in guard.js).
 pub const FRAME_RISK: &str =
     "goes into a frame from another site, whose fields and buttons cannot be checked";
+/// The risk the guard and the snapshot give a click or key press that
+/// goes into a closed shadow root (`CLOSED_RISK` in guard.js).
+pub const CLOSED_RISK: &str =
+    "goes into a closed shadow root, whose fields and buttons cannot be checked";
+/// Marks the element it is called on as the host of a closed shadow root
+/// in the guard of the world it runs in.
+const MARK_CLOSED: &str =
+    "function() { if (globalThis.__juneesGuard) globalThis.__juneesGuard.closed(this); }";
+/// The object group of the handles [`Browser::mark_closed_hosts`] takes.
+const CLOSED_GROUP: &str = "junees-closed-hosts";
 
 /// Notes of one kind kept until the model looks; older ones are only
 /// counted ([`Notes::more`]), so a page cannot fill the result with them.
@@ -389,9 +400,9 @@ impl Browser {
         let world = self.new_world().await?;
         // The guard is already there unless this document came without
         // it; then it starts here, late but still before the actions.
-        let value = self
-            .evaluate_in(world, &format!("{GUARD_JS}\n;{SNAPSHOT_JS}"))
-            .await?;
+        self.evaluate_in(world, &format!("{GUARD_JS}\n;0")).await?;
+        self.mark_closed_hosts(world).await?;
+        let value = self.evaluate_in(world, SNAPSHOT_JS).await?;
         self.world = Some(world);
         let refs = value["refs"]
             .as_array()
@@ -459,6 +470,85 @@ impl Browser {
             bail!("the page script failed: {}", exception(details));
         }
         Ok(result["result"]["value"].clone())
+    }
+
+    /// Tells the risk rules which elements host a closed shadow root.
+    /// No script in the page can see into one (`shadowRoot` is null, and
+    /// events and `elementFromPoint` stop at the host), so a password form
+    /// or a buy button inside looks like its host. DevTools sees them: the
+    /// hosts DOMSnapshot finds (in every frame of this page's process) are
+    /// marked in the guard of `world` (the top frame's, which the snapshot
+    /// and the checks run in) and of their own frame, and the rules treat
+    /// them like frames of another site. A flat DOMSnapshot rather than
+    /// `DOM.getDocument`, which fails on deeply nested pages; a closed
+    /// root without nodes in it holds nothing to click.
+    async fn mark_closed_hosts(&self, world: i64) -> Result<()> {
+        let snapshot = self
+            .call_page("DOMSnapshot.captureSnapshot", json!({"computedStyles": []}))
+            .await?;
+        let hosts = closed_hosts(&snapshot);
+        if hosts.is_empty() {
+            return Ok(());
+        }
+        let mut worlds = HashMap::from([(self.target.clone(), world)]);
+        for (frame, node) in hosts {
+            let mut contexts = vec![world];
+            if !worlds.contains_key(&frame) {
+                // A frame whose world cannot be made has no guard to tell.
+                if let Ok(made) = self
+                    .call_page(
+                        "Page.createIsolatedWorld",
+                        json!({"frameId": frame, "worldName": WORLD}),
+                    )
+                    .await
+                    && let Some(id) = made["executionContextId"].as_i64()
+                {
+                    worlds.insert(frame.clone(), id);
+                }
+            }
+            if let Some(&own) = worlds.get(&frame)
+                && own != world
+            {
+                contexts.push(own);
+            }
+            for context in contexts {
+                // A node removed since the snapshot is not on the page.
+                let Ok(object) = self
+                    .call_page(
+                        "DOM.resolveNode",
+                        json!({"backendNodeId": node, "executionContextId": context,
+                               "objectGroup": CLOSED_GROUP}),
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                let Some(id) = object["object"]["objectId"].as_str() else {
+                    continue;
+                };
+                self.call_page(
+                    "Runtime.callFunctionOn",
+                    json!({"objectId": id, "functionDeclaration": MARK_CLOSED}),
+                )
+                .await?;
+            }
+        }
+        let _ = self
+            .call_page(
+                "Runtime.releaseObjectGroup",
+                json!({"objectGroup": CLOSED_GROUP}),
+            )
+            .await;
+        Ok(())
+    }
+
+    /// Runs one of the snapshot's element functions that checks an
+    /// element before an action (`point(3)`), after marking the hosts of
+    /// closed shadow roots the page has now.
+    pub async fn element_check(&self, call: &str) -> Result<Value> {
+        let world = self.world.context(STALE)?;
+        self.mark_closed_hosts(world).await?;
+        self.element_call(call).await
     }
 
     /// Runs one of the snapshot's element functions (`point(3)`).
@@ -705,6 +795,66 @@ pub const KEYS: &str = "Enter, Tab, Escape, Backspace, Delete, Space, ArrowUp, A
 
 fn text(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_string()
+}
+
+/// The hosts of closed shadow roots in a `DOMSnapshot.captureSnapshot`
+/// answer, as (frame id, backend node id). A node in a closed root whose
+/// parent is not in one is a top node of that root, and its parent the
+/// host (the snapshot lists no node for the root itself). Hosts inside
+/// another closed root are skipped: the outer host covers them.
+pub(super) fn closed_hosts(snapshot: &Value) -> Vec<(String, i64)> {
+    let strings: Vec<&str> = snapshot["strings"]
+        .as_array()
+        .map(|all| all.iter().map(|s| s.as_str().unwrap_or("")).collect())
+        .unwrap_or_default();
+    let string = |index: &Value| {
+        index
+            .as_u64()
+            .and_then(|i| strings.get(i as usize).copied())
+            .unwrap_or("")
+    };
+    let mut hosts = Vec::new();
+    for document in snapshot["documents"].as_array().into_iter().flatten() {
+        let frame = string(&document["frameId"]).to_string();
+        let nodes = &document["nodes"];
+        let parents = nodes["parentIndex"].as_array();
+        let ids = nodes["backendNodeId"].as_array();
+        let (Some(parents), Some(ids)) = (parents, ids) else {
+            continue;
+        };
+        let roots = &nodes["shadowRootType"];
+        let closed: std::collections::HashSet<i64> = roots["index"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .zip(roots["value"].as_array().into_iter().flatten())
+            .filter(|(_, kind)| string(kind) == "closed")
+            .filter_map(|(index, _)| index.as_i64())
+            .collect();
+        for &node in &closed {
+            let Some(parent) = usize::try_from(node)
+                .ok()
+                .and_then(|i| parents.get(i))
+                .and_then(Value::as_i64)
+            else {
+                continue;
+            };
+            if closed.contains(&parent) {
+                continue;
+            }
+            let Some(id) = usize::try_from(parent)
+                .ok()
+                .and_then(|i| ids.get(i))
+                .and_then(Value::as_i64)
+            else {
+                continue;
+            };
+            if !hosts.iter().any(|(f, h)| *f == frame && *h == id) {
+                hosts.push((frame.clone(), id));
+            }
+        }
+    }
+    hosts
 }
 
 fn exception(details: &Value) -> String {
