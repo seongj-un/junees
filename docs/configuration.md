@@ -39,13 +39,14 @@ openai_api_key = "sk-or-v1-..."                    # OPENAI_API_KEY
 model = "openai/gpt-4o-mini"                       # JUNEES_MODEL, 이 provider에서는 꼭 적는다
 ```
 
-- 주소: https만 받는다. 평문 http는 키와 대화 전체가 네트워크에 그대로 실리므로 서버가 이 컴퓨터에 있을 때(`localhost`, `127.0.0.0/8`, `::1`)만 받는다. 리다이렉트는 따라가지 않는다.
-- 키: `Authorization: Bearer <키>`로 보낸다. 루프백 주소의 서버는 키 없이 부를 수 있고, 그 밖의 주소에서 키가 없으면 시작할 때 오류다. `OPENAI_API_KEY`는 `ANTHROPIC_API_KEY`처럼 bash, MCP 서버, 플러그인, `claude` 자식 환경에서 지우고, `junees doctor` 출력에서 가린다. 메모리와 스킬에 저장하는 글의 비밀 값 검사는 OpenAI 프로젝트 키(`sk-proj-` 등)와 OpenRouter 키(`sk-or-v1-`)도 찾는다.
+- 주소: https만 받는다. 평문 http는 키와 대화 전체가 네트워크에 그대로 실리므로 서버가 이 컴퓨터에 있을 때(`localhost`, `127.0.0.0/8`, `::1`)만 받는다. 리다이렉트는 따라가지 않는다. 주소는 오류와 `junees doctor` 출력에 나오므로 사용자 이름이나 비밀번호가 든 주소(`https://user:pass@proxy/v1`)는 거절한다. 키는 `openai_api_key`에 둔다.
+- 키: `Authorization: Bearer <키>`로 보낸다. 루프백 주소의 서버는 키 없이 부를 수 있고, 그 밖의 주소에서 키가 없으면 시작할 때 오류다. `OPENAI_API_KEY`는 `ANTHROPIC_API_KEY`처럼 bash, MCP 서버, 플러그인, `claude` 자식 환경에서 지우고, `junees doctor` 출력에서 가린다. 메모리와 스킬에 저장하는 글의 비밀 값 검사는 OpenAI 프로젝트 키(`sk-proj-` 등), OpenRouter 키(`sk-or-v1-`), 접두 없는 `sk-` 키(`sk-` 뒤 영문자와 숫자 32자 이상: OpenAI 옛 키, DeepSeek 같은 호환 서버 키)도 찾는다.
 - 모델: 기본값(`claude-sonnet-4-6`)은 이 provider에서 쓰지 않으므로 `model`을 꼭 적는다(없으면 시작할 때 오류). 서버가 아는 모델 이름은 `junees doctor --online`이 `GET <openai_base_url>/models`로 보여 준다. `/model`로 바꿀 때 `claude-`로 시작하지 않아도 경고하지 않는다. `context_window`는 모델에 맞게 따로 정한다(기본 200000).
 - 출력 상한: OpenAI 자체 API(`api.openai.com`)에는 `max_completion_tokens`로, 다른 서버에는 호환 서버들이 받는 `max_tokens`로 보낸다(OpenAI는 `max_tokens`를 deprecated로 두고 추론 모델에서 받지 않는다).
+- 도구 호출: 모델이 JSON이 아닌 인자를 쓰면 도구가 입력 오류로 거절하고, 다음 요청에는 그 호출의 인자를 `{}`로 보낸다(인자를 검사하는 서버(Ollama)가 깨진 인자 때문에 세션의 모든 요청을 400으로 거절하지 않도록). 스트리밍에서 `index`와 `id`가 없는 조각은, 앞 호출의 인자가 완성된 JSON이고 새 조각이 함수 이름을 가지면 새 호출로 본다.
 - 꺼지는 Anthropic 전용 기능: 프롬프트 캐시 표시(`cache_control`, OpenAI 쪽은 서버가 알아서 캐시한다), 확장 사고(`thinking_budget`), 서버 웹 검색(`web_search`)은 보내지 않는다. 설정해 두면 무시하고 `junees doctor`가 경고한다.
-- 사용량: `usage.prompt_tokens`에서 캐시된 토큰(`prompt_tokens_details.cached_tokens`, 서버가 주면 `cache_write_tokens`)을 빼 입력으로, 그 둘을 캐시 읽기/쓰기로 센다. 스트리밍은 `stream_options.include_usage`로 마지막 조각의 사용량을 받는다. 사용량을 주지 않는 서버면 0으로 남아 비용과 컨텍스트 크기 추정이 되지 않고, 컨텍스트 초과 오류가 오면 그때 압축한다. 가격표에는 Claude 모델만 있으므로 비용을 보려면 `prices`에 모델 가격을 적는다([사용량과 비용](usage.md#사용량과-비용)).
-- 오류: 401/403은 키 문제로, 429와 5xx는 재시도(`retry-after`를 따름)하되 크레딧 소진·지출 한도(`insufficient_quota` 등) 429는 재시도하지 않는다. 400 `context_length_exceeded`(또는 "maximum context length" 문구)는 컨텍스트 초과로 보고 도구 결과 비우기와 압축을 한다. 이미지를 가리키는 400은 Anthropic과 같이 다음 요청부터 그 이미지를 안내 한 줄로 바꾼다.
+- 사용량: `usage.prompt_tokens`에서 캐시된 토큰(`prompt_tokens_details.cached_tokens`, 서버가 주면 `cache_write_tokens`)을 빼 입력으로, 그 둘을 캐시 읽기/쓰기로 센다. 스트리밍은 `stream_options.include_usage`로 마지막 조각의 사용량을 받는다. 사용량을 주지 않는 서버(또는 사용량 조각 전에 끊긴 스트림)면 비용은 0으로 남지만, 컨텍스트 크기는 0으로 두지 않고 마지막으로 잰 크기에 그 뒤 늘어난 대화의 추정치를 더해 자동 압축이 계속 동작한다. 가격표에는 Claude 모델만 있으므로 비용을 보려면 `prices`에 모델 가격을 적는다([사용량과 비용](usage.md#사용량과-비용)).
+- 오류: 401/403은 키 문제로, 429와 5xx는 재시도(`retry-after`를 따름)하되 크레딧 소진·지출 한도(`insufficient_quota` 등) 429는 재시도하지 않는다. 400 `context_length_exceeded`(또는 "maximum context length" 문구)는 컨텍스트 초과로 보고 도구 결과 비우기와 압축을 한다. 다만 vLLM처럼 출력 상한(`max_tokens`)만으로 모델의 창 이상이라고 말하는 오류("8192 in the completion", "'max_tokens' ... is too large")는 압축해도 소용이 없으므로 초과로 보지 않고, 창이 작은 모델이면 `max_tokens`를 낮추라고 안내한다. OpenRouter처럼 상태 200 응답 본문에 든 `{"error": ...}`도 그 `code`(없으면 `type`)의 상태로 보고 같은 기준으로 재시도한다. JSON이 아닌 오류 본문(프록시의 HTML 페이지 등)은 앞 300자만 남긴다. 이미지를 가리키는 400은 Anthropic과 같이 다음 요청부터 그 이미지를 안내 한 줄로 바꾼다.
 
 ## 환경 변수
 
