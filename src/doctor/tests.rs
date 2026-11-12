@@ -942,12 +942,14 @@ async fn online_finds_the_authorization_server_without_logging_in() {
     use crate::mcp::oauth::tests::{Fake, Knobs};
     let good = Fake::start(Knobs::default()).await;
     let no_pkce = Fake::start(Knobs::without_pkce()).await;
+    let no_registration = Fake::start(Knobs::without_registration()).await;
     let mut fixture = Fixture::new();
     // No API key: the online API check skips.
     fixture.set("PATH", "/nonexistent");
     let servers = json!({"servers": {
         "good": {"url": good.url()},
         "nopkce": {"url": no_pkce.url()},
+        "noreg": {"url": no_registration.url()},
     }});
     fixture.write("mcp.json", &servers.to_string(), 0o600);
     let report = fixture.run(true).await;
@@ -965,7 +967,22 @@ async fn online_finds_the_authorization_server_without_logging_in() {
         Status::Warn,
         "PKCE with S256",
     );
-    for fake in [&good, &no_pkce] {
+    expect(
+        &report,
+        "mcp",
+        "login noreg (online)",
+        Status::Warn,
+        "(PKCE S256)",
+    );
+    let fix = check(&report, "mcp", "login noreg (online)")
+        .fix
+        .clone()
+        .unwrap();
+    assert!(
+        fix.contains("register a client at the authorization server and set `oauth.client_id`"),
+        "{fix}"
+    );
+    for fake in [&good, &no_pkce, &no_registration] {
         let paths = fake.paths();
         assert!(
             paths

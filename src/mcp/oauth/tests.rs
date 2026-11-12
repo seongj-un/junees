@@ -86,6 +86,14 @@ impl Knobs {
             ..Self::default()
         }
     }
+
+    /// An authorization server without client registration.
+    pub(crate) fn without_registration() -> Self {
+        Self {
+            registration: false,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Knobs {

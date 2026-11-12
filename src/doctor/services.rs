@@ -371,7 +371,8 @@ pub(super) async fn mcp_online(
                         AREA,
                         &name,
                         detail,
-                        "register a client at the authorization server and set                          `oauth.client_id` in mcp.json",
+                        "register a client at the authorization server and set `oauth.client_id` in \
+                         mcp.json",
                     );
                 } else {
                     report.ok(AREA, &name, detail);
