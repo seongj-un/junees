@@ -6,8 +6,11 @@
 //! So does everything in the secrets folder next to it
 //! ([`SECRETS_FOLDER`]): webhook secret files, which `junees webhook add`
 //! only takes from there, and the user's environment files. And so do
-//! the user's git and GitHub CLI credentials ([`CREDENTIALS`]): git's
-//! credential store and `gh`'s login, which push and merge as the user.
+//! the user's git, GitHub CLI and Claude Code credentials
+//! ([`CREDENTIALS`]): git's credential store and `gh`'s login, which push
+//! and merge as the user, and Claude Code's folder (`~/.claude`), whose
+//! login is the user's subscription and whose `settings.json` hooks run
+//! outside the claude-code backend's deny rules.
 //!
 //! read_file, write_file and edit_file refuse it; the command policy refuses
 //! bash commands that name it (also through a glob or braces) or that use
@@ -36,11 +39,16 @@ pub fn secrets_dir(junees_home: &Path) -> PathBuf {
     junees_home.join(SECRETS_FOLDER)
 }
 
-/// The git and GitHub CLI credential files and folders under the home
-/// folder (`~/.git-credentials`, `~/.config/git/credentials`,
-/// `~/.config/gh`); `$XDG_CONFIG_HOME/git/credentials` and
+/// The git, GitHub CLI and Claude Code credential files and folders under
+/// the home folder (`~/.git-credentials`, `~/.config/git/credentials`,
+/// `~/.config/gh`, `~/.claude`); `$XDG_CONFIG_HOME/git/credentials` and
 /// `$XDG_CONFIG_HOME/gh` come from [`SettingsFile::with_config_home`].
-pub const CREDENTIALS: &[&str] = &[".git-credentials", ".config/git/credentials", ".config/gh"];
+pub const CREDENTIALS: &[&str] = &[
+    ".git-credentials",
+    ".config/git/credentials",
+    ".config/gh",
+    ".claude",
+];
 
 /// How many symbolic links a dangling chain may have before giving up.
 const MAX_LINKS: usize = 40;
@@ -744,7 +752,20 @@ mod tests {
         ] {
             assert!(file.is(&root.join(path)), "{path}");
         }
-        for path in [".gitconfig", ".config", ".config/git/config"] {
+        // Claude Code's login and settings (hooks).
+        for path in [
+            ".claude",
+            ".claude/.credentials.json",
+            ".claude/settings.json",
+        ] {
+            assert!(file.is(&root.join(path)), "{path}");
+        }
+        for path in [
+            ".gitconfig",
+            ".config",
+            ".config/git/config",
+            ".claude.json",
+        ] {
             assert!(!file.is(&root.join(path)), "{path}");
         }
         for word in [
@@ -753,6 +774,8 @@ mod tests {
             "~/.config/g?/hosts.yml",
             "~/.git-cred*",
             "~/.config/gh",
+            "~/.claude/.credentials.json",
+            "$HOME/.claude/settings.json",
         ] {
             assert_eq!(file.names(word, Some(&root)), Some(Named::File), "{word}");
         }
