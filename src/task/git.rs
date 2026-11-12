@@ -1017,6 +1017,7 @@ mod tests {
             mode: Some(crate::sandbox::Mode::Require),
             write: Vec::new(),
             read: None,
+            webhook_read: Vec::new(),
             network: true,
             temp: Vec::new(),
             unattended: false,
