@@ -560,11 +560,36 @@ pub struct Confinement {
     ruleset: landlock::Ruleset,
 }
 
+/// Makes the calling process the leader of a session of its own
+/// (`setsid`), unless it leads one already. A new session is also a
+/// process group of its own whose id is the pid (so killing the group
+/// still works), and has no controlling terminal: the process cannot
+/// open Junees's terminal through `/dev/tty`, to push keys into it
+/// (`TIOCSTI`, on kernels that still allow it) or to draw over its
+/// approval questions. For a child between fork and exec: it only makes
+/// system calls. Fails when the process leads a process group but no
+/// session (`process_group(0)`): never combine the two.
+pub(crate) fn start_session() -> io::Result<()> {
+    // SAFETY: getsid, getpid and setsid are plain system calls.
+    unsafe {
+        if libc::getsid(0) == libc::getpid() {
+            return Ok(());
+        }
+        if libc::setsid() == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 impl Confinement {
-    /// Makes `command`'s process put itself under the ruleset (with
+    /// Makes `command`'s process start a session of its own
+    /// ([`start_session`]) and put itself under the ruleset (with
     /// `no_new_privs`) right before it runs the program, and takes the
     /// [`ESCAPE_ENV_VARS`] out of its environment. Spawning fails when
-    /// the ruleset cannot be applied.
+    /// either cannot be done. Every confined child (bash, the flow's test
+    /// command, the harness's git, `doctor`'s trial run) goes through
+    /// here, so none of them keeps Junees's terminal.
     pub fn apply(&self, command: &mut tokio::process::Command) {
         for name in ESCAPE_ENV_VARS {
             command.env_remove(name);
@@ -573,11 +598,15 @@ impl Confinement {
         {
             let fd = self.ruleset.raw_fd();
             // SAFETY: the closure runs in the child between fork and exec
-            // and only makes the two system calls of `restrict_self`; the
-            // descriptor stays open in the parent until spawning is done
-            // (the caller keeps `self`), so the child has it too.
+            // and only makes the system calls of `start_session` and
+            // `restrict_self`; the descriptor stays open in the parent
+            // until spawning is done (the caller keeps `self`), so the
+            // child has it too.
             unsafe {
-                command.pre_exec(move || landlock::restrict_self(fd));
+                command.pre_exec(move || {
+                    start_session()?;
+                    landlock::restrict_self(fd)
+                });
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -595,7 +624,10 @@ impl Confinement {
             let fd = self.ruleset.raw_fd();
             // SAFETY: as in `apply`.
             unsafe {
-                command.pre_exec(move || landlock::restrict_self(fd));
+                command.pre_exec(move || {
+                    start_session()?;
+                    landlock::restrict_self(fd)
+                });
             }
         }
         #[cfg(not(target_os = "linux"))]

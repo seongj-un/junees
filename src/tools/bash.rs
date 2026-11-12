@@ -289,22 +289,17 @@ impl Tool for Bash {
     }
 }
 
-/// Makes `command`'s process start a session of its own (`setsid`), which
-/// is also a process group of its own whose id is its pid, for
-/// [`GroupGuard`]. A new session has no controlling terminal: commands
-/// cannot open Junees's terminal through `/dev/tty`, to push keys into it
-/// (`TIOCSTI`, on kernels that still allow it) or to draw over its
-/// approval questions.
+/// Makes `command`'s process start a session of its own
+/// ([`crate::sandbox::start_session`]), which is also a process group of
+/// its own whose id is its pid, for [`GroupGuard`], and has no controlling
+/// terminal. For commands that may run unconfined: a confinement starts
+/// the session itself ([`crate::sandbox::Confinement::apply`]), and doing
+/// both is fine.
 pub(crate) fn own_session(command: &mut Command) {
     // SAFETY: the closure runs in the child between fork and exec and only
-    // makes the setsid system call, which allocates nothing.
+    // makes system calls, which allocate nothing.
     unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        command.pre_exec(crate::sandbox::start_session);
     }
 }
 

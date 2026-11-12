@@ -540,6 +540,40 @@ fn confined_commands_lose_the_session_bus_agent_and_tmux() {
 }
 
 #[tokio::test]
+async fn confined_children_run_in_a_session_of_their_own() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let sandbox = layout.sandbox(settings());
+    let Prepared::Confined(confinement, _) = sandbox.prepare(&layout.path("work")) else {
+        panic!("not confined");
+    };
+    // Fields 5 to 7 of /proc/<pid>/stat: process group, session and
+    // controlling terminal (0: none).
+    let script = "read -r _ _ _ _ group session tty _ < /proc/$$/stat; \
+                  echo \"$$ $group $session $tty\"";
+    let mut tokio_command = tokio::process::Command::new("/bin/sh");
+    let mut std_command = std::process::Command::new("/bin/sh");
+    tokio_command.args(["-c", script]);
+    std_command.args(["-c", script]);
+    confinement.apply(&mut tokio_command);
+    confinement.apply_std(&mut std_command);
+    let lines = [
+        tokio_command.output().await.unwrap().stdout,
+        std_command.output().unwrap().stdout,
+    ];
+    for line in lines {
+        let line = String::from_utf8(line).unwrap();
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields.len(), 4, "{line}");
+        assert_eq!(fields[1], fields[0], "{line}");
+        assert_eq!(fields[2], fields[0], "{line}");
+        assert_eq!(fields[3], "0", "{line}");
+    }
+}
+
+#[tokio::test]
 async fn commands_run_with_no_new_privs() {
     if !landlock() {
         return;

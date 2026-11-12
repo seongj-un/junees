@@ -43,7 +43,7 @@ api 백엔드의 `bash` 도구가 실행하는 명령(대화, `-p`, 작업 모�
 - 네트워크: `sandbox_network = 0`이면 TCP 연결과 bind를 모두 막는다(Landlock ABI 4 이상, Linux 6.7부터). 기본은 허용이다. UDP(DNS 포함)와 유닉스 소켓은 막지 않는다.
 - `no_new_privs`: setuid 프로그램(`sudo` 등)과 파일 capability가 권한을 주지 않는다.
 - 환경: `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `SSH_AUTH_SOCK`, `TMUX`, `TMUX_PANE`를 뺀다. 묶이지 않은 다른 프로세스에 명령을 대신 돌리게 하는 길(`systemd-run --user`, `tmux send-keys`, ssh 에이전트)을 우연히 쓰지 않게 하는 것이고, 막는 장치는 아니다(아래 한계). 그래서 묶인 명령은 ssh 에이전트로 `git push`를 하지 못한다.
-- 터미널: bash 명령은 `setsid`로 자기 세션에서 돈다(자기 프로세스 그룹이기도 해서 시간 초과 때 그룹째 죽이는 것은 그대로다). 제어 터미널이 없으므로 `/dev/tty`로 Junees의 터미널을 열어 키를 밀어 넣거나(`TIOCSTI`가 되는 커널) 승인 질문 화면을 덮어 그리지 못한다. GitHub 흐름의 테스트 명령도 같다.
+- 터미널: bash 명령은 `setsid`로 자기 세션에서 돈다(자기 프로세스 그룹이기도 해서 시간 초과 때 그룹째 죽이는 것은 그대로다). 제어 터미널이 없으므로 `/dev/tty`로 Junees의 터미널을 열어 키를 밀어 넣거나(`TIOCSTI`가 되는 커널) 승인 질문 화면을 덮어 그리지 못한다. 격리를 거는 쪽에서 세션을 새로 만들므로, 격리되어 도는 다른 자식(GitHub 흐름의 테스트 명령, 작업 모드의 git과 그 git이 부르는 필터, `junees doctor`의 시험 실행)도 모두 같다.
 - 다른 프로세스: Landlock의 ptrace 규칙으로, 격리된 명령은 격리되지 않은 프로세스(Junees, MCP 서버, 같은 사용자의 다른 프로그램)를 추적하거나 그 `/proc/<pid>/environ`, `mem`을 읽지 못한다.
 
 `sandbox` 설정(`JUNEES_SANDBOX`):

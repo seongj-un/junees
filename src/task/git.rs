@@ -990,4 +990,33 @@ mod tests {
         assert!(swapped.commit_all("elsewhere").is_err());
         assert_eq!(subjects(other.path()), ["other"]);
     }
+
+    #[test]
+    fn confined_git_and_its_filters_run_in_a_session_of_their_own() {
+        if !landlock() {
+            return;
+        }
+        let repo = repo();
+        let root = repo.path();
+        // Fields 5 to 7 of /proc/<pid>/stat: process group, session and
+        // controlling terminal (0: none), of the filter's parent (git).
+        let seen = root.join(".git/session");
+        let filter = format!(
+            "read -r _ _ _ _ group session tty _ < /proc/$PPID/stat; \
+             echo \"$PPID $group $session $tty\" > '{}'; cat",
+            seen.display()
+        );
+        git(root, &["config", "filter.planted.clean", &filter]).unwrap();
+        std::fs::write(root.join(".gitattributes"), "* filter=planted\n").unwrap();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+
+        let confined = Repo::confined(root, Some(sandbox()));
+        assert!(confined.commit_all("planted").unwrap().made);
+        let line = std::fs::read_to_string(&seen).unwrap();
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields.len(), 4, "{line}");
+        assert_eq!(fields[1], fields[0], "{line}");
+        assert_eq!(fields[2], fields[0], "{line}");
+        assert_eq!(fields[3], "0", "{line}");
+    }
 }
