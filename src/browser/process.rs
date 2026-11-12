@@ -147,9 +147,14 @@ const LOCK_FILE: &str = "junees.lock";
 /// The file in a profile naming Chrome's separate temporary folder, so
 /// that [`remove_stale`] removes it too.
 const TEMP_FILE: &str = "junees-temp";
-/// A profile without a lock file (from before the lock, or one being
-/// made this instant) is removed only after this long untouched.
+/// A profile without a lock file (from before the lock), or one left
+/// half made ([`MAKING`]), is removed only after this long untouched.
 const UNLOCKED_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// The name prefix of a profile while it is made: its lock file exists
+/// but is not locked yet, so [`remove_stale`] (in another process) would
+/// take it for a dead one under its final name. It gets that name once
+/// locked.
+const MAKING: &str = ".new-";
 
 /// A private (0700) profile folder, removed when dropped, and Chrome's
 /// temporary folder (TMPDIR), so what Chrome puts there (its
@@ -191,12 +196,13 @@ impl Profile {
             .mode(0o700)
             .create(folder)?;
         remove_stale(folder);
-        let path = folder.join(crate::cron::store::random_hex(PROFILE_HEX));
+        let name = crate::cron::store::random_hex(PROFILE_HEX);
+        let making = folder.join(format!("{MAKING}{name}"));
         // Fails when the name is taken: never a folder someone else made.
-        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        std::fs::DirBuilder::new().mode(0o700).create(&making)?;
         // From here on a failure drops `profile`, which removes it.
         let mut profile = Self {
-            path,
+            path: making,
             temp: None,
             _lock: None,
         };
@@ -209,6 +215,11 @@ impl Profile {
             return Err(std::io::Error::other("cannot lock the new browser profile"));
         }
         profile._lock = Some(lock);
+        // Locked: from now on it may carry a name `remove_stale` looks at
+        // (the lock stays with the renamed file).
+        let path = folder.join(&name);
+        std::fs::rename(&profile.path, &path)?;
+        profile.path = path;
         if !socket_fits(&profile.path) {
             let temp = private_folder(&profile_base(&std::env::temp_dir()))?;
             profile.temp = Some(temp.clone());
@@ -235,8 +246,9 @@ impl Profile {
 /// Removes the profiles in the profiles folder `folder` whose owner is
 /// gone: their [`LOCK_FILE`] can be locked (a live owner holds the lock;
 /// a dead one's lock went with it). A profile without a lock file is
-/// removed only when it has not changed for [`UNLOCKED_AGE`]. Entries
-/// that are not profile folders (other names, links) are left alone.
+/// removed only when it has not changed for [`UNLOCKED_AGE`], and so is
+/// one left half made ([`MAKING`]). Entries that are not profile folders
+/// (other names, links) are left alone.
 pub fn remove_stale(folder: &Path) {
     use std::os::unix::fs::OpenOptionsExt;
     let Ok(entries) = std::fs::read_dir(folder) else {
@@ -245,7 +257,11 @@ pub fn remove_stale(folder: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.len() != PROFILE_HEX || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let (hex, making) = match name.strip_prefix(MAKING) {
+            Some(hex) => (hex, true),
+            None => (&*name, false),
+        };
+        if hex.len() != PROFILE_HEX || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
         let path = entry.path();
@@ -253,6 +269,15 @@ pub fn remove_stale(folder: &Path) {
             continue;
         };
         if !meta.is_dir() {
+            continue;
+        }
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.elapsed().ok())
+            .is_some_and(|age| age > UNLOCKED_AGE);
+        // Its lock file may be there but not locked yet.
+        if making && !old {
             continue;
         }
         let lock = std::fs::OpenOptions::new()
@@ -272,11 +297,6 @@ pub fn remove_stale(folder: &Path) {
                 Some(lock)
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let old = meta
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.elapsed().ok())
-                    .is_some_and(|age| age > UNLOCKED_AGE);
                 if !old {
                     continue;
                 }

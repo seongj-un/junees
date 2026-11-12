@@ -1617,6 +1617,12 @@ fn profiles_left_by_a_process_that_is_gone_are_removed() {
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
     // A live profile of this process: its lock is held.
     let live = process::Profile::new(Some(&folder)).unwrap();
+    // It got its final name once locked.
+    let name = live.path().file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{name}"
+    );
     // A profile whose owner died: its lock file is there, unlocked; it
     // names Chrome's separate temporary folder, which goes too.
     let dead = folder.join("00112233445566aa");
@@ -1654,6 +1660,18 @@ fn profiles_left_by_a_process_that_is_gone_are_removed() {
         .unwrap()
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
         .unwrap();
+    // Being made by another process (its lock file not locked yet): kept;
+    // left half made long ago: removed.
+    let making = folder.join(".new-00112233445566ab");
+    std::fs::create_dir(&making).unwrap();
+    std::fs::write(making.join("junees.lock"), "").unwrap();
+    let half = folder.join(".new-00112233445566ac");
+    std::fs::create_dir(&half).unwrap();
+    std::fs::write(half.join("junees.lock"), "").unwrap();
+    std::fs::File::open(&half)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
+        .unwrap();
     // Not profiles: another name, and a link with a profile's name.
     let note = folder.join("notes");
     std::fs::create_dir(&note).unwrap();
@@ -1664,10 +1682,10 @@ fn profiles_left_by_a_process_that_is_gone_are_removed() {
 
     // The next start removes the dead ones.
     let next = process::Profile::new(Some(&folder)).unwrap();
-    for gone in [&dead, &dead_other, &old, &temp] {
+    for gone in [&dead, &dead_other, &old, &temp, &half] {
         assert!(!gone.exists(), "{} is still there", gone.display());
     }
-    for kept in [live.path(), next.path(), &young, &note, &other] {
+    for kept in [live.path(), next.path(), &young, &making, &note, &other] {
         assert!(kept.exists(), "{} was removed", kept.display());
     }
     assert!(link.symlink_metadata().is_ok());
