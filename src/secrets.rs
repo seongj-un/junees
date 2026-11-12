@@ -9,6 +9,12 @@
 /// Prefixes of well-known credential formats, with what they are.
 const PREFIXES: &[(&str, &str)] = &[
     ("sk-ant-", "an Anthropic API key"),
+    // OpenAI project, service account and admin keys, and OpenRouter keys
+    // (other `sk-` keys: [`has_plain_sk_key`]).
+    ("sk-proj-", "an OpenAI API key"),
+    ("sk-svcacct-", "an OpenAI API key"),
+    ("sk-admin-", "an OpenAI API key"),
+    ("sk-or-v1-", "an OpenRouter API key"),
     ("ghp_", "a GitHub token"),
     ("gho_", "a GitHub token"),
     ("ghu_", "a GitHub token"),
@@ -111,6 +117,9 @@ fn line_secret(text: &str, start: usize, line: &str, hashes: bool) -> Option<&'s
         .find(|(prefix, _)| has_prefixed_token(line, prefix))
     {
         return Some(kind);
+    }
+    if has_plain_sk_key(line) {
+        return Some("an API key");
     }
     if has_aws_key_id(line) {
         return Some("an AWS access key id");
@@ -245,6 +254,29 @@ fn has_prefixed_token(text: &str, prefix: &str) -> bool {
             .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
             .count();
         starts_word && body >= PREFIX_BODY
+    })
+}
+
+/// Key characters an unprefixed `sk-` key has at least: OpenAI's older
+/// user keys (48) and the keys of compatible services (DeepSeek: 32).
+const SK_KEY_BODY: usize = 32;
+
+/// Whether `text` holds an `sk-` key without a known prefix after it:
+/// `sk-` starting a word, then at least [`SK_KEY_BODY`] letters and
+/// digits without a `-` or `_`. Lower-case-only keys slip past the run
+/// rules (no upper case, not hex). Names that only begin with `sk-`
+/// (`sk-learn`, a branch `sk-some-long-topic`) have a `-` or are short.
+fn has_plain_sk_key(text: &str) -> bool {
+    text.match_indices("sk-").any(|(at, _)| {
+        let starts_word = text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
+        let body = text[at + 3..]
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .count();
+        starts_word && body >= SK_KEY_BODY
     })
 }
 
@@ -571,6 +603,32 @@ mod tests {
     }
 
     #[test]
+    fn finds_sk_keys_without_a_known_prefix() {
+        // Built at run time, so no complete fake key sits in the source.
+        let lower = "qwertyuiopzxcvbnm".repeat(3);
+        let hex = "0123456789abcdef".repeat(2);
+        for text in [
+            format!("OPENAI_API_KEY=sk-{lower}"),
+            format!("key: \"sk-{hex}\""),
+            format!("sk-{}", "a1B2c3d4".repeat(6)),
+        ] {
+            assert_eq!(secret_kind(&text), Some("an API key"), "{text}");
+        }
+        // Text for others to read, where 64 hex digits pass as a hash.
+        let long = format!("the key sk-{}", "0123456789abcdef".repeat(4));
+        assert_eq!(find_outgoing_secret(&long), Some(("an API key", 1)));
+        for text in [
+            "pip install sk-learn".to_string(),
+            "branch sk-some-very-long-topic-name-that-goes-on-and-on".to_string(),
+            format!("sk-{}", &lower[..20]),
+            format!("risk-{lower}"),
+            format!("task_sk-{lower}"),
+        ] {
+            assert_eq!(secret_kind(&text), None, "{text}");
+        }
+    }
+
+    #[test]
     fn leaves_ordinary_text_alone() {
         for text in [
             "Run `cargo test -q` and check the output.",
@@ -664,6 +722,15 @@ mod tests {
             (format!("{sha1} ghp_{filler}"), "a GitHub token"),
             (format!("github_pat_{filler}"), "a GitHub token"),
             (format!("key sk-ant-{filler}"), "an Anthropic API key"),
+            (
+                format!("OPENAI_API_KEY=sk-proj-{filler}"),
+                "an OpenAI API key",
+            ),
+            (format!("sk-svcacct-{filler}"), "an OpenAI API key"),
+            (
+                format!("key: sk-or-v1-{}", "0123abcd".repeat(2)),
+                "an OpenRouter API key",
+            ),
             (
                 format!("-----BEGIN RSA {} KEY-----", "PRIVATE"),
                 "a private key",

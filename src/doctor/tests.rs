@@ -1882,3 +1882,203 @@ async fn the_browser_program_and_its_version() {
     let report = fixture.run_landlock(false, none).await;
     assert!(!has(&report, "browser", "pipe"), "{}", report.text());
 }
+
+#[tokio::test]
+async fn the_provider_and_its_settings() {
+    let fixture = Fixture::new();
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Ok,
+        "anthropic: the Messages API at https://api.anthropic.com",
+    );
+    assert!(!has(&report, "keys", "OpenAI API key"));
+
+    // OpenAI's API: a key and a model are needed; the Anthropic-only
+    // settings are named.
+    fixture.config("provider = \"openai\"\nthinking_budget = 2048\nweb_search = true\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Ok,
+        "openai: Chat Completions at https://api.openai.com/v1;",
+    );
+    expect(
+        &report,
+        "settings",
+        "model",
+        Status::Fail,
+        "no default model",
+    );
+    expect(
+        &report,
+        "settings",
+        "Anthropic-only settings",
+        Status::Warn,
+        "thinking_budget and web_search set, but provider = openai ignores them",
+    );
+    expect(
+        &report,
+        "keys",
+        "OpenAI API key",
+        Status::Fail,
+        "needs it for a server on another machine",
+    );
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Skip,
+        "provider = openai does not need it",
+    );
+
+    // A server on this machine needs no key.
+    fixture.config(
+        "provider = \"openai\"\nopenai_base_url = \"http://localhost:11434/v1\"\nmodel = \"llama\"\n",
+    );
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Ok,
+        "at http://localhost:11434/v1 (an OpenAI-compatible server)",
+    );
+    assert!(!has(&report, "settings", "model"));
+    assert!(!has(&report, "settings", "Anthropic-only settings"));
+    expect(
+        &report,
+        "keys",
+        "OpenAI API key",
+        Status::Skip,
+        "a server on this machine needs none",
+    );
+
+    // Plain http elsewhere is refused.
+    fixture
+        .config("provider = \"openai\"\nopenai_base_url = \"http://10.1.2.3/v1\"\nmodel = \"m\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Fail,
+        "must use https",
+    );
+
+    fixture.config("provider = \"openai\"\nbackend = \"claude-code\"\n");
+    let report = fixture.run(false).await;
+    expect(&report, "settings", "provider", Status::Skip, "not used");
+    fixture.config("provider = \"gemini\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Fail,
+        "must be anthropic or openai",
+    );
+}
+
+/// A fake OpenAI-compatible server that answers each connection with the
+/// next (status, body) and returns the requests.
+async fn fake_models(
+    replies: Vec<(u16, &'static str)>,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (status, body) in replies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            requests.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let response = format!(
+                "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        }
+        requests
+    });
+    (url, handle)
+}
+
+#[tokio::test]
+async fn online_lists_the_models_of_an_openai_compatible_server() {
+    const KEY: &str = "sk-proj-doctorfakekey123";
+    const MODELS: &str = r#"{"object": "list", "data": [
+        {"id": "gpt-test", "object": "model"}, {"id": "other", "object": "model"}]}"#;
+    let mut fixture = Fixture::new();
+    let (url, server) = fake_models(vec![
+        (200, MODELS),
+        (200, MODELS),
+        (
+            401,
+            r#"{"error": {"message": "Incorrect API key provided"}}"#,
+        ),
+    ])
+    .await;
+    fixture.config(&format!(
+        "provider = \"openai\"\nopenai_base_url = \"{url}/v1/\"\nopenai_api_key = \"{KEY}\"\n\
+         model = \"gpt-test\"\napi_key = \"sk-ant-not-asked\"\n"
+    ));
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "online",
+        "OpenAI-compatible API",
+        Status::Ok,
+        "127.0.0.1 accepts the key and lists the model `gpt-test`",
+    );
+    // The Anthropic API is not asked.
+    assert!(!has(&report, "online", "API key"));
+    assert_hidden(&report, KEY);
+    fixture.set("JUNEES_MODEL", "gpt-missing");
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "online",
+        "OpenAI-compatible API",
+        Status::Warn,
+        "`gpt-missing` is not among the 2 models it lists",
+    );
+    assert!(
+        check(&report, "online", "OpenAI-compatible API")
+            .fix
+            .as_deref()
+            .is_some_and(|fix| fix.contains("`gpt-test`, `other`"))
+    );
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "online",
+        "OpenAI-compatible API",
+        Status::Fail,
+        "refused the key (HTTP 401)",
+    );
+    let requests = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .expect("the fake server got fewer requests")
+        .unwrap();
+    for request in &requests {
+        assert!(
+            request.starts_with("GET /v1/models HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request
+                .to_lowercase()
+                .contains(&format!("authorization: bearer {}", KEY.to_lowercase())),
+            "{request}"
+        );
+    }
+}

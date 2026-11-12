@@ -55,7 +55,7 @@ pub(super) fn settings(
                 AREA,
                 "backend",
                 match backend {
-                    Backend::Api => "api: Junees's own agent on the Anthropic API",
+                    Backend::Api => "api: Junees's own agent on a model API (see provider)",
                     Backend::ClaudeCode => {
                         "claude-code: the Claude Code CLI on your Claude subscription"
                     }
@@ -104,6 +104,113 @@ pub(super) fn settings(
     }
 }
 
+/// The API the `api` backend talks to: which one and where, and the
+/// settings it ignores.
+pub(super) fn provider(report: &mut Report, settings: &Settings, read: &Read) {
+    use crate::provider::{Kind, PROVIDER_ENV, openai};
+    const NAME: &str = "provider";
+    let kind = match Kind::parse(settings.get(PROVIDER_ENV).as_deref()) {
+        Ok(kind) => kind,
+        Err(err) => {
+            report.fail(
+                AREA,
+                NAME,
+                format!("{err:#}"),
+                "set provider to anthropic (default) or openai (config.toml or JUNEES_PROVIDER)",
+            );
+            return;
+        }
+    };
+    if read.backend == Backend::ClaudeCode {
+        report.skip(
+            AREA,
+            NAME,
+            format!(
+                "{} (not used: the claude-code backend calls no model API itself)",
+                kind.as_str()
+            ),
+        );
+        return;
+    }
+    let settings_openai = match kind {
+        Kind::Anthropic => {
+            let base = settings
+                .get("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|| crate::config::DEFAULT_BASE_URL.to_string());
+            report.ok(
+                AREA,
+                NAME,
+                format!("anthropic: the Messages API at {}", base.trim()),
+            );
+            return;
+        }
+        Kind::OpenAi => openai::Settings::read(|key| {
+            settings
+                .get(key)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        }),
+    };
+    let openai = match settings_openai {
+        Ok(openai) => openai,
+        Err(err) => {
+            report.fail(
+                AREA,
+                NAME,
+                format!("openai: {err:#}"),
+                "set openai_base_url to an https:// URL, or http:// on localhost for a server \
+                 on this machine (docs/configuration.md)",
+            );
+            return;
+        }
+    };
+    report.ok(
+        AREA,
+        NAME,
+        format!(
+            "openai: Chat Completions at {}{}; no prompt-cache marks, thinking budget or \
+             web search (Anthropic features)",
+            openai.base_url,
+            if openai.is_official() {
+                ""
+            } else {
+                " (an OpenAI-compatible server)"
+            }
+        ),
+    );
+    if settings.get("JUNEES_MODEL").is_none() {
+        report.fail(
+            AREA,
+            "model",
+            "not set: provider = openai has no default model",
+            "set model (JUNEES_MODEL) to a model id the server knows; `junees doctor --online` \
+             lists them",
+        );
+    }
+    let Some(config) = &read.config else {
+        return;
+    };
+    let ignored: Vec<&str> = [
+        ("thinking_budget", config.thinking_budget > 0),
+        ("web_search", config.web_search.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, set)| set.then_some(name))
+    .collect();
+    if !ignored.is_empty() {
+        report.warn(
+            AREA,
+            "Anthropic-only settings",
+            format!(
+                "{} set, but provider = openai ignores {}",
+                ignored.join(" and "),
+                if ignored.len() == 1 { "it" } else { "them" }
+            ),
+            "remove them, or set provider = anthropic",
+        );
+    }
+}
+
 /// Where the value of `name` comes from.
 fn source(settings: &Settings, name: &str) -> &'static str {
     if settings.env(name).is_some() {
@@ -115,13 +222,20 @@ fn source(settings: &Settings, name: &str) -> &'static str {
 
 /// Whether the keys are set; never their values.
 pub(super) fn keys(report: &mut Report, settings: &Settings, backend: Backend) {
+    use crate::provider::{Kind, PROVIDER_ENV, openai};
     const AREA: &str = "keys";
     const KEY: &str = "ANTHROPIC_API_KEY";
+    let kind = Kind::parse(settings.get(PROVIDER_ENV).as_deref()).unwrap_or_default();
     match (settings.get(KEY).is_some(), backend) {
         (true, _) => report.ok(
             AREA,
             "Anthropic API key",
             format!("set ({})", source(settings, KEY)),
+        ),
+        (false, Backend::Api) if kind == Kind::OpenAi => report.skip(
+            AREA,
+            "Anthropic API key",
+            "not set (provider = openai does not need it)",
         ),
         (false, Backend::Api) => report.fail(
             AREA,
@@ -135,6 +249,48 @@ pub(super) fn keys(report: &mut Report, settings: &Settings, backend: Backend) {
             "Anthropic API key",
             "not set (the claude-code backend does not need it)",
         ),
+    }
+    let openai_key = settings.get(openai::API_KEY_ENV).is_some();
+    if openai_key {
+        report.ok(
+            AREA,
+            "OpenAI API key",
+            format!(
+                "set ({}){}",
+                source(settings, openai::API_KEY_ENV),
+                if kind == Kind::OpenAi {
+                    ""
+                } else {
+                    "; provider = anthropic does not use it"
+                }
+            ),
+        );
+    } else if kind == Kind::OpenAi {
+        let local = openai::Settings::read(|key| {
+            settings
+                .get(key)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .is_ok_and(|openai| openai.is_local());
+        if local || backend == Backend::ClaudeCode {
+            report.skip(
+                AREA,
+                "OpenAI API key",
+                if local {
+                    "not set (a server on this machine needs none)"
+                } else {
+                    "not set (the claude-code backend does not need it)"
+                },
+            );
+        } else {
+            report.fail(
+                AREA,
+                "OpenAI API key",
+                "not set: provider = openai needs it for a server on another machine",
+                "set openai_api_key in config.toml or OPENAI_API_KEY",
+            );
+        }
     }
     let github = crate::github::TOKEN_ENV;
     if settings.get(github).is_some() {

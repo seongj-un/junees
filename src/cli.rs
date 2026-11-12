@@ -89,7 +89,12 @@ Claude Code session (--resume).
 Environment (each also a key of config.toml, named in brackets):
   ANTHROPIC_API_KEY   [api_key] needed on the api backend only
   ANTHROPIC_BASE_URL  [base_url] API base URL (default https://api.anthropic.com)
-  JUNEES_MODEL        [model] model id (default claude-sonnet-4-6)
+  JUNEES_PROVIDER     [provider] API of the api backend: anthropic (default) or openai
+                      (Chat Completions: OpenAI, OpenRouter, Ollama, vLLM, LM Studio)
+  OPENAI_BASE_URL     [openai_base_url] its address (default https://api.openai.com/v1;
+                      plain http only on localhost)
+  OPENAI_API_KEY      [openai_api_key] its key (a server on localhost may need none)
+  JUNEES_MODEL        [model] model id (default claude-sonnet-4-6; needed with openai)
   JUNEES_PRICES       [prices] model prices for cost estimates, replacing the built-in
                       table: \"<model>=<input>/<output>, ...\" in $ per million tokens
   JUNEES_MAX_TOKENS   [max_tokens] max output tokens per model call (default 8192)

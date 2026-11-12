@@ -4,6 +4,9 @@
 
 ### 업그레이드할 때 확인할 것
 
+- **`OPENAI_API_KEY`를 bash에서 숨김 (OpenAI 호환 provider)**
+  - `OPENAI_API_KEY`는 이제 Junees가 읽는 자격 증명이라 `ANTHROPIC_API_KEY`처럼 bash 도구, MCP 서버, 플러그인, `claude` 자식의 환경에서 지웁니다. 모델이 실행하는 스크립트가 이 변수를 쓰고 있었다면 그 스크립트가 직접 읽도록 바꿔야 합니다.
+
 - **웹훅 실행의 파일 도구와 `sandbox_read` (#77)**
   - 웹훅 실행(GitHub 흐름의 단계 포함)의 파일 도구(`read_file`)는 이제 `sandbox_read`를 받지 않습니다. 작업 폴더, 임시 폴더, `sandbox_write`, 그리고 새 설정 `webhook_sandbox_read`(`JUNEES_WEBHOOK_SANDBOX_READ`, 기본은 없음)의 폴더만 읽습니다.
   - 그래서 예약 작업용으로 설정 파일에 `sandbox_read = "/, ~/.ssh"`를 적어도, 웹훅 실행의 `read_file`은 디스크 전체를 읽지 않습니다. 0.2.0에서 안내한 "`JUNEES_SANDBOX_READ`는 예약 작업 데몬의 환경에만" 우회는 더 필요 없습니다.
@@ -22,6 +25,7 @@
 
 ### 새 기능
 
+- OpenAI 호환 API provider: `provider = "openai"`, `openai_base_url`, `openai_api_key`(`OPENAI_API_KEY`)로 api 백엔드가 OpenAI Chat Completions 형식의 서버(OpenAI, OpenRouter, Ollama, vLLM, LM Studio)를 부른다. 도구 호출(병렬 포함), 이미지, 스트리밍, 사용량과 `prices` 비용, 재시도와 컨텍스트 초과 압축이 그대로 동작하고, 확장 사고·서버 웹 검색·프롬프트 캐시 표시는 꺼진다. `junees doctor`가 provider와 주소를 보여 주고 `--online`이면 모델 목록을 확인한다 ([OpenAI 호환 API](docs/configuration.md#openai-호환-api))
 - 디스코드와 텔레그램 승인 버튼 (#79), Slack Block Kit 승인 버튼 (#80)
 - `junees setup`의 Slack 단계(봇 토큰, 앱 토큰, 허용할 member id) (#80)
 - 웹훅 실행 전용 읽기 설정 `webhook_sandbox_read` (#78)

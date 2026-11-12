@@ -27,8 +27,6 @@ use crate::gateway::engine::ProviderFactory;
 use crate::mcp::Mcp;
 use crate::memory::{self, Memory};
 use crate::prompt;
-use crate::provider::Provider;
-use crate::provider::anthropic::AnthropicProvider;
 use crate::session::{self, SessionWriter};
 use crate::skills;
 use crate::task::budget::{format_duration, tokens};
@@ -287,18 +285,7 @@ impl ApiEngine {
     pub fn new(config: Config) -> Self {
         let config = Arc::new(config);
         let settings = Arc::clone(&config);
-        let provider: ProviderFactory = Arc::new(move || {
-            Ok(Box::new(
-                AnthropicProvider::new(
-                    settings.api_key.clone(),
-                    settings.base_url.clone(),
-                    settings.model.clone(),
-                )?
-                .with_thinking(settings.thinking_budget)
-                .with_streaming(settings.stream)
-                .with_web_search(settings.web_search.clone()),
-            ) as Box<dyn Provider>)
-        });
+        let provider: ProviderFactory = Arc::new(move || crate::provider::from_config(&settings));
         Self {
             config,
             provider,
@@ -583,7 +570,7 @@ mod tests {
     use crate::cron::schedule::Schedule;
     use crate::cron::store::tests::job;
     use crate::message::{ContentBlock, StopReason, Usage};
-    use crate::provider::{CompletionRequest, CompletionResponse, ProviderError};
+    use crate::provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 
     /// The system prompt and tool names of each request.
     type Seen = Arc<Mutex<Vec<(String, Vec<String>)>>>;
