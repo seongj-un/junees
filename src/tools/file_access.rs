@@ -23,8 +23,9 @@
 //!   folders in the home folder ([`UNATTENDED_CREDENTIALS`]), the private
 //!   Junees paths or, in a webhook run, the saved sessions, even inside
 //!   those folders. Nor do they change the files that run or configure
-//!   programs later ([`UNATTENDED_NO_WRITE`]: shell startup files, user
-//!   services, git's settings) when the working folder holds them.
+//!   programs later ([`unattended_no_write`]: shell startup files, user
+//!   services, git's settings, program folders on PATH) when the working
+//!   folder holds them.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{File, Metadata};
@@ -72,8 +73,10 @@ pub const UNATTENDED_CREDENTIALS: &[&str] = &[
 /// unattended run do not change (they may read them), even when the
 /// working folder holds them: what they hold runs later, outside the run
 /// and its sandbox. Shell startup files, user services and session
-/// autostart entries, and git's own settings (`core.hooksPath`,
-/// `core.fsmonitor`, aliases).
+/// autostart entries, git's own settings (`core.hooksPath`,
+/// `core.fsmonitor`, aliases), and the user's program folders that a
+/// login shell puts on PATH (Debian's and Ubuntu's `~/.profile` adds both
+/// when they exist). [`unattended_no_write`] adds more at run time.
 pub const UNATTENDED_NO_WRITE: &[&str] = &[
     ".bashrc",
     ".bash_profile",
@@ -96,7 +99,52 @@ pub const UNATTENDED_NO_WRITE: &[&str] = &[
     ".config/autostart",
     ".gitconfig",
     ".config/git",
+    ".local/bin",
+    "bin",
 ];
+
+/// The files in `~/.ssh` that let someone log in as the user, besides
+/// every `authorized_keys*` entry found there (sshd's default
+/// `AuthorizedKeysFile`).
+const AUTHORIZED_KEYS: &[&str] = &[".ssh/authorized_keys", ".ssh/authorized_keys2"];
+
+/// The paths under `home` an unattended run may not change, as written:
+/// [`UNATTENDED_NO_WRITE`], ssh's authorized keys files
+/// ([`AUTHORIZED_KEYS`] and any other `~/.ssh/authorized_keys*`), and the
+/// folders of `path_var` (a PATH value) inside `home`, since the next
+/// shell runs what lands there instead of the system's program. The home
+/// folder itself is left out when PATH names it: protecting it would
+/// leave a run working anywhere in the home folder unable to write.
+pub fn unattended_no_write(home: &Path, path_var: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = UNATTENDED_NO_WRITE
+        .iter()
+        .chain(AUTHORIZED_KEYS)
+        .map(|name| home.join(name))
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(home.join(".ssh")) {
+        out.extend(
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().as_bytes().starts_with(b"authorized_keys"))
+                .map(|entry| entry.path()),
+        );
+    }
+    let real_home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    for dir in path_var.into_iter().flat_map(std::env::split_paths) {
+        if !dir.is_absolute() || dir.components().any(|c| c == Component::ParentDir) {
+            continue;
+        }
+        let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        let inside = |home: &Path| dir.starts_with(home) || real.starts_with(home);
+        let is_home = |home: &Path| dir == home || real == home;
+        if (inside(home) || inside(&real_home)) && !is_home(home) && !is_home(&real_home) {
+            out.push(dir);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
 
 /// Why the working folder `dir` of an unattended run is a risky choice,
 /// if it is: the home folder itself, or a folder holding Junees's state
@@ -505,7 +553,7 @@ pub struct Scope {
     /// Never read nor written ([`UNATTENDED_CREDENTIALS`] in the home
     /// folder, the protected Junees paths, a webhook run's sessions).
     denied: Vec<PathBuf>,
-    /// Never written ([`UNATTENDED_NO_WRITE`] in the home folder).
+    /// Never written ([`unattended_no_write`]).
     no_write: Vec<PathBuf>,
 }
 
@@ -577,7 +625,9 @@ impl Scope {
             read,
             read_setting: "sandbox_read",
             denied,
-            no_write: under_home(UNATTENDED_NO_WRITE),
+            no_write: home
+                .map(|home| unattended_no_write(home, std::env::var_os("PATH").as_deref()))
+                .unwrap_or_default(),
         }
     }
 
@@ -616,9 +666,10 @@ impl Scope {
                 && let Some(startup) = within(&self.no_write)
             {
                 return Err(Refusal::Denied(format!(
-                    "{shown} is a shell startup file, user service, autostart entry or git setting \
-                     ({}): what it holds runs later, outside this run. This run is unattended (a \
-                     scheduled job or a webhook), and its file tools do not change it.",
+                    "{shown} is a shell startup file, user service, autostart entry, git setting, \
+                     program folder on PATH or ssh login key ({}): what it holds runs later, \
+                     outside this run. This run is unattended (a scheduled job or a webhook), and \
+                     its file tools do not change it.",
                     startup.display()
                 )));
             }

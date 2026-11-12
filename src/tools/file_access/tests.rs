@@ -372,6 +372,8 @@ async fn unattended_runs_in_the_home_folder_leave_startup_files_alone() {
         "home/.config/git/config",
         "home/.config/systemd/user/evil.service",
         "home/.config/autostart/evil.desktop",
+        "home/.local/bin/ls",
+        "home/bin/git",
     ] {
         let output = write(&access, &layout.path(path), "planted\n").await;
         assert!(output.is_error, "{path}: {}", output.content);
@@ -393,6 +395,47 @@ async fn unattended_runs_in_the_home_folder_leave_startup_files_alone() {
     assert!(output.content.contains("# rc"), "{}", output.content);
     let output = write(&access, &layout.path("home/notes.md"), "ok\n").await;
     assert!(!output.is_error, "{}", output.content);
+}
+
+#[test]
+fn unattended_no_write_adds_authorized_keys_and_path_folders_in_home() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    std::fs::write(home.join(".ssh/authorized_keys.bak"), "key\n").unwrap();
+    let path = std::env::join_paths([
+        home.join(".cargo/bin"),
+        home.join("tools/../escape"),
+        home.clone(),
+        layout.path("outside/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("relative/bin"),
+    ])
+    .unwrap();
+    let paths = super::unattended_no_write(&home, Some(&path));
+    for name in [
+        ".bashrc",
+        ".config/systemd",
+        ".local/bin",
+        "bin",
+        ".ssh/authorized_keys",
+        ".ssh/authorized_keys2",
+        ".ssh/authorized_keys.bak",
+        ".cargo/bin",
+    ] {
+        assert!(paths.contains(&home.join(name)), "{name}: {paths:?}");
+    }
+    // Not the home folder itself, nor folders outside it or not plainly
+    // named.
+    for path in [
+        home.clone(),
+        layout.path("outside/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("relative/bin"),
+        home.join("tools/../escape"),
+    ] {
+        assert!(!paths.contains(&path), "{}: {paths:?}", path.display());
+    }
 }
 
 #[test]
