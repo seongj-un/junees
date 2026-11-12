@@ -147,14 +147,21 @@ impl Repo {
     /// there ([`Sandbox::for_tools`]; `None` when their commands are not
     /// confined). In a linked worktree whose git folders lie outside
     /// `root` ([`linked_git_dir`]), git may also write the repository's
-    /// git folder; the sessions' commands still may not.
+    /// git folder; the sessions' commands still may not. Its git folder
+    /// is then pinned like [`Repo::pinned`] to the one checked here: a
+    /// confined process left running could swap the `.git` file between
+    /// that check and a later command, which would then run with write
+    /// access to the common folder for a git folder of its own making
+    /// (settings with a filter).
     pub fn confined(root: impl Into<PathBuf>, sandbox: Option<Sandbox>) -> Self {
         let root = root.into();
-        let sandbox = sandbox.map(|sandbox| sandbox.with_write(linked_git_dir(&root)));
+        let linked = sandbox.as_ref().and_then(|_| linked_git_dir(&root));
+        let git_dir = linked.as_ref().map(|linked| linked.own.clone());
+        let sandbox = sandbox.map(|sandbox| sandbox.with_write(linked.map(|linked| linked.common)));
         Self {
             root,
             sandbox,
-            git_dir: None,
+            git_dir,
         }
     }
 
@@ -246,14 +253,22 @@ impl Repo {
     }
 }
 
-/// The repository's common git folder when `root` is a linked worktree
-/// (`git worktree add`) whose own git folder lies outside it: the
-/// harness's commits write there (index, objects, the branch), which the
-/// sandbox of `root` does not allow. Only a folder that names this work
-/// tree back counts (`<common>/worktrees/<name>/gitdir` is `root/.git`),
-/// so a `.git` file a session pointed at another repository gets no write
-/// into that one.
-fn linked_git_dir(root: &Path) -> Option<PathBuf> {
+/// The git folders of a linked worktree ([`linked_git_dir`]).
+struct Linked {
+    /// The worktree's own git folder, `<common>/worktrees/<name>`.
+    own: PathBuf,
+    /// The repository's common git folder.
+    common: PathBuf,
+}
+
+/// The git folders when `root` is a linked worktree (`git worktree add`)
+/// whose own git folder lies outside it: the harness's commits write in
+/// the common one (index, objects, the branch), which the sandbox of
+/// `root` does not allow. Only a folder that names this work tree back
+/// counts (`<common>/worktrees/<name>/gitdir` is `root/.git`), so a `.git`
+/// file a session pointed at another repository gets no write into that
+/// one.
+fn linked_git_dir(root: &Path) -> Option<Linked> {
     let out = git(
         root,
         &[
@@ -273,7 +288,7 @@ fn linked_git_dir(root: &Path) -> Option<PathBuf> {
     }
     let back = std::fs::read_to_string(own.join("gitdir")).ok()?;
     let back = std::fs::canonicalize(own.join(back.trim_end_matches('\n'))).ok()?;
-    (back == root.join(".git")).then_some(common)
+    (back == root.join(".git")).then_some(Linked { own, common })
 }
 
 /// New files larger than this (1 MiB) stay out of harness commits: build
@@ -988,6 +1003,35 @@ mod tests {
         std::fs::write(linked.join("d.txt"), "d").unwrap();
         let swapped = Repo::confined(&linked, Some(sandbox()));
         assert!(swapped.commit_all("elsewhere").is_err());
+        assert_eq!(subjects(other.path()), ["other"]);
+    }
+
+    #[test]
+    fn a_linked_worktree_keeps_the_git_folder_it_was_checked_with() {
+        if !landlock() {
+            return;
+        }
+        let repo = repo();
+        let main = repo.path();
+        std::fs::write(main.join("a.txt"), "a").unwrap();
+        commit_all(main, "first").unwrap();
+        let trees = tempfile::tempdir().unwrap();
+        let linked = trees.path().join("linked");
+        let shown = linked.to_string_lossy();
+        git(main, &["worktree", "add", "-q", "-b", "side", &shown]).unwrap();
+        let confined = Repo::confined(&linked, Some(sandbox()));
+
+        // The `.git` file changes after the check: git still uses the
+        // checked folder.
+        let other = super::testing::repo();
+        std::fs::write(other.path().join("c.txt"), "c").unwrap();
+        commit_all(other.path(), "other").unwrap();
+        let pointer = format!("gitdir: {}\n", other.path().join(".git").display());
+        std::fs::write(linked.join(".git"), pointer).unwrap();
+        std::fs::write(linked.join("b.txt"), "b").unwrap();
+        assert!(confined.commit_all("on side").unwrap().made);
+        let side = git(main, &["log", "--format=%s", "side"]).unwrap();
+        assert_eq!(side, "on side\nfirst\n");
         assert_eq!(subjects(other.path()), ["other"]);
     }
 
