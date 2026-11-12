@@ -37,20 +37,48 @@ const NO_MENTION: char = '\u{2060}';
 /// word joiner after the `@`. A group reply then notifies no one: the
 /// model's text may repeat names from web pages or files, and the Bot
 /// API has no switch like Discord's `allowed_mentions`. E-mail addresses
-/// stay as they are.
+/// stay as they are, and so do names in the path of a web address
+/// (`https://medium.com/@alice/post`), which Telegram takes as part of
+/// the link, so the hidden character would only spoil a copied link.
+/// Code in backticks is broken too: replies are plain text, where a
+/// backtick is no code to Telegram and `@name` in it still notifies.
 pub fn defuse_mentions(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut previous: Option<char> = None;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
+    // Where the current run of non-space characters starts.
+    let mut word = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
         out.push(c);
+        if c.is_whitespace() {
+            word = at + c.len_utf8();
+        }
         let starts_word = previous.is_none_or(|p| !(p.is_alphanumeric() || p == '_'));
-        if c == '@' && starts_word && chars.peek().is_some_and(|next| next.is_ascii_alphabetic()) {
+        if c == '@'
+            && starts_word
+            && chars
+                .peek()
+                .is_some_and(|(_, next)| next.is_ascii_alphabetic())
+            && !in_url_path(&text[word..at])
+        {
             out.push(NO_MENTION);
         }
         previous = Some(c);
     }
     out
+}
+
+/// Whether what comes right after `before` (a run without spaces) is in
+/// the path of an http(s) address: a scheme, a host with a dot, then a
+/// `/`.
+fn in_url_path(before: &str) -> bool {
+    ["https://", "http://"].iter().any(|scheme| {
+        before.rfind(scheme).is_some_and(|at| {
+            let rest = &before[at + scheme.len()..];
+            rest.find('/')
+                .is_some_and(|slash| rest[..slash].contains('.') && !rest[..slash].contains('@'))
+        })
+    })
 }
 
 /// An image attached to a message: a photo, or a document that is an
@@ -330,6 +358,35 @@ mod tests {
             defuse_mentions("줄\n@dave"),
             format!("줄\n{}", broken("dave"))
         );
+    }
+
+    #[test]
+    fn names_in_a_web_address_path_stay_whole() {
+        let broken = |name: &str| format!("@\u{2060}{name}");
+        for kept in [
+            "see https://medium.com/@alice/post",
+            "(http://example.org/x/@bob)",
+            "https://한국.kr/@carol",
+        ] {
+            assert_eq!(defuse_mentions(kept), kept, "{kept}");
+        }
+        // Not in a path: the host part, no host, a host without a dot, a
+        // name after the address, and code (plain text to Telegram).
+        for (text, name) in [
+            ("https://@alice", "alice"),
+            ("https:///@alice", "alice"),
+            ("https://x/@alice", "alice"),
+            ("https://u@a.com/@alice", "alice"),
+            ("https://medium.com/x @alice", "alice"),
+            ("x://a.b/@alice", "alice"),
+            ("`@dataclass`", "dataclass"),
+        ] {
+            assert!(
+                defuse_mentions(text).contains(&broken(name)),
+                "{text}: {}",
+                defuse_mentions(text)
+            );
+        }
     }
 
     #[test]
