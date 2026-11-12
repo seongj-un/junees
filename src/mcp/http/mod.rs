@@ -703,7 +703,7 @@ fn rpc_error(message: &Value) -> Option<RpcError> {
 }
 
 /// A request error and its causes, without the URL.
-fn describe(err: &reqwest::Error) -> String {
+pub(crate) fn describe(err: &reqwest::Error) -> String {
     let mut parts = Vec::new();
     if err.is_timeout() {
         parts.push("timed out".to_string());
