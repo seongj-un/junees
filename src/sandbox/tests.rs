@@ -275,6 +275,43 @@ async fn a_linked_state_folder_keeps_its_link_when_the_working_folder_holds_it()
 }
 
 #[tokio::test]
+async fn a_folder_that_cannot_be_listed_on_the_way_leaves_commands_running() {
+    // `/home` at 0711, or a home that cannot be listed: the walk to the
+    // protected files cannot see the folder's other entries. They get no
+    // rule; commands still run, and the protection holds.
+    if !landlock() {
+        return;
+    }
+    // SAFETY: geteuid only reads the process's user id.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root lists any folder");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let junees = layout.path("home/.junees");
+    let command = format!(
+        "echo ok > made && echo work-ok; \
+         cat {h}/notes.txt || echo notes-refused; \
+         cat {j}/config.toml || echo config-refused; \
+         cat {j}/memory/note.md",
+        h = home.display(),
+        j = junees.display(),
+    );
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o311)).unwrap();
+    let output = run(&layout.path("work"), layout.sandbox(settings()), &command).await;
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let text = &output.content;
+    assert!(!output.is_error, "{text}");
+    for line in ["work-ok", "notes-refused", "config-refused", "remembered"] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    assert!(!text.contains("fake-key"), "{text}");
+    assert!(layout.path("work/made").exists());
+}
+
+#[tokio::test]
 async fn a_webhook_run_cannot_read_git_and_github_credentials() {
     if !landlock() {
         return;

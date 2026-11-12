@@ -227,28 +227,57 @@ impl Ruleset {
         let entries = match std::fs::read_dir(root) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err),
+            // A folder that cannot be listed (`/home` at 0711): only its
+            // entries on the way to the excepted paths are known, and the
+            // others get no rule. Out of reach rather than every command
+            // refused.
+            Err(_) => {
+                let mut next: Vec<PathBuf> = except
+                    .iter()
+                    .filter_map(|excepted| {
+                        let first = excepted.strip_prefix(root).ok()?.components().next()?;
+                        Some(root.join(first))
+                    })
+                    .collect();
+                next.sort();
+                next.dedup();
+                for path in next {
+                    if !except.iter().any(|excepted| path.starts_with(excepted)) {
+                        self.walk_into(&path, rights, except)?;
+                    }
+                }
+                return Ok(());
+            }
         };
-        for entry in entries {
-            let entry = entry?;
+        // An entry that cannot be read (gone meanwhile, a broken mount)
+        // gets no rule.
+        for entry in entries.flatten() {
             let path = entry.path();
             if except.iter().any(|excepted| path.starts_with(excepted)) {
                 continue;
             }
             if except.iter().any(|excepted| excepted.starts_with(&path)) {
-                if !entry.file_type()?.is_symlink() {
-                    self.grant_except(&path, rights, except)?;
-                }
+                self.walk_into(&path, rights, except)?;
                 continue;
             }
             // Not followed: a link swapped in now is skipped, not granted.
-            if let Some((fd, kind)) = open_path(&path, false)?
+            if let Ok(Some((fd, kind))) = open_path(&path, false)
                 && !kind.is_symlink()
             {
                 self.add(&fd, kind.is_dir(), rights)?;
             }
         }
         Ok(())
+    }
+
+    /// [`Self::grant_except`] on an entry on the way to an excepted path,
+    /// unless it is a symbolic link (or cannot be looked at): a link gets
+    /// no rule, so it cannot be renamed or replaced.
+    fn walk_into(&self, path: &Path, rights: u64, except: &[PathBuf]) -> io::Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if !meta.file_type().is_symlink() => self.grant_except(path, rights, except),
+            _ => Ok(()),
+        }
     }
 
     /// The ruleset's descriptor, for [`restrict_self`] in the child.

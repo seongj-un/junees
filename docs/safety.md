@@ -49,7 +49,7 @@ api 백엔드의 `bash` 도구가 실행하는 명령(대화, `-p`, 작업 모�
 - `auto`(대화, `-p`, 작업 모드의 기본): 커널이 Landlock을 지원하면 묶는다. 지원하지 않으면 묶지 않고 실행하되 그 bash 도구의 첫 결과 끝에 `[sandbox: <이유>; commands run without it (sandbox = auto)]` 한 줄을 붙인다. `sandbox_network = 0`인데 ABI가 4보다 낮으면 파일만 묶고 `[sandbox: ...; TCP is not restricted]`를 붙인다.
 - `require`: 설정대로 묶을 수 없으면 실행하지 않고 `not run: the sandbox is required (sandbox = require) but <이유>` 오류 결과를 돌려준다. 예약 작업과 웹훅 실행은 `sandbox`를 따로 주지 않으면 `require`다(지켜보는 사람이 없다). 그런 서버에서 Landlock 없이도 돌리려면 `sandbox = "auto"`를 직접 준다.
 - `off`: 묶지 않는다(명령 정책은 그대로).
-- 지원하는 커널에서 규칙을 만들지 못하면(작업 폴더가 사라졌을 때 등) 모드와 상관없이 실행하지 않는다.
+- 지원하는 커널에서 규칙을 만들지 못하면(작업 폴더가 사라졌을 때 등) 모드와 상관없이 실행하지 않는다. 보호 경로로 가는 길의 폴더를 나열할 수 없으면(`/home`이 0711, 끊긴 마운트) 그 폴더에서 길 위의 항목만 따라가고 나머지 항목에는 규칙을 주지 않는다. 명령은 묶인 채 돌고, 그 항목들만 읽고 쓸 수 없다.
 
 ```toml
 sandbox = "auto"
