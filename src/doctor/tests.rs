@@ -1603,6 +1603,13 @@ async fn the_sandbox_is_tried_with_a_confined_child() {
         Status::Warn,
         "Landlock ABI 2 cannot stop bash commands from emptying",
     );
+    expect(
+        &report,
+        "sandbox",
+        "truncate",
+        Status::Warn,
+        "scheduled jobs and webhook runs (which default to sandbox = require) refuse every",
+    );
     fixture.config("sandbox = \"require\"\n");
     let report = fixture.run_landlock(false, Some(Support::Abi(2))).await;
     expect(
@@ -1611,6 +1618,13 @@ async fn the_sandbox_is_tried_with_a_confined_child() {
         "truncate",
         Status::Fail,
         "truncation needs ABI 3",
+    );
+    assert!(
+        !check(&report, "sandbox", "truncate")
+            .detail
+            .contains("scheduled jobs"),
+        "{}",
+        report.text()
     );
     fixture.config("sandbox = \"strict\"\n");
     let report = fixture.run_landlock(false, none).await;

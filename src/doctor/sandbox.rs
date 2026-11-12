@@ -40,6 +40,12 @@ pub(super) fn check(report: &mut Report, settings: &Settings, support: Support, 
         Support::Abi(abi) => {
             report.ok(AREA, "landlock", support.describe());
             if *abi < TRUNCATE_ABI {
+                let unattended = if explicit {
+                    ""
+                } else {
+                    "; scheduled jobs and webhook runs (which default to sandbox = require) \
+                     refuse every bash command"
+                };
                 report.problem(
                     mode == Mode::Require,
                     AREA,
@@ -48,7 +54,7 @@ pub(super) fn check(report: &mut Report, settings: &Settings, support: Support, 
                         "Landlock ABI {abi} cannot stop bash commands from emptying the \
                          settings file, mcp.json, the secrets and the data folders (truncation \
                          needs ABI {TRUNCATE_ABI}); they cannot read them (sandbox = require \
-                         refuses every command)"
+                         refuses every command){unattended}"
                     ),
                     "use a newer kernel (6.2 or later)",
                 );
