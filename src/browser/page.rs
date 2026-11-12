@@ -75,6 +75,9 @@ pub struct Notes {
     pub downloads: Vec<String>,
     /// Notes dropped to keep each list at [`MAX_NOTES`].
     pub more: usize,
+    /// Requests blocked since the browser started (`blocked` keeps the
+    /// newest only).
+    pub blocked_total: usize,
     /// Page targets opened by the page (popups, `target=_blank`).
     pub popups: Vec<String>,
 }
@@ -82,6 +85,7 @@ pub struct Notes {
 impl Notes {
     pub fn block(&mut self, reason: &str) {
         keep(&mut self.blocked, &mut self.more, reason);
+        self.blocked_total += 1;
     }
 
     pub fn dialog(&mut self, line: &str) {
@@ -307,7 +311,18 @@ impl Browser {
 
     /// What happened since the last call, cleared.
     pub fn take_notes(&self) -> Notes {
-        std::mem::take(&mut *self.notes.lock().unwrap_or_else(PoisonError::into_inner))
+        let mut notes = self.notes.lock().unwrap_or_else(PoisonError::into_inner);
+        let total = notes.blocked_total;
+        let taken = std::mem::take(&mut *notes);
+        notes.blocked_total = total;
+        taken
+    }
+
+    fn blocked_total(&self) -> usize {
+        self.notes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .blocked_total
     }
 
     async fn call_browser(&self, method: &str, params: Value) -> Result<Value> {
@@ -334,19 +349,25 @@ impl Browser {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        let blocked_before = self.blocked_total();
         let result = self.call_page("Page.navigate", json!({"url": url})).await?;
         if let Some(error) = result["errorText"].as_str() {
             // The guard left a page from a private address (which ends
             // this navigation too).
             self.refuse_private_page().await?;
-            let blocked = self
-                .notes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .blocked
-                .clone();
-            if let Some(reason) = blocked.last() {
-                bail!("not opened: {reason}");
+            // Only a request blocked during this navigation says why; its
+            // reason names a host a redirect chose.
+            let reason = {
+                let notes = self.notes.lock().unwrap_or_else(PoisonError::into_inner);
+                (notes.blocked_total > blocked_before)
+                    .then(|| notes.blocked.last().cloned())
+                    .flatten()
+            };
+            if let Some(reason) = reason {
+                bail!(
+                    "not opened: the browser blocked a request of the page\n{}",
+                    super::tool::wrap(&reason)
+                );
             }
             bail!("the page did not open: {error}");
         }

@@ -534,6 +534,43 @@ async fn refuses_other_schemes_and_private_addresses() {
         "{}",
         output.content
     );
+    // A redirect the model opens: the reason (a host the redirect chose)
+    // is page text.
+    let output = run(
+        &tool,
+        json!({"action": "open", "url": format!("http://{public}/redirect")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    let (message, rest) = output.content.split_once('\n').unwrap();
+    assert_eq!(
+        message,
+        "not opened: the browser blocked a request of the page"
+    );
+    assert!(rest.starts_with(UNTRUSTED), "{}", output.content);
+    assert!(
+        rest.contains("127.0.0.2 is a private"),
+        "{}",
+        output.content
+    );
+    // A later failure is not given that reason.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let output = run(
+        &tool,
+        json!({"action": "open", "url": format!("http://127.0.0.1:{port}/")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output
+            .content
+            .starts_with("the page did not open: net::ERR_CONNECTION_REFUSED"),
+        "{}",
+        output.content
+    );
+    assert!(!output.content.contains("127.0.0.2"), "{}", output.content);
     // A page cannot send the browser to a file either.
     let output = run(
         &tool,
