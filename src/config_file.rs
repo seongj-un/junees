@@ -49,6 +49,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("notify_each_session", "JUNEES_NOTIFY_EACH_SESSION"),
     ("claude_bin", "JUNEES_CLAUDE_BIN"),
     ("claude_model", "JUNEES_CLAUDE_MODEL"),
+    ("claude_code_unattended", "JUNEES_CLAUDE_CODE_UNATTENDED"),
     ("web_search", "JUNEES_WEB_SEARCH"),
     ("web_search_max_uses", "JUNEES_WEB_SEARCH_MAX_USES"),
     (

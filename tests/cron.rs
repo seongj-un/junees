@@ -220,6 +220,66 @@ async fn adds_lists_runs_and_delivers_a_job() {
 }
 
 #[tokio::test]
+async fn jobs_refuse_the_claude_code_backend_unless_allowed() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    // Never reached: the refusal comes before Claude Code is asked.
+    let missing = home.path().join("no-claude");
+    let run = |args: &[&str], extra: &[(&str, &str)]| {
+        let mut command = junees(
+            home.path(),
+            work.path(),
+            "http://127.0.0.1:9",
+            "http://127.0.0.1:9",
+        );
+        command
+            .env("JUNEES_BACKEND", "claude-code")
+            .env("JUNEES_CLAUDE_BIN", &missing)
+            .env_remove("JUNEES_CLAUDE_CODE_UNATTENDED")
+            .env_remove("JUNEES_SANDBOX");
+        command.envs(extra.iter().copied()).args(args);
+        async move { output(&mut command, &[]).await }
+    };
+    let (ok, _, stderr) = run(&["cron", "add", "every 2h", "hi", "--name", "cc"], &[]).await;
+    assert!(ok, "{stderr}");
+
+    let (ok, _, stderr) = run(&["cron", "run", "cc"], &[]).await;
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("refuse the claude-code backend")
+            && stderr.contains("claude_code_unattended"),
+        "{stderr}"
+    );
+    let last = &jobs(home.path())["jobs"][0]["last"];
+    assert_eq!(last["status"], "failed");
+
+    // An explicit `require` wins over the permission.
+    let (ok, _, stderr) = run(
+        &["cron", "run", "cc"],
+        &[
+            ("JUNEES_CLAUDE_CODE_UNATTENDED", "1"),
+            ("JUNEES_SANDBOX", "require"),
+        ],
+    )
+    .await;
+    assert!(!ok && stderr.contains("sandbox = require"), "{stderr}");
+
+    // Allowed: it goes on to Claude Code (missing here) and says the
+    // commands run unconfined.
+    let (ok, _, stderr) = run(
+        &["cron", "run", "cc"],
+        &[("JUNEES_CLAUDE_CODE_UNATTENDED", "1")],
+    )
+    .await;
+    assert!(!ok, "{stderr}");
+    assert!(stderr.contains("without Junees's sandbox"), "{stderr}");
+    assert!(
+        !stderr.contains("refuse the claude-code backend"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
 async fn the_daemon_starts_a_due_job_and_a_failed_run_is_delivered() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
