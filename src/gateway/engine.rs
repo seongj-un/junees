@@ -173,6 +173,8 @@ pub struct ApiEngines {
     provider: ProviderFactory,
     mcp: Arc<Mcp>,
     plugins: Arc<Plugins>,
+    /// Added to the system prompt: which chat the user writes from.
+    note: &'static str,
 }
 
 impl ApiEngines {
@@ -198,7 +200,15 @@ impl ApiEngines {
             provider,
             mcp: Arc::new(Mcp::none()),
             plugins: Arc::new(Plugins::none()),
+            note: GATEWAY_NOTE,
         }
+    }
+
+    /// Tells the model it talks through another chat than Discord
+    /// ([`GATEWAY_NOTE`] by default).
+    pub fn with_note(mut self, note: &'static str) -> Self {
+        self.note = note;
+        self
     }
 
     /// Offers the tools of these MCP servers in every channel.
@@ -262,7 +272,7 @@ impl Engines for ApiEngines {
             (self.provider)()?,
             tools,
             AgentOptions {
-                system: api_system(config, &self.cwd, memory.as_ref(), &self.plugins),
+                system: api_system(config, &self.cwd, memory.as_ref(), &self.plugins, self.note),
                 max_tokens: config.max_tokens,
                 max_turns: config.max_turns,
                 context_window: config.context_window,
@@ -292,6 +302,7 @@ impl Engines for ApiEngines {
             config: Arc::clone(config),
             cwd: self.cwd.clone(),
             plugins: Arc::clone(&self.plugins),
+            note: self.note,
         }))
     }
 }
@@ -309,9 +320,10 @@ fn api_system(
     cwd: &std::path::Path,
     memory: Option<&Memory>,
     plugins: &Plugins,
+    note: &str,
 ) -> String {
     prompt::system_prompt(cwd)
-        + GATEWAY_NOTE
+        + note
         + crate::subagent::prompt_note(config.subagents)
         + &config.context_files.load(cwd).section()
         + &prompt::data_sections(
@@ -328,6 +340,7 @@ struct ApiConversation {
     config: Arc<Config>,
     cwd: PathBuf,
     plugins: Arc<Plugins>,
+    note: &'static str,
 }
 
 #[async_trait(?Send)]
@@ -362,6 +375,7 @@ impl Conversation for ApiConversation {
             &self.cwd,
             memory.as_ref(),
             &self.plugins,
+            self.note,
         ));
         self.agent.reset(journal);
     }
@@ -387,6 +401,7 @@ pub struct ClaudeEngines {
     claude: ClaudeCode,
     config: Arc<Config>,
     cwd: PathBuf,
+    note: &'static str,
 }
 
 impl ClaudeEngines {
@@ -396,7 +411,15 @@ impl ClaudeEngines {
             claude,
             config: Arc::new(config),
             cwd,
+            note: GATEWAY_NOTE,
         }
+    }
+
+    /// Tells the model it talks through another chat than Discord
+    /// ([`GATEWAY_NOTE`] by default).
+    pub fn with_note(mut self, note: &'static str) -> Self {
+        self.note = note;
+        self
     }
 }
 
@@ -431,18 +454,19 @@ impl Engines for ClaudeEngines {
             self.config.max_turns,
             cancel,
         );
-        chat.set_system(claude_system(&self.config, &self.cwd));
+        chat.set_system(claude_system(&self.config, &self.cwd, self.note));
         Ok(Box::new(ClaudeConversation {
             chat,
             config: Arc::clone(&self.config),
             cwd: self.cwd.clone(),
+            note: self.note,
         }))
     }
 }
 
-fn claude_system(config: &Config, cwd: &std::path::Path) -> String {
+fn claude_system(config: &Config, cwd: &std::path::Path, note: &str) -> String {
     prompt::claude_append_with_context(
-        GATEWAY_NOTE.trim_start().to_string(),
+        note.trim_start().to_string(),
         &config.context_files.load(cwd),
         memory(config, cwd).as_ref(),
         config.home.as_deref(),
@@ -453,6 +477,7 @@ struct ClaudeConversation {
     chat: Chat,
     config: Arc<Config>,
     cwd: PathBuf,
+    note: &'static str,
 }
 
 #[async_trait(?Send)]
@@ -469,7 +494,8 @@ impl Conversation for ClaudeConversation {
     }
 
     fn reset(&mut self, journal: Option<Box<dyn Journal>>) {
-        self.chat.set_system(claude_system(&self.config, &self.cwd));
+        self.chat
+            .set_system(claude_system(&self.config, &self.cwd, self.note));
         self.chat.reset(journal);
     }
 

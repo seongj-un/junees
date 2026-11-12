@@ -44,6 +44,10 @@ pub const CLAUDE_CODE: &str = "claude-code";
 /// [`Meta::source`] of a conversation in a channel of the Discord gateway.
 pub const DISCORD: &str = "discord";
 
+/// [`Meta::source`] of a conversation in a chat of the Telegram gateway;
+/// its [`Meta::channel`] is the chat id (`<chat>:<topic>` in a forum).
+pub const TELEGRAM: &str = "telegram";
+
 /// [`Meta::source`] of a run of a scheduled job (`junees cron`); its
 /// [`Meta::channel`] is the job id.
 pub const CRON: &str = "cron";
@@ -94,7 +98,8 @@ pub struct Meta {
     pub backend: Option<String>,
     /// Where the conversation takes place when not at a terminal:
     /// [`DISCORD`] for a channel of the Discord gateway, which continues
-    /// it there, or [`CRON`] for a run of a scheduled job. `junees -c` and
+    /// it there ([`TELEGRAM`] likewise), or [`CRON`] for a run of a
+    /// scheduled job. `junees -c` and
     /// the `/sessions` list leave such sessions out. `None` (the field left
     /// out) for the terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]

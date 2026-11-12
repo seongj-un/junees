@@ -171,6 +171,48 @@ pub(super) fn keys(report: &mut Report, settings: &Settings, backend: Backend) {
     }
 }
 
+/// The Telegram gateway's token and allowed users. Offline: the token's
+/// shape is checked, not whether Telegram takes it (`getMe` would put the
+/// token in a request to api.telegram.org).
+pub(super) fn telegram(report: &mut Report, settings: &Settings) {
+    use crate::telegram::config as telegram;
+    const AREA: &str = "telegram";
+    if settings.get(telegram::TOKEN_ENV).is_none()
+        && settings.get(telegram::ALLOWED_USERS_ENV).is_none()
+    {
+        report.skip(
+            AREA,
+            "gateway",
+            "not set up (`junees gateway telegram` needs telegram_token and \
+             telegram_allowed_users)",
+        );
+        return;
+    }
+    match telegram::TelegramConfig::from_lookup(|key| settings.get(key)) {
+        Ok(config) => report.ok(
+            AREA,
+            "gateway",
+            format!(
+                "token set ({}), {} allowed users{}",
+                source(settings, telegram::TOKEN_ENV),
+                config.allowed_users.len(),
+                if config.api_url == telegram::DEFAULT_API_URL {
+                    String::new()
+                } else {
+                    format!(", Bot API at {}", config.api_url)
+                }
+            ),
+        ),
+        Err(err) => report.fail(
+            AREA,
+            "gateway",
+            format!("{err:#}"),
+            "set telegram_token (from @BotFather) and telegram_allowed_users (README, 텔레그램 \
+             게이트웨이)",
+        ),
+    }
+}
+
 /// The Discord gateway's token and allowed users.
 pub(super) fn discord(report: &mut Report, settings: &Settings) {
     const AREA: &str = "discord";

@@ -1,7 +1,9 @@
 //! Cutting a reply into Discord messages: at most 2000 characters each
 //! (Create Message, `content`), on line breaks where possible, with a code
 //! block that spans a cut closed at the end of one message and opened
-//! again, with the same language, at the start of the next.
+//! again, with the same language, at the start of the next. Plain-text
+//! platforms (Telegram) cut the same way without touching code blocks
+//! ([`split_plain`]): a fence there is shown as typed.
 
 /// The longest `content` of a message.
 pub const MESSAGE_LIMIT: usize = 2000;
@@ -16,9 +18,20 @@ pub fn length(text: &str) -> usize {
 /// `text` as messages of at most `limit` (at least 16) units each. Blank
 /// messages are left out: Discord refuses empty content.
 pub fn split_message(text: &str, limit: usize) -> Vec<String> {
+    split(text, limit, true)
+}
+
+/// [`split_message`] for plain text: no code block is closed or opened
+/// again at a cut, so the messages joined by line breaks are `text`.
+pub fn split_plain(text: &str, limit: usize) -> Vec<String> {
+    split(text, limit, false)
+}
+
+fn split(text: &str, limit: usize, code_blocks: bool) -> Vec<String> {
     let limit = limit.max(16);
     let mut out = Splitter {
         limit,
+        code_blocks,
         messages: Vec::new(),
         current: String::new(),
         fence: None,
@@ -31,6 +44,8 @@ pub fn split_message(text: &str, limit: usize) -> Vec<String> {
 
 struct Splitter {
     limit: usize,
+    /// Whether code blocks are kept whole across cuts.
+    code_blocks: bool,
     messages: Vec<String>,
     current: String,
     /// How the code block the text is in opens again in the next message
@@ -47,6 +62,7 @@ impl Splitter {
     fn line(&mut self, line: &str) {
         let trimmed = line.trim_start();
         let toggles = match self.fence {
+            _ if !self.code_blocks => false,
             Some(_) => trimmed.starts_with(CLOSE),
             // ```` ```code``` ```` closes on its own line: no block.
             None => trimmed
@@ -215,6 +231,17 @@ mod tests {
         check(&messages, 40);
         assert_eq!(messages.join("\n"), text);
         assert!(messages.iter().all(|m| m.starts_with("line")));
+    }
+
+    #[test]
+    fn plain_text_keeps_fences_as_typed() {
+        let code: Vec<String> = (0..40).map(|n| format!("let x{n} = {n};")).collect();
+        let text = format!("look:\n```rust\n{}\n```\ndone", code.join("\n"));
+        let messages = split_plain(&text, 100);
+        assert!(messages.len() > 2, "{messages:#?}");
+        assert!(messages.iter().all(|m| length(m) <= 100));
+        assert_eq!(messages.join("\n"), text);
+        assert_eq!(text.matches(CLOSE).count(), 2);
     }
 
     #[test]

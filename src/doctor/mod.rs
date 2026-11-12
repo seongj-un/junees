@@ -321,6 +321,7 @@ pub async fn run_with(
     claude::check(&mut report, settings, &read, path, probe, online).await;
     services::programs(&mut report, path);
     settings::discord(&mut report, settings);
+    settings::telegram(&mut report, settings);
     if let Some(home) = home.as_deref() {
         services::cron(&mut report, home);
         services::webhooks(&mut report, home, settings);

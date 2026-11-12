@@ -13,6 +13,7 @@ junees -c                           # 이 폴더의 마지막 대화 이어서
 junees task "할 일 관리 웹 앱을 만들어"   # 장기 작업: 계획하고 바로 실행 (git 저장소 안에서)
 junees setup                        # 설정 다시
 junees gateway                      # 디스코드 봇으로 띄우기 (아래 디스코드 게이트웨이)
+junees gateway telegram             # 텔레그램 봇으로 띄우기 (아래 텔레그램 게이트웨이)
 junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작업 (아래 예약 작업)
 junees doctor                       # 설치와 설정 점검 (아래 점검)
 ```
@@ -33,7 +34,7 @@ junees doctor                       # 설치와 설정 점검 (아래 점검)
 - `/doctor`: 설치와 설정 점검(`junees doctor`와 같은 목록, 네트워크 없이. 아래 점검).
 - `/compact`(api 백엔드만), `/usage`, `/help`, `/exit`.
 
-명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `cron`, `sessions`, `doctor`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `sessions`, `doctor`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
 ### 설정 파일과 처음 설정
 
@@ -129,7 +130,7 @@ junees sessions search --source discord 회의록   # 디스코드 채널 세션
 - 맞추기: 공백으로 나눈 낱말이 모두 한 메시지(텍스트 블록이나 도구 결과 하나) 안에 있어야 한다. 대소문자는 무시하고 한글은 그대로 찾는다. `"빌드 실패"`처럼 큰따옴표로 묶으면 구절로 찾는다(공백과 줄바꿈 차이는 무시). 낱말은 16개, 질의는 500자까지.
 - 결과: 마지막으로 기록된(파일 수정 시각) 세션부터 기본 5개(최대 20). 세션마다 맞는 곳 3개를 240자 안팎의 한 줄로 보여 주고 나머지는 개수만 센다.
 - 범위: 기본은 지금 폴더에서 시작한 세션이다(기록의 `cwd`가 같은 것, `-c`와 같은 기준이라 하위 폴더는 다른 폴더). 모델은 `all: true`, 사람은 `--all`이면 모든 폴더. `session`(사람은 `--session`)에 id나 id 앞부분을 주면 그 세션과 서브에이전트 기록만, 폴더와 상관없이 찾는다. 다만 게이트웨이, 예약 작업, task 실행의 모델 도구는 자기 작업 폴더의 세션만 찾는다: `all: true`는 거절하고, `session`도 그 폴더 안의 세션 중에서만 고른다(디스코드 채널의 답은 여러 사람이 읽고, 예약 작업의 프롬프트는 사람이 지켜보지 않으므로).
-- 출처: 모델 도구는 기본으로 터미널에서 시작한 세션(대화, `-p`, task 세션)만 찾는다. 디스코드 채널, 예약 작업, 웹훅 실행 세션은 터미널의 대화와 `-p`에서만 `sources: ["discord", "cron", "webhook"]`(또는 `"terminal"`)로 더할 수 있다. 사람의 `/search`와 `junees sessions search`는 기본으로 모든 출처를 보여 주고 `--source terminal|discord|cron|webhook|all`(반복하거나 쉼표로)로 좁힌다. 출처를 기록하기 전(#34 이전)의 게이트웨이 세션은 meta에 `source`가 없으므로, meta의 `channel`이나 게이트웨이 색인(`gateway/discord-sessions.json`, 세션과 서브에이전트 기록)으로 디스코드 세션으로 센다. 색인에서 이미 빠진 더 오래된 채널 세션은 구별할 표시가 없어 여전히 터미널 세션으로 센다.
+- 출처: 모델 도구는 기본으로 터미널에서 시작한 세션(대화, `-p`, task 세션)만 찾는다. 디스코드 채널, 텔레그램 채팅, 예약 작업, 웹훅 실행 세션은 터미널의 대화와 `-p`에서만 `sources: ["discord", "telegram", "cron", "webhook"]`(또는 `"terminal"`)로 더할 수 있다. 사람의 `/search`와 `junees sessions search`는 기본으로 모든 출처를 보여 주고 `--source terminal|discord|telegram|cron|webhook|all`(반복하거나 쉼표로)로 좁힌다. 출처를 기록하기 전(#34 이전)의 게이트웨이 세션은 meta에 `source`가 없으므로, meta의 `channel`이나 게이트웨이 색인(`gateway/discord-sessions.json`, 세션과 서브에이전트 기록)으로 디스코드 세션으로 센다. 색인에서 이미 빠진 더 오래된 채널 세션은 구별할 표시가 없어 여전히 터미널 세션으로 센다.
 - 도구가 있는 곳: 대화와 `-p`(api 백엔드), 디스코드 게이트웨이, 예약 작업 실행, task 세션, 그리고 이들의 서브에이전트(읽기만 하므로 `delegate`가 빌려준다). 게이트웨이, 예약 작업, task 세션의 모델은 채널 세션을 찾을 수 없다(길드 채널의 답은 물은 사람 말고도 읽는다). 웹훅 실행에는 도구를 주지 않는다: PR 본문 같은 남의 글이 모델을 움직이고 답이 GitHub로 나갈 수 있어서다. claude-code 백엔드의 모델은 Claude Code의 도구만 쓰므로 이 도구가 없다(사람용 명령은 그대로 쓴다). `JUNEES_HOME`과 `HOME`이 없으면 도구도 없다.
 - 데이터 표시: 모델에게 주는 결과는 세션마다 매번 무작위 이름의 요소(`<session-1a2b3c4d id="..." created="..." updated="..." cwd="..." source="...">`)로 감싸서 인용한 글이 요소를 닫을 수 없게 하고, 그 안은 지난 세션에서 인용한 데이터일 뿐 지시가 아니며 사용자나 규칙보다 앞서지 않는다는 줄을 앞에 둔다. 제어 문자와 방향 제어 문자는 모델 결과와 터미널 출력 모두 `prompt_text::escape_hidden`으로 이스케이프한다.
 - 성능: 색인 없이 파일을 줄 단위로 읽는다. 4 MiB가 넘는 줄은 메모리에 담지 않고 건너뛰고, 읽을 수 없는 줄(깨진 줄, 잘린 마지막 줄, 기록이 아닌 파일)도 건너뛰어 개수를 결과 끝에 알린다. 새 세션부터 읽다가 보여 줄 수를 채우면 멈추고, 시간 상한(모델 5초, 사람 15초)에 닿으면 그때까지 찾은 것과 "N개 중 M개 기록을 읽고 멈췄다"는 줄을 돌려준다.
@@ -142,7 +143,7 @@ junees sessions search --source discord 회의록   # 디스코드 채널 세션
 junees usage                       # 지금 폴더의 세션, 오늘까지 7일, 날짜별
 junees usage --days 30 --by model  # 30일, 모델별
 junees usage --all --by folder     # 모든 폴더, 폴더별
-junees usage --by source           # 터미널, discord, cron, webhook별
+junees usage --by source           # 터미널, discord, telegram, cron, webhook별
 ```
 
 - 세는 것: 대화의 모델 호출마다 남는 `usage`, 압축 요약 호출의 `summary_usage`, 서브에이전트(`delegate`)의 토큰을 모은 `subagent_usage`, Claude Code 턴(`claude_turn`)의 사용량. 서브에이전트의 기록(`sessions/<id>/sub-<n>.jsonl`)은 부모의 `subagent_usage`가 이미 세므로 보통 읽지 않는다. 호출마다 프롬프트 길이로 가격이 달라지는 모델(Haiku 5.5)의 `subagent_usage`만 예외다: 항목에는 어느 기록의 합인지 적혀 있지 않지만 `delegate`는 서브에이전트 번호를 그때 있는 가장 큰 번호 다음부터 매기므로, 기록을 번호 순으로 읽어 부모의 `subagent_usage` 항목(모든 모델, 차례를 맞추려고)마다 합이 그 항목과 정확히 같은 다음 기록들을 찾고, 찾으면 그 항목 대신 그 기록의 호출들을 센다. 그래서 같은 호출을 두 번 세지 않는다. 부모가 항목을 남기기 전에 끝난 실행의 서브에이전트 기록은 어느 항목에도 들지 않으므로 전처럼 세지 않는다. 열은 입력, 캐시 쓰기, 캐시 읽기, 출력, 웹 검색 횟수, 캐시 적중률(캐시 읽기 / (캐시 읽기 + 캐시 쓰기 + 입력)), 비용이다.
@@ -219,7 +220,7 @@ junees usage --by source           # 터미널, discord, cron, webhook별
 - 모델이 `read_file`로 PNG, JPEG, GIF, WebP 파일을 읽으면 내용 대신 이미지 자체가 도구 결과로 간다(결과 `content`가 텍스트 블록 + `image` 블록 목록, [도구 결과 문서](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)). 형식은 파일 이름이 아니라 앞부분 바이트(매직 바이트)로 알아본다. `offset`/`limit`은 이미지에 쓰이지 않는다.
 - 대화에서 `/image <경로> [질문]`: 이미지와 질문을 한 입력으로 보낸다. 공백이 든 경로는 `/image "내 사진.png" 이건 뭐야?`처럼 큰따옴표로, `~/`는 홈. 질문이 없으면 `(sent with no text)`가 텍스트로 간다.
 - `-p`에 `--image <경로>`(여러 번): `junees --image a.png --image b.png "둘의 차이는?"`. 프롬프트 없는 `--image`는 오류. 잘못된 이미지는 서버를 띄우거나 세션을 만들기 전에 오류로 끝난다.
-- 디스코드: 허용된 사용자의 메시지에 붙은 이미지(아래 디스코드 게이트웨이).
+- 디스코드: 허용된 사용자의 메시지에 붙은 이미지(아래 디스코드 게이트웨이). 텔레그램도 같다(사진과 이미지 문서, 아래 텔레그램 게이트웨이).
 - 입력의 이미지는 텍스트 앞에 둔다([vision 문서](https://platform.claude.com/docs/en/build-with-claude/vision): "Claude works best when images come before text"). API에는 base64 소스(`{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ...}}`)로 보낸다.
 - 상한: 파일 5 MB(base64로 약 7 MB. API는 이미지당 base64 10 MB, Bedrock/Vertex는 5 MB)와 가로세로 8000 px(문서의 최대). 넘으면 이유와 줄이는 방법(ImageMagick 예)을 알려 주고 보내지 않는다. 크기는 헤더(PNG IHDR, GIF 화면 크기, WebP VP8/VP8L/VP8X, JPEG SOF)에서 읽고 픽셀은 디코딩하지 않는다. 리사이즈는 하지 않는다(이미지 라이브러리가 필요해서).
 - 세션 기록: 이미지는 세션 폴더의 파일 `$JUNEES_HOME/sessions/<id>/images/<sha256>.<확장자>`(폴더 0700, 파일 0600, 같은 이미지는 한 번만)에 두고 기록 줄에는 그 파일을 가리키는 블록(`"source": {"type": "junees_file", "media_type": ..., "sha256": ...}`)만 남긴다. 이어 갈 때 파일을 다시 읽어 붙이고, 파일이 없거나 내용이 바뀌었으면(해시가 다르면) 그 자리에 `[image ... could not be read ...]` 같은 한 줄을 넣고 이어 간다. 기록 형식 7(위 세션 기록, 아래 거절된 이미지는 형식 8).
@@ -474,6 +475,69 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
 - `!task <목표>`(게이트웨이에서 장기 작업 시작)는 후속으로 미뤘다. 작업 모드는 프로세스의 현재 폴더를 저장소 루트로 옮기고 한 저장소에 하나만 돌기 때문에, 여러 채널이 동시에 도는 게이트웨이 안에서는 따로 설계해야 한다. 지금은 컴퓨터에서 `junees task`를 돌리고 진행 알림은 웹훅(`notify_webhook`)으로 받는다.
 - 디스코드 애플리케이션(슬래시) 명령 등록, 이미지가 아닌 첨부 파일 읽기, 메시지 편집 스트리밍, 반응 이모지, 봇이 스스로 스레드를 만드는 것은 하지 않는다.
 - 테스트는 테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST 서버로만 했다(`tests/discord_gateway.rs`). 실제 디스코드에는 연결해 보지 않았다.
+
+### 텔레그램 게이트웨이
+
+`junees gateway telegram`(또는 `junees telegram`)은 Junees를 텔레그램 봇으로 띄운다. 디스코드 게이트웨이와 같은 엔진(`src/gateway/channels.rs`)을 쓰므로 채팅마다 대화 하나, 대기열과 동시 실행 상한, 세션 기록과 재시작 뒤 이어 가기, 승인 질문, 이미지 첨부, `stop`/`status`/`new` 명령이 디스코드와 같다. 다른 점만 적는다. [Bot API](https://core.telegram.org/bots/api)를 직접 부르고(라이브러리 없음, 새 의존성 없음) 업데이트는 `getUpdates` 롱 폴링으로 받는다(웹훅 아님: 공개 주소가 필요 없다).
+
+#### 봇 만들기와 설정
+
+1. 텔레그램에서 @BotFather에게 `/newbot`을 보내 봇을 만들고 토큰(`123456789:AA...`)을 받는다.
+2. 내 사용자 id(숫자)를 알아 둔다. 예: @userinfobot에게 아무 메시지나 보내면 알려 준다. 사용자 이름(`@name`)은 받지 않는다(바꿀 수 있어서).
+3. 그룹에서 쓰려면 봇을 그룹에 넣는다. 기본 개인 정보 모드(privacy mode)에서는 봇이 명령, 봇 멘션, 봇 메시지에 대한 답장만 받는데, Junees도 그룹에서는 그것에만 답하므로 그대로 두면 된다.
+
+`junees setup`은 텔레그램을 묻지 않는다. 설정 파일이나 환경 변수로 둔다(환경 변수가 우선).
+
+```toml
+telegram_token = "..."                  # JUNEES_TELEGRAM_TOKEN (필수)
+telegram_allowed_users = "123456789"    # JUNEES_TELEGRAM_ALLOWED_USERS (필수, 숫자 id 쉼표 목록)
+telegram_parallel = 2                   # JUNEES_TELEGRAM_PARALLEL (동시에 턴을 돌릴 채팅 수, 기본 2)
+telegram_approval_timeout = "5m"        # JUNEES_TELEGRAM_APPROVAL_TIMEOUT (승인 답장 대기, 기본 5m)
+```
+
+- `telegram_allowed_users`가 비어 있으면 시작하지 않는다(`no allowed Telegram users ...`). 텔레그램 봇은 이름만 알면 누구나 말을 걸 수 있기 때문이다.
+- 토큰: Bot API는 토큰을 요청 URL 경로(`https://api.telegram.org/bot<토큰>/<메서드>`, 파일은 `/file/bot<토큰>/<경로>`)에 받는다. 그래서 요청 URL을 어디에도 출력하지 않는다: 연결 오류는 종류와 원인만(`reqwest`의 `without_url`), 서버가 보낸 오류 설명은 토큰(과 콜론 뒤 비밀 부분)을 `[hidden]`으로 바꾼 뒤 쓴다(`Telegram getMe: error 401 (Unauthorized); check the bot token (telegram_token)`). `Debug`는 `Token(hidden)`. 토큰은 `숫자:영문/숫자/_/-` 모양만 받아 경로를 바꿀 수 없고, 모양이 틀려도 값을 되풀이하지 않는다. bash, MCP 서버, 작업 git의 환경에서 `JUNEES_TELEGRAM_TOKEN`을 지우고(`SECRET_ENV_VARS`), `junees doctor`는 값을 `[hidden]`으로 가리며, 메모리와 스킬과 GitHub로 나가는 글은 텔레그램 봇 토큰 모양을 거절한다(`src/secrets.rs`).
+- `JUNEES_TELEGRAM_API_URL`(환경 변수만)은 테스트용이다. 기본 `https://api.telegram.org` 말고는 이 컴퓨터 주소(`127.0.0.1` 등 루프백, `::1`, `localhost`, http/https)만 받는다. 파일도 이 주소에서만 받으므로 실제로는 api.telegram.org의 https에서만 내려받는다. 리다이렉트는 따르지 않는다. 그래서 로컬 Bot API 서버(`telegram-bot-api`)는 이 컴퓨터에서 돌 때만 쓸 수 있고, 그 서버가 주는 절대 경로 `file_path`는 받지 않는다.
+
+```sh
+cd ~/work/some-project      # 도구가 도는 폴더 (세션 기록의 cwd)
+junees gateway telegram
+```
+
+진행 상황은 디스코드 게이트웨이처럼 표준 오류에 한 줄씩 나오고(메시지 내용과 토큰은 찍지 않는다), SIGINT/SIGTERM이면 턴을 취소해 기록한 뒤 끝난다. systemd 예시는 디스코드 절의 `ExecStart`를 `junees gateway telegram`으로 바꾸면 된다. 한 `$JUNEES_HOME`에는 텔레그램 게이트웨이도 하나만 돈다(`$JUNEES_HOME/gateway/telegram.lock`). 디스코드 게이트웨이와는 잠금이 달라 함께 돌릴 수 있다.
+
+#### 누구의 어떤 메시지에 답하나
+
+- `telegram_allowed_users`의 사용자만. 다른 사용자의 메시지는 무시하고 로그에 사용자 id를 한 번만 남긴다(사진도 내려받지 않는다). 봇의 메시지와 채널 게시물, 수정된 메시지는 받지 않는다(`allowed_updates: ["message"]`).
+- 개인 채팅은 늘 답한다. 그룹과 슈퍼그룹에서는 봇을 멘션했을 때(`@봇이름`, mention 엔티티나 text_mention. 멘션 글자는 빼고 넘긴다), 봇 메시지에 답장했을 때, 그 채팅에서 승인 질문이 답을 기다릴 때만 답한다. 그렇게 받아들인 앨범의 나머지 사진은 캡션(멘션)이 없어도 받는다(아래 이미지).
+- 전달(forward)된 메시지는 허용 사용자가 보냈어도 다른 사람이 쓴 글이다. 앞에 `(forwarded message from <이름>; they wrote it, not the user)` 한 줄을 붙여 모델에 넘기고(이름은 `forward_origin`의 사용자 이름, 채팅/채널 제목, 숨긴 사용자 이름. 숨은 문자는 이스케이프하고 64자에서 자른다), 명령으로 읽지 않는다. 승인 질문이 기다리는 동안 전달된 글은 이 줄이 붙은 채로 답이 되므로 거절이 된다.
+- 포럼 슈퍼그룹의 토픽은 토픽마다 대화 하나(채널 키 `<chat id>:<topic id>`, 답도 그 토픽에). 일반 그룹의 답장 줄기는 따로 나누지 않는다.
+
+#### 명령
+
+- 텔레그램 관례대로 `/new`, `/stop`, `/status`, `/memory`, `/skills`, `/cron`, `/webhooks`, `/help`(텔레그램이 봇을 처음 열 때 보내는 `/start`도 도움말). 그룹에서는 `/stop@봇이름`처럼 봇을 붙이거나 `@봇이름 /stop`처럼 멘션 뒤에 써도 되고(멘션을 빼고 명령을 다시 읽는다), 다른 봇 이름이 붙은 명령은 무시한다. 사진이나 파일에 붙은 캡션과 전달된 메시지는 명령이 아니다(캡션 `/new`는 사진과 함께 모델에 간다). 디스코드처럼 `!stop`도 된다. 뜻은 디스코드의 `!` 명령과 같고, 그룹에서 `/memory`는 개수만, 개인 채팅에서 내용을 보여 준다.
+- Junees 터미널의 슬래시 명령(`/model`, `/sessions`, `/image` 등)과의 충돌: 게이트웨이에서는 위 명령만 명령이다. 모르는 `/단어`는 개인 채팅에서 `unknown command /model; /help lists them`으로 답하고, 그룹에서는 다른 봇의 명령일 수 있어 조용히 무시한다(봇을 부른 `/model@봇이름`이나 `@봇이름 /model`은 개인 채팅처럼 답한다). `/etc/hosts 보여 줘`처럼 `/` 뒤가 한 단어의 영문자가 아니면 명령이 아니라 보통 메시지다. 반대로 `/tmp is full`처럼 한 단어 경로로 시작하는 글은 모르는 명령 `/tmp`가 된다. 앞에 다른 말을 붙이면(`디스크: /tmp is full`) 보통 메시지로 간다.
+
+#### 대화와 출력
+
+- 세션 색인은 `$JUNEES_HOME/gateway/telegram-sessions.json`(채팅 키 -> 세션 id, 0600), 세션 meta는 `"source": "telegram"`, `"channel": "<채팅 키>"`. `junees -c`와 `/sessions` 번호 목록에서 빠지는 것, 다른 Junees가 세션을 쥐고 있을 때 `(not run)`으로 미루는 것은 디스코드와 같다. 세션 검색의 출처 이름은 `telegram`.
+- 메시지는 `parse_mode` 없이 평문으로 보낸다(모델의 Markdown은 글자 그대로 보이고, 깨진 서식 때문에 전송이 거절될 일이 없다). 링크 미리보기는 끈다. 4096자(UTF-16 단위로 센다)가 넘으면 줄 단위로 나눈다. 디스코드와 달리 잘린 코드 블록에 울타리(```` ``` ````)를 덧붙이지 않는다(평문이라 글자 그대로 보이므로). 도구 줄은 코드 블록 없이 `-> bash ls` 한 줄씩. 시스템 프롬프트에는 "텔레그램 평문이니 짧게" 문단이 들어간다.
+- 모델 답의 `@사용자이름`은 그 그룹 구성원에게 알림을 보낸다. 텔레그램에는 디스코드의 `allowed_mentions` 같은 끄는 방법이 없어서, 모델 출력에 섞여 들어온 글(웹 페이지, 파일 내용)로도 알림이 갈 수 있다.
+- 타이핑: 턴 중 `sendChatAction typing`을 4초마다(텔레그램은 5초 동안 보여 준다). 승인 질문을 기다리는 동안은 멈춘다.
+- 승인 질문은 평문(`Approve this tool call?` + 터미널과 같은 내용 + 답하는 법)이고 `y`/`n`/`n <이유>`/`a`로 답한다. 그룹에서는 질문 메시지에 답장하면 된다.
+- 이미지: 사진(`photo`, 크기 목록 중 5 MB 이하에서 가장 큰 것)과 이미지 문서(`document`, MIME `image/png|jpeg|gif|webp`, 없으면 확장자)를 그 턴이 시작할 때 `getFile`과 파일 URL로 30초 안에 5 MB까지 스트리밍으로 받는다(봇이 받을 수 있는 최대는 20 MB). 받은 바이트가 네 형식이 아니면 버린다. 앨범(같은 `media_group_id`)은 한 번의 `getUpdates` 응답에 함께 온 것끼리 한 입력으로 묶는다(10장까지). 롱 폴링은 첫 업데이트가 오자마자 돌아오므로 나머지가 다음 응답으로 올 수 있고, 그 사진은 따로따로 입력이 된다. 그룹에서는 받아들인 앨범(채팅, 보낸 사람, `media_group_id`; 최근 64개)을 기억해 다음 응답으로 온 나머지도 캡션 없이 받는다. 개인 정보 모드(privacy mode)의 봇에게는 캡션 없는 앨범 사진이 아예 오지 않을 수도 있다(실제 텔레그램으로 확인하지 못했다). 이미지가 아닌 문서, 동영상, 음성, 스티커는 `(attachments left out: ...)`로 알린다. claude-code 백엔드는 디스코드처럼 이미지를 거절한다.
+
+#### 폴링, 오프셋, 레이트 리밋
+
+- `getUpdates`(`timeout` 30초, `limit` 100)를 이어서 부른다. 응답을 받을 때마다 `offset`을 받은 업데이트 중 가장 큰 `update_id` + 1로 다시 계산하고(문서: "recalculate offset after each server response"), 업데이트가 확인되는 것은 다음 `getUpdates`가 그 offset으로 갈 때다. 배치는 채팅들에 넘긴 뒤에야 다음 폴링을 하므로, 넘기기 전에 죽으면 텔레그램이 같은 업데이트를 다시 준다. 최근에 넘긴 id(4096개)는 기억해서 다시 와도 두 번 돌리지 않는다(id 비교가 아니라 기억으로: 일주일 넘게 업데이트가 없으면 다음 id가 무작위라서). 끝날 때는 `timeout: 0`, `limit: 1`로 한 번 더 불러 마지막 배치를 확인하므로 다시 띄워도 같은 메시지를 다시 돌리지 않는다. 게이트웨이가 꺼져 있는 동안 온 메시지(텔레그램이 24시간 보관)는 다음에 띄울 때 처리된다.
+- 폴링 오류(연결, 5xx, 시간 초과)는 1초부터 두 배씩 60초까지 기다렸다 다시 한다. 401/404(토큰 거절)는 다시 하지 않고 이유와 함께 끝난다. 409(다른 프로그램이 같은 봇의 `getUpdates`를 하거나 웹훅이 설정됨)는 한 번 들여다본 `getUpdates`처럼 금방 지나갈 수 있어 같은 방식으로 기다렸다 다시 하고, 10분 안에 여섯 번째 409가 오면(같은 토큰으로 다른 게이트웨이가 돌 때) `deleteWebhook`으로 지우라는 안내와 함께 끝난다.
+- 429는 `parameters.retry_after`초만큼 기다렸다 다시 보낸다(다섯 번, 10분 넘게 기다리라면 실패). `sendMessage`에는 디스코드의 nonce 같은 중복 방지가 없으므로 보내졌을 수 있는 실패(응답 전 끊김, 시간 초과, 5xx)는 다시 보내지 않고 로그에 남긴다. 연결 자체가 안 된 경우만 다시 보낸다. 다른 메서드는 연결 오류, 시간 초과, 5xx를 세 번까지 다시 한다.
+
+#### 범위 밖, 한계
+
+- 웹훅 방식 수신, 인라인 키보드(승인 버튼), 메시지 편집 스트리밍, MarkdownV2/HTML 서식, 음성과 문서 내용 읽기, 그룹 관리 명령, `/task`, setup 마법사의 텔레그램 질문, `junees doctor --online`의 `getMe`(토큰을 외부로 보내야 해서)는 하지 않는다.
+- 여러 응답에 나뉘어 온 앨범은 따로따로 입력이 된다(그룹에서도 받기는 한다, 위 이미지). 그룹이 슈퍼그룹으로 바뀌면(`migrate_to_chat_id`) 새 채팅으로 보고 새 대화를 시작한다.
+- 테스트는 테스트 안에서 띄운 가짜 Bot API(루프백)로만 했다(`tests/telegram_gateway.rs`). 실제 텔레그램에는 연결해 보지 않았다.
 
 ### MCP 서버
 
@@ -935,6 +999,7 @@ junees doctor --online    # API 키 확인 요청과 claude auth status까지
 - claude-code 백엔드: `claude --version`(2.1.259 이상, 실행하는 프로그램은 이것 하나), 로그인(`claude auth status`는 `--online`일 때만), `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 켜져 있는지, 켜져 있으면 `bwrap`이 PATH에 있는지와 비특권 user namespace를 막는 커널 설정(`kernel.apparmor_restrict_unprivileged_userns = 1`, `kernel.unprivileged_userns_clone = 0`, `user.max_user_namespaces = 0`). 백엔드가 claude-code면 문제는 실패, api면 경고이고, api인데 `claude`도 없으면 이 부분은 건너뛴다. setuid root인 `bwrap`은 user namespace가 필요 없으므로 제한이 있어도 ok.
 - 프로그램: `git`(없으면 경고: 작업 모드와 GitHub 흐름이 쓴다), `gh`(선택).
 - 디스코드: 토큰과 허용 사용자(게이트웨이가 시작할 때와 같은 검사). 둘 다 없으면 해당 없음.
+- 텔레그램: 토큰 모양과 허용 사용자(게이트웨이가 시작할 때와 같은 검사, 토큰은 `[hidden]`). 둘 다 없으면 해당 없음. 토큰이 맞는지(`getMe`)는 `--online`에서도 묻지 않는다.
 - 예약 작업과 웹훅: `jobs.json`/`routes.json`이 읽히는지, 기다리는 작업이나 멈추지 않은 경로가 있는데 `junees cron daemon`/`junees webhook serve`가 돌지 않으면 경고(잠금 파일이 잡혀 있는지로 판단한다. 비어 있으면 잠깐 잡았다 바로 놓는다). 경로마다 시크릿 파일이 있고 내 것이고 `0600`인지(값은 읽기만 하고 출력하지 않음), 환경 변수 시크릿은 지금 환경에 없으면 경고(서버의 환경은 다를 수 있다).
 - 세션: `$JUNEES_HOME/sessions`의 파일 수와 크기, 1 GiB를 넘으면 경고.
 - MCP: `mcp.json`이 읽히는지(`url`과 `headers` 형식 포함), 켜진 서버의 `command`가 PATH(서버 `env`에 PATH가 있으면 그것)나 그 경로에 실행 파일로 있는지, `cwd`가 폴더인지, `url` 서버의 헤더가 참조하는 환경 변수가 있는지(값은 출력하지 않는다), 저장된 OAuth 로그인(`login <서버>`: 있는지, 이 `url`의 것인지, 0600인지, 발급자와 만료, 갱신할 수 있는지. 만료됐는데 리프레시 토큰이 없으면 경고, 쓸 수 없으면 실패. 토큰 값은 `[hidden]`). 서버를 실행하거나 HTTP 서버에 연결하지는 않는다.
@@ -1062,23 +1127,31 @@ src/
     run.rs             과제 실행(동시 실행 상한, 과제 순서 보존), 자기 한도와 부모 예산, 진행 한 줄, 서브에이전트 기록, 결과 크기 제한
     tests.rs           Scripted provider로 병렬 상한과 순서, 재귀 금지, 예산 차감, 취소, 자식 기록, 승인 공유(한 자식이 답을 기다리는 동안 다른 자식의 묻지 않는 호출은 실행), 결과 크기 검증
   prompt.rs          시스템 프롬프트, 메모리와 스킬 절(data_sections), Claude Code에 넘기는 인자(claude_append, 지침 파일을 더한 claude_append_with_context, 128 KiB 한도)
-  secrets.rs         비밀처럼 보이는 내용 찾기, 메모리와 스킬이 함께 씀 (키 접두사, 개인 키, AWS 키 id, 긴 hex/토큰, 몇째 줄인지)
+  secrets.rs         비밀처럼 보이는 내용 찾기, 메모리와 스킬이 함께 씀 (키 접두사, 개인 키, AWS 키 id, 디스코드/텔레그램 봇 토큰, 긴 hex/토큰, 몇째 줄인지)
   prompt_text.rs     저장된 텍스트(메모리, 스킬)의 제어/방향 문자 판단: 쓸 때 거절(check_plain), 읽을 때 이스케이프(escape_hidden)
   context_files/     프로젝트 지침 파일 (AGENTS.md/JUNEES.md/CLAUDE.md를 저장소 맨 위나 HOME까지 찾기, 파일당/전체 상한, 링크 판단, 시스템 프롬프트 절, /context 목록, Claude Code의 AGENTS.md 플러그인 끄는 --settings, 웹훅 실행용 마지막 커밋 읽기와 커밋되지 않은 변경 비교(committed.rs))
   memory/            영구 메모리
     mod.rs             저장소 셋(user, notes, 프로젝트별 notes) 읽기/쓰기(0600, 원자적, flock), 항목 추가/교체/삭제와 상한, 프롬프트 절(대화, task, Claude Code 읽기 전용), /memory 보기
     tool.rs            memory 도구 (task 세션은 project만)
   cli.rs             인자 파싱(위치 인자 질문, task/status/setup/gateway/cron/webhook/doctor 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
-  gateway/           디스코드 게이트웨이 (junees gateway)
-    mod.rs             Gateway::run: Get Gateway Bot, 연결 태스크, 채널 LocalSet, 종료 처리, 로그(Log)
+  gateway/           디스코드 게이트웨이 (junees gateway)와 게이트웨이 공통 엔진
+    mod.rs             Gateway::run: Get Gateway Bot, 연결 태스크, 채널 LocalSet, 종료 처리, 로그(Log), 게이트웨이 잠금(lock_file)
+    platform.rs        Platform 트레이트: 엔진이 플랫폼에 바라는 것(보내기, 타이핑, 이미지 받기, 명령/도구 줄/승인 질문 표기)
+    channels.rs        공통 엔진: 채널별 작업자(대기열, 동시 실행 상한, 타이핑, 도구 줄 묶기, 취소), 명령 실행(new/stop/status/memory/...), 첨부 받기, 세션 열기
     config.rs          discord_* 설정 (토큰 Token은 Debug에서 숨김, 허용 사용자 필수, https/wss 확인)
     shard.rs           Gateway v10 WebSocket: Hello/Identify/Ready, 하트비트(지터, ACK 누락), Resume, Reconnect, Invalid Session, 닫힘 코드, 지수 대기
     rest.rs            REST: Get Gateway Bot, Create Message(allowed_mentions 없음), 타이핑, 경로별 레이트 리밋과 429 재시도
-    bot.rs             메시지 고르기(허용 사용자, DM/멘션/지정 채널/스레드), ! 명령, 채널별 작업자(대기열, 동시 실행 상한, 타이핑, 도구 줄 묶기, 취소)
+    bot.rs             디스코드 쪽: 메시지 고르기(허용 사용자, DM/멘션/지정 채널/스레드), ! 명령 읽기, Platform 구현(Discord)
     engine.rs          Conversation/Engines 트레이트, api 에이전트와 Claude Code 대화, 이벤트를 텍스트 블록과 도구 한 줄로(Collector)
     ask.rs             채널 승인 질문(다음 메시지로 답, 시간 초과 거절)
-    sessions.rs        채널 -> 세션 색인(discord-sessions.json), 세션 이어 가기/새로 만들기
-    split.rs           2000자 나누기(줄 단위, 코드 블록 닫고 다시 열기, UTF-16 길이)
+    sessions.rs        채널 -> 세션 색인(discord-sessions.json, 다른 게이트웨이는 자기 파일과 source), 세션 이어 가기/새로 만들기
+    split.rs           2000자 나누기(줄 단위, 코드 블록 닫고 다시 열기, UTF-16 길이), 평문용 split_plain(울타리 없이)
+  telegram/          텔레그램 게이트웨이 (junees gateway telegram)
+    mod.rs             TelegramGateway::run: getMe, 롱 폴링 Poller(offset 다시 계산, 최근 id로 중복 거름, 409 몇 번 기다리기, 끝날 때 확인), 채팅 LocalSet, 종료 처리
+    config.rs          telegram_* 설정 (토큰 모양 검사와 Debug 숨김, 숫자 사용자 id 필수, API 주소는 api.telegram.org 또는 루프백)
+    api.rs             Bot API: getMe/getUpdates/sendMessage/sendChatAction/getFile/파일 받기, URL과 토큰 없는 오류, 429 retry_after, 중복 전송 없는 재시도, 응답과 파일 크기 상한
+    bot.rs             메시지 고르기(허용 사용자, 개인/그룹 멘션/답장/승인 답, 포럼 토픽), /명령 읽기(@봇, 멘션 뒤 명령, 다른 봇, /start, 캡션과 전달은 명령 아님), 전달 표시, 앨범 묶기와 나뉘어 온 그룹 앨범
+    platform.rs        Platform 구현(Telegram): 평문 4096자, 타이핑, 사진/이미지 문서 고르기와 받기, 평문 승인 질문, 도움말
   cron/              예약 작업 (junees cron)
     tz.rs              시스템 시간대 파일(TZif)과 POSIX TZ 규칙 읽기, 현지 시각 <-> UTC(건너뛴/두 번 오는 시각), 날짜 계산
     schedule.rs        일정 문법(every, in, daily, weekdays, cron 식, ISO 시각)과 다음 실행 시각
@@ -1117,7 +1190,7 @@ src/
   doctor/            설치와 설정 점검 (junees doctor, /doctor)
     mod.rs             인자, 점검 결과(ok/warn/fail/skip, 고치는 방법), 텍스트와 JSON 출력, 비밀 값 지우기, 점검 순서
     files.rs           상태 폴더와 비공개 파일 권한, secrets/, 세션 폴더 크기
-    settings.rs        설정 파일 읽기와 모든 값, 키가 있는지(값 없이), 디스코드, 알림 웹훅
+    settings.rs        설정 파일 읽기와 모든 값, 키가 있는지(값 없이), 디스코드, 텔레그램, 알림 웹훅
     claude.rs          claude --version, --online의 auth status, 환경 정리와 bubblewrap, user namespace 제한(/proc/sys)
     services.rs        git/gh, cron 데몬과 웹훅 서버(잠금으로 판단), 웹훅 시크릿, MCP 명령 찾기(실행 안 함), 켜진 플러그인
     online.rs          --online: 키 확인 요청 GET /v1/models
@@ -1144,6 +1217,7 @@ tests/
   memory.rs            실제 바이너리와 가짜 API 서버로 memory 도구가 저장한 항목이 지금 세션이 아니라 다음 세션의 시스템 프롬프트에 들어가는지, /memory 보기와 clear(확인 질문), /new가 메모리를 다시 읽는지 검증
   skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기, /skills 화면의 제어 문자 이스케이프 검증
   discord_gateway.rs   테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST로 IDENTIFY/READY, 하트비트와 ACK 누락, resume_gateway_url로 RESUME, Reconnect, INVALID_SESSION, 닫힘 코드, 거절된 토큰이 오류와 로그에 안 나옴, 허용 사용자와 멘션 규칙, 메시지 나누기, 채널별 대기열과 동시 실행, !stop/!new/!status, 종료 시 취소, 429 재시도, 실제 에이전트와 가짜 API로 재시작 뒤 채널 세션 이어 가기(meta의 source/channel, -c와 /sessions 번호 목록에서 빠짐)와 승인 답장/시간 초과 검증
+  telegram_gateway.rs  테스트 안에서 띄운 가짜 Bot API(루프백, 롱 폴링과 offset 확인)로 허용 사용자와 그룹/답장/토픽 규칙, /명령과 다른 봇 명령, 그룹의 `@봇 /stop`, 전달된 메시지 표시, 캡션은 명령 아님, 409 몇 번 기다리기와 계속되면 끝내기, 업데이트 확인과 다시 온 업데이트, 재시작 뒤 중복 없음, 4096자 나누기(코드 블록 울타리 없이)와 429, /stop//status//new, 거절된 토큰이 오류와 로그에 안 나옴, 실제 에이전트와 가짜 API로 승인 질문과 답(파일 쓰기), 채팅 세션(meta source), 사진과 앨범, 두 응답에 나뉘어 온 그룹 앨범, 바이너리 시작/답/SIGTERM 종료 검증
   mcp_oauth.rs         실제 바이너리 `junees mcp login`을 붙여 넣기 방식으로(가짜 인가 서버와 MCP 서버, PKCE와 resource 확인), 저장 파일 0600/0700, 출력에 토큰 없음, 저장된 로그인으로 `-p`의 도구 호출(토큰은 MCP 주소에만), `mcp logout`, 로그인 없는 실행은 401 한 번 뒤 그 서버만 실패하고 로그인을 시작하지 않음 검증
   mcp_http.rs          실제 바이너리 `-p`로 루프백 HTTP MCP 서버의 도구 호출(SSE 응답), 헤더 값이 환경 변수에서 오고 bash에는 그 변수가 없음, 변수가 없으면 그 서버만 빠짐 검증
   mcp.rs               실제 바이너리와 가짜 API, 가짜 MCP 서버(tests/fixtures/fake_mcp.py)로 모델의 MCP 도구 호출, 서버 환경에 API 키/디스코드 토큰/숨긴 변수가 없음, 종료 때 서버와 그 자식 정리, 0644 mcp.json 거절, /mcp, 파이프 입력 대화의 승인 거절과 trust, 게이트웨이 채널 질문, 작업 폴더의 모듈과 스크립트를 서버로 실행하지 않음(작업 폴더 안 상대 경로는 trust만) 검증

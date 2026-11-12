@@ -54,11 +54,24 @@ pub struct DiscordAsk {
     out: UnboundedSender<Progress>,
     slot: Arc<AnswerSlot>,
     timeout: Duration,
+    format: fn(&Request, Duration) -> String,
 }
 
 impl DiscordAsk {
     pub fn new(out: UnboundedSender<Progress>, slot: Arc<AnswerSlot>, timeout: Duration) -> Self {
-        Self { out, slot, timeout }
+        Self {
+            out,
+            slot,
+            timeout,
+            format: question,
+        }
+    }
+
+    /// Writes the questions with `format` instead of [`question`] (the
+    /// platform's spelling: Telegram shows no Markdown).
+    pub fn with_format(mut self, format: fn(&Request, Duration) -> String) -> Self {
+        self.format = format;
+        self
     }
 }
 
@@ -71,7 +84,7 @@ impl Ask for DiscordAsk {
         // Through the worker, so it shows after the tool lines before it.
         let _ = self
             .out
-            .send(Progress::Question(question(request, self.timeout)));
+            .send(Progress::Question((self.format)(request, self.timeout)));
         match tokio::time::timeout(self.timeout, answer).await {
             Ok(Ok(text)) => parse_answer(&text),
             // The channel's worker is going away.

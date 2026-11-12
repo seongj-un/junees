@@ -10,8 +10,10 @@
 
 pub mod ask;
 pub mod bot;
+pub mod channels;
 pub mod config;
 pub mod engine;
+pub mod platform;
 pub mod rest;
 pub mod sessions;
 pub mod shard;
@@ -29,7 +31,8 @@ use tokio::sync::{Semaphore, mpsc};
 
 use crate::cancel::Cancel;
 use crate::memory::Memory;
-use bot::{Bot, Shared};
+use bot::{Bot, Discord};
+use channels::Shared;
 use config::DiscordConfig;
 use engine::Engines;
 use rest::Rest;
@@ -61,7 +64,13 @@ pub const LOCK_FILE: &str = "gateway/lock";
 /// state folder would both answer every message, run the tools twice and
 /// take each other's channel sessions, so a second one is refused.
 pub fn lock(home: &Path) -> Result<File> {
-    let path = home.join(LOCK_FILE);
+    lock_file(home, LOCK_FILE)
+}
+
+/// [`lock`] on the lock file `name` (relative to `home`): each gateway
+/// (Discord, Telegram) has its own, since they answer different chats.
+pub fn lock_file(home: &Path, name: &str) -> Result<File> {
+    let path = home.join(name);
     let dir = path.parent().context("the lock file has no folder")?;
     fs::DirBuilder::new()
         .recursive(true)
@@ -152,11 +161,11 @@ impl Gateway {
         ));
         let fetcher = crate::images::discord::Fetcher::new(self.config.cdn_url.as_deref())?;
         let shared = Arc::new(Shared {
-            rest,
-            fetcher,
+            platform: Discord { rest, fetcher },
             engines: self.engines,
             permits: Arc::new(Semaphore::new(self.config.parallel)),
-            config: self.config.clone(),
+            parallel: self.config.parallel,
+            approval_timeout: self.config.approval_timeout,
             home: self.home,
             cwd: self.cwd,
             memory: self.memory,
@@ -179,7 +188,7 @@ impl Gateway {
         let channels = tokio::task::LocalSet::new();
         let ended = channels
             .run_until(async move {
-                let mut bot = Bot::new(shared);
+                let mut bot = Bot::new(shared, self.config.clone());
                 let ended = loop {
                     tokio::select! {
                         _ = shutdown.cancelled() => break None,

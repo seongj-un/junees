@@ -63,6 +63,13 @@ pub const KEYS: &[(&str, &str)] = &[
     ("discord_allowed_users", "JUNEES_DISCORD_ALLOWED_USERS"),
     ("discord_channels", "JUNEES_DISCORD_CHANNELS"),
     ("discord_parallel", "JUNEES_DISCORD_PARALLEL"),
+    ("telegram_token", "JUNEES_TELEGRAM_TOKEN"),
+    ("telegram_allowed_users", "JUNEES_TELEGRAM_ALLOWED_USERS"),
+    ("telegram_parallel", "JUNEES_TELEGRAM_PARALLEL"),
+    (
+        "telegram_approval_timeout",
+        "JUNEES_TELEGRAM_APPROVAL_TIMEOUT",
+    ),
     ("timezone", "JUNEES_TIMEZONE"),
     ("cron_max_time", "JUNEES_CRON_MAX_TIME"),
     ("cron_max_tokens", "JUNEES_CRON_MAX_TOKENS"),
