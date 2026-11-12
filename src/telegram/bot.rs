@@ -2,12 +2,14 @@
 //! themselves (a worker per chat, the queue, sessions, approvals) are the
 //! shared engine of [`crate::gateway::channels`].
 //!
-//! Commands are Telegram's `/word` (also `/word@bot` in a group, as
-//! Telegram writes them, and Discord's `!word`). Junees's own terminal
-//! slash commands (`/model`, `/sessions`, ...) do not exist here: a `/`
-//! word the gateway does not know gets "unknown command" in a private
-//! chat, and is left to the other bots in a group. `/start`, which
-//! Telegram sends when a user opens the bot, shows the help.
+//! Commands are Telegram's `/word` (also `/word@bot` or `@bot /word` in
+//! a group, and Discord's `!word`). Junees's own terminal slash commands
+//! (`/model`, `/sessions`, ...) do not exist here: a `/` word the gateway
+//! does not know gets "unknown command" in a private chat or when it
+//! names the bot, and is left to the other bots in a group otherwise.
+//! `/start`, which Telegram sends when a user opens the bot, shows the
+//! help. A caption under a file and a forwarded message are never
+//! commands.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
