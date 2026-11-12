@@ -13,7 +13,8 @@
 //!   ([`crate::browser::PROFILES_FOLDER`]: cookies and logins of a
 //!   running browser) and, in a webhook run, the git and GitHub CLI
 //!   credentials;
-//! - never write in Junees's data folders (memory, skills, cron, ...);
+//! - never write in Junees's data folders (memory, skills, cron, ...)
+//!   or the saved sessions;
 //! - with `sandbox_network = 0` and a kernel of Landlock ABI 4 or later,
 //!   neither connect nor bind TCP sockets.
 //!
@@ -255,6 +256,8 @@ pub struct Sandbox {
     /// Whether a result already said the working folder holds protected
     /// paths.
     told_holds: AtomicBool,
+    /// Junees's state folder, made before rules are built when missing.
+    state: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -267,14 +270,21 @@ impl Sandbox {
         }
         let mut hidden = Vec::new();
         let mut read_only = Vec::new();
+        let mut state = None;
         if let Some(file) = &tools.settings_file {
             hidden.extend(file.protected_paths());
             if tools.webhook {
                 hidden.extend(file.resolved_credentials());
             }
             read_only.extend(file.data_folders());
+            // Saved sessions too: `-c` and `--resume` read them back as
+            // the user's own conversation.
+            state = file.folder();
+            read_only.extend(state.as_deref().map(crate::session::sessions_dir));
         }
-        Some(Self::new(settings, hidden, read_only))
+        let mut sandbox = Self::new(settings, hidden, read_only);
+        sandbox.state = state;
+        Some(sandbox)
     }
 
     /// A sandbox with `settings` that keeps commands from reading or
@@ -287,6 +297,7 @@ impl Sandbox {
             support: None,
             told: AtomicBool::new(false),
             told_holds: AtomicBool::new(false),
+            state: None,
         }
     }
 
@@ -311,8 +322,14 @@ impl Sandbox {
     }
 
     /// The confinement for a command run in `work`: what to apply before
-    /// spawning it, or why it must not run.
+    /// spawning it, or why it must not run. Makes a missing state folder
+    /// first ([`Self::make_state_folder`]).
     pub fn prepare(&self, work: &Path) -> Prepared {
+        self.prepare_in(work, true)
+    }
+
+    /// [`Self::prepare`], making the state folder only when `make_state`.
+    fn prepare_in(&self, work: &Path, make_state: bool) -> Prepared {
         let mode = self.settings.mode();
         if mode == Mode::Off {
             return Prepared::Unconfined(None);
@@ -364,6 +381,9 @@ impl Sandbox {
         } else {
             self.tell_once(lines.join("\n"))
         };
+        if make_state {
+            self.make_state_folder();
+        }
         match self.build(abi, work) {
             Ok((confinement, holds)) => {
                 if holds && !self.told_holds.swap(true, Ordering::Relaxed) {
@@ -379,6 +399,22 @@ impl Sandbox {
                 Prepared::Confined(confinement, note)
             }
             Err(err) => Prepared::Refused(format!("cannot set up the sandbox: {err}")),
+        }
+    }
+
+    /// Makes the state folder (0700) when it is missing. Rules protect
+    /// only the paths whose folder exists, so without it a confined
+    /// command could create `mcp.json` or `config.toml` there for the next
+    /// run to read.
+    fn make_state_folder(&self) {
+        use std::os::unix::fs::DirBuilderExt;
+        if let Some(dir) = &self.state
+            && std::fs::symlink_metadata(dir).is_err()
+        {
+            let _ = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir);
         }
     }
 
@@ -465,9 +501,9 @@ impl Sandbox {
     /// Runs a tiny command (`/bin/sh`, empty environment) the way bash's
     /// commands in `work` would run, then one that tries to open the
     /// first protected file that exists for reading, which must fail.
-    /// Writes nothing.
+    /// Writes nothing, a missing state folder included.
     pub fn try_child(&self, work: &Path) -> Trial {
-        let confinement = match self.prepare(work) {
+        let confinement = match self.prepare_in(work, false) {
             Prepared::Confined(confinement, _) => confinement,
             Prepared::Unconfined(_) => return Trial::Unconfined,
             Prepared::Refused(reason) => return Trial::Failed(reason),

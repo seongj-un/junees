@@ -244,7 +244,7 @@ async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
          echo x >> {j}/config.toml || echo config-write-refused; \
          echo x > {j}/memory/new.md || echo memory-refused; \
          mv {j}/secrets/token {h}/sub/token || echo move-refused; \
-         echo x > {j}/sessions/new.jsonl && echo sessions-ok",
+         echo x > {j}/sessions/new.jsonl || echo sessions-refused",
         h = home.display(),
         j = junees.display(),
     );
@@ -257,7 +257,7 @@ async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
         "config-write-refused",
         "memory-refused",
         "move-refused",
-        "sessions-ok",
+        "sessions-refused",
     ] {
         assert!(text.contains(line), "{line}: {text}");
     }
@@ -426,14 +426,16 @@ async fn reads_can_be_narrowed() {
 }
 
 #[tokio::test]
-async fn a_missing_state_folder_leaves_the_working_folder_whole() {
+async fn a_missing_state_folder_is_made_private_and_protected() {
     if !landlock() {
         return;
     }
     let layout = Layout::new();
     let home = layout.path("sub-home");
-    std::fs::create_dir_all(&home).unwrap();
-    // The settings file would be in sub-home/.junees, which does not exist.
+    std::fs::create_dir_all(home.join("sub")).unwrap();
+    // The settings file would be in sub-home/.junees, which does not exist
+    // yet: a command run in the home folder must not make it with an
+    // mcp.json of its own for the next run.
     let sandbox = Sandbox::for_tools(&ToolSettings {
         settings_file: Some(SettingsFile::new(
             home.join(".junees/config.toml"),
@@ -443,9 +445,42 @@ async fn a_missing_state_folder_leaves_the_working_folder_whole() {
         ..ToolSettings::default()
     })
     .unwrap();
-    let command = format!("echo a > {}/top && echo top-ok", home.display());
-    let output = run(&home, sandbox, &command).await;
-    assert_eq!(output, ToolOutput::ok("top-ok\n[exit code 0]"));
+    let command = "echo '{}' > .junees/mcp.json || echo mcp-refused; \
+                   mkdir .junees/skills || echo mkdir-refused; \
+                   mv .junees gone || echo move-refused; \
+                   echo a > sub/made && echo sub-ok";
+    let output = run(&home, sandbox, command).await;
+    for line in ["mcp-refused", "mkdir-refused", "move-refused", "sub-ok"] {
+        assert!(output.content.contains(line), "{line}: {}", output.content);
+    }
+    let state = home.join(".junees");
+    let mode =
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&state).unwrap().permissions());
+    assert_eq!(mode & 0o777, 0o700);
+    assert!(!state.join("mcp.json").exists());
+    assert!(home.join("sub/made").exists());
+}
+
+#[tokio::test]
+async fn saved_sessions_are_read_only() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let sessions = layout.path("home/.junees/sessions");
+    let command = format!(
+        "echo forged >> {dir}/s.jsonl || echo append-refused; \
+         echo x > {dir}/new.jsonl || echo create-refused; cat {dir}/s.jsonl",
+        dir = sessions.display()
+    );
+    let output = run(&layout.path("work"), layout.sandbox(settings()), &command).await;
+    for line in ["append-refused", "create-refused", "{}"] {
+        assert!(output.content.contains(line), "{line}: {}", output.content);
+    }
+    assert_eq!(
+        std::fs::read_to_string(sessions.join("s.jsonl")).unwrap(),
+        "{}\n"
+    );
 }
 
 #[tokio::test]
@@ -813,6 +848,8 @@ fn the_tools_sandbox_follows_the_settings() {
         ]
     );
     assert!(plain.read_only.contains(&junees.join("memory")));
+    assert!(plain.read_only.contains(&junees.join("sessions")));
+    assert_eq!(plain.state, Some(junees.clone()));
     assert!(plain.read_only.contains(&junees.join("skills")));
     let webhook = Sandbox::for_tools(&tools(Some(settings()), true)).unwrap();
     assert!(

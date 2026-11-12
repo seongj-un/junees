@@ -201,6 +201,11 @@ impl SettingsFile {
         resolve(&path).unwrap_or(path)
     }
 
+    /// The folder holding the file, `$JUNEES_HOME`, absolute.
+    pub fn folder(&self) -> Option<PathBuf> {
+        std::path::absolute(self.path.parent()?).ok()
+    }
+
     /// What `~` and `$HOME` mean in bash commands.
     pub fn home(&self) -> Option<&Path> {
         self.home.as_deref()
