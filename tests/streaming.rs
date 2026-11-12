@@ -310,8 +310,13 @@ async fn cancelling_closes_the_stream_at_once() {
 /// The binary in a temporary folder, talking to the fake API, saving no
 /// session.
 async fn junees(url: &str, extra_env: &[(&str, &str)]) -> Output {
-    let cwd = tempfile::tempdir().unwrap();
-    let mut command = common::junees_binary(cwd.path(), cwd.path());
+    // The working folder is below HOME, not HOME itself: Junees's state
+    // folder (`~/.junees`, made on first use) inside the working folder
+    // would add a sandbox line to bash results.
+    let home = tempfile::tempdir().unwrap();
+    let cwd = home.path().join("work");
+    std::fs::create_dir(&cwd).unwrap();
+    let mut command = common::junees_binary(&cwd, home.path());
     command
         .args(["--no-session", "-p", "go"])
         .env("ANTHROPIC_API_KEY", "sk-fake")

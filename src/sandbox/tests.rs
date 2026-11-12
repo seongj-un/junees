@@ -244,7 +244,7 @@ async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
          echo x >> {j}/config.toml || echo config-write-refused; \
          echo x > {j}/memory/new.md || echo memory-refused; \
          mv {j}/secrets/token {h}/sub/token || echo move-refused; \
-         echo x > {j}/sessions/new.jsonl && echo sessions-ok",
+         echo x > {j}/sessions/new.jsonl || echo sessions-refused",
         h = home.display(),
         j = junees.display(),
     );
@@ -257,7 +257,7 @@ async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
         "config-write-refused",
         "memory-refused",
         "move-refused",
-        "sessions-ok",
+        "sessions-refused",
     ] {
         assert!(text.contains(line), "{line}: {text}");
     }
@@ -426,14 +426,16 @@ async fn reads_can_be_narrowed() {
 }
 
 #[tokio::test]
-async fn a_missing_state_folder_leaves_the_working_folder_whole() {
+async fn a_missing_state_folder_is_made_private_and_protected() {
     if !landlock() {
         return;
     }
     let layout = Layout::new();
     let home = layout.path("sub-home");
-    std::fs::create_dir_all(&home).unwrap();
-    // The settings file would be in sub-home/.junees, which does not exist.
+    std::fs::create_dir_all(home.join("sub")).unwrap();
+    // The settings file would be in sub-home/.junees, which does not exist
+    // yet: a command run in the home folder must not make it with an
+    // mcp.json of its own for the next run.
     let sandbox = Sandbox::for_tools(&ToolSettings {
         settings_file: Some(SettingsFile::new(
             home.join(".junees/config.toml"),
@@ -443,9 +445,42 @@ async fn a_missing_state_folder_leaves_the_working_folder_whole() {
         ..ToolSettings::default()
     })
     .unwrap();
-    let command = format!("echo a > {}/top && echo top-ok", home.display());
-    let output = run(&home, sandbox, &command).await;
-    assert_eq!(output, ToolOutput::ok("top-ok\n[exit code 0]"));
+    let command = "echo '{}' > .junees/mcp.json || echo mcp-refused; \
+                   mkdir .junees/skills || echo mkdir-refused; \
+                   mv .junees gone || echo move-refused; \
+                   echo a > sub/made && echo sub-ok";
+    let output = run(&home, sandbox, command).await;
+    for line in ["mcp-refused", "mkdir-refused", "move-refused", "sub-ok"] {
+        assert!(output.content.contains(line), "{line}: {}", output.content);
+    }
+    let state = home.join(".junees");
+    let mode =
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&state).unwrap().permissions());
+    assert_eq!(mode & 0o777, 0o700);
+    assert!(!state.join("mcp.json").exists());
+    assert!(home.join("sub/made").exists());
+}
+
+#[tokio::test]
+async fn saved_sessions_are_read_only() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let sessions = layout.path("home/.junees/sessions");
+    let command = format!(
+        "echo forged >> {dir}/s.jsonl || echo append-refused; \
+         echo x > {dir}/new.jsonl || echo create-refused; cat {dir}/s.jsonl",
+        dir = sessions.display()
+    );
+    let output = run(&layout.path("work"), layout.sandbox(settings()), &command).await;
+    for line in ["append-refused", "create-refused", "{}"] {
+        assert!(output.content.contains(line), "{line}: {}", output.content);
+    }
+    assert_eq!(
+        std::fs::read_to_string(sessions.join("s.jsonl")).unwrap(),
+        "{}\n"
+    );
 }
 
 #[tokio::test]
@@ -473,6 +508,69 @@ async fn unconfined_processes_environment_is_out_of_reach() {
         .run(json!({ "command": command }))
         .await;
     assert!(open.content.contains("environ-read"), "{}", open.content);
+}
+
+#[test]
+fn confined_commands_lose_the_session_bus_agent_and_tmux() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let sandbox = layout.sandbox(settings());
+    let Prepared::Confined(confinement, _) = sandbox.prepare(&layout.path("work")) else {
+        panic!("not confined");
+    };
+    let mut tokio_command = tokio::process::Command::new("true");
+    let mut std_command = std::process::Command::new("true");
+    for name in ESCAPE_ENV_VARS {
+        tokio_command.env(name, "/run/user/1000/bus");
+        std_command.env(name, "/run/user/1000/bus");
+    }
+    confinement.apply(&mut tokio_command);
+    confinement.apply_std(&mut std_command);
+    for envs in [tokio_command.as_std().get_envs(), std_command.get_envs()] {
+        let envs: Vec<_> = envs.collect();
+        for name in ESCAPE_ENV_VARS {
+            assert!(
+                envs.contains(&(std::ffi::OsStr::new(name), None)),
+                "{name}: {envs:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn confined_children_run_in_a_session_of_their_own() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let sandbox = layout.sandbox(settings());
+    let Prepared::Confined(confinement, _) = sandbox.prepare(&layout.path("work")) else {
+        panic!("not confined");
+    };
+    // Fields 5 to 7 of /proc/<pid>/stat: process group, session and
+    // controlling terminal (0: none).
+    let script = "read -r _ _ _ _ group session tty _ < /proc/$$/stat; \
+                  echo \"$$ $group $session $tty\"";
+    let mut tokio_command = tokio::process::Command::new("/bin/sh");
+    let mut std_command = std::process::Command::new("/bin/sh");
+    tokio_command.args(["-c", script]);
+    std_command.args(["-c", script]);
+    confinement.apply(&mut tokio_command);
+    confinement.apply_std(&mut std_command);
+    let lines = [
+        tokio_command.output().await.unwrap().stdout,
+        std_command.output().unwrap().stdout,
+    ];
+    for line in lines {
+        let line = String::from_utf8(line).unwrap();
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields.len(), 4, "{line}");
+        assert_eq!(fields[1], fields[0], "{line}");
+        assert_eq!(fields[2], fields[0], "{line}");
+        assert_eq!(fields[3], "0", "{line}");
+    }
 }
 
 #[tokio::test]
@@ -573,6 +671,53 @@ async fn an_older_abi_without_tcp_rules_says_so_or_refuses() {
     // With the network allowed, ABI 3 confines files.
     let sandbox = layout.sandbox(settings()).with_support(Support::Abi(3));
     let output = run(&work, sandbox, &command).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(!outside.exists());
+}
+
+#[tokio::test]
+async fn an_abi_without_truncation_says_so_or_refuses() {
+    if !landlock() {
+        return;
+    }
+    // ABI 2 does not handle truncate(2): `require` refuses, `auto`
+    // confines the rest and says once what is left open.
+    let layout = Layout::new();
+    let work = layout.path("work");
+    let command = "echo ran".to_string();
+    let refused = run(
+        &work,
+        layout.sandbox(settings()).with_support(Support::Abi(2)),
+        &command,
+    )
+    .await;
+    assert!(refused.is_error);
+    assert_eq!(
+        refused.content,
+        "not run: the sandbox is required (sandbox = require) but the kernel's Landlock ABI 2 \
+         cannot stop commands from emptying (truncating) files; that needs ABI 3 (Linux 6.2)"
+    );
+    let auto = Settings {
+        mode: Some(Mode::Auto),
+        network: false,
+        ..settings()
+    };
+    let bash =
+        Bash::for_test(&work).confined(Some(layout.sandbox(auto).with_support(Support::Abi(2))));
+    let first = bash.run(json!({ "command": command })).await;
+    assert_eq!(
+        first.content,
+        "ran\n[exit code 0]\n[sandbox: the kernel's Landlock ABI 2 cannot stop commands from \
+         emptying (truncating) files; that needs ABI 3 (Linux 6.2); the settings file and the \
+         data folders can be emptied, not read]\n[sandbox: sandbox_network = 0 needs Landlock \
+         ABI 4, the kernel has 2; TCP is not restricted]"
+    );
+    let second = bash.run(json!({ "command": command })).await;
+    assert_eq!(second, ToolOutput::ok("ran\n[exit code 0]"));
+    // Still confined otherwise.
+    let outside = layout.path("outside/new");
+    let write = format!("echo x > {}", outside.display());
+    let output = bash.run(json!({ "command": write })).await;
     assert!(output.is_error, "{}", output.content);
     assert!(!outside.exists());
 }
@@ -737,6 +882,8 @@ fn the_tools_sandbox_follows_the_settings() {
         ]
     );
     assert!(plain.read_only.contains(&junees.join("memory")));
+    assert!(plain.read_only.contains(&junees.join("sessions")));
+    assert_eq!(plain.state, Some(junees.clone()));
     assert!(plain.read_only.contains(&junees.join("skills")));
     let webhook = Sandbox::for_tools(&tools(Some(settings()), true)).unwrap();
     assert!(

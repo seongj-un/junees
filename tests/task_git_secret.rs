@@ -64,9 +64,11 @@ fn harness_git_runs_no_planted_hook_and_hides_the_credentials() {
         std::env::set_var("ANTHROPIC_API_KEY", KEY);
         std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", CLAUDE_TOKEN);
     }
-    assert!(git::is_dirty(&root).unwrap());
-    git::commit_all(&root, "junees: checkpoint after session 1").unwrap();
-    assert!(!git::is_dirty(&root).unwrap());
+    let repo = git::Repo::unconfined(&root);
+    assert!(repo.is_dirty().unwrap());
+    repo.commit_all("junees: checkpoint after session 1")
+        .unwrap();
+    assert!(!repo.is_dirty().unwrap());
 
     // The filter ran (it cannot be turned off without breaking the
     // repository's own attributes), but it saw no key, and the hook never ran.

@@ -3,8 +3,20 @@
 //! plain push (never forced) to the branch.
 //!
 //! Git runs like task mode's ([`crate::task::git`]): no hooks, no
-//! fsmonitor, without the repository variables or any credential Junees
-//! holds. The push uses the user's own git credentials (credential helper,
+//! fsmonitor, no signing, without the repository variables or any
+//! credential Junees holds. After the model ran, it runs with the
+//! worktree's git folder fixed (`GIT_DIR`, [`Worktree::repo`]) as git
+//! found it before: the model can rewrite the worktree's `.git` file to
+//! lead into a copy of the repository's folder whose config names a clean
+//! filter, and git would run that program outside the sandbox on the
+//! commit. The commit stops when the `.git` file leads elsewhere now
+//! ([`Worktree::check_git_dirs`]). The folders it leads to before are the
+//! route clone's, which the model's sandbox does not let it write, so
+//! their filters are the user's own; the [`ConfigSnapshot`] catches a
+//! change where the sandbox is off. The commit itself runs unconfined:
+//! confining it would mean letting the sandbox write the clone's git
+//! folder, where a filter could then plant settings for the next fetch
+//! and checkout. The push uses the user's own git credentials (credential helper,
 //! ssh agent): Junees never hands its GitHub token to git. It pushes to the
 //! `origin` URL read before the model ran, so a changed `remote.origin.url`
 //! cannot send the commit elsewhere. Other settings still apply to a URL
@@ -38,6 +50,63 @@ pub struct Worktree {
     pub path: PathBuf,
     /// `origin` as configured (before the model ran).
     pub origin: String,
+    /// The worktree's own git folder and the repository's common one, as
+    /// git found them before the model ran.
+    pub git_dir: PathBuf,
+    pub common_dir: PathBuf,
+}
+
+impl Worktree {
+    /// Git in the worktree with its git folder fixed at [`Self::git_dir`],
+    /// whatever its `.git` file says by now.
+    pub fn repo(&self) -> git::Repo {
+        git::Repo::pinned(&self.path, &self.git_dir)
+    }
+
+    /// Fails when git finds other git folders for the worktree than
+    /// before the model ran: a rewritten `.git` file, or a changed
+    /// `commondir` in the worktree's own git folder.
+    pub fn check_git_dirs(&self) -> Result<()> {
+        let found = git_dirs(&git::Repo::unconfined(&self.path))?;
+        let pinned = git_dirs(&self.repo())?;
+        let expected = (self.git_dir.clone(), self.common_dir.clone());
+        for (now, how) in [
+            (found, "the worktree's .git file"),
+            (pinned, "its git folder"),
+        ] {
+            if now != expected {
+                bail!(
+                    "{how} now leads to the git folders {} and {}, not {} and {} as before the \
+                     model ran; nothing was committed or pushed (check the worktree {})",
+                    now.0.display(),
+                    now.1.display(),
+                    expected.0.display(),
+                    expected.1.display(),
+                    self.path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The git folder and common git folder git finds for the work tree of
+/// `repo`, absolute.
+fn git_dirs(repo: &git::Repo) -> Result<(PathBuf, PathBuf)> {
+    let out = repo.git(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+    ])?;
+    let mut lines = out.lines();
+    match (lines.next(), lines.next()) {
+        (Some(own), Some(common)) => Ok((PathBuf::from(own), PathBuf::from(common))),
+        _ => bail!(
+            "`git rev-parse` named no git folders in {}",
+            repo.root().display()
+        ),
+    }
 }
 
 /// Checks a branch name from GitHub before it goes into a refspec.
@@ -118,7 +187,13 @@ pub fn prepare(dir: &Path, repo: &Repo, number: u64, branch: &str, sha: &str) ->
         dir,
         &["worktree", "add", "--quiet", "--detach", &shown, sha],
     )?;
-    Ok(Worktree { path, origin })
+    let (git_dir, common_dir) = git_dirs(&git::Repo::unconfined(&path))?;
+    Ok(Worktree {
+        path,
+        origin,
+        git_dir,
+        common_dir,
+    })
 }
 
 /// Lists the worktrees folder in the repository's `info/exclude`, so the
@@ -148,9 +223,12 @@ fn exclude(dir: &Path) -> Result<()> {
 }
 
 /// Commits everything the model changed (new secret-looking or very large
-/// files left out); the new head, or `None` when nothing changed.
-pub fn commit(worktree: &Path, message: &str) -> Result<Option<String>> {
-    let commit = git::commit_all(worktree, message)?;
+/// files left out) with the git folder fixed ([`Worktree::repo`]), after
+/// checking the worktree still leads to it ([`Worktree::check_git_dirs`]);
+/// the new head, or `None` when nothing changed.
+pub fn commit(worktree: &Worktree, message: &str) -> Result<Option<String>> {
+    worktree.check_git_dirs()?;
+    let commit = worktree.repo().commit_all(message)?;
     if !commit.made {
         return Ok(None);
     }
@@ -158,26 +236,28 @@ pub fn commit(worktree: &Path, message: &str) -> Result<Option<String>> {
 }
 
 /// The worktree's head commit.
-pub fn head(worktree: &Path) -> Result<String> {
-    Ok(run_git(worktree, &["rev-parse", "HEAD"])?
+pub fn head(worktree: &Worktree) -> Result<String> {
+    Ok(worktree
+        .repo()
+        .git(&["rev-parse", "HEAD"])?
         .trim()
         .to_string())
 }
 
-/// Pushes the worktree's head to `branch` of `origin`, without force.
-pub fn push(worktree: &Path, origin: &str, branch: &str) -> Result<()> {
+/// Pushes the worktree's head to `branch` of its `origin` (as read before
+/// the model ran), without force.
+pub fn push(worktree: &Worktree, branch: &str) -> Result<()> {
     check_branch(branch)?;
-    run_git(
-        worktree,
-        &[
+    worktree
+        .repo()
+        .git(&[
             "push",
             "--quiet",
             "--no-verify",
-            origin,
+            &worktree.origin,
             &format!("HEAD:refs/heads/{branch}"),
-        ],
-    )
-    .map(|_| ())
+        ])
+        .map(|_| ())
 }
 
 /// How many levels of `include.path` and `includeIf.*.path`
@@ -363,8 +443,8 @@ fn config_entries(bytes: Option<&[u8]>) -> Option<std::collections::BTreeMap<Str
     Some(entries)
 }
 
-/// The test command: `sh -c` in `worktree`, in a process group of its
-/// own, without the repository variables, Junees's credentials, the
+/// The test command: `sh -c` in `worktree`, in a session and process
+/// group of its own ([`crate::tools::own_session`]), without the repository variables, Junees's credentials, the
 /// variables in `hidden`, and the user's git and GitHub CLI credentials
 /// like the model's shell ([`crate::tools::strip_git_credentials`], with
 /// `gh_config` as the GitHub CLI folder): it runs code of the pull request
@@ -381,8 +461,8 @@ fn test_command(
         .arg(command)
         .current_dir(worktree)
         .stdin(std::process::Stdio::null())
-        .process_group(0)
         .kill_on_drop(true);
+    crate::tools::own_session(&mut child);
     for name in git::REPO_ENV_VARS
         .iter()
         .chain(crate::tools::SECRET_ENV_VARS)
@@ -612,7 +692,7 @@ pub(crate) mod tests {
         let tree = prepare(&clone, &repo, 7, "feature", &head).unwrap();
         assert_eq!(tree.path, clone.join(".junees-worktrees/pr-7"));
         assert_eq!(tree.origin, "https://git.invalid/o/n.git");
-        assert_eq!(super::head(&tree.path).unwrap(), head);
+        assert_eq!(super::head(&tree).unwrap(), head);
         // The clone does not look changed.
         assert_eq!(sh_git(&clone, &["status", "--porcelain"]), "");
         // Again (an earlier worktree is replaced).
@@ -620,11 +700,11 @@ pub(crate) mod tests {
         let tree = prepare(&clone, &repo, 7, "feature", &head).unwrap();
         assert!(!tree.path.join("junk").exists());
 
-        assert_eq!(commit(&tree.path, "nothing").unwrap(), None);
+        assert_eq!(commit(&tree, "nothing").unwrap(), None);
         std::fs::write(tree.path.join("lib.txt"), "one\ntwo\nthree\n").unwrap();
         std::fs::write(tree.path.join(".env"), "TOKEN=x\n").unwrap();
-        let new = commit(&tree.path, "fix: address review").unwrap().unwrap();
-        push(&tree.path, &tree.origin, "feature").unwrap();
+        let new = commit(&tree, "fix: address review").unwrap().unwrap();
+        push(&tree, "feature").unwrap();
         assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), new);
         assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature~1"]), head);
         let files = sh_git(&bare, &["ls-tree", "--name-only", "feature"]);
@@ -634,9 +714,53 @@ pub(crate) mod tests {
         let tree = prepare(&clone, &repo, 8, "feature", &new).unwrap();
         sh_git(&tree.path, &["checkout", "-q", "--detach", &head]);
         std::fs::write(tree.path.join("lib.txt"), "other\n").unwrap();
-        commit(&tree.path, "diverge").unwrap().unwrap();
-        assert!(push(&tree.path, &tree.origin, "feature").is_err());
+        commit(&tree, "diverge").unwrap().unwrap();
+        assert!(push(&tree, "feature").is_err());
         assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), new);
+    }
+
+    #[test]
+    fn a_rewritten_git_file_stops_the_commit_and_its_filter_never_runs() {
+        // The review's attack: the model points the worktree's `.git` file
+        // at a git folder of its own whose config names a clean filter.
+        let (root, clone, bare, head) = remote_and_clone();
+        let repo = Repo::parse("o/n").unwrap();
+        let tree = prepare(&clone, &repo, 7, "feature", &head).unwrap();
+        assert_eq!(tree.git_dir, tree.common_dir.join("worktrees/pr-7"));
+        tree.check_git_dirs().unwrap();
+        let escaped = root.path().join("escaped");
+        let planted = tree.path.join("planted");
+        sh_git(&tree.path, &["init", "-q", "planted"]);
+        let filter = format!("echo escaped >> '{}'; cat", escaped.display());
+        sh_git(&planted, &["config", "filter.planted.clean", &filter]);
+        let real = std::fs::read_to_string(tree.path.join(".git")).unwrap();
+        let pointer = format!("gitdir: {}\n", planted.join(".git").display());
+        std::fs::write(tree.path.join(".git"), pointer).unwrap();
+        std::fs::write(tree.path.join(".gitattributes"), "* filter=planted\n").unwrap();
+        std::fs::write(tree.path.join(".gitignore"), "/planted/\n").unwrap();
+        std::fs::write(tree.path.join("lib.txt"), "changed\n").unwrap();
+        // Plain git now reads the planted config: the control.
+        assert_eq!(
+            sh_git(&tree.path, &["config", "filter.planted.clean"]),
+            filter
+        );
+
+        let err = commit(&tree, "fix").unwrap_err().to_string();
+        assert!(
+            err.contains("the worktree's .git file now leads to"),
+            "{err}"
+        );
+        assert!(!escaped.exists());
+        // Git with the folder fixed reads the real one, whatever the file
+        // says: the head is the pull request's, and a commit (past the
+        // check) runs no filter.
+        assert_eq!(super::head(&tree).unwrap(), head);
+        assert!(tree.repo().commit_all("fix").unwrap().made);
+        assert!(!escaped.exists());
+        std::fs::write(tree.path.join(".git"), real).unwrap();
+        tree.check_git_dirs().unwrap();
+        push(&tree, "feature").unwrap();
+        assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature~1"]), head);
     }
 
     #[test]
@@ -668,8 +792,8 @@ pub(crate) mod tests {
         // Unchecked, the push goes to the other repository: this is what
         // the snapshot guards.
         std::fs::write(tree.path.join("lib.txt"), "changed\n").unwrap();
-        commit(&tree.path, "fix").unwrap().unwrap();
-        push(&tree.path, &tree.origin, "feature").unwrap();
+        commit(&tree, "fix").unwrap().unwrap();
+        push(&tree, "feature").unwrap();
         assert_eq!(sh_git(&bare, &["rev-parse", "refs/heads/feature"]), head);
         assert_ne!(sh_git(&other, &["rev-parse", "refs/heads/feature"]), head);
 

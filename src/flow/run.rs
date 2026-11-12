@@ -687,8 +687,7 @@ async fn address_run(
          (webhook route {}).",
         review["id"], cx.route.name
     );
-    let committed =
-        address::commit(&tree.path, &message).map_err(|err| (format!("{err:#}"), true))?;
+    let committed = address::commit(&tree, &message).map_err(|err| (format!("{err:#}"), true))?;
     let Some(new) = committed else {
         let body = format!(
             "Junees가 리뷰 {}(@{reviewer})를 살폈지만 바꾼 파일이 없어 push하지 않았습니다.\n\n{}",
@@ -739,8 +738,8 @@ async fn address_run(
     if tested.is_some() {
         config_unchanged(cx, r, n, review, &snapshot, Changer::Test).await?;
     }
-    let (path, origin, branch_owned) = (tree.path.clone(), tree.origin.clone(), branch.to_string());
-    tokio::task::spawn_blocking(move || address::push(&path, &origin, &branch_owned))
+    let (pushed, branch_owned) = (tree.clone(), branch.to_string());
+    tokio::task::spawn_blocking(move || address::push(&pushed, &branch_owned))
         .await
         .map_err(|err| (err.to_string(), true))?
         .map_err(|err| (format!("push: {err:#}"), true))?;

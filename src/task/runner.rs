@@ -26,6 +26,7 @@ use crate::memory::{Memory, MemoryTool, Mode};
 use crate::message::Usage;
 use crate::notify::Notifier;
 use crate::provider::Provider;
+use crate::sandbox::Sandbox;
 use crate::session::{SessionWriter, format_utc};
 use crate::skills;
 use crate::tools::{ToolRegistry, ToolSettings};
@@ -175,6 +176,13 @@ impl TaskEnv<'_> {
         Verifier::new(self.root.clone(), &self.tool_settings)
     }
 
+    /// The harness's git in the task's repository, in the sandbox of the
+    /// sessions' commands ([`git::Repo::confined`]): sessions write
+    /// `.git/config`, where a filter would run in every checkpoint commit.
+    fn repo(&self) -> git::Repo {
+        git::Repo::confined(&self.root, Sandbox::for_tools(&self.tool_settings))
+    }
+
     /// With the `claude-code` backend, checks that `claude` runs on the
     /// subscription and tells the user which one, and whether the commands
     /// it runs can see its credentials.
@@ -275,8 +283,9 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
         );
     }
     // A failed init may have left .junees/ behind; the next one rewrites it.
-    if git::is_dirty_outside_task(root)? {
-        return Err(dirty_tree(root, &["--", ".", ":(exclude).junees"]));
+    let repo = env.repo();
+    if repo.is_dirty_outside_task()? {
+        return Err(dirty_tree(&repo, &["--", ".", ":(exclude).junees"]));
     }
     prepare_dir(root)?;
     env.check_claude(report).await?;
@@ -294,8 +303,10 @@ pub async fn init(env: &TaskEnv<'_>, goal: &str, report: &mut Reporter<'_>) -> R
         &format!("init: {count} features planned, {}", tokens(usage)),
     )?;
     // Only now: a failed init must leave the user's files as they were.
-    ignore_build_output(root, report)?;
-    let commit = git::commit_all(root, INIT_COMMIT).context("cannot commit the new task")?;
+    ignore_build_output(&repo, report)?;
+    let commit = repo
+        .commit_all(INIT_COMMIT)
+        .context("cannot commit the new task")?;
     warn_left_out(report, &commit.left_out);
     line(
         report,
@@ -520,9 +531,10 @@ async fn run_until_stop(
     // 1 MiB, a `.env`) stay out of every later commit too, so they cannot
     // sweep the user's work into one: name them, but do not stop an
     // unattended run on them.
-    let left_out = git::untracked_left_out(root, &[])?;
-    if git::is_dirty_besides(root, &left_out)? {
-        return Err(dirty_tree(root, &[]));
+    let repo = env.repo();
+    let left_out = repo.untracked_left_out(&[])?;
+    if repo.is_dirty_besides(&left_out)? {
+        return Err(dirty_tree(&repo, &[]));
     }
     warn_left_out(report, &left_out);
     env.check_claude(report).await?;
@@ -530,15 +542,15 @@ async fn run_until_stop(
     let ledger = Arc::new(Mutex::new(ledger));
     // A task from an older Junees learns to ignore the run log here, in its
     // own commit, so the tree stays clean even if no session runs.
-    if prepare_dir(root)? && git::is_dirty(root)? {
-        git::commit_all(root, IGNORE_COMMIT)?;
+    if prepare_dir(root)? && repo.is_dirty()? {
+        repo.commit_all(IGNORE_COMMIT)?;
     }
     let unchecked =
         recheck_passing(env, &ledger, budget::tokens(state.usage), started, report).await?;
     // The tree was clean before the list was loaded, so whatever changed
     // since is the harness's doing. Committed now, the run leaves a clean
     // tree even when it stops before any session (see `recheck_commit`).
-    recheck_commit(root, report)?;
+    recheck_commit(&repo, report)?;
     // A run that stopped on its own does not hold its stall streak against
     // the next one; after a crash (no stop recorded) the streak carries on.
     if state.stop.take().is_some() {
@@ -723,11 +735,12 @@ async fn run_until_stop(
 /// that stops before any session (a budget already used up, a signal,
 /// nothing left to do) would leave them uncommitted, and the next run would
 /// refuse the dirty tree.
-fn recheck_commit(root: &Path, report: &mut Reporter<'_>) -> Result<()> {
-    if !git::is_dirty(root)? {
+fn recheck_commit(repo: &git::Repo, report: &mut Reporter<'_>) -> Result<()> {
+    if !repo.is_dirty()? {
         return Ok(());
     }
-    let commit = git::commit_all(root, RECHECK_COMMIT)
+    let commit = repo
+        .commit_all(RECHECK_COMMIT)
         .context("cannot commit the changes of the start-of-run recheck")?;
     warn_left_out(report, &commit.left_out);
     if commit.made {
@@ -802,7 +815,8 @@ fn recover(
             running.pid
         ),
     );
-    let (init, defined) = init_list(root).context("cannot recover after the crash")?;
+    let repo = env.repo();
+    let (init, defined) = init_list(&repo).context("cannot recover after the crash")?;
     prepare_dir(root)?;
     let copy = state.features.as_deref();
     let restored = features::restore_defined(root, &defined, copy)?;
@@ -831,8 +845,8 @@ fn recover(
         ));
     }
     append_progress(root, &note)?;
-    if git::is_dirty(root)? {
-        let commit = git::commit_all(root, RECOVER_COMMIT)?;
+    if repo.is_dirty()? {
+        let commit = repo.commit_all(RECOVER_COMMIT)?;
         warn_left_out(report, &commit.left_out);
         if commit.made {
             line(report, &format!("recovery commit: {RECOVER_COMMIT}"));
@@ -854,8 +868,8 @@ fn recover(
 
 /// The oldest [`INIT_COMMIT`] in the history (shortened) and the feature
 /// list it committed, with every feature not passing.
-fn init_list(root: &Path) -> Result<(String, Vec<features::Feature>)> {
-    let Some(commit) = git::oldest_with_subject(root, INIT_COMMIT)? else {
+fn init_list(repo: &git::Repo) -> Result<(String, Vec<features::Feature>)> {
+    let Some(commit) = repo.oldest_with_subject(INIT_COMMIT)? else {
         bail!(
             "there is no `{INIT_COMMIT}` commit in the history to take the feature \
              definitions from; put .junees/features.json right yourself, commit it, and \
@@ -863,7 +877,8 @@ fn init_list(root: &Path) -> Result<(String, Vec<features::Feature>)> {
         );
     };
     let short: String = commit.chars().take(12).collect();
-    let text = git::show(root, &commit, ".junees/features.json")
+    let text = repo
+        .show(&commit, ".junees/features.json")
         .with_context(|| format!("cannot read the feature list of {short}"))?;
     let mut list =
         features::parse(&text).with_context(|| format!("the feature list of {short}"))?;
@@ -937,8 +952,9 @@ fn wrap_up(
         Err(err) => format!("failed: {}", preview(&format!("{err:#}"), ERROR_CHARS)),
     };
     append_progress(root, &format!("session {n}: {summary}, {}", tokens(usage)))?;
-    if git::is_dirty(root)? {
-        let commit = git::commit_all(root, &checkpoint_message(n))?;
+    let repo = env.repo();
+    if repo.is_dirty()? {
+        let commit = repo.commit_all(&checkpoint_message(n))?;
         warn_left_out(report, &commit.left_out);
         if commit.made {
             line(
@@ -993,7 +1009,7 @@ async fn work_session(
 ) -> (Result<Ended>, Usage) {
     let root = &env.root;
     let progress = fs::read_to_string(progress_path(root)).unwrap_or_default();
-    let git_log = git::recent_log(root, GIT_LOG_LINES);
+    let git_log = env.repo().recent_log(GIT_LOG_LINES);
     let (system, passing, total) = {
         let ledger = ledger.lock().unwrap();
         let system = prompt::work_system(root, n, ledger.features(), &progress, &git_log);
@@ -1040,7 +1056,7 @@ async fn claude_session(
 ) -> (Result<Ended>, Usage) {
     let root = &env.root;
     let progress = fs::read_to_string(progress_path(root)).unwrap_or_default();
-    let git_log = git::recent_log(root, GIT_LOG_LINES);
+    let git_log = env.repo().recent_log(GIT_LOG_LINES);
     let (system, passing, total) = {
         let ledger = ledger.lock().unwrap();
         let system = prompt::claude_work_system(n, ledger.features(), &progress, &git_log);
@@ -1294,12 +1310,13 @@ fn prepare_dir(root: &Path) -> Result<bool> {
 /// repository's `.gitignore`, so the init commit carries them. A folder
 /// that already holds tracked files is the project's own and stays as it
 /// is.
-fn ignore_build_output(root: &Path, report: &mut Reporter<'_>) -> Result<()> {
+fn ignore_build_output(repo: &git::Repo, report: &mut Reporter<'_>) -> Result<()> {
+    let root = repo.root();
     let mut missing = Vec::new();
     for pattern in BUILD_OUTPUT {
         // Checked at the root, where the anchored ones apply.
         let folder = pattern.trim_start_matches('/');
-        if !git::is_ignored(root, folder)? && !git::tracks_any(root, folder)? {
+        if !repo.is_ignored(folder)? && !repo.tracks_any(folder)? {
             missing.push(*pattern);
         }
     }
@@ -1336,8 +1353,8 @@ fn ignore_build_output(root: &Path, report: &mut Reporter<'_>) -> Result<()> {
 /// files the harness does not commit are among the changes (it left them
 /// out of an earlier commit, or would leave them out), it names a few and
 /// says why, since committing everything would not clean the tree.
-fn dirty_tree(root: &Path, pathspec: &[&str]) -> anyhow::Error {
-    let left_out = git::untracked_left_out(root, pathspec).unwrap_or_default();
+fn dirty_tree(repo: &git::Repo, pathspec: &[&str]) -> anyhow::Error {
+    let left_out = repo.untracked_left_out(pathspec).unwrap_or_default();
     if left_out.is_empty() {
         return anyhow!(DIRTY_TREE);
     }
@@ -1926,14 +1943,14 @@ mod tests {
         fs::write(root.join("build/gen.sh"), "true").unwrap();
         git::commit_all(root, "project").unwrap();
         let mut out = Collected::default();
-        ignore_build_output(root, &mut out.reporter()).unwrap();
+        ignore_build_output(&git::Repo::unconfined(root), &mut out.reporter()).unwrap();
         assert_eq!(
             fs::read_to_string(root.join(".gitignore")).unwrap(),
             "/target\n*.log\nnode_modules/\n/dist/\n.venv/\n__pycache__/\n"
         );
         // Nothing left to add: the file stays as it is.
         let mut out = Collected::default();
-        ignore_build_output(root, &mut out.reporter()).unwrap();
+        ignore_build_output(&git::Repo::unconfined(root), &mut out.reporter()).unwrap();
         assert!(out.lines.is_empty(), "{:?}", out.lines);
     }
 
@@ -1942,7 +1959,7 @@ mod tests {
         let repo = repo();
         let root = repo.path();
         let mut out = Collected::default();
-        ignore_build_output(root, &mut out.reporter()).unwrap();
+        ignore_build_output(&git::Repo::unconfined(root), &mut out.reporter()).unwrap();
         for path in [
             "target/debug/app",
             "build/out.o",
@@ -1975,7 +1992,7 @@ mod tests {
         ] {
             fs::write(root.join(name), "x").unwrap();
         }
-        let err = dirty_tree(root, &[]).to_string();
+        let err = dirty_tree(&git::Repo::unconfined(root), &[]).to_string();
         assert!(
             err.contains(
                 "stay uncommitted: .env.a (the name looks like a secret), \
@@ -2313,6 +2330,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_filter_a_session_planted_runs_in_the_sessions_sandbox() {
+        if let crate::sandbox::Support::Unavailable(why) = crate::sandbox::Support::current() {
+            eprintln!("skipped: {why}");
+            return;
+        }
+        let repo = task_repo(&["false"]);
+        let root = repo.path();
+        let outside = tempfile::tempdir().unwrap();
+        let escaped = outside.path().join("escaped");
+        let ran = root.join(".git/filter-ran");
+        // A clean filter in the repository's config, the way a session
+        // can write it: `git add` runs it for every new file.
+        let config = fs::read_to_string(root.join(".git/config")).unwrap()
+            + &format!(
+                "[filter \"planted\"]\n\tclean = \"echo ran >> '{}'; (echo escaped >> '{}'); cat\"\n",
+                ran.display(),
+                escaped.display()
+            );
+        let provider = Scripted::new(vec![
+            calls(&[
+                write(&root.join(".git/config"), &config),
+                write(&root.join(".gitattributes"), "* filter=planted\n"),
+                write(&root.join("app.rs"), "fn main() {}\n"),
+            ]),
+            text("done"),
+        ]);
+        let home = tempfile::tempdir().unwrap();
+        let factory = factory(&provider);
+        let mut env = env(root, home.path(), &factory);
+        // The temporary folders, where the test folders are, stay out.
+        env.tool_settings.sandbox = Some(crate::sandbox::Settings {
+            mode: Some(crate::sandbox::Mode::Require),
+            write: Vec::new(),
+            read: None,
+            network: true,
+            temp: Vec::new(),
+            unattended: false,
+        });
+        let mut out = Collected::default();
+        run(&env, 1, &mut out.reporter()).await.unwrap();
+
+        assert_eq!(subjects(root)[0], checkpoint_message(1));
+        assert!(git::show(root, "HEAD", "app.rs").is_ok());
+        assert!(ran.exists(), "the filter did not run");
+        assert!(!escaped.exists(), "the filter ran outside the sandbox");
+    }
+
+    #[tokio::test]
     async fn checkpoints_leave_files_that_look_like_secrets_out() {
         let repo = task_repo(&["false"]);
         let root = repo.path();
@@ -2506,8 +2571,7 @@ mod tests {
         // The session leaves the repository unable to commit.
         let provider = Scripted::new(vec![
             calls(&[bash(format!(
-                "cd '{}' && git config commit.gpgsign true && git config gpg.program false \
-                 && echo wip > wip.txt",
+                "cd '{}' && touch .git/index.lock && echo wip > wip.txt",
                 root.display()
             ))]),
             text("done"),
@@ -2522,7 +2586,7 @@ mod tests {
             detail.starts_with("could not wrap up session 1: "),
             "{detail}"
         );
-        assert!(detail.contains("git commit"), "{detail}");
+        assert!(detail.contains("git add"), "{detail}");
         assert_eq!(State::load(root).unwrap().stop, Some(stop));
         assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
     }

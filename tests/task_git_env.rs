@@ -58,8 +58,9 @@ async fn git_dir_in_the_environment_does_not_redirect_task_mode() {
             .to_string(),
     )
     .unwrap();
-    git::commit_all(&root, "first").unwrap();
-    assert!(!git::is_dirty(&root).unwrap());
+    let repo = git::Repo::unconfined(&root);
+    repo.commit_all("first").unwrap();
+    assert!(!repo.is_dirty().unwrap());
 
     // The session's bash, which sees the repository's own identity.
     let output = session_tools(&ToolSettings::default())

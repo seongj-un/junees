@@ -26,8 +26,8 @@ const DRAIN_GRACE: Duration = Duration::from_millis(200);
 
 /// Runs a command with `bash -c` in the current working directory.
 ///
-/// The command gets its own process group, so a timeout kills everything it
-/// started. bash exiting ends the call even if background processes it
+/// The command gets its own session and so its own process group
+/// ([`own_session`]), so a timeout kills everything it started. bash exiting ends the call even if background processes it
 /// started still hold the output pipes. Commands the [`CommandPolicy`]
 /// denies are not run at all; the default policy has the built-in rules.
 pub struct Bash {
@@ -124,8 +124,8 @@ impl Bash {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .process_group(0)
             .kill_on_drop(true);
+        own_session(&mut cmd);
         // First, so the settings under test (hidden variables, a webhook
         // run's credentials) still apply on top of it.
         #[cfg(test)]
@@ -289,6 +289,20 @@ impl Tool for Bash {
     }
 }
 
+/// Makes `command`'s process start a session of its own
+/// ([`crate::sandbox::start_session`]), which is also a process group of
+/// its own whose id is its pid, for [`GroupGuard`], and has no controlling
+/// terminal. For commands that may run unconfined: a confinement starts
+/// the session itself ([`crate::sandbox::Confinement::apply`]), and doing
+/// both is fine.
+pub(crate) fn own_session(command: &mut Command) {
+    // SAFETY: the closure runs in the child between fork and exec and only
+    // makes system calls, which allocate nothing.
+    unsafe {
+        command.pre_exec(crate::sandbox::start_session);
+    }
+}
+
 /// The process group of a running command, killed when dropped unless
 /// disarmed first.
 pub(crate) struct GroupGuard(pub(crate) Option<u32>);
@@ -302,8 +316,8 @@ impl GroupGuard {
             .and_then(|pid| libc::pid_t::try_from(pid).ok())
         {
             // SAFETY: killpg only sends a signal. The group was created for
-            // this command with process_group(0), so its id equals the
-            // child's pid, and the child is not reaped yet, so the id still
+            // this command ([`own_session`]), so its id equals the child's
+            // pid, and the child is not reaped yet, so the id still
             // names this group.
             unsafe {
                 libc::killpg(pid, libc::SIGKILL);
@@ -569,6 +583,25 @@ mod tests {
         assert!(output.is_error);
         assert!(output.content.starts_with("before\n"), "{}", output.content);
         assert!(output.content.contains("timed out after 1s"));
+    }
+
+    #[tokio::test]
+    async fn commands_run_in_a_session_without_a_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        // Fields 5 to 7 of /proc/<pid>/stat: process group, session and
+        // controlling terminal (0: none).
+        let output = Bash::for_test(dir.path())
+            .run(json!({
+                "command": "read -r _ _ _ _ group session tty _ < /proc/$$/stat; \
+                            echo \"$$ $group $session $tty\""
+            }))
+            .await;
+        let line = output.content.lines().next().unwrap();
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(fields.len(), 4, "{}", output.content);
+        assert_eq!(fields[1], fields[0], "{}", output.content);
+        assert_eq!(fields[2], fields[0], "{}", output.content);
+        assert_eq!(fields[3], "0", "{}", output.content);
     }
 
     #[tokio::test]

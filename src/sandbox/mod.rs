@@ -13,7 +13,8 @@
 //!   ([`crate::browser::PROFILES_FOLDER`]: cookies and logins of a
 //!   running browser) and, in a webhook run, the git and GitHub CLI
 //!   credentials;
-//! - never write in Junees's data folders (memory, skills, cron, ...);
+//! - never write in Junees's data folders (memory, skills, cron, ...)
+//!   or the saved sessions;
 //! - with `sandbox_network = 0` and a kernel of Landlock ABI 4 or later,
 //!   neither connect nor bind TCP sockets.
 //!
@@ -79,6 +80,22 @@ pub const NETWORK_ENV: &str = "JUNEES_SANDBOX_NETWORK";
 
 /// The temporary folders commands may always write in, besides `$TMPDIR`.
 const TEMP_FOLDERS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
+
+/// Variables that lead a confined command to a process outside the
+/// sandbox that runs commands for it: the user's D-Bus session bus
+/// (`systemd-run --user`), the user's runtime folder where it and other
+/// user services listen, the ssh agent, and tmux (`tmux send-keys` into
+/// another pane). Landlock does not handle connecting to a unix socket,
+/// so leaving them out of a confined command's environment only stops
+/// such an escape by accident: a command can still name the sockets
+/// itself (docs/safety.md, the limits of the sandbox).
+pub const ESCAPE_ENV_VARS: &[&str] = &[
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "SSH_AUTH_SOCK",
+    "TMUX",
+    "TMUX_PANE",
+];
 
 /// The sandbox settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +207,13 @@ impl Support {
             Support::Abi(abi) if *abi >= NETWORK_ABI => {
                 format!("Landlock ABI {abi} (files and TCP)")
             }
-            Support::Abi(abi) => format!("Landlock ABI {abi} (files only; TCP needs ABI 4)"),
+            Support::Abi(abi) if *abi >= TRUNCATE_ABI => {
+                format!("Landlock ABI {abi} (files only; TCP needs ABI {NETWORK_ABI})")
+            }
+            Support::Abi(abi) => format!(
+                "Landlock ABI {abi} (files without truncation, which needs ABI \
+                 {TRUNCATE_ABI}; TCP needs ABI {NETWORK_ABI})"
+            ),
             Support::Unavailable(why) => why.clone(),
         }
     }
@@ -198,6 +221,12 @@ impl Support {
 
 /// The first ABI version that can restrict TCP.
 pub const NETWORK_ABI: u32 = 4;
+
+/// The first ABI version that handles truncating a file (Linux 6.2).
+/// Before it, a confined command can empty files it may not write
+/// (`truncate -s0` on the settings file or a memory file), though not
+/// read them.
+pub const TRUNCATE_ABI: u32 = 3;
 
 #[cfg(target_os = "linux")]
 fn probe_kernel() -> Support {
@@ -227,6 +256,8 @@ pub struct Sandbox {
     /// Whether a result already said the working folder holds protected
     /// paths.
     told_holds: AtomicBool,
+    /// Junees's state folder, made before rules are built when missing.
+    state: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -239,14 +270,21 @@ impl Sandbox {
         }
         let mut hidden = Vec::new();
         let mut read_only = Vec::new();
+        let mut state = None;
         if let Some(file) = &tools.settings_file {
             hidden.extend(file.protected_paths());
             if tools.webhook {
                 hidden.extend(file.resolved_credentials());
             }
             read_only.extend(file.data_folders());
+            // Saved sessions too: `-c` and `--resume` read them back as
+            // the user's own conversation.
+            state = file.folder();
+            read_only.extend(state.as_deref().map(crate::session::sessions_dir));
         }
-        Some(Self::new(settings, hidden, read_only))
+        let mut sandbox = Self::new(settings, hidden, read_only);
+        sandbox.state = state;
+        Some(sandbox)
     }
 
     /// A sandbox with `settings` that keeps commands from reading or
@@ -259,12 +297,19 @@ impl Sandbox {
             support: None,
             told: AtomicBool::new(false),
             told_holds: AtomicBool::new(false),
+            state: None,
         }
     }
 
     /// Uses `support` instead of asking the kernel (tests).
     pub fn with_support(mut self, support: Support) -> Self {
         self.support = Some(support);
+        self
+    }
+
+    /// Also lets commands write in `paths`.
+    pub fn with_write(mut self, paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.settings.write.extend(paths);
         self
     }
 
@@ -277,8 +322,14 @@ impl Sandbox {
     }
 
     /// The confinement for a command run in `work`: what to apply before
-    /// spawning it, or why it must not run.
+    /// spawning it, or why it must not run. Makes a missing state folder
+    /// first ([`Self::make_state_folder`]).
     pub fn prepare(&self, work: &Path) -> Prepared {
+        self.prepare_in(work, true)
+    }
+
+    /// [`Self::prepare`], making the state folder only when `make_state`.
+    fn prepare_in(&self, work: &Path, make_state: bool) -> Prepared {
         let mode = self.settings.mode();
         if mode == Mode::Off {
             return Prepared::Unconfined(None);
@@ -296,17 +347,42 @@ impl Sandbox {
                 };
             }
         };
-        let mut note = None;
+        let mut gaps = Vec::new();
+        if abi < TRUNCATE_ABI {
+            gaps.push((
+                format!(
+                    "the kernel's Landlock ABI {abi} cannot stop commands from emptying \
+                     (truncating) files; that needs ABI {TRUNCATE_ABI} (Linux 6.2)"
+                ),
+                "the settings file and the data folders can be emptied, not read",
+            ));
+        }
         if !self.settings.network && abi < NETWORK_ABI {
-            let why = format!(
-                "sandbox_network = 0 needs Landlock ABI {NETWORK_ABI}, the kernel has {abi}"
-            );
-            if mode == Mode::Require {
-                return Prepared::Refused(format!(
-                    "the sandbox is required (sandbox = require) but {why}"
-                ));
-            }
-            note = self.tell_once(format!("[sandbox: {why}; TCP is not restricted]"));
+            gaps.push((
+                format!(
+                    "sandbox_network = 0 needs Landlock ABI {NETWORK_ABI}, the kernel has {abi}"
+                ),
+                "TCP is not restricted",
+            ));
+        }
+        if let Some((why, _)) = gaps.first()
+            && mode == Mode::Require
+        {
+            return Prepared::Refused(format!(
+                "the sandbox is required (sandbox = require) but {why}"
+            ));
+        }
+        let lines: Vec<String> = gaps
+            .iter()
+            .map(|(why, left)| format!("[sandbox: {why}; {left}]"))
+            .collect();
+        let mut note = if lines.is_empty() {
+            None
+        } else {
+            self.tell_once(lines.join("\n"))
+        };
+        if make_state {
+            self.make_state_folder();
         }
         match self.build(abi, work) {
             Ok((confinement, holds)) => {
@@ -323,6 +399,22 @@ impl Sandbox {
                 Prepared::Confined(confinement, note)
             }
             Err(err) => Prepared::Refused(format!("cannot set up the sandbox: {err}")),
+        }
+    }
+
+    /// Makes the state folder (0700) when it is missing. Rules protect
+    /// only the paths whose folder exists, so without it a confined
+    /// command could create `mcp.json` or `config.toml` there for the next
+    /// run to read.
+    fn make_state_folder(&self) {
+        use std::os::unix::fs::DirBuilderExt;
+        if let Some(dir) = &self.state
+            && std::fs::symlink_metadata(dir).is_err()
+        {
+            let _ = std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir);
         }
     }
 
@@ -409,9 +501,9 @@ impl Sandbox {
     /// Runs a tiny command (`/bin/sh`, empty environment) the way bash's
     /// commands in `work` would run, then one that tries to open the
     /// first protected file that exists for reading, which must fail.
-    /// Writes nothing.
+    /// Writes nothing, a missing state folder included.
     pub fn try_child(&self, work: &Path) -> Trial {
-        let confinement = match self.prepare(work) {
+        let confinement = match self.prepare_in(work, false) {
             Prepared::Confined(confinement, _) => confinement,
             Prepared::Unconfined(_) => return Trial::Unconfined,
             Prepared::Refused(reason) => return Trial::Failed(reason),
@@ -468,20 +560,53 @@ pub struct Confinement {
     ruleset: landlock::Ruleset,
 }
 
+/// Makes the calling process the leader of a session of its own
+/// (`setsid`), unless it leads one already. A new session is also a
+/// process group of its own whose id is the pid (so killing the group
+/// still works), and has no controlling terminal: the process cannot
+/// open Junees's terminal through `/dev/tty`, to push keys into it
+/// (`TIOCSTI`, on kernels that still allow it) or to draw over its
+/// approval questions. For a child between fork and exec: it only makes
+/// system calls. Fails when the process leads a process group but no
+/// session (`process_group(0)`): never combine the two.
+pub(crate) fn start_session() -> io::Result<()> {
+    // SAFETY: getsid, getpid and setsid are plain system calls.
+    unsafe {
+        if libc::getsid(0) == libc::getpid() {
+            return Ok(());
+        }
+        if libc::setsid() == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 impl Confinement {
-    /// Makes `command`'s process put itself under the ruleset (with
-    /// `no_new_privs`) right before it runs the program. Spawning fails
-    /// when that fails.
+    /// Makes `command`'s process start a session of its own
+    /// ([`start_session`]) and put itself under the ruleset (with
+    /// `no_new_privs`) right before it runs the program, and takes the
+    /// [`ESCAPE_ENV_VARS`] out of its environment. Spawning fails when
+    /// either cannot be done. Every confined child (bash, the flow's test
+    /// command, the harness's git, `doctor`'s trial run) goes through
+    /// here, so none of them keeps Junees's terminal.
     pub fn apply(&self, command: &mut tokio::process::Command) {
+        for name in ESCAPE_ENV_VARS {
+            command.env_remove(name);
+        }
         #[cfg(target_os = "linux")]
         {
             let fd = self.ruleset.raw_fd();
             // SAFETY: the closure runs in the child between fork and exec
-            // and only makes the two system calls of `restrict_self`; the
-            // descriptor stays open in the parent until spawning is done
-            // (the caller keeps `self`), so the child has it too.
+            // and only makes the system calls of `start_session` and
+            // `restrict_self`; the descriptor stays open in the parent
+            // until spawning is done (the caller keeps `self`), so the
+            // child has it too.
             unsafe {
-                command.pre_exec(move || landlock::restrict_self(fd));
+                command.pre_exec(move || {
+                    start_session()?;
+                    landlock::restrict_self(fd)
+                });
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -490,13 +615,19 @@ impl Confinement {
 
     /// [`Self::apply`] for a std command.
     pub fn apply_std(&self, command: &mut std::process::Command) {
+        for name in ESCAPE_ENV_VARS {
+            command.env_remove(name);
+        }
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::process::CommandExt;
             let fd = self.ruleset.raw_fd();
             // SAFETY: as in `apply`.
             unsafe {
-                command.pre_exec(move || landlock::restrict_self(fd));
+                command.pre_exec(move || {
+                    start_session()?;
+                    landlock::restrict_self(fd)
+                });
             }
         }
         #[cfg(not(target_os = "linux"))]
