@@ -206,7 +206,13 @@ impl Support {
             Support::Abi(abi) if *abi >= NETWORK_ABI => {
                 format!("Landlock ABI {abi} (files and TCP)")
             }
-            Support::Abi(abi) => format!("Landlock ABI {abi} (files only; TCP needs ABI 4)"),
+            Support::Abi(abi) if *abi >= TRUNCATE_ABI => {
+                format!("Landlock ABI {abi} (files only; TCP needs ABI {NETWORK_ABI})")
+            }
+            Support::Abi(abi) => format!(
+                "Landlock ABI {abi} (files without truncation, which needs ABI \
+                 {TRUNCATE_ABI}; TCP needs ABI {NETWORK_ABI})"
+            ),
             Support::Unavailable(why) => why.clone(),
         }
     }
@@ -214,6 +220,12 @@ impl Support {
 
 /// The first ABI version that can restrict TCP.
 pub const NETWORK_ABI: u32 = 4;
+
+/// The first ABI version that handles truncating a file (Linux 6.2).
+/// Before it, a confined command can empty files it may not write
+/// (`truncate -s0` on the settings file or a memory file), though not
+/// read them.
+pub const TRUNCATE_ABI: u32 = 3;
 
 #[cfg(target_os = "linux")]
 fn probe_kernel() -> Support {
@@ -318,18 +330,40 @@ impl Sandbox {
                 };
             }
         };
-        let mut note = None;
-        if !self.settings.network && abi < NETWORK_ABI {
-            let why = format!(
-                "sandbox_network = 0 needs Landlock ABI {NETWORK_ABI}, the kernel has {abi}"
-            );
-            if mode == Mode::Require {
-                return Prepared::Refused(format!(
-                    "the sandbox is required (sandbox = require) but {why}"
-                ));
-            }
-            note = self.tell_once(format!("[sandbox: {why}; TCP is not restricted]"));
+        let mut gaps = Vec::new();
+        if abi < TRUNCATE_ABI {
+            gaps.push((
+                format!(
+                    "the kernel's Landlock ABI {abi} cannot stop commands from emptying \
+                     (truncating) files; that needs ABI {TRUNCATE_ABI} (Linux 6.2)"
+                ),
+                "the settings file and the data folders can be emptied, not read",
+            ));
         }
+        if !self.settings.network && abi < NETWORK_ABI {
+            gaps.push((
+                format!(
+                    "sandbox_network = 0 needs Landlock ABI {NETWORK_ABI}, the kernel has {abi}"
+                ),
+                "TCP is not restricted",
+            ));
+        }
+        if let Some((why, _)) = gaps.first()
+            && mode == Mode::Require
+        {
+            return Prepared::Refused(format!(
+                "the sandbox is required (sandbox = require) but {why}"
+            ));
+        }
+        let lines: Vec<String> = gaps
+            .iter()
+            .map(|(why, left)| format!("[sandbox: {why}; {left}]"))
+            .collect();
+        let mut note = if lines.is_empty() {
+            None
+        } else {
+            self.tell_once(lines.join("\n"))
+        };
         match self.build(abi, work) {
             Ok((confinement, holds)) => {
                 if holds && !self.told_holds.swap(true, Ordering::Relaxed) {

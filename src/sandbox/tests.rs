@@ -607,6 +607,53 @@ async fn an_older_abi_without_tcp_rules_says_so_or_refuses() {
 }
 
 #[tokio::test]
+async fn an_abi_without_truncation_says_so_or_refuses() {
+    if !landlock() {
+        return;
+    }
+    // ABI 2 does not handle truncate(2): `require` refuses, `auto`
+    // confines the rest and says once what is left open.
+    let layout = Layout::new();
+    let work = layout.path("work");
+    let command = "echo ran".to_string();
+    let refused = run(
+        &work,
+        layout.sandbox(settings()).with_support(Support::Abi(2)),
+        &command,
+    )
+    .await;
+    assert!(refused.is_error);
+    assert_eq!(
+        refused.content,
+        "not run: the sandbox is required (sandbox = require) but the kernel's Landlock ABI 2 \
+         cannot stop commands from emptying (truncating) files; that needs ABI 3 (Linux 6.2)"
+    );
+    let auto = Settings {
+        mode: Some(Mode::Auto),
+        network: false,
+        ..settings()
+    };
+    let bash =
+        Bash::for_test(&work).confined(Some(layout.sandbox(auto).with_support(Support::Abi(2))));
+    let first = bash.run(json!({ "command": command })).await;
+    assert_eq!(
+        first.content,
+        "ran\n[exit code 0]\n[sandbox: the kernel's Landlock ABI 2 cannot stop commands from \
+         emptying (truncating) files; that needs ABI 3 (Linux 6.2); the settings file and the \
+         data folders can be emptied, not read]\n[sandbox: sandbox_network = 0 needs Landlock \
+         ABI 4, the kernel has 2; TCP is not restricted]"
+    );
+    let second = bash.run(json!({ "command": command })).await;
+    assert_eq!(second, ToolOutput::ok("ran\n[exit code 0]"));
+    // Still confined otherwise.
+    let outside = layout.path("outside/new");
+    let write = format!("echo x > {}", outside.display());
+    let output = bash.run(json!({ "command": write })).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(!outside.exists());
+}
+
+#[tokio::test]
 async fn without_landlock_auto_runs_and_says_so_once_and_require_refuses() {
     let layout = Layout::new();
     let work = layout.path("work");

@@ -1594,6 +1594,24 @@ async fn the_sandbox_is_tried_with_a_confined_child() {
         Status::Warn,
         "this kernel has 3",
     );
+    assert!(!has(&report, "sandbox", "truncate"));
+    let report = fixture.run_landlock(false, Some(Support::Abi(2))).await;
+    expect(
+        &report,
+        "sandbox",
+        "truncate",
+        Status::Warn,
+        "Landlock ABI 2 cannot stop bash commands from emptying",
+    );
+    fixture.config("sandbox = \"require\"\n");
+    let report = fixture.run_landlock(false, Some(Support::Abi(2))).await;
+    expect(
+        &report,
+        "sandbox",
+        "truncate",
+        Status::Fail,
+        "truncation needs ABI 3",
+    );
     fixture.config("sandbox = \"strict\"\n");
     let report = fixture.run_landlock(false, none).await;
     expect(
