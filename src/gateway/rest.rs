@@ -1,11 +1,16 @@
 //! Discord's REST API, as far as the gateway needs it: where the gateway
-//! is, sending messages and the typing indicator.
+//! is, sending and editing messages, the typing indicator, and answering
+//! button presses (interactions).
 //!
 //! Rate limits (developer docs, "Rate Limits"): every answer may carry
 //! `X-RateLimit-Remaining` and `X-RateLimit-Reset-After`; when a route has
 //! no requests left, the next one on it waits for the reset. A 429 answer
 //! says how long to wait in `retry_after` (seconds, with decimals; the
 //! `Retry-After` header too), and `global: true` holds back every route.
+//!
+//! Interaction responses (developer docs, "Receiving and Responding",
+//! Create Interaction Response) are "not bound to the application's Global
+//! Rate Limit", so they never wait for it.
 //!
 //! A message post that fails after sending (no answer, a 5xx) may have
 //! created the message anyway, so posts carry a `nonce` with
@@ -104,18 +109,94 @@ impl Rest {
     /// call. A retried post cannot show twice: its tries share one
     /// enforced `nonce` (module docs).
     pub async fn create_message(&self, channel: &str, content: &str) -> Result<()> {
-        let body = json!({
+        self.post_message(channel, content, None).await.map(drop)
+    }
+
+    /// [`Rest::create_message`] with `components` (message components:
+    /// action rows of buttons); the new message's id.
+    pub async fn create_message_with(
+        &self,
+        channel: &str,
+        content: &str,
+        components: Value,
+    ) -> Result<String> {
+        let message = self
+            .post_message(channel, content, Some(components))
+            .await?;
+        message
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .context("Discord's Create Message answer has no message id")
+    }
+
+    async fn post_message(
+        &self,
+        channel: &str,
+        content: &str,
+        components: Option<Value>,
+    ) -> Result<Value> {
+        let mut body = json!({
             "content": content,
             "allowed_mentions": {"parse": []},
             "flags": SUPPRESS_EMBEDS,
             "nonce": nonce(),
             "enforce_nonce": true,
         });
+        if let Some(components) = components {
+            body["components"] = components;
+        }
         self.request(
             Method::POST,
             &format!("POST /channels/{channel}/messages"),
             &format!("/channels/{channel}/messages"),
             Some(body),
+        )
+        .await
+    }
+
+    /// Edit Message (docs.discord.com, resources/message, Edit Message:
+    /// `PATCH /channels/{channel.id}/messages/{message.id}`) of one of the
+    /// bot's messages: `content` replaces its text and an empty
+    /// `components` takes its buttons off. Mentions in it stay silent.
+    pub async fn edit_message(&self, channel: &str, message: &str, content: &str) -> Result<()> {
+        let body = json!({
+            "content": content,
+            "components": [],
+            "allowed_mentions": {"parse": []},
+        });
+        self.request(
+            Method::PATCH,
+            &format!("PATCH /channels/{channel}/messages"),
+            &format!("/channels/{channel}/messages/{message}"),
+            Some(body),
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Create Interaction Response (`POST
+    /// /interactions/{interaction.id}/{interaction.token}/callback`) with
+    /// `response` (an interaction response object). It must reach Discord
+    /// within 3 seconds of the event, so it skips the global rate limit,
+    /// which does not bind it (module docs). The token stays out of every
+    /// error and log line; an id or token that could change the path is
+    /// refused.
+    pub async fn respond(&self, interaction: &str, token: &str, response: Value) -> Result<()> {
+        let id_ok = !interaction.is_empty() && interaction.bytes().all(|b| b.is_ascii_digit());
+        let token_ok = (8..=1024).contains(&token.len())
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+        if !id_ok || !token_ok {
+            bail!("Discord sent an interaction with an id or token of unexpected characters");
+        }
+        self.request_in(
+            Method::POST,
+            &format!("POST /interactions/{interaction}/callback"),
+            &format!("/interactions/{interaction}/{token}/callback"),
+            Some(response),
+            false,
         )
         .await
         .map(drop)
@@ -144,13 +225,26 @@ impl Rest {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value> {
+        self.request_in(method, route, path, body, true).await
+    }
+
+    /// [`Rest::request`]; `waits_global` when the request waits out a global
+    /// rate limit.
+    async fn request_in(
+        &self,
+        method: Method,
+        route: &str,
+        path: &str,
+        body: Option<Value>,
+        waits_global: bool,
+    ) -> Result<Value> {
         let mut auth = HeaderValue::from_str(&format!("Bot {}", self.token.expose()))
             .map_err(|_| anyhow!("the Discord bot token has characters a header cannot hold"))?;
         auth.set_sensitive(true);
         let mut limited = 0;
         let mut tries = 0;
         loop {
-            self.wait_for(route).await;
+            self.wait_for(route, waits_global).await;
             tries += 1;
             let mut request = self
                 .client
@@ -225,15 +319,18 @@ impl Rest {
         }
     }
 
-    /// Sleeps until `route` (and every route, after a global limit) may be
-    /// used again.
-    async fn wait_for(&self, route: &str) {
+    /// Sleeps until `route` (and every route, after a global limit, when
+    /// `global`) may be used again.
+    async fn wait_for(&self, route: &str, global: bool) {
         let until = {
             let limits = self.limits.lock().await;
-            [limits.global, limits.routes.get(route).copied()]
-                .into_iter()
-                .flatten()
-                .max()
+            [
+                limits.global.filter(|_| global),
+                limits.routes.get(route).copied(),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
         };
         if let Some(until) = until
             && until > Instant::now()

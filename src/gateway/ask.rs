@@ -328,8 +328,8 @@ pub fn question(request: &Request, timeout: Duration) -> String {
         request.kinds.join(", ")
     ));
     format!(
-        "**Approve this tool call?**\n```text\n{}```\nReply `y` to run it, `n` to decline \
-         (`n <reason>` tells the model why), `a` to allow this kind for the rest of this \
+        "**Approve this tool call?**\n```text\n{}```\nPress a button, or reply `y` to run it, `n` to \
+         decline (`n <reason>` tells the model why), `a` to allow this kind for the rest of this \
          channel's conversation. Anything else declines with your words as the reason. No \
          answer within {} declines.",
         fence_safe(&details),

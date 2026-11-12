@@ -1,23 +1,37 @@
-//! What the bot does with Discord's events: which messages are for it and
-//! the `!` commands. The channels themselves (a worker per channel, the
-//! queue, sessions, approvals) are the shared engine of
-//! [`super::channels`]; [`Discord`] is its Discord side.
+//! What the bot does with Discord's events: which messages are for it,
+//! the `!` commands, and presses on the buttons of approval questions.
+//! The channels themselves (a worker per channel, the queue, sessions,
+//! approvals) are the shared engine of [`super::channels`]; [`Discord`]
+//! is its Discord side.
+//!
+//! Approval buttons are message components (developer docs, components
+//! reference: an Action Row, type 1, of Buttons, type 2, each with a
+//! `custom_id` of 1 to 100 characters). A press arrives as the Gateway
+//! event `INTERACTION_CREATE` (no intent needed) holding an interaction of
+//! type 3, `MESSAGE_COMPONENT` (interactions, "Receiving and
+//! Responding"), which has to be answered over HTTP "within 3 seconds of
+//! receiving the event": the press goes to the channel engine at once, and
+//! the answer is type 6, `DEFERRED_UPDATE_MESSAGE` ("ACK an interaction and
+//! edit the original message later; the user does not see a loading
+//! state"), when it answered the question. The engine then edits the
+//! message: buttons off, result added. Any other press gets type 4 with
+//! the `EPHEMERAL` flag (1 << 6), a note only the presser sees.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use super::ask::fence_safe;
+use super::ask::{Choice, Press, Question, button_data, fence_safe, parse_button};
 use super::channels::{Channels, Shared};
 use super::config::DiscordConfig;
 use super::platform::Platform;
 use super::rest::Rest;
 use super::shard::Dispatch;
-use super::split::MESSAGE_LIMIT;
+use super::split::{MESSAGE_LIMIT, length, split_message};
 use crate::approval::Request;
 use crate::images::Image;
 use crate::images::discord::{self as attached, Attachment, Fetcher};
@@ -39,12 +53,77 @@ pub const HELP: &str = "\
 `!help` this list
 In a server channel, mention the bot (`@Junees !stop`) unless the channel is one of discord_channels.";
 
+/// Interaction callback types (interactions, "Receiving and Responding",
+/// Interaction Callback Type).
+const CHANNEL_MESSAGE_WITH_SOURCE: u64 = 4;
+const DEFERRED_UPDATE_MESSAGE: u64 = 6;
+/// The message flag of a reply only the user who pressed sees.
+const EPHEMERAL: u64 = 1 << 6;
+/// Interaction type of a message component.
+const MESSAGE_COMPONENT: u64 = 3;
+
+/// What a press that answered nothing gets back.
+pub const ALREADY_HANDLED: &str =
+    "This question was already answered, timed out or stopped; the button does nothing now.";
+/// What a press of a user not in `discord_allowed_users` gets back.
+pub const NOT_ALLOWED: &str = "Only the users in discord_allowed_users can answer Junees.";
+/// What a press of a button that is not Junees's gets back.
+const NOT_OURS: &str = "Junees does not know this button.";
+
 /// Discord as the channel engine's platform: posts and typing through the
 /// REST API, images from Discord's CDN.
 pub struct Discord {
     pub rest: Arc<Rest>,
     /// Downloads the images attached to messages.
     pub fetcher: Fetcher,
+    /// The questions posted with buttons, by question id, until they end.
+    questions: Mutex<HashMap<String, Posted>>,
+}
+
+/// A question message with buttons.
+struct Posted {
+    channel: String,
+    message: String,
+    /// Its text, which the edit keeps.
+    content: String,
+}
+
+impl Discord {
+    pub fn new(rest: Arc<Rest>, fetcher: Fetcher) -> Self {
+        Self {
+            rest,
+            fetcher,
+            questions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn questions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Posted>> {
+        self.questions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The buttons of `question`: one action row.
+fn components(question: &Question) -> Value {
+    let buttons: Vec<Value> = Choice::offered(question)
+        .into_iter()
+        .map(|choice| {
+            // Button styles: Primary 1, Success 3, Danger 4.
+            let style = match choice {
+                Choice::Allow => 3,
+                Choice::Always => 1,
+                Choice::Decline => 4,
+            };
+            json!({
+                "type": 2,
+                "style": style,
+                "label": choice.label(),
+                "custom_id": button_data(&question.id, choice),
+            })
+        })
+        .collect();
+    json!([{"type": 1, "components": buttons}])
 }
 
 #[async_trait]
@@ -95,6 +174,51 @@ impl Platform for Discord {
 
     fn question(request: &Request, timeout: Duration) -> String {
         super::ask::question(request, timeout)
+    }
+
+    /// The question's last message (it is cut like any post) carries the
+    /// buttons.
+    async fn post_question(&self, channel: &str, question: &Question) -> Result<Option<String>> {
+        let mut parts = split_message(&question.text, MESSAGE_LIMIT);
+        let last = parts.pop().unwrap_or_default();
+        for part in &parts {
+            self.rest.create_message(channel, part).await?;
+        }
+        let message = self
+            .rest
+            .create_message_with(channel, &last, components(question))
+            .await?;
+        self.questions().insert(
+            question.id.clone(),
+            Posted {
+                channel: channel.to_string(),
+                message: message.clone(),
+                content: last,
+            },
+        );
+        Ok(Some(message))
+    }
+
+    /// The result goes under the question, in bold; when that would not
+    /// fit the message, the buttons go and the result is a post of its
+    /// own.
+    async fn close_question(&self, _channel: &str, id: &str, outcome: &str) -> Result<()> {
+        let Some(posted) = self.questions().remove(id) else {
+            return Ok(());
+        };
+        let closed = format!("{}\n\n**{outcome}**", posted.content);
+        if length(&closed) <= MESSAGE_LIMIT {
+            return self
+                .rest
+                .edit_message(&posted.channel, &posted.message, &closed)
+                .await;
+        }
+        self.rest
+            .edit_message(&posted.channel, &posted.message, &posted.content)
+            .await?;
+        self.rest
+            .create_message(&posted.channel, &format!("**{outcome}**"))
+            .await
     }
 }
 
@@ -181,8 +305,77 @@ impl Bot {
                 }
             }
             "MESSAGE_CREATE" => self.message(data),
+            "INTERACTION_CREATE" => self.interaction(data),
             _ => {}
         }
+    }
+
+    /// A press on a button: answers the question it belongs to if an
+    /// allowed user pressed it on the question that waits in that channel
+    /// ([`Channels::press`]), and answers the interaction in the
+    /// background (module docs).
+    fn interaction(&mut self, data: &Value) {
+        let text = |pointer: &str| data.pointer(pointer).and_then(Value::as_str);
+        // The bot registers no commands: only its buttons send these.
+        if data.get("type").and_then(Value::as_u64) != Some(MESSAGE_COMPONENT) {
+            return;
+        }
+        let (Some(id), Some(token)) = (text("/id"), text("/token")) else {
+            return;
+        };
+        // `member` in a server, `user` in a DM.
+        let user = text("/member/user/id").or_else(|| text("/user/id"));
+        let channel = text("/channel_id").or_else(|| text("/channel/id"));
+        let refusal = match (user, channel) {
+            (Some(user), Some(channel)) if self.config.allowed_users.contains(user) => {
+                match text("/data/custom_id").and_then(parse_button) {
+                    Some((question, choice)) => {
+                        let press = Press {
+                            id: question,
+                            choice,
+                            message: text("/message/id").map(str::to_string),
+                            by: format!("<@{user}>"),
+                        };
+                        if self.channels.press(channel, press) {
+                            None
+                        } else {
+                            Some(ALREADY_HANDLED)
+                        }
+                    }
+                    None => Some(NOT_OURS),
+                }
+            }
+            (user, _) => {
+                if let Some(user) = user
+                    && self.strangers.insert(user.to_string())
+                {
+                    (self.channels.shared().log)(&format!(
+                        "ignoring button presses of user {user}: not in discord_allowed_users"
+                    ));
+                }
+                Some(NOT_ALLOWED)
+            }
+        };
+        let response = match refusal {
+            None => json!({"type": DEFERRED_UPDATE_MESSAGE}),
+            Some(note) => json!({
+                "type": CHANNEL_MESSAGE_WITH_SOURCE,
+                "data": {
+                    "content": note,
+                    "flags": EPHEMERAL,
+                    "allowed_mentions": {"parse": []},
+                },
+            }),
+        };
+        let shared = self.channels.shared();
+        let rest = Arc::clone(&shared.platform.rest);
+        let log = Arc::clone(&shared.log);
+        let (id, token) = (id.to_string(), token.to_string());
+        tokio::spawn(async move {
+            if let Err(err) = rest.respond(&id, &token, response).await {
+                log(&format!("cannot answer a button press: {err:#}"));
+            }
+        });
     }
 
     fn thread(&mut self, thread: &Value) {
