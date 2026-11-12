@@ -75,6 +75,16 @@ pub(crate) struct Knobs {
     seen: Vec<Seen>,
 }
 
+impl Knobs {
+    /// An authorization server that does not announce PKCE.
+    pub(crate) fn without_pkce() -> Self {
+        Self {
+            pkce: false,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for Knobs {
     fn default() -> Self {
         Self {

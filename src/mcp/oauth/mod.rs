@@ -39,7 +39,7 @@ pub mod store;
 pub mod token;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::path::Path;
 
