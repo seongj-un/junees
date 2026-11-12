@@ -336,14 +336,14 @@ pub async fn run_with(
     settings::keys(&mut report, settings, read.backend);
     claude::check(&mut report, settings, &read, path, probe, online).await;
     services::programs(&mut report, path);
+    let support = probe
+        .landlock
+        .clone()
+        .unwrap_or_else(crate::sandbox::Support::current);
     if let Some(work) = probe.work.clone().or_else(|| std::env::current_dir().ok()) {
-        let support = probe
-            .landlock
-            .clone()
-            .unwrap_or_else(crate::sandbox::Support::current);
-        sandbox::check(&mut report, settings, support, &work);
+        sandbox::check(&mut report, settings, support.clone(), &work);
     }
-    browser::check(&mut report, settings, path).await;
+    browser::check(&mut report, settings, path, &support).await;
     settings::discord(&mut report, settings);
     settings::telegram(&mut report, settings);
     if let Some(home) = home.as_deref() {

@@ -120,6 +120,34 @@ pub enum Run {
     Unattended,
 }
 
+/// A warning when the browser tool is on but bash's commands run
+/// unconfined (`sandbox = off`, or `auto` on a kernel without Landlock):
+/// any process of the user can open Chrome's DevTools pipe through
+/// `/proc/<pid>/fd` and drive the browser past the approval questions.
+/// Landlock keeps confined commands from opening it; `require` without
+/// Landlock runs no command at all. `sandbox` `None`: no sandbox settings
+/// (unconfined).
+pub fn unconfined_warning(
+    settings: &Settings,
+    sandbox: Option<&crate::sandbox::Settings>,
+    support: &crate::sandbox::Support,
+) -> Option<String> {
+    use crate::sandbox::{Mode, Support};
+    if !settings.enabled {
+        return None;
+    }
+    let why = match (sandbox.map(crate::sandbox::Settings::mode), support) {
+        (None | Some(Mode::Off), _) => "sandbox = off".to_string(),
+        (Some(Mode::Auto), Support::Unavailable(why)) => format!("sandbox = auto: {why}"),
+        _ => return None,
+    };
+    Some(format!(
+        "the browser tool is on, but bash commands run unconfined ({why}): a command can open \
+         the browser's DevTools pipe through /proc and drive it without the approval \
+         questions. Use a kernel with Landlock, or turn the browser off"
+    ))
+}
+
 /// Registers the `browser` tool when the settings turn it on for `run`,
 /// and returns what the approval gate asks it about its calls
 /// ([`crate::approval::Approval::with_questions`]). `hidden_env` are the

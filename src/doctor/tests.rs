@@ -1677,4 +1677,24 @@ async fn the_browser_program_and_its_version() {
     fixture.set("JUNEES_HOME", "/tmp/junees-short");
     let report = fixture.run(false).await;
     assert!(!has(&report, "browser", "profiles"), "{}", report.text());
+
+    // Unconfined commands could drive the browser through its pipe.
+    let none = Some(crate::sandbox::Support::Unavailable(
+        "no Landlock here".into(),
+    ));
+    let report = fixture.run_landlock(false, none.clone()).await;
+    expect(&report, "browser", "pipe", Status::Warn, "no Landlock here");
+    let report = fixture
+        .run_landlock(false, Some(crate::sandbox::Support::Abi(4)))
+        .await;
+    assert!(!has(&report, "browser", "pipe"), "{}", report.text());
+    fixture.set("JUNEES_SANDBOX", "off");
+    let report = fixture
+        .run_landlock(false, Some(crate::sandbox::Support::Abi(4)))
+        .await;
+    expect(&report, "browser", "pipe", Status::Warn, "sandbox = off");
+    // `require` without Landlock runs no command at all.
+    fixture.set("JUNEES_SANDBOX", "require");
+    let report = fixture.run_landlock(false, none).await;
+    assert!(!has(&report, "browser", "pipe"), "{}", report.text());
 }

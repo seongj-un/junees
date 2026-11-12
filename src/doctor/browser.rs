@@ -11,12 +11,30 @@ use super::{Report, shown};
 
 const AREA: &str = "browser";
 
-pub(super) async fn check(report: &mut Report, settings: &SettingsFile, path: Option<&OsStr>) {
+pub(super) async fn check(
+    report: &mut Report,
+    settings: &SettingsFile,
+    path: Option<&OsStr>,
+    support: &crate::sandbox::Support,
+) {
     let browser = match Settings::read(|key| settings.get(key)) {
         Ok(browser) => browser,
         // The settings check already names the bad value.
         Err(_) => return,
     };
+    // A bad sandbox setting is the sandbox check's to report.
+    if let Ok(sandbox) = crate::sandbox::Settings::read(|key| {
+        settings.get(key).map(|value| value.trim().to_string())
+    }) && let Some(warning) =
+        crate::browser::unconfined_warning(&browser, Some(&sandbox), support)
+    {
+        report.warn(
+            AREA,
+            "pipe",
+            warning,
+            "use a kernel with Landlock (Linux 5.13 or later), or set sandbox = auto",
+        );
+    }
     if !browser.enabled && browser.path.is_none() {
         report.skip(
             AREA,
