@@ -14,12 +14,12 @@ Usage:
                      [--secret-env <VAR> | --secret-file <path> | --no-secret]
                      [--events pull_request.opened,issue_comment,...]
                      [--dir <folder>] [--deliver discord:<channel id>|webhook|local]
-                     [--github-allow comment,review,approve,pr_create,merge]
+                     [--github-allow comment,review,approve,pr_create,merge] [--allow-home]
   junees webhook add-github <name> --repo owner/name [--review] [--address-reviews]
                      [--merge-when-ready] [--dir <clone>] [--deliver ...]
                      [--test-cmd \"<command>\"] [--min-approvals N] [--allow-self-review]
                      [--re-review] [--max-runs-per-hour N] [--approver <login>]...
-                     [--require-check <name>]...
+                     [--require-check <name>]... [--allow-home]
                                    a pull request flow (below)
   junees webhook list              the routes and their last runs
   junees webhook remove <name>     (also rm)
@@ -52,7 +52,8 @@ The prompt template takes {{event}}, {{action}}, {{delivery}}, {{route}},
 in data tags and the prompt says they are data, not instructions.
 
 Each request runs like a scheduled job (see `junees cron --help`): a new
-session in the route's folder (default: the current one), no approval
+session in the route's folder (default: the current one; not the home
+folder or a folder holding it unless --allow-home), no approval
 questions, the command policy, the memory and skills read only, up to
 webhook_max_time (default 30m) and webhook_max_tokens (default 1000000).
 One run per route at a time; up to 20 more wait. The answer goes to
@@ -138,6 +139,8 @@ pub struct AddArgs {
     pub dir: Option<PathBuf>,
     pub deliver: Option<String>,
     pub github_allow: Option<String>,
+    /// `--allow-home`: the route may work in the home folder.
+    pub allow_home: bool,
 }
 
 /// Parses the arguments after `webhook`.
@@ -258,7 +261,7 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
             "--deliver",
             "--github-allow",
         ],
-        &["--no-secret"],
+        &["--no-secret", "--allow-home"],
         "add",
     )?;
     let mut args = AddArgs::default();
@@ -273,6 +276,7 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
             "--dir" => args.dir = Some(PathBuf::from(value)),
             "--github-allow" => args.github_allow = Some(value),
             "--no-secret" => args.no_secret = true,
+            "--allow-home" => args.allow_home = true,
             _ => args.deliver = Some(value),
         }
     }
@@ -281,7 +285,7 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
         Err(_) => bail!(
             "usage: junees webhook add <name> --prompt \"<template>\" [--kind ...] \
              [--secret-env VAR | --secret-file path | --no-secret] [--events ...] [--dir ...] \
-             [--deliver ...] [--github-allow ...]"
+             [--deliver ...] [--github-allow ...] [--allow-home]"
         ),
     };
     args.prompt = prompt.context("`junees webhook add` needs --prompt \"<template>\"")?;
@@ -313,6 +317,7 @@ fn add_github(rest: Vec<String>) -> Result<crate::flow::setup::AddGithubArgs> {
             "--merge-when-ready",
             "--allow-self-review",
             "--re-review",
+            "--allow-home",
         ],
         "add-github",
     )?;
@@ -331,6 +336,7 @@ fn add_github(rest: Vec<String>) -> Result<crate::flow::setup::AddGithubArgs> {
             "--address-reviews" => args.address_reviews = true,
             "--merge-when-ready" => args.merge_when_ready = true,
             "--allow-self-review" => args.allow_self_review = true,
+            "--allow-home" => args.allow_home = true,
             _ => args.re_review = true,
         }
     }
@@ -338,7 +344,8 @@ fn add_github(rest: Vec<String>) -> Result<crate::flow::setup::AddGithubArgs> {
         Ok([name]) => name,
         Err(_) => bail!(
             "usage: junees webhook add-github <name> --repo owner/name [--review] \
-             [--address-reviews] [--merge-when-ready] [--dir ...] [--deliver ...] [--test-cmd ...]"
+             [--address-reviews] [--merge-when-ready] [--dir ...] [--deliver ...] [--test-cmd ...] \
+             [--allow-home]"
         ),
     };
     Ok(args)
@@ -436,6 +443,7 @@ mod tests {
                 "--deliver",
                 "discord:42",
                 "--github-allow=comment,review",
+                "--allow-home",
             ])
             .unwrap(),
             WebhookCommand::Add(AddArgs {
@@ -449,6 +457,7 @@ mod tests {
                 dir: Some(PathBuf::from("/srv")),
                 deliver: Some("discord:42".into()),
                 github_allow: Some("comment,review".into()),
+                allow_home: true,
             })
         );
         match parse_words(&["add", "local", "--prompt", "x", "--no-secret"]).unwrap() {
@@ -476,6 +485,7 @@ mod tests {
                 "--require-check",
                 "test (ubuntu, stable)",
                 "--require-check=lint",
+                "--allow-home",
                 "--dir",
                 "/srv",
                 "--deliver",
@@ -497,6 +507,7 @@ mod tests {
                 max_runs_per_hour: Some("3".into()),
                 approvers: vec!["alice,bob".into(), "carol".into()],
                 required_checks: vec!["test (ubuntu, stable)".into(), "lint".into()],
+                allow_home: true,
             })
         );
         assert_eq!(

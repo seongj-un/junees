@@ -36,6 +36,8 @@ pub struct AddGithubArgs {
     pub approvers: Vec<String>,
     /// `--require-check` values (repeatable; names may hold commas).
     pub required_checks: Vec<String>,
+    /// `--allow-home`: the route may work in the home folder.
+    pub allow_home: bool,
 }
 
 /// A flow route just added.
@@ -113,6 +115,7 @@ pub fn add(store: &Store, lookup: &Lookup, args: AddGithubArgs, now: i64) -> Res
         .ok()
         .filter(|dir| dir.is_dir())
         .with_context(|| format!("{} is not a folder", dir.display()))?;
+    crate::cron::command::check_home_folder(lookup, &dir, args.allow_home, None)?;
     if flow.address_reviews {
         let repo = Repo::parse(&flow.repo).expect("checked");
         super::address::origin_of(&dir, &repo).context("--address-reviews works in --dir")?;
@@ -136,6 +139,7 @@ pub fn add(store: &Store, lookup: &Lookup, args: AddGithubArgs, now: i64) -> Res
         no_secret: false,
         events: flow.events(),
         dir,
+        allow_home: args.allow_home,
         deliver,
         paused: false,
         created_at: now,

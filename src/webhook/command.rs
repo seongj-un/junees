@@ -17,7 +17,7 @@ use super::store::{Kind, Route, Secret, Store, check_event, check_name};
 use super::template;
 use crate::cancel::Cancel;
 use crate::config_file::{self, Settings};
-use crate::cron::command::{cancel_on_signals, engine_in};
+use crate::cron::command::{cancel_on_signals, check_home_folder, engine_in};
 use crate::cron::deliver::{Delivery, Lookup};
 use crate::cron::run::Outcome;
 use crate::cron::store::{RunStatus, random_hex};
@@ -214,6 +214,7 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         .ok()
         .filter(|dir| dir.is_dir())
         .with_context(|| format!("{} is not a folder", dir.display()))?;
+    check_home_folder(lookup, &dir, args.allow_home, None)?;
     let deliver = match &args.deliver {
         Some(text) => Delivery::parse(text)?,
         None => Delivery::Local,
@@ -269,6 +270,7 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         no_secret: args.no_secret,
         events,
         dir,
+        allow_home: args.allow_home,
         deliver,
         paused: false,
         created_at: unix_now(),
@@ -402,9 +404,10 @@ async fn run_now(
     // gh in the run's commands finds no login there (removed after the run).
     let gh_config = crate::tools::GhConfigDir::new()
         .context("cannot make the run's GitHub CLI configuration folder");
-    let (outcome, prompt, quiet) = match (&route.flow, &gh_config) {
-        (_, Err(err)) => (Outcome::failed(format!("{err:#}")), None, false),
-        (Some(flow), Ok(gh)) => {
+    let refused = check_home_folder(lookup, &route.dir, route.allow_home, Some("route"));
+    let (outcome, prompt, quiet) = match (&refused, &route.flow, &gh_config) {
+        (Err(err), _, _) | (_, _, Err(err)) => (Outcome::failed(format!("{err:#}")), None, false),
+        (Ok(()), Some(flow), Ok(gh)) => {
             let report = flow_run(home, lookup, &route, flow, incoming, gh.path(), &cancel).await;
             let outcome = Outcome {
                 status: report.status,
@@ -415,7 +418,7 @@ async fn run_now(
             };
             (outcome, report.prompt, report.quiet)
         }
-        (None, Ok(gh)) => {
+        (Ok(()), None, Ok(gh)) => {
             let prompt = run::prompt(&route, incoming);
             let outcome = match &prompt {
                 Err(err) => Outcome::failed(format!("cannot make the prompt: {err:#}")),
