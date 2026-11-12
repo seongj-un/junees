@@ -166,7 +166,7 @@ async fn run() -> Result<ExitCode> {
         if !on_terminal() {
             bail!(
                 "`junees setup` asks its questions on a terminal; run it in one, or write \
-                 the settings file yourself (see README)"
+                 the settings file yourself (see docs/configuration.md)"
             );
         }
         setup(&mut settings, &input).await?;

@@ -93,7 +93,7 @@ pub const KEYS: &[(&str, &str)] = &[
 const HEADER: &str = "\
 # Junees settings, written by `junees setup` (run it again to change them).
 # Environment variables win over this file: ANTHROPIC_API_KEY over api_key,
-# JUNEES_MODEL over model, and so on (see README).
+# JUNEES_MODEL over model, and so on (see docs/configuration.md).
 ";
 
 /// The state folder: `JUNEES_HOME`, else `$HOME/.junees`; `None` when

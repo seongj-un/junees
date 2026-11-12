@@ -128,7 +128,7 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_WEBHOOK_MAX_TIME    [webhook_max_time] time one webhook run may take (default 30m)
   JUNEES_WEBHOOK_MAX_TOKENS  [webhook_max_tokens] tokens one webhook run may use (default 1000000)
   (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
-  JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see README)
+  JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see docs/configuration.md)
 ";
 
 pub const REPL_HELP: &str = "\

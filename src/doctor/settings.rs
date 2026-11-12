@@ -95,7 +95,7 @@ pub(super) fn settings(
             AREA,
             "values",
             problem,
-            "fix that setting in config.toml or the environment (README lists them)",
+            "fix that setting in config.toml or the environment (docs/configuration.md lists them)",
         );
     }
     Read {
