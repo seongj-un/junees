@@ -134,6 +134,8 @@ struct Inner {
     name: String,
     /// The saved OAuth login, if one is used.
     auth: Option<Arc<Auth>>,
+    /// Whether mcp.json sets `oauth.scope`, which a login asks for alone.
+    configured_scope: bool,
     /// Whether `headers` holds `Authorization`.
     own_authorization: bool,
     max_bytes: usize,
@@ -181,6 +183,10 @@ impl HttpConnection {
                 headers,
                 name: name.to_string(),
                 auth,
+                configured_scope: config
+                    .oauth
+                    .as_ref()
+                    .is_some_and(|oauth| oauth.scope.is_some()),
                 own_authorization: config.has_authorization_header(),
                 max_bytes,
                 next_id: AtomicU64::new(1),
@@ -504,15 +510,26 @@ impl Inner {
                         // Best effort: the message says what to do anyway.
                         let _ = auth.want_scope(scope).await;
                     }
+                    let scope = challenge
+                        .scope
+                        .map(|scope| format!("`{}`", super::oauth::fetch::short(&scope, 200)));
                     Err(HttpError::Auth(format!(
                         "it needs more permissions (HTTP 403, insufficient scope{}); {}",
-                        challenge
-                            .scope
-                            .map(|scope| format!(" `{}`", super::oauth::fetch::short(&scope, 200)))
+                        scope
+                            .as_ref()
+                            .map(|scope| format!(" {scope}"))
                             .unwrap_or_default(),
                         if self.own_authorization {
                             "the `Authorization` header from mcp.json does not grant them"
                                 .to_string()
+                        } else if self.configured_scope {
+                            // A login asks for `oauth.scope` only, so logging
+                            // in again alone would not grant them.
+                            format!(
+                                "add {} to `oauth.scope` of `{name}` in mcp.json, then log in \
+                                 again: {login}",
+                                scope.as_deref().unwrap_or("what the server needs")
+                            )
                         } else {
                             format!("log in again to grant them: {login}")
                         }

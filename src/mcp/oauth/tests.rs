@@ -844,6 +844,30 @@ async fn a_scope_challenge_is_remembered_for_the_next_login() {
 }
 
 #[tokio::test]
+async fn a_scope_challenge_names_a_configured_scope_to_extend() {
+    let fake = Fake::start(Knobs::default()).await;
+    let home = tempfile::tempdir().unwrap();
+    let config = server_config(json!({"url": fake.url(), "oauth": {"scope": "files:read"}}));
+    login_by_browser(home.path(), &fake, &config)
+        .await
+        .0
+        .unwrap();
+    assert_eq!(fake.grant_scope().as_deref(), Some("files:read"));
+    let server = start_server(config.clone(), home.path());
+    server.start().await.unwrap();
+    fake.knobs().forbid = true;
+    let output = server.call("whoami", json!({})).await;
+    assert!(output.is_error);
+    // A login asks for `oauth.scope` alone, so the way out is to extend it.
+    let message = text(&output);
+    assert!(
+        message.contains("add `files:write` to `oauth.scope` of `docs` in mcp.json"),
+        "{message}"
+    );
+    assert!(message.contains("junees mcp login docs"), "{message}");
+}
+
+#[tokio::test]
 async fn unattended_starts_use_a_saved_login_only() {
     let fake = Fake::start(Knobs::default()).await;
     let home = tempfile::tempdir().unwrap();
