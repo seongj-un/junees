@@ -1,7 +1,7 @@
 # Junees
 
 Rust로 만드는 AI 에이전트 하네스. LLM이 도구를 호출하며 일을 처리하는 루프를 바닥부터 직접 만든다.
-[Hermes Agent](https://github.com/NousResearch/hermes-agent)에서 영감을 받았고, 단일 바이너리와 적은 메모리 사용을 목표로 한다.
+단일 바이너리와 적은 메모리 사용을 목표로 한다.
 
 ## 빠른 시작
 
