@@ -320,13 +320,20 @@ async fn prepare(lookup: &Lookup, job: &Job) -> Result<(Box<dyn Engine>, super::
 }
 
 /// Moves to `dir` (the tools work in the current folder) and makes the
-/// engine of the `backend` setting there.
+/// engine of the `backend` setting there. The claude-code backend runs only
+/// when [`crate::claude_code::check_unattended`] allows it.
 pub async fn engine_in(lookup: &Lookup, dir: &Path) -> Result<Box<dyn Engine>> {
     std::env::set_current_dir(dir).with_context(|| format!("cannot work in {}", dir.display()))?;
     let engine: Box<dyn Engine> = match Backend::from_lookup(|key| lookup(key))? {
         Backend::Api => Box::new(ApiEngine::new(Config::from_lookup(|key| lookup(key))?)),
         Backend::ClaudeCode => {
             let config = Config::from_lookup_without_key(|key| lookup(key))?;
+            crate::claude_code::check_unattended(|key| lookup(key), config.tools.sandbox.as_ref())?;
+            eprintln!(
+                "  !! the claude-code backend runs this unattended run's commands without \
+                 Junees's sandbox ({})",
+                crate::claude_code::UNATTENDED_ENV
+            );
             let claude = ClaudeCode::from_lookup(|key| lookup(key));
             claude.check(dir, &config.tools).await?;
             for notice in claude.notices() {

@@ -103,6 +103,13 @@ pub(super) fn webhooks(report: &mut Report, home: &Path, settings: &Settings) {
     for route in &routes {
         let name = format!("route {}", route.name);
         match &route.secret {
+            None if !route.no_secret => report.warn(
+                AREA,
+                &name,
+                "no secret, and not added with --no-secret: the server refuses its requests",
+                "remove the route and add it again: `junees webhook add` makes a secret \
+                 (--no-secret accepts unsigned requests on a loopback address)",
+            ),
             None => report.ok(
                 AREA,
                 &name,

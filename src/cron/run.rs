@@ -58,6 +58,9 @@ pub enum Trigger<'a> {
         github_allow: &'a [crate::github::Write],
         gh_config: &'a Path,
         context_dir: &'a Path,
+        /// Logins whose pull request comments the `github` tool shows
+        /// besides people with write access (a flow's `--approver`).
+        approvers: &'a [String],
     },
 }
 
@@ -88,6 +91,12 @@ impl<'a> Trigger<'a> {
                 webhook: true,
                 gh_config_dir: Some(gh_config.to_path_buf()),
                 sandbox: unattended(settings),
+                // Claude Code's memory and instruction files too: they
+                // would reach the user's own Claude Code sessions.
+                settings_file: settings
+                    .settings_file
+                    .clone()
+                    .map(crate::tools::SettingsFile::with_claude_folder),
                 ..settings.clone()
             },
         }
@@ -311,7 +320,14 @@ impl ApiEngine {
         self
     }
 
-    fn agent(&self, spec: &Spec<'_>, mcp: &Mcp, cancel: &Cancel, limits: Limits) -> Result<Agent> {
+    /// The run's agent and the MCP servers whose tools it left out.
+    fn agent(
+        &self,
+        spec: &Spec<'_>,
+        mcp: &Mcp,
+        cancel: &Cancel,
+        limits: Limits,
+    ) -> Result<(Agent, Vec<String>)> {
         let config = &self.config;
         let dir = spec.dir;
         let home = config.home.as_deref();
@@ -328,12 +344,21 @@ impl ApiEngine {
             crate::search::register(&mut tools, home, dir, false);
         }
         skills::register(&mut tools, home, false);
-        mcp.register(&mut tools);
+        // Nobody can answer the question an untrusted server's tool needs.
+        let left_out = mcp.register_trusted(&mut tools);
+        for server in &left_out {
+            eprintln!(
+                "  !! MCP server `{}` is not trusted: its tools are left out of unattended \
+                 runs (set \"trust\": true in mcp.json to allow them)",
+                crate::prompt_text::escape_hidden(server)
+            );
+        }
         match spec.trigger {
             Trigger::Cron => crate::github::register(&mut tools, &config.github, dir, false),
             Trigger::Webhook {
                 route,
                 github_allow,
+                approvers,
                 ..
             } => crate::github::register_webhook(
                 &mut tools,
@@ -341,6 +366,7 @@ impl ApiEngine {
                 dir,
                 route,
                 github_allow,
+                approvers,
             ),
         }
         // Only with browser_unattended, and nobody is asked.
@@ -387,7 +413,7 @@ impl ApiEngine {
         if let Some(settings) = config.subagents {
             agent = agent.with_delegate(settings);
         }
-        Ok(agent)
+        Ok((agent, left_out))
     }
 }
 
@@ -399,8 +425,8 @@ impl Engine for ApiEngine {
         for line in mcp.report() {
             eprintln!("{line}");
         }
-        let mut agent = match self.agent(spec, &mcp, cancel, limits) {
-            Ok(agent) => agent,
+        let (mut agent, left_out) = match self.agent(spec, &mcp, cancel, limits) {
+            Ok(built) => built,
             Err(err) => {
                 mcp.shutdown().await;
                 return Outcome::failed(format!("{err:#}"));
@@ -428,22 +454,44 @@ impl Engine for ApiEngine {
         let result = agent.run(spec.prompt, |event| answer.event(event)).await;
         mcp.shutdown().await;
         let used = tokens(agent.usage());
-        match result {
-            Ok(text) => Outcome {
-                status: RunStatus::Ok,
-                answer: text.trim().to_string(),
-                note: String::new(),
-                session,
-                tokens: used,
-            },
-            Err(err) => Outcome {
-                status: RunStatus::Failed,
-                answer: answer.text(),
-                note: failure_note(&err, &deadline, limits),
-                session,
-                tokens: used,
-            },
+        let (status, answer, note) = match result {
+            Ok(text) => (RunStatus::Ok, text.trim().to_string(), String::new()),
+            Err(err) => (
+                RunStatus::Failed,
+                answer.text(),
+                failure_note(&err, &deadline, limits),
+            ),
+        };
+        Outcome {
+            status,
+            answer,
+            note: with_left_out(note, &left_out),
+            session,
+            tokens: used,
         }
+    }
+}
+
+/// `note` plus the MCP servers whose tools the run left out, so the
+/// output file, the delivered result and `last` say why a job that used
+/// them behaves differently, not only stderr.
+fn with_left_out(note: String, servers: &[String]) -> String {
+    if servers.is_empty() {
+        return note;
+    }
+    let names: Vec<String> = servers
+        .iter()
+        .map(|server| crate::prompt_text::escape_hidden(server))
+        .collect();
+    let left_out = format!(
+        "left out the tools of untrusted MCP servers: {} (set \"trust\": true in mcp.json to \
+         allow them)",
+        names.join(", ")
+    );
+    if note.is_empty() {
+        left_out
+    } else {
+        format!("{note}; {left_out}")
     }
 }
 
@@ -652,6 +700,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_result_names_the_untrusted_mcp_servers_left_out() {
+        let home = tempfile::tempdir().unwrap();
+        let fake = tempfile::tempdir().unwrap();
+        let script = fake.path().join("fake_mcp.py");
+        std::fs::write(&script, include_str!("../../tests/fixtures/fake_mcp.py")).unwrap();
+        let servers = serde_json::json!({"servers": {
+            "notes": {"command": "python3", "args": [script], "env": {"FAKE_MCP_MODE": "modern"}},
+            "kept": {
+                "command": "python3",
+                "args": [script],
+                "env": {"FAKE_MCP_MODE": "modern"},
+                "trust": true
+            }
+        }});
+        let list = home.path().join(crate::mcp::config::FILE_NAME);
+        std::fs::write(&list, servers.to_string()).unwrap();
+        std::fs::set_permissions(&list, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let mut job = job("0123abcd", Schedule::Once { at: 1 }, None);
+        job.dir = home.path().to_path_buf();
+        let (engine, seen) = engine(
+            home.path(),
+            vec![reply(vec![ContentBlock::text("done")], StopReason::EndTurn)],
+            Duration::ZERO,
+        );
+        let outcome = engine.run(&job.spec(), &Cancel::new(), limits()).await;
+        assert_eq!(outcome.status, RunStatus::Ok, "{outcome:?}");
+        assert_eq!(
+            outcome.note,
+            "left out the tools of untrusted MCP servers: notes (set \"trust\": true in \
+             mcp.json to allow them)"
+        );
+        let tools = seen.lock().unwrap()[0].1.clone();
+        assert!(
+            tools.iter().any(|name| name.starts_with("mcp__kept__")),
+            "{tools:?}"
+        );
+        assert!(
+            !tools.iter().any(|name| name.starts_with("mcp__notes__")),
+            "{tools:?}"
+        );
+        // After a failure note.
+        assert_eq!(
+            with_left_out("interrupted".into(), &["a".into(), "b".into()]),
+            "interrupted; left out the tools of untrusted MCP servers: a, b (set \"trust\": \
+             true in mcp.json to allow them)"
+        );
+        assert_eq!(with_left_out("interrupted".into(), &[]), "interrupted");
+    }
+
+    #[tokio::test]
     async fn the_token_limit_stops_the_run_and_keeps_the_text_so_far() {
         let home = tempfile::tempdir().unwrap();
         let mut job = job("0123abcd", Schedule::Once { at: 1 }, None);
@@ -744,6 +843,7 @@ mod tests {
                 github_allow: allow,
                 gh_config: Path::new("/run/gh-config"),
                 context_dir: home.path(),
+                approvers: &[],
             },
         };
         let (engine, seen) = self::engine(home.path(), replies(), Duration::ZERO);
@@ -769,6 +869,7 @@ mod tests {
             github_allow: allow,
             gh_config: Path::new("/run/gh-config"),
             context_dir: home.path(),
+            approvers: &[],
         }
         .tool_settings(&settings);
         assert!(webhook.webhook);
@@ -779,6 +880,35 @@ mod tests {
         let cron = Trigger::Cron.tool_settings(&settings);
         assert!(!cron.webhook);
         assert_eq!(cron.gh_config_dir, None);
+
+        // A webhook run's tools keep off all of Claude Code's folder, a
+        // scheduled job's only its login and settings.
+        let user = home.path().join("user");
+        let settings = ToolSettings {
+            settings_file: Some(crate::tools::SettingsFile::new(
+                user.join(".junees/config.toml"),
+                Some(user.clone()),
+            )),
+            ..ToolSettings::default()
+        };
+        let memory = user.join(".claude/projects/p/memory/MEMORY.md");
+        let login = user.join(".claude/.credentials.json");
+        let webhook = Trigger::Webhook {
+            route: "flow",
+            github_allow: allow,
+            gh_config: Path::new("/run/gh-config"),
+            context_dir: home.path(),
+            approvers: &[],
+        }
+        .tool_settings(&settings)
+        .settings_file
+        .unwrap();
+        assert!(webhook.is(&memory) && webhook.is(&login));
+        let cron = Trigger::Cron
+            .tool_settings(&settings)
+            .settings_file
+            .unwrap();
+        assert!(!cron.is(&memory) && cron.is(&login));
     }
 
     #[tokio::test]
@@ -812,6 +942,7 @@ mod tests {
                 github_allow: allow,
                 gh_config: Path::new("/run/gh-config"),
                 context_dir: &base,
+                approvers: &[],
             },
         };
         assert_eq!(webhook.trigger.context_dir(&tree), base.as_path());

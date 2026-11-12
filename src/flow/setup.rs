@@ -133,6 +133,7 @@ pub fn add(store: &Store, lookup: &Lookup, args: AddGithubArgs, now: i64) -> Res
         kind: Kind::Github,
         prompt: FLOW_PROMPT.to_string(),
         secret: Some(Secret::File(secret_file.clone())),
+        no_secret: false,
         events: flow.events(),
         dir,
         deliver,
@@ -160,7 +161,7 @@ pub fn add(store: &Store, lookup: &Lookup, args: AddGithubArgs, now: i64) -> Res
 
 /// Writes a new random secret (32 bytes, hex) for route `name` to
 /// `$JUNEES_HOME/secrets/webhook-<name>` (0600, folder 0700).
-fn write_secret(home: &Path, name: &str) -> Result<PathBuf> {
+pub(crate) fn write_secret(home: &Path, name: &str) -> Result<PathBuf> {
     use ring::rand::SecureRandom;
     let folder = crate::tools::secrets_dir(home);
     create_private_dir(&folder)?;

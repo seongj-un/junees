@@ -54,6 +54,7 @@ pub async fn main(command: WebhookCommand, settings: Settings) -> Result<ExitCod
     let store = Store::new(&home);
     match command {
         WebhookCommand::Add(args) => {
+            let made = args.secret_env.is_none() && args.secret_file.is_none() && !args.no_secret;
             let route = new_route(&store, &lookup, args)?;
             println!(
                 "added route {}: POST /hooks/{} ({})",
@@ -61,6 +62,17 @@ pub async fn main(command: WebhookCommand, settings: Settings) -> Result<ExitCod
                 route.name,
                 route.kind.word()
             );
+            if let (true, Some(Secret::File(path))) = (made, &route.secret) {
+                println!(
+                    "secret: the contents of {} (cat it; it is 0600); requests must be signed \
+                     with it ({})",
+                    path.display(),
+                    match route.kind {
+                        Kind::Github => "the webhook's Secret on GitHub",
+                        Kind::Generic => "X-Junees-Signature",
+                    }
+                );
+            }
             if !super::is_serving(&home) {
                 eprintln!(
                     "no `junees webhook serve` is running: start it (see README, \"웹훅\") to \
@@ -164,6 +176,7 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
             secret.read(&|_| None)?;
             Some(secret)
         }
+        // Made below, once the name is known to be free.
         (None, None) => None,
     };
     let events = match &args.events {
@@ -221,12 +234,14 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         _ => {}
     }
     match &secret {
-        None => eprintln!(
-            "  !! the route has no secret: anyone who can reach the server can start runs. \
-             It is only served while `junees webhook serve` listens on a loopback address, \
-             to JSON requests sent straight to it (Host 127.0.0.1:<port>, localhost:<port> \
-             or [::1]:<port>; no browser or proxy headers)"
+        None if args.no_secret => eprintln!(
+            "  !! the route has no secret: anything on this machine that can reach the server \
+             (other users, the model's own commands) can start runs. It is only served while \
+             `junees webhook serve` listens on a loopback address, to JSON requests sent \
+             straight to it (Host 127.0.0.1:<port>, localhost:<port> or [::1]:<port>; no \
+             browser or proxy headers)"
         ),
+        None => {}
         Some(Secret::Env(name)) if std::env::var_os(name).is_none() => {
             eprintln!("  !! {name} is not set here: set it for `junees webhook serve`")
         }
@@ -239,11 +254,19 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
     if locked.routes.iter().any(|route| route.name == args.name) {
         bail!("a route named `{}` exists already", args.name);
     }
+    let secret = match secret {
+        None if !args.no_secret => Some(Secret::File(crate::flow::setup::write_secret(
+            store.home(),
+            &args.name,
+        )?)),
+        secret => secret,
+    };
     let route = Route {
         name: args.name,
         kind,
         prompt: args.prompt,
         secret,
+        no_secret: args.no_secret,
         events,
         dir,
         deliver,
@@ -574,6 +597,12 @@ async fn serve(home: &Path, lookup: Lookup, listen: Option<String>) -> Result<Ex
     let env: Env = Arc::new(|key: &str| std::env::var(key).ok());
     for route in Store::new(home).routes()? {
         match &route.secret {
+            None if !route.no_secret => eprintln!(
+                "  !! route {} has no secret and was not added with --no-secret: its requests \
+                 are refused (403); remove it and add it again (`junees webhook add` makes a \
+                 secret)",
+                route.name
+            ),
             None if !loopback => eprintln!(
                 "  !! route {} has no secret: refused on a non-loopback address",
                 route.name
@@ -675,6 +704,32 @@ mod tests {
             route.secret,
             Some(Secret::File(std::fs::canonicalize(&good).unwrap()))
         );
+        // Without a secret option: a random private secret file, like
+        // add-github's; unsigned only when asked for.
+        let mut made = args("made");
+        made.secret_env = None;
+        let route = new_route(&store, &settings, made).unwrap();
+        let path = secrets.join("webhook-made");
+        assert_eq!(route.secret, Some(Secret::File(path.clone())));
+        assert!(!route.no_secret);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim().len(), 64);
+        let mut open = args("open-route");
+        open.secret_env = None;
+        open.no_secret = true;
+        let route = new_route(&store, &settings, open).unwrap();
+        assert_eq!(route.secret, None);
+        assert!(route.no_secret);
+        assert!(!secrets.join("webhook-open-route").exists());
+        // A taken name does not overwrite that route's secret file.
+        std::fs::write(&path, "kept").unwrap();
+        let mut again = args("made");
+        again.secret_env = None;
+        assert!(new_route(&store, &settings, again).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept");
         for (change, wanted) in [
             (
                 Box::new(|_: &mut AddArgs| {}) as Box<dyn Fn(&mut AddArgs)>,
@@ -758,7 +813,7 @@ mod tests {
             let err = new_route(&store, &settings, args).unwrap_err().to_string();
             assert!(err.contains(wanted), "{wanted}: {err}");
         }
-        assert_eq!(store.routes().unwrap().len(), 2);
+        assert_eq!(store.routes().unwrap().len(), 4);
     }
 
     #[test]

@@ -114,6 +114,12 @@ pub struct Route {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<Secret>,
+    /// Added with `--no-secret`: the user accepted unsigned requests,
+    /// served on a loopback address only. The server refuses a route that
+    /// has neither a secret nor this mark (one added before secrets were
+    /// required).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_secret: bool,
     /// The events that run (`pull_request` or `pull_request.opened`);
     /// empty for every event.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -317,6 +323,7 @@ pub(crate) mod tests {
             kind: Kind::Github,
             prompt: "review {{payload.number}}".into(),
             secret: Some(Secret::Env("TEST_HOOK_SECRET".into())),
+            no_secret: false,
             events: Vec::new(),
             dir: PathBuf::from("/"),
             deliver: Delivery::Local,

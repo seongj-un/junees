@@ -425,6 +425,7 @@ async fn model_run(
             // The route's folder (the base checkout), not a worktree of
             // the pull request: its instruction files are its author's.
             context_dir: &cx.route.dir,
+            approvers: &cx.flow.approvers,
         },
     };
     let outcome = engine.run(&spec, cx.cancel, cx.limits).await;
@@ -697,6 +698,37 @@ async fn address_run(
         let posted = comment(cx, r, n, &body).await;
         return Ok(format!("no change{posted}"));
     };
+    let github_files =
+        address::github_changes(&tree, sha).map_err(|err| (format!("{err:#}"), true))?;
+    if !github_files.is_empty() {
+        let mut shown: Vec<String> = github_files
+            .iter()
+            .take(5)
+            .map(|file| {
+                format!(
+                    "`{}`",
+                    crate::prompt_text::escape_hidden(file).replace('`', "'")
+                )
+            })
+            .collect();
+        if github_files.len() > 5 {
+            shown.push(format!("외 {}개", github_files.len() - 5));
+        }
+        let body = format!(
+            "Junees가 리뷰 {}(@{reviewer})를 반영한 커밋 {}이 `{}` 아래 파일({})을 바꿔서 push하지 \
+             않았습니다. 워크플로와 액션은 저장소 시크릿으로 실행되므로 직접 확인하고 반영해 주세요.\n\n{}",
+            review["id"],
+            short(&new),
+            merge::GITHUB_DIR,
+            shown.join(", "),
+            answer_block(cx, &report.answer)
+        );
+        let posted = comment(cx, r, n, &body).await;
+        return Err((
+            format!("changes under {}, not pushed{posted}", merge::GITHUB_DIR),
+            true,
+        ));
+    }
     let tested = match &cx.flow.test_cmd {
         None => None,
         Some(command) => {

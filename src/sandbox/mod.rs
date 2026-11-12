@@ -11,8 +11,9 @@
 //!   writable folders), except the settings file, the MCP server list,
 //!   the secrets folder, the browser profiles
 //!   ([`crate::browser::PROFILES_FOLDER`]: cookies and logins of a
-//!   running browser) and, in a webhook run, the git and GitHub CLI
-//!   credentials;
+//!   running browser) and, in a webhook run, the git, GitHub CLI and
+//!   Claude Code credentials and the saved sessions (tool output of
+//!   earlier conversations);
 //! - never write in Junees's data folders (memory, skills, cron, ...)
 //!   or the saved sessions;
 //! - with `sandbox_network = 0` and a kernel of Landlock ABI 4 or later,
@@ -278,9 +279,16 @@ impl Sandbox {
             }
             read_only.extend(file.data_folders());
             // Saved sessions too: `-c` and `--resume` read them back as
-            // the user's own conversation.
+            // the user's own conversation. A webhook run (anyone's text)
+            // may not read them either: they hold the tool output of
+            // earlier conversations, secrets included.
             state = file.folder();
-            read_only.extend(state.as_deref().map(crate::session::sessions_dir));
+            let sessions = state.as_deref().map(crate::session::sessions_dir);
+            if tools.webhook {
+                hidden.extend(sessions);
+            } else {
+                read_only.extend(sessions);
+            }
         }
         let mut sandbox = Self::new(settings, hidden, read_only);
         sandbox.state = state;

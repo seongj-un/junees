@@ -4,9 +4,10 @@
 //!
 //! The answers: 405 for another method, 404 for another path or an unknown
 //! route, 401 for a missing or wrong signature, 403 for a route without a
-//! secret when the server listens on a non-loopback address or the request
-//! may not come straight from a program on this machine
-//! ([`Server::check_unsigned`]), 415 for such a request that is not JSON,
+//! secret that was not added with `--no-secret`, or when the server listens
+//! on a non-loopback address or the request may not come straight from a
+//! program on this machine ([`Server::check_unsigned`]), 415 for such a
+//! request that is not JSON,
 //! 400 for a request it cannot use, 200 `pong` for GitHub's `ping`, 503 while
 //! paused or stopping, 202 `ignored` for events the route does not want,
 //! 200 `duplicate` for a delivery id it has seen (the last [`REMEMBERED`];
@@ -391,6 +392,13 @@ impl Server {
     fn check_unsigned(&self, route: &Route, head: &Head) -> Result<(), Answer> {
         if route.secret.is_some() {
             return Ok(());
+        }
+        if !route.no_secret {
+            return Err(answer(
+                403,
+                "this route has no secret; add it again with one (or with --no-secret to accept \
+                 unsigned requests)",
+            ));
         }
         if !self.loopback {
             return Err(answer(
