@@ -198,6 +198,19 @@ impl<P: Platform> Channels<P> {
         {
             return;
         }
+        self.queue(channel, content, attachments, notes);
+    }
+
+    /// An input for the channel's worker that never answers a waiting
+    /// approval question (someone else's words, such as a forwarded
+    /// message): it runs after the turn, like any queued input.
+    pub fn queue(
+        &mut self,
+        channel: &str,
+        content: String,
+        attachments: Vec<P::Attachment>,
+        notes: Vec<String>,
+    ) {
         if content.is_empty() && attachments.is_empty() {
             // Only files that are not images: nothing to run.
             let shared = Arc::clone(&self.shared);

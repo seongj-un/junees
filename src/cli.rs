@@ -127,8 +127,11 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_CRON_MAX_TOKENS  [cron_max_tokens] tokens one scheduled run may use (default 1000000)
   JUNEES_WEBHOOK_MAX_TIME    [webhook_max_time] time one webhook run may take (default 30m)
   JUNEES_WEBHOOK_MAX_TOKENS  [webhook_max_tokens] tokens one webhook run may use (default 1000000)
+  JUNEES_SANDBOX  [sandbox] Landlock confinement of bash commands: auto (default; require
+                  for scheduled and webhook runs), require or off; also
+                  JUNEES_SANDBOX_WRITE, JUNEES_SANDBOX_READ, JUNEES_SANDBOX_NETWORK
   (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
-  JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see README)
+  JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see docs/configuration.md)
 ";
 
 pub const REPL_HELP: &str = "\

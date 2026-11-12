@@ -6,8 +6,9 @@
 //! and close.
 //!
 //! Off unless the user turns it on (`browser = on`, `JUNEES_BROWSER`).
-//! Each session gets a new private profile in the temporary folder, so no
-//! login or cookie of the user's own browser is there; the browser and
+//! Each session gets a new private profile in `$JUNEES_HOME/browser`
+//! ([`PROFILES_FOLDER`], which the bash sandbox keeps commands out of),
+//! so no login or cookie of the user's own browser is there; the browser and
 //! the profile go away on `close`, after a quiet [`IDLE`], when a turn is
 //! cancelled and when Junees ends (Chrome also ends when its DevTools pipe
 //! closes, see [`process`]).
@@ -49,6 +50,11 @@ use crate::tools::ToolRegistry;
 
 /// The tool's name.
 pub const TOOL_NAME: &str = "browser";
+/// The folder under `$JUNEES_HOME` holding the running browsers'
+/// profiles (cookies, logins of the session). The bash sandbox keeps
+/// commands from reading or changing it, like the settings file
+/// ([`crate::tools::SettingsFile::protected_paths`]).
+pub const PROFILES_FOLDER: &str = "browser";
 pub const ENABLE_ENV: &str = "JUNEES_BROWSER";
 pub const PATH_ENV: &str = "JUNEES_BROWSER_PATH";
 pub const ALLOW_PRIVATE_ENV: &str = "JUNEES_BROWSER_ALLOW_PRIVATE";
@@ -75,6 +81,10 @@ pub struct Settings {
     /// Starts Chrome with `--no-sandbox` (`JUNEES_BROWSER_NO_SANDBOX`), for
     /// machines where its sandbox cannot start.
     pub no_sandbox: bool,
+    /// Where the profiles go: [`PROFILES_FOLDER`] in the state folder,
+    /// absolute; `None` (no state folder) puts them in the temporary
+    /// folder.
+    pub profiles: Option<PathBuf>,
 }
 
 impl Settings {
@@ -87,6 +97,8 @@ impl Settings {
             allow_private: parse_flag(get(ALLOW_PRIVATE_ENV), ALLOW_PRIVATE_ENV)?,
             unattended: parse_flag(get(UNATTENDED_ENV), UNATTENDED_ENV)?,
             no_sandbox: parse_flag(get(NO_SANDBOX_ENV), NO_SANDBOX_ENV)?,
+            profiles: crate::config_file::home_dir(&get)
+                .and_then(|home| std::path::absolute(home.join(PROFILES_FOLDER)).ok()),
         })
     }
 }

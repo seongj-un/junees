@@ -70,6 +70,9 @@ pub struct Timing {
     /// `backoff_max`.
     pub backoff_start: Duration,
     pub backoff_max: Duration,
+    /// How long the parts of an album received so far wait for the next
+    /// one before they go on as one input.
+    pub album_wait: Duration,
 }
 
 impl Default for Timing {
@@ -78,6 +81,7 @@ impl Default for Timing {
             poll: Duration::from_secs(30),
             backoff_start: Duration::from_secs(1),
             backoff_max: Duration::from_secs(60),
+            album_wait: Duration::from_secs(1),
         }
     }
 }
@@ -168,14 +172,24 @@ impl TelegramGateway {
         let mut poller = Poller::new(Arc::clone(&api), self.timing, Arc::clone(&self.log));
         let log = Arc::clone(&self.log);
         let allowed = self.config.allowed_users.clone();
+        let album_wait = self.timing.album_wait;
         // The chats' conversations run here, on this thread.
         let chats = tokio::task::LocalSet::new();
         chats
             .run_until(async move {
-                let mut router = Router::new(shared, allowed, me);
+                let mut router = Router::new(shared, allowed, me, album_wait);
                 let ended = loop {
+                    let due = router.next_due();
                     tokio::select! {
                         _ = shutdown.cancelled() => break Ok(()),
+                        // The poll is cancel-safe: updates it did not hand
+                        // out come again.
+                        _ = async {
+                            match due {
+                                Some(due) => tokio::time::sleep_until(due.into()).await,
+                                None => std::future::pending().await,
+                            }
+                        } => router.flush_due(),
                         batch = poller.next() => match batch {
                             Ok(updates) => router.handle(&updates),
                             Err(err) => break Err(err),

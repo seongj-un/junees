@@ -13,6 +13,7 @@ use super::api::{Api, Target};
 use crate::approval::{Request, render};
 use crate::gateway::ask::human;
 use crate::gateway::platform::Platform;
+use crate::gateway::split::split_plain;
 use crate::images::{Image, MAX_IMAGE_BYTES, too_large};
 use crate::prompt_text::escape_hidden;
 
@@ -26,6 +27,59 @@ pub const MAX_ATTACHMENTS: usize = 10;
 
 /// Time one download may take.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// U+2060 WORD JOINER: shows as nothing, and an `@name` with it after the
+/// `@` is no mention to Telegram.
+const NO_MENTION: char = '\u{2060}';
+
+/// `text` with each `@name` (an `@` not right after a letter, digit or
+/// `_`, followed by a letter, as usernames start) broken by an invisible
+/// word joiner after the `@`. A group reply then notifies no one: the
+/// model's text may repeat names from web pages or files, and the Bot
+/// API has no switch like Discord's `allowed_mentions`. E-mail addresses
+/// stay as they are, and so do names in the path of a web address
+/// (`https://medium.com/@alice/post`), which Telegram takes as part of
+/// the link, so the hidden character would only spoil a copied link.
+/// Code in backticks is broken too: replies are plain text, where a
+/// backtick is no code to Telegram and `@name` in it still notifies.
+pub fn defuse_mentions(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut previous: Option<char> = None;
+    // Where the current run of non-space characters starts.
+    let mut word = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        out.push(c);
+        if c.is_whitespace() {
+            word = at + c.len_utf8();
+        }
+        let starts_word = previous.is_none_or(|p| !(p.is_alphanumeric() || p == '_'));
+        if c == '@'
+            && starts_word
+            && chars
+                .peek()
+                .is_some_and(|(_, next)| next.is_ascii_alphabetic())
+            && !in_url_path(&text[word..at])
+        {
+            out.push(NO_MENTION);
+        }
+        previous = Some(c);
+    }
+    out
+}
+
+/// Whether what comes right after `before` (a run without spaces) is in
+/// the path of an http(s) address: a scheme, a host with a dot, then a
+/// `/`.
+fn in_url_path(before: &str) -> bool {
+    ["https://", "http://"].iter().any(|scheme| {
+        before.rfind(scheme).is_some_and(|at| {
+            let rest = &before[at + scheme.len()..];
+            rest.find('/')
+                .is_some_and(|slash| rest[..slash].contains('.') && !rest[..slash].contains('@'))
+        })
+    })
+}
 
 /// An image attached to a message: a photo, or a document that is an
 /// image.
@@ -193,11 +247,22 @@ impl Platform for Telegram {
         false
     }
 
+    /// In a group (Telegram gives groups negative chat ids), `@name`s are
+    /// broken first ([`defuse_mentions`]); the few added characters may
+    /// need one more message.
     async fn post(&self, channel: &str, text: &str) -> Result<()> {
-        self.api
-            .send_message(Self::target(channel)?, text)
-            .await
-            .map_err(Into::into)
+        let target = Self::target(channel)?;
+        if target.chat >= 0 {
+            return self
+                .api
+                .send_message(target, text)
+                .await
+                .map_err(Into::into);
+        }
+        for part in split_plain(&defuse_mentions(text), MESSAGE_LIMIT) {
+            self.api.send_message(target, &part).await?;
+        }
+        Ok(())
     }
 
     async fn typing(&self, channel: &str) -> Result<()> {
@@ -266,6 +331,63 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn mentions_are_broken_and_addresses_kept() {
+        let broken = |name: &str| format!("@\u{2060}{name}");
+        assert_eq!(
+            defuse_mentions("@alice and (@bob_2), ask @carol."),
+            format!(
+                "{} and ({}), ask {}.",
+                broken("alice"),
+                broken("bob_2"),
+                broken("carol")
+            )
+        );
+        for kept in [
+            "mail me at a@example.com",
+            "x_@y",
+            "@ alone",
+            "@123",
+            "ends with @",
+            "한글@name",
+        ] {
+            assert_eq!(defuse_mentions(kept), kept, "{kept}");
+        }
+        assert_eq!(
+            defuse_mentions("줄\n@dave"),
+            format!("줄\n{}", broken("dave"))
+        );
+    }
+
+    #[test]
+    fn names_in_a_web_address_path_stay_whole() {
+        let broken = |name: &str| format!("@\u{2060}{name}");
+        for kept in [
+            "see https://medium.com/@alice/post",
+            "(http://example.org/x/@bob)",
+            "https://한국.kr/@carol",
+        ] {
+            assert_eq!(defuse_mentions(kept), kept, "{kept}");
+        }
+        // Not in a path: the host part, no host, a host without a dot, a
+        // name after the address, and code (plain text to Telegram).
+        for (text, name) in [
+            ("https://@alice", "alice"),
+            ("https:///@alice", "alice"),
+            ("https://x/@alice", "alice"),
+            ("https://u@a.com/@alice", "alice"),
+            ("https://medium.com/x @alice", "alice"),
+            ("x://a.b/@alice", "alice"),
+            ("`@dataclass`", "dataclass"),
+        ] {
+            assert!(
+                defuse_mentions(text).contains(&broken(name)),
+                "{text}: {}",
+                defuse_mentions(text)
+            );
+        }
+    }
 
     #[test]
     fn picks_the_largest_photo_within_the_limit_and_image_documents() {

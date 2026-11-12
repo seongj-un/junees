@@ -487,12 +487,8 @@ impl crate::flow::run::Engines for FlowEngines {
 /// The variables a flow's test command (PR code) does not get: the
 /// `hidden_env` of [`crate::config::Config`], which adds the header
 /// variables of mcp.json to the list in `lookup`.
-fn flow_hidden(lookup: &Lookup) -> Result<Vec<String>> {
-    Ok(
-        crate::config::Config::from_lookup_without_key(|key| lookup(key))?
-            .tools
-            .hidden_env,
-    )
+fn flow_tools(lookup: &Lookup) -> Result<crate::tools::ToolSettings> {
+    Ok(crate::config::Config::from_lookup_without_key(|key| lookup(key))?.tools)
 }
 
 /// Runs the GitHub flow `flow` of `route` for `incoming`.
@@ -528,16 +524,17 @@ async fn flow_run(
         let client = crate::github::Client::new(&settings.api_url, token)?;
         let merge = crate::flow::merge_enabled(&*lookup)?;
         let limits = super::limits(&*lookup)?;
-        let hidden = flow_hidden(&lookup)?;
-        Ok((settings.unattended, client, merge, limits, hidden))
+        let tools = flow_tools(&lookup)?;
+        Ok((settings.unattended, client, merge, limits, tools))
     })();
-    let (unattended, client, merge_setting, limits, hidden) = match prepared {
+    let (unattended, client, merge_setting, limits, tools) = match prepared {
         Ok(prepared) => prepared,
         Err(err) => return crate::flow::run::Report::failed(format!("{err:#}")),
     };
     let engines = FlowEngines {
         lookup: Arc::clone(&lookup),
     };
+    let sandbox = crate::flow::address::test_sandbox(&tools, gh_config);
     let cx = crate::flow::run::Context {
         home,
         route,
@@ -548,7 +545,8 @@ async fn flow_run(
         limits,
         merge_setting,
         unattended: &unattended,
-        hidden: &hidden,
+        hidden: &tools.hidden_env,
+        sandbox: sandbox.as_ref(),
         gh_config,
         now: unix_now(),
     };
@@ -843,7 +841,7 @@ mod tests {
             &lookup(&[("JUNEES_HOME", home_text), (HIDDEN_ENV, "DB_PASSWORD")]),
         );
         assert_eq!(
-            flow_hidden(&lookup).unwrap(),
+            flow_tools(&lookup).unwrap().hidden_env,
             ["DB_PASSWORD", "A_SECRET", "DOCS_TOKEN"]
         );
     }

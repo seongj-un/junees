@@ -1,5 +1,5 @@
-//! Starting and stopping the browser: the program, a private temporary
-//! profile per session, the DevTools pipe and the cleanup.
+//! Starting and stopping the browser: the program, a private profile per
+//! session, the DevTools pipe and the cleanup.
 //!
 //! Chrome talks the DevTools protocol over a pipe
 //! (`--remote-debugging-pipe`: it reads commands from fd 3 and writes
@@ -109,9 +109,9 @@ const SOCKET_SUFFIX: usize = "/org.chromium.Chromium.XXXXXX/SingletonSocket".len
 /// `/junees-browser-` and 16 hex digits.
 const PROFILE_NAME: usize = "/junees-browser-".len() + 16;
 
-/// Where the profile folder goes: the temporary folder `temp`, or `/tmp`
-/// when Chrome's socket in a profile there would be too long a path (a
-/// long TMPDIR made Chrome end at once).
+/// Where a `junees-browser-*` folder Chrome takes as its temporary folder
+/// goes: the temporary folder `temp`, or `/tmp` when Chrome's socket in
+/// it would be too long a path (a long TMPDIR made Chrome end at once).
 pub fn profile_base(temp: &Path) -> PathBuf {
     if temp.as_os_str().len() + PROFILE_NAME + SOCKET_SUFFIX <= MAX_SOCKET_PATH {
         temp.to_path_buf()
@@ -120,39 +120,93 @@ pub fn profile_base(temp: &Path) -> PathBuf {
     }
 }
 
-/// A private (0700) temporary profile folder, removed when dropped. It is
-/// also Chrome's temporary folder (TMPDIR), so what Chrome puts there goes
-/// with it.
+/// Whether Chrome's socket fits in the path limit with `temp` as its
+/// temporary folder.
+pub fn socket_fits(temp: &Path) -> bool {
+    temp.as_os_str().len() + SOCKET_SUFFIX <= MAX_SOCKET_PATH
+}
+
+/// A private (0700) profile folder, removed when dropped, and Chrome's
+/// temporary folder (TMPDIR), so what Chrome puts there (its
+/// single-instance socket folder) goes with it.
+///
+/// The profile goes in the profiles folder of the state folder
+/// ([`super::PROFILES_FOLDER`]), out of reach of sandboxed bash commands,
+/// which may write the temporary folders. Chrome's temporary folder is
+/// the profile itself when the socket path fits there; else a private
+/// folder of its own in the temporary folder (or `/tmp`, [`profile_base`]),
+/// which then holds only the socket and Chrome's temporary files.
+/// Without a state folder both are one folder in the temporary folder.
 #[derive(Debug)]
-pub struct Profile(PathBuf);
+pub struct Profile {
+    path: PathBuf,
+    /// Chrome's temporary folder, when it is not the profile.
+    temp: Option<PathBuf>,
+}
 
 impl Profile {
-    pub fn new() -> std::io::Result<Self> {
+    /// A new profile in `folder` (made 0700 if missing), or in the
+    /// temporary folder when `None`.
+    pub fn new(folder: Option<&Path>) -> std::io::Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
-        let path = profile_base(&std::env::temp_dir()).join(format!(
-            "junees-browser-{}",
-            crate::cron::store::random_hex(16)
-        ));
+        let Some(folder) = folder else {
+            let path = private_folder(&profile_base(&std::env::temp_dir()))?;
+            return Ok(Self { path, temp: None });
+        };
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)?;
+        let path = folder.join(crate::cron::store::random_hex(16));
         // Fails when the name is taken: never a folder someone else made.
         std::fs::DirBuilder::new().mode(0o700).create(&path)?;
-        Ok(Self(path))
+        // From here on a failure drops `profile`, which removes it.
+        let mut profile = Self { path, temp: None };
+        if !socket_fits(&profile.path) {
+            profile.temp = Some(private_folder(&profile_base(&std::env::temp_dir()))?);
+        }
+        Ok(profile)
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
+    }
+
+    /// Chrome's temporary folder (TMPDIR).
+    pub fn temp(&self) -> &Path {
+        self.temp.as_deref().unwrap_or(&self.path)
+    }
+}
+
+/// A new private (0700) `junees-browser-<random>` folder in `base`.
+fn private_folder(base: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let path = base.join(format!(
+        "junees-browser-{}",
+        crate::cron::store::random_hex(16)
+    ));
+    // Fails when the name is taken: never a folder someone else made.
+    std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+    Ok(path)
+}
+
+/// Removes `path`, again while a dying helper process still writes a file.
+fn remove(path: &Path) {
+    for _ in 0..10 {
+        if std::fs::remove_dir_all(path).is_ok() || !path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
 impl Drop for Profile {
     fn drop(&mut self) {
         // Chrome's single-instance socket folder (`org.chromium.Chromium.*`)
-        // is in its temporary folder, the profile: it goes with it.
-        // A dying helper process may still write a file: try again.
-        for _ in 0..10 {
-            if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        // is in its temporary folder: it goes with it.
+        remove(&self.path);
+        if let Some(temp) = &self.temp {
+            remove(temp);
         }
     }
 }
@@ -182,12 +236,19 @@ pub fn launch(
     settings: &Settings,
     hidden_env: &[String],
 ) -> Result<(Process, Pipes)> {
-    let profile = Profile::new().context("cannot create the browser profile folder")?;
+    let profile = Profile::new(settings.profiles.as_deref())
+        .context("cannot create the browser profile folder")?;
     // Junees writes commands into `to_child`, Chrome reads them on fd 3;
     // Chrome writes to fd 4, Junees reads `from_child`.
     let (child_reads, to_child) = cloexec_pipe()?;
     let (from_child, child_writes) = cloexec_pipe()?;
-    let mut command = command(program, settings, hidden_env, profile.path());
+    let mut command = command(
+        program,
+        settings,
+        hidden_env,
+        profile.path(),
+        profile.temp(),
+    );
     let (read_fd, write_fd) = (child_reads.as_raw_fd(), child_writes.as_raw_fd());
     // SAFETY: only async-signal-safe calls (fcntl, dup2) between fork and
     // exec. Both ends are first copied above fd 10 so that neither copy
@@ -242,12 +303,14 @@ pub fn launch(
     Ok((process, pipes))
 }
 
-/// The browser's command line and environment, without the pipe.
+/// The browser's command line and environment, without the pipe: the
+/// profile `profile`, and `temp` as its temporary folder.
 pub(super) fn command(
     program: &Path,
     settings: &Settings,
     hidden_env: &[String],
     profile: &Path,
+    temp: &Path,
 ) -> Command {
     let (width, height) = WINDOW;
     let mut command = Command::new(program);
@@ -280,7 +343,7 @@ pub(super) fn command(
     command
         .arg("about:blank")
         .current_dir(profile)
-        .env("TMPDIR", profile)
+        .env("TMPDIR", temp)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

@@ -1,10 +1,10 @@
-# 명령 정책과 실행 전 승인
+# 명령 정책, 실행 격리, 실행 전 승인
 
-모델의 도구 호출을 막거나 실행 전에 묻는 안전장치. 샌드박스가 아니라 차단 목록이므로 한계도 함께 적는다.
+모델의 도구 호출을 막거나 실행 전에 묻는 안전장치. 명령 정책은 차단 목록이므로 한계도 함께 적고, 그 빈틈의 일부는 커널의 실행 격리(Landlock)가 막는다.
 
 ## 명령 정책
 
-`bash`는 명령을 실행하기 전에 정책으로 검사하고, 걸리면 아무것도 실행하지 않은 채 `blocked by policy: <이유>` 오류 결과를 모델에 돌려준다. 사람이 지켜보지 않는 장기 실행에서 치명적인 명령을 막는 1차 안전장치이고 샌드박스는 아니다.
+`bash`는 명령을 실행하기 전에 정책으로 검사하고, 걸리면 아무것도 실행하지 않은 채 `blocked by policy: <이유>` 오류 결과를 모델에 돌려준다. 사람이 지켜보지 않는 장기 실행에서 치명적인 명령을 막는 1차 안전장치이고 샌드박스는 아니다. 통과한 명령은 [실행 격리](#실행-격리-landlock) 안에서 돈다.
 
 기본으로 막는 것:
 
@@ -23,7 +23,7 @@
 - `gh`(GitHub CLI)로 GitHub에 쓰는 명령(`src/tools/gh_command.rs`의 표): `gh pr merge`, `review`, `close`, `comment`, `create`, `edit`, `reopen`, `ready`, `lock`/`unlock`, `gh issue create`/`comment`/`close`/`reopen`/`edit`/`delete`/`transfer` 등, `gh release create`/`edit`/`delete`/`upload`, `gh repo create`/`delete`/`edit`/`rename`/`archive`/`fork`/`sync` 등, `gh workflow run`, `gh run rerun`/`cancel`/`delete`, `gh secret`/`gh variable`의 `set`/`delete`, `gh label`, `gh gist`의 쓰기, 그리고 `gh api` 중 `-X`/`--method`(`-XPUT`, `--method=put` 포함)가 POST, PUT, PATCH, DELETE이거나, 메서드 없이 `-f`/`-F`/`--field`/`--raw-field`/`--input`으로 본문을 보내는 것(gh가 POST로 보낸다. `gh api graphql`은 읽기도 POST라서 묻는다). `-R`/`--repo`가 하위 명령 앞에 와도(`gh pr -R o/n merge 7`) 알아본다. 서버에 `gh`가 로그인돼 있거나 `GH_TOKEN`/`GITHUB_TOKEN`이 있으면, bash로 `github` 도구의 승인 질문과 무인 허용 목록(`github_allow_unattended`)을 건너뛰고 merge나 approve를 할 수 있기 때문이다. 사람에게 물을 수 없는 실행에서는 막고(`` `gh pr merge` merges a pull request on GitHub as the user: no one is here to approve it ... ``), 승인 게이트가 있는 대화와 게이트웨이에서는 `risky`에서도 묻는다(종류 `write to GitHub through gh`). merge(`gh pr merge`, 그리고 인자에 `/merge`나 `mergePullRequest`가 든 `gh api` 쓰기)는 종류가 `merge on GitHub through gh (asked every time)`라서 `github` 도구의 merge처럼 "항상 허용"으로 답해도 다음 merge는 다시 묻는다. 읽기(`gh pr view`, `gh pr diff`, `gh pr checks`, `gh api repos/o/n/pulls`, `gh api -X GET ...`)는 그대로 된다. claude-code 백엔드의 거절 규칙에는 넣지 않았다(그 백엔드에는 `github` 도구도 없고, Claude Code는 자기 `gh`를 쓸 수 있다. [GitHub](automation.md#github) 절)
 - git과 GitHub CLI의 자격 증명 파일: `~/.git-credentials`, `~/.config/git/credentials`, `~/.config/gh/`(`XDG_CONFIG_HOME`이 절대 경로로 있으면 `$XDG_CONFIG_HOME/git/credentials`와 `$XDG_CONFIG_HOME/gh/`도)는 설정 파일과 똑같이 막는다(이름이나 글롭으로 가리키는 명령, read_file/write_file/edit_file, claude-code 백엔드의 `Read`/`Edit` 거절 규칙). git의 자격 증명 저장소와 `gh` 로그인은 사용자로 push하고 merge할 수 있다.
 - 웹훅으로 시작한 실행(GitHub 흐름의 단계 포함)에서만: `git push`(`git -C x push`, `--git-dir=...`, 래퍼, `sh -c`, `eval`까지), `git send-pack`과 `git-send-pack`, `git subtree push`, 읽기가 아닌 `git config`(`--get`, `--get-all`, `--list`, `git config get`/`list`, `git config <이름>`은 허용), `git credential`과 `git-credential-*`, `-c`/`--config-env`의 `alias.*`, `credential*`, `url.*` 키. 웹훅 요청은 누구나 쓸 수 있는 글이라, 주입된 모델이 `git push origin FETCH_HEAD:main`으로 merge 조건을 건너뛰거나 `url.<x>.pushInsteadOf`로 흐름의 push를 다른 곳으로 돌리지 못하게 한다(push는 흐름 코드가 직접 한다). 그 실행의 bash는 git 자격 증명 없이 돈다: `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`으로 빈 `credential.helper`(모든 설정 파일의 helper 목록을 비운다), `GIT_TERMINAL_PROMPT=0`, 실행마다 새로 만들고 끝나면 지우는 빈 임시 폴더(0700)를 가리키는 `GH_CONFIG_DIR`(`gh`는 로그인을 `~/.config/gh/hosts.yml`에서 스스로 읽으므로, 그 폴더에서는 `gh auth token`도 `gh auth git-credential`도 토큰을 내주지 않는다), 그리고 `SSH_AUTH_SOCK`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_CONFIG_PARAMETERS`, `GH_TOKEN`/`GITHUB_TOKEN`/`GH_ENTERPRISE_TOKEN`/`GITHUB_ENTERPRISE_TOKEN`을 뺀다. 같은 실행의 bash는 `gh auth`(모든 하위 명령)와 `gh alias`, 그리고 `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `HOME`, 토큰 변수를 바꾸는 명령(`NAME=...` 대입, `export`/`declare`/`unset`/`read`/`for`, `env -u`, `env -i`, `exec -c`)을 거절한다(`sh -c`, `$(...)` 안까지). 빈 폴더만으로는 `GH_CONFIG_DIR=$HOME/.config/gh gh ...`나 키링의 토큰을 막지 못하기 때문이다. claude-code 백엔드도 같은 환경과 `Bash(git push *)`, `Bash(git -C * push*)`, `Bash(git config *)`(읽기도 막힌다), `Bash(git -c *)`, `Bash(git credential*)`, `Bash(gh auth *)`, `Bash(gh alias *)`, `Bash(*GH_CONFIG_DIR*)` 같은 거절 규칙을 받는다. 막지 못하는 것: 암호 없는 ssh 키 파일(`~/.ssh/id_*`)을 직접 쓰는 ssh, 홈 폴더 git 설정에 미리 있던 별칭, 스크립트 파일이나 다른 언어로 부르는 git과 gh(같은 사용자로 도는 프로그램은 `GH_CONFIG_DIR`을 되돌리고 `~/.config/gh/hosts.yml`이나 키링을 읽을 수 있다. 그래서 흐름의 `gh`/git 로그인은 봇 전용 계정을 권한다).
-- 위 일곱 규칙은 비밀과 도구 검사를 지키는 것이라 `JUNEES_ALLOW_DANGEROUS=1`이어도 적용된다. 차단 목록일 뿐 샌드박스가 아니다: 다른 변수에 담은 경로(`d=~; cat $d/.junees/config.toml`), 실행 중에 만든 경로(`cat $(echo ~/.junees)/config.toml`), 더 위 폴더를 통째로 다루는 명령(`grep -r api_key ~`, `cp -r ~ /tmp/h`. 막으면 정상 작업까지 너무 많이 막힌다), 경로 없이 현재 폴더를 쓰는 명령(`cd ~/.junees && grep -r api_key`), 스크립트 본문 안에 쓴 경로(`python3 -c "open('/home/u/.junees/memory/user.md', 'a')"`), 파일로 써 둔 스크립트, 판정과 실제 열기 사이에 링크를 바꿔치기하는 경쟁은 막지 못한다. Junees 하위 명령도 같은 이유로 다음은 막지 못한다: 변수에 담거나 실행 중에 만든 프로그램 이름(`j=junees; $j cron add ...`, `$(which junees) plugin enable p --trust`), 다른 이름으로 복사한 바이너리나 같은 명령 안에서 만든 링크, `find -exec junees ...`와 `xargs junees ...`(`echo p | xargs junees plugin enable`), `watch`처럼 모르는 래퍼, `cargo run -- cron add ...`, 셸 함수와 alias, 스크립트 파일이나 다른 언어(`python3 -c "subprocess.run(['junees', 'plugin', 'install', ...])"`)로 부르는 것. claude-code 백엔드의 규칙은 쓰인 단어 그대로만 맞추므로 경로를 붙인 호출(`/usr/local/bin/junees cron add`), `env junees`, `bash -c '...'`도 지나간다. `gh` 쓰기 규칙도 같은 이유로 다음은 막지 못한다: `gh alias set m 'pr merge'` 뒤의 `gh m 7`(별칭), 변수에 담거나 실행 중에 만든 프로그램 이름(`g=gh; $g pr merge 7`), 다른 이름의 복사본이나 링크, `xargs gh ...`와 `find -exec gh ...`, 스크립트 파일이나 다른 언어(`python3 -c "subprocess.run(['gh', 'pr', 'merge', '7'])"`), 토큰으로 API를 직접 부르는 `curl -X PUT -H "Authorization: ..." https://api.github.com/...`(`gh auth token`으로 토큰을 꺼내 쓰는 것 포함)과 `hub` 같은 다른 클라이언트, 표에 없는 `gh` 확장 명령(`gh <extension>`)
+- 위 일곱 규칙은 비밀과 도구 검사를 지키는 것이라 `JUNEES_ALLOW_DANGEROUS=1`이어도 적용된다. 차단 목록일 뿐 샌드박스가 아니다(설정 파일, `mcp.json`, `secrets/` 읽기와 데이터 폴더 쓰기는 [실행 격리](#실행-격리-landlock)가 켜져 있으면 아래 방법으로도 막힌다): 다른 변수에 담은 경로(`d=~; cat $d/.junees/config.toml`), 실행 중에 만든 경로(`cat $(echo ~/.junees)/config.toml`), 더 위 폴더를 통째로 다루는 명령(`grep -r api_key ~`, `cp -r ~ /tmp/h`. 막으면 정상 작업까지 너무 많이 막힌다), 경로 없이 현재 폴더를 쓰는 명령(`cd ~/.junees && grep -r api_key`), 스크립트 본문 안에 쓴 경로(`python3 -c "open('/home/u/.junees/memory/user.md', 'a')"`), 파일로 써 둔 스크립트, 판정과 실제 열기 사이에 링크를 바꿔치기하는 경쟁은 막지 못한다. Junees 하위 명령도 같은 이유로 다음은 막지 못한다: 변수에 담거나 실행 중에 만든 프로그램 이름(`j=junees; $j cron add ...`, `$(which junees) plugin enable p --trust`), 다른 이름으로 복사한 바이너리나 같은 명령 안에서 만든 링크, `find -exec junees ...`와 `xargs junees ...`(`echo p | xargs junees plugin enable`), `watch`처럼 모르는 래퍼, `cargo run -- cron add ...`, 셸 함수와 alias, 스크립트 파일이나 다른 언어(`python3 -c "subprocess.run(['junees', 'plugin', 'install', ...])"`)로 부르는 것. claude-code 백엔드의 규칙은 쓰인 단어 그대로만 맞추므로 경로를 붙인 호출(`/usr/local/bin/junees cron add`), `env junees`, `bash -c '...'`도 지나간다. `gh` 쓰기 규칙도 같은 이유로 다음은 막지 못한다: `gh alias set m 'pr merge'` 뒤의 `gh m 7`(별칭), 변수에 담거나 실행 중에 만든 프로그램 이름(`g=gh; $g pr merge 7`), 다른 이름의 복사본이나 링크, `xargs gh ...`와 `find -exec gh ...`, 스크립트 파일이나 다른 언어(`python3 -c "subprocess.run(['gh', 'pr', 'merge', '7'])"`), 토큰으로 API를 직접 부르는 `curl -X PUT -H "Authorization: ..." https://api.github.com/...`(`gh auth token`으로 토큰을 꺼내 쓰는 것 포함)과 `hub` 같은 다른 클라이언트, 표에 없는 `gh` 확장 명령(`gh <extension>`)
 
 검사 방식:
 
@@ -32,6 +32,46 @@
 - 실행 중에 만들어지는 단어(`rm -rf $(echo /)`, 변수에 담긴 경로)는 알 수 없으므로 막지 못한다. `$(...)`, `sh -c`, `eval`이 합쳐서 8단계보다 깊게 중첩되면 검사하지 않고 막는다.
 - `JUNEES_DENY_COMMANDS`의 접두사는 단어 단위로 비교한다. `docker rm`은 `docker rm -f web`을 막지만 `docker rmi`는 막지 않는다. 이 규칙은 `JUNEES_ALLOW_DANGEROUS=1`이어도 적용된다.
 - `JUNEES_ALLOW_DANGEROUS`는 `1`/`true`/`yes`/`on` 또는 `0`/`false`/`no`/`off`만 받고, 다른 값이면 시작할 때 오류로 멈춘다.
+
+## 실행 격리 (Landlock)
+
+api 백엔드의 `bash` 도구가 실행하는 명령(대화, `-p`, 작업 모드, 예약 작업, 웹훅 실행)과 GitHub 흐름의 테스트 명령(`--test-cmd`, 그 웹훅 실행의 bash와 같은 규칙)은 Linux Landlock으로 묶인 채 돈다. 명령 정책을 통과한 명령에만 그 위에 겹쳐 적용되고, 정책이 문자열만 보고는 놓치는 경로(변수나 실행 중에 만든 경로, 스크립트 파일, 다른 언어로 연 파일)도 커널이 막는다. 규칙은 명령마다 Junees가 만들어 두고, 자식 프로세스가 bash를 실행하기 직전에 `no_new_privs`와 함께 자기에게 건다. 묶인 명령과 그 명령이 띄운 모든 프로세스는:
+
+- 쓰기: 작업 폴더(명령이 도는 폴더), 임시 폴더(`/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`과 Junees 프로세스의 임시 폴더), `sandbox_write`의 폴더 아래에서만 파일을 만들고 바꾸고 지우고 옮길 수 있다. `/dev` 아래 이미 있는 파일(`/dev/null`, 터미널)에는 쓸 수 있다. 그 밖에서는 `Permission denied`.
+- 읽기: 기본은 어디든 읽고 실행할 수 있다. `sandbox_read`를 주면 그 폴더들과 쓸 수 있는 폴더만 읽는다(bash가 시작하려면 `/usr`, `/lib`, `/lib64`, `/bin`, `/etc` 같은 시스템 폴더가 들어 있어야 한다. `junees doctor`가 확인한다).
+- 언제나: 설정 파일(`$JUNEES_HOME/config.toml`), `mcp.json`, `$JUNEES_HOME/secrets/`(웹훅 시크릿, MCP OAuth 토큰), 실행 중인 브라우저의 프로필 폴더 `$JUNEES_HOME/browser/`(그 세션의 쿠키와 로그인)는 읽지도 바꾸지도 못하고(`/proc/self/root/...`로 돌아가도, 하드 링크를 새로 걸어도), 데이터 폴더(`memory`, `projects`, `skills`, `cron`, `plugins`, `webhooks`, `flows`)는 읽기만 된다. 작업 폴더가 이것들을 품어도(홈에서 실행) 마찬가지다. 웹훅 실행에서는 git과 GitHub CLI 자격 증명(`~/.git-credentials`, `~/.config/git/credentials`, `~/.config/gh/`)도 읽지 못한다. 다른 실행에서는 `gh`와 git push가 그 파일을 읽어야 하므로 명령 정책만 막는다.
+- 네트워크: `sandbox_network = 0`이면 TCP 연결과 bind를 모두 막는다(Landlock ABI 4 이상, Linux 6.7부터). 기본은 허용이다. UDP(DNS 포함)와 유닉스 소켓은 막지 않는다.
+- `no_new_privs`: setuid 프로그램(`sudo` 등)과 파일 capability가 권한을 주지 않는다.
+- 다른 프로세스: Landlock의 ptrace 규칙으로, 격리된 명령은 격리되지 않은 프로세스(Junees, MCP 서버, 같은 사용자의 다른 프로그램)를 추적하거나 그 `/proc/<pid>/environ`, `mem`을 읽지 못한다.
+
+`sandbox` 설정(`JUNEES_SANDBOX`):
+
+- `auto`(대화, `-p`, 작업 모드의 기본): 커널이 Landlock을 지원하면 묶는다. 지원하지 않으면 묶지 않고 실행하되 그 bash 도구의 첫 결과 끝에 `[sandbox: <이유>; commands run without it (sandbox = auto)]` 한 줄을 붙인다. `sandbox_network = 0`인데 ABI가 4보다 낮으면 파일만 묶고 `[sandbox: ...; TCP is not restricted]`를 붙인다.
+- `require`: 설정대로 묶을 수 없으면 실행하지 않고 `not run: the sandbox is required (sandbox = require) but <이유>` 오류 결과를 돌려준다. 예약 작업과 웹훅 실행은 `sandbox`를 따로 주지 않으면 `require`다(지켜보는 사람이 없다). 그런 서버에서 Landlock 없이도 돌리려면 `sandbox = "auto"`를 직접 준다.
+- `off`: 묶지 않는다(명령 정책은 그대로).
+- 지원하는 커널에서 규칙을 만들지 못하면(작업 폴더가 사라졌을 때 등) 모드와 상관없이 실행하지 않는다. 보호 경로로 가는 길의 폴더를 나열할 수 없으면(`/home`이 0711, 끊긴 마운트) 그 폴더에서 길 위의 항목만 따라가고 나머지 항목에는 규칙을 주지 않는다. 명령은 묶인 채 돌고, 그 항목들만 읽고 쓸 수 없다.
+
+```toml
+sandbox = "auto"
+sandbox_write = "~/.cargo, ~/.cache"   # 쉼표 구분, 절대 경로나 ~/...
+sandbox_network = "1"
+```
+
+작업 폴더 밖에 쓰는 흔한 명령은 기본 설정에서 실패한다: `cargo build`의 레지스트리 내려받기(`~/.cargo`), pip와 npm의 캐시(`~/.cache`, `~/.npm`), `git config --global`. 필요한 폴더를 `sandbox_write`에 더한다.
+
+정한 것:
+
+- 플러그인 명령과 stdio MCP 서버는 묶지 않는다. 사용자가 설치하고 켠 프로그램이고(모델은 입력만 준다), 자기 상태 폴더나 네트워크가 필요한 경우가 많아 bash와 같은 규칙으로는 깨진다. claude-code 백엔드도 대상이 아니다(Claude Code가 자기 도구를 자기 방식으로 돌린다). `read_file`/`write_file`/`edit_file`은 Junees 프로세스 안에서 돌고 지금처럼 경로 검사로 지킨다.
+- 브라우저 도구([브라우저 도구](browser.md))도 묶지 않는다. Chrome은 bash가 아니라 Junees가 직접 띄우는 프로그램이고, 자기 샌드박스(`browser_no_sandbox`면 그것도 없이)와 주소 검사(사설, 루프백, 링크 로컬 주소는 `browser_allow_private`일 때만)로만 지켜진다. 그래서 `sandbox_network = 0`과 예약 작업, 웹훅 실행의 `require`는 bash 명령만 묶는다: `browser_unattended`를 켜면 무인 실행의 모델이 `sandbox_network = 0`이어도 브라우저로 공개 웹에 나갈 수 있다(페이지를 열고 폼을 채워 보내는 것 포함, 비밀번호와 결제 칸, `evaluate`는 묻는 사람이 없으니 거절된다). 무인 실행에서 네트워크를 막으려면 `browser_unattended`를 끈 채 둔다.
+- 폴더 목록(`LANDLOCK_ACCESS_FS_READ_DIR`)은 다루지 않는다. Landlock 규칙은 허용만 하고 아래로 상속되므로, 비밀 폴더 하나만 빼고 그 위 폴더들을 나열할 수 있게 하는 방법이 없다. 그래서 `ls ~/.junees/secrets`로 파일 이름은 보인다(내용은 못 읽는다).
+- `landlock` 크레이트 대신 세 시스템 호출을 libc로 직접 부른다(구조체 두 개와 상수 몇 개라 의존성이 필요 없다). Linux가 아니면 지원하지 않는 커널과 같이 다룬다.
+
+한계:
+
+- Landlock은 경로 기준이다. 같은 파일을 다른 경로로 보여 주는 bind mount와 미리 있던 하드 링크는 막지 못한다.
+- 보호 경로를 품은 폴더(`/`, `/home`, 홈, `$JUNEES_HOME`, 그리고 그런 폴더가 작업 폴더일 때)에는 폴더 자체가 아니라 그 안의 항목마다 규칙을 준다. 그래서 명령이 시작된 뒤 그 폴더 바로 아래에 생긴 항목은 읽을 수 없고, 묶인 명령은 그 폴더 바로 아래에서 항목을 만들거나 지우지 못한다(홈에서 실행하면 `~/새파일`은 안 되고 `~/하위폴더/새파일`은 된다). 상태 폴더가 아직 없으면(보호할 파일이 없으면) 이 제한도 없다. 작업 폴더가 그런 폴더면 그 bash 도구의 첫 결과 끝에 `[sandbox: the working folder holds Junees's state folder, ...; work in a subfolder]` 한 줄로 알린다. 그 폴더에 쓰기를 통째로 허용하지 않는 것은, 그러면 같은 폴더 안에서 이름만 바꾸는 것(`mv config.toml x`, 폴더를 옮기지 않으므로 Landlock의 `REFER` 검사도 없다)을 막을 수 없어 다음 명령에서 새 이름으로 읽히기 때문이다. `~/.junees`가 다른 곳(`/data/state`)을 가리키는 심볼릭 링크여도 같다: 보호 경로를 링크를 푼 경로와 쓰인 경로 둘 다로 계산하고, 가는 길의 링크에는 규칙을 주지 않으므로 홈에서 실행해도 링크 자체를 옮기거나 바꿔 치지 못한다(Junees는 다음 실행에서 링크를 거쳐 읽는다).
+- 묶이지 않은 같은 사용자의 프로세스에 신호를 보내는 것과 이미 떠 있던 프로세스(예: 명령 전에 띄운 서버, Junees 자신)를 통한 우회는 막지 않는다. 묶인 명령이 백그라운드로 띄운 서버는 묶인 채로 남는다.
+- 커널이 지원하지 않으면 `auto`에서는 이전처럼 명령 정책만 남는다.
 
 ## 실행 전 승인
 

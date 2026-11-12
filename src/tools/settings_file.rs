@@ -213,6 +213,34 @@ impl SettingsFile {
         Some(resolve(&dir).unwrap_or(dir))
     }
 
+    /// The settings file, the MCP server list, the secrets folder and the
+    /// browser profiles ([`crate::browser::PROFILES_FOLDER`]): the paths
+    /// the bash sandbox ([`crate::sandbox`]) keeps commands from reading.
+    pub fn protected_paths(&self) -> Vec<PathBuf> {
+        let mut paths = vec![self.path.clone(), self.mcp_path()];
+        paths.extend(self.path.parent().map(secrets_dir));
+        paths.extend(
+            self.path
+                .parent()
+                .map(|home| home.join(crate::browser::PROFILES_FOLDER)),
+        );
+        paths
+            .into_iter()
+            .filter_map(|path| std::path::absolute(path).ok())
+            .collect()
+    }
+
+    /// The [`DATA_FOLDERS`] next to the file, absolute.
+    pub fn data_folders(&self) -> Vec<PathBuf> {
+        let Some(home) = self.path.parent() else {
+            return Vec::new();
+        };
+        DATA_FOLDERS
+            .iter()
+            .filter_map(|folder| std::path::absolute(home.join(folder.name)).ok())
+            .collect()
+    }
+
     /// Whether the file tools must refuse `path` (relative paths start from
     /// the current folder): it is the settings file once `.`, `..` and
     /// symbolic links are resolved, a dangling link to where it would be,

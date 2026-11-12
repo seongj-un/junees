@@ -63,6 +63,8 @@ pub struct Context<'a> {
     pub unattended: &'a [Write],
     /// Variables the test command does not get (`hidden_env`).
     pub hidden: &'a [String],
+    /// The test command's sandbox ([`address::test_sandbox`]).
+    pub sandbox: Option<&'a crate::sandbox::Sandbox>,
     /// The run's empty GitHub CLI configuration folder
     /// ([`crate::tools::GhConfigDir`]) for the model's commands and the
     /// test command.
@@ -704,9 +706,17 @@ async fn address_run(
                 .join(format!("{}-pr{n}.log", cx.route.name));
             let limit = Duration::from_secs(cx.limits.max_time.as_secs().max(60));
             Some(
-                address::test(&tree.path, command, &log, cx.hidden, cx.gh_config, limit)
-                    .await
-                    .map_err(|err| (format!("{err:#}"), true))?,
+                address::test(
+                    &tree.path,
+                    command,
+                    &log,
+                    cx.hidden,
+                    cx.gh_config,
+                    cx.sandbox,
+                    limit,
+                )
+                .await
+                .map_err(|err| (format!("{err:#}"), true))?,
             )
         }
     };

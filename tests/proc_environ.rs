@@ -58,6 +58,10 @@ async fn bash_cannot_read_hidden_variables_from_any_ancestor() {
     let child = common::junees_binary(&work, home.path())
         .args(["--no-session", "-p", "probe"])
         .env("JUNEES_HOME", home.path().join(".junees"))
+        // Without the Landlock sandbox, which also keeps a confined walk
+        // out of every unconfined process's environ (ptrace rule; see the
+        // sandbox tests): this test proves the non-dumpable flag alone.
+        .env("JUNEES_SANDBOX", "off")
         .env_remove("XDG_CONFIG_HOME")
         .env("ANTHROPIC_API_KEY", KEY)
         .env("ANTHROPIC_BASE_URL", &url)

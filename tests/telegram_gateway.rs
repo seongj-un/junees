@@ -556,6 +556,7 @@ fn start(
             poll: Duration::from_secs(1),
             backoff_start: Duration::from_millis(50),
             backoff_max: Duration::from_millis(200),
+            album_wait: Duration::from_secs(1),
         },
         typing_every: Duration::from_secs(3600),
         log,
@@ -632,6 +633,9 @@ async fn answers_only_allowed_users_where_it_is_addressed() {
     bot.push(private(USER, "/model opus"));
     bot.wait_post(&me, |p| p == "unknown command /model; /help lists them")
         .await;
+    // A one-word path that starts a sentence is a message (#58).
+    bot.push(private(USER, "/tmp is full"));
+    bot.wait_post(&me, |p| p.ends_with(": /tmp is full")).await;
     // Inputs run in order: once this one is answered, an input made of
     // the other bot's command would have been too.
     bot.push(private(USER, "ping"));
@@ -838,6 +842,24 @@ async fn a_command_after_the_mention_is_a_command_in_a_group() {
 }
 
 #[tokio::test]
+async fn group_replies_mention_no_one() {
+    let bot = FakeBot::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    // The fake engine repeats the input: `@alice` in a group reply is
+    // broken with an invisible word joiner (#58), in private it stays.
+    bot.push(group(USER, "@junees_bot ask @alice, mail a@example.com"));
+    bot.wait_post(&GROUP.to_string(), |p| {
+        p == "reply 1: ask @\u{2060}alice, mail a@example.com"
+    })
+    .await;
+    bot.push(private(USER, "ask @alice"));
+    bot.wait_post(&USER.to_string(), |p| p == "reply 1: ask @alice")
+        .await;
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn forwarded_messages_are_marked_and_never_commands() {
     let bot = FakeBot::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -984,6 +1006,7 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
         (200, common::text_reply("declined, fine")),
         (200, write_call(&file)),
         (200, common::text_reply("wrote it")),
+        (200, common::text_reply("about the forward")),
         (200, write_call(&file)),
         (200, common::text_reply("timed out")),
     ])
@@ -1013,10 +1036,17 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
     bot.push(private(USER, "now"));
     bot.wait_posts(&me, 2, |p| p.starts_with("Approve this tool call?"))
         .await;
+    // A forwarded message is someone else's words: no answer to the
+    // question (#58), but an input for after the turn.
+    let mut forwarded = private(USER, "n");
+    forwarded["forward_origin"] = json!({"type": "user", "date": 0, "sender_user":
+        {"id": STRANGER, "is_bot": false, "first_name": "Mallory"}});
+    bot.push(forwarded);
     bot.push(private(USER, "y"));
     bot.wait_post(&me, |p| p == "wrote it").await;
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "written\n");
     std::fs::remove_file(&file).unwrap();
+    bot.wait_post(&me, |p| p == "about the forward").await;
 
     bot.push(private(USER, "once more"));
     bot.wait_post(&me, |p| p == "(no answer within 1s: declined)")
@@ -1034,7 +1064,11 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
     );
     assert!(!texts(&requests[3]).last().unwrap().contains("declined"));
     assert_eq!(
-        texts(&requests[5]).last().unwrap(),
+        texts(&requests[4]).last().unwrap(),
+        "user: (forwarded message from Mallory; they wrote it, not the user)\nn"
+    );
+    assert_eq!(
+        texts(&requests[6]).last().unwrap(),
         "user: the user declined: no answer within 1s"
     );
     // The chat's session is an ordinary journal, marked as Telegram's.
@@ -1051,6 +1085,44 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
         (&json!("telegram"), &json!(me))
     );
     assert!(home.path().join("gateway/telegram.lock").exists());
+}
+
+#[tokio::test]
+async fn another_bots_command_is_no_answer_to_a_question_in_a_group() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let file = cwd.path().join("note.txt");
+    let (api, served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(TELEGRAM_NOTE),
+    );
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let chat = GROUP.to_string();
+    bot.push(group(USER, "@junees_bot write a note"));
+    bot.wait_post(&chat, |p| p.starts_with("Approve this tool call?"))
+        .await;
+    // Another bot's command while the question waits is not taken as the
+    // answer (it would decline); the question takes the next message.
+    bot.push(group(USER, "/roll 2d6"));
+    bot.push(group(USER, "y"));
+    bot.wait_post(&chat, |p| p == "wrote it").await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "written\n");
+    running.stop().await;
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 2);
+    let texts = texts(&requests[1]);
+    assert!(!texts.iter().any(|t| t.contains("roll")), "{texts:?}");
 }
 
 /// A PNG header of `width` x `height`: enough for Junees, which never
@@ -1199,6 +1271,52 @@ async fn a_caption_is_never_a_command() {
     let content = &common::body_of(&requests[0])["messages"][0]["content"];
     assert_eq!(content[0]["type"], "image", "{content}");
     assert_eq!(content[1]["text"], "/new", "{content}");
+}
+
+#[tokio::test]
+async fn an_album_split_over_two_answers_is_one_input() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    bot.file("ph1", "photos/file_1.png", png(20, 10));
+    bot.file("ph2", "photos/file_2.png", png(30, 20));
+    let (api, served) = common::fake_api(vec![
+        (200, common::text_reply("Two pictures.")),
+        (200, common::text_reply("After them.")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let me = USER.to_string();
+    // The first part alone in one getUpdates answer, the second in the
+    // next one (#58).
+    let first = bot.push(photo(USER, "ph1", Some("compare these"), Some("album-5")));
+    bot.wait_offset(first + 1).await;
+    bot.push(photo(USER, "ph2", None, Some("album-5")));
+    bot.push(private(USER, "and then this"));
+    bot.wait_post(&me, |p| p == "After them.").await;
+    running.stop().await;
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 2);
+    let content = &common::body_of(&requests[0])["messages"][0]["content"];
+    let kinds: Vec<&str> = content
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["image", "image", "text"], "{content}");
+    assert_eq!(content[2]["text"], "compare these");
+    assert_eq!(texts(&requests[1]).last().unwrap(), "user: and then this");
 }
 
 /// A photo from `from` in the group: part of `album`, with a caption (and

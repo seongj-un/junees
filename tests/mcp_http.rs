@@ -107,6 +107,14 @@ async fn serve(mut socket: TcpStream, seen: Seen) {
 }
 
 /// A state folder whose `mcp.json` lists the server at `url` as `web`.
+/// The working folder under `dir`, beside the state folder: a working
+/// folder holding the state folder gets a note from the bash sandbox.
+fn work(dir: &Path) -> PathBuf {
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    work
+}
+
 fn home_with_server(dir: &Path, url: &str) -> PathBuf {
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -155,7 +163,7 @@ async fn the_model_calls_an_http_server_whose_token_bash_cannot_see() {
     .await;
     let dir = tempfile::tempdir().unwrap();
     let home = home_with_server(dir.path(), &mcp_url);
-    let output = common::junees_binary(dir.path(), &home)
+    let output = common::junees_binary(&work(dir.path()), &home)
         .args(["-p", "go", "--no-session"])
         .env("ANTHROPIC_API_KEY", "sk-test")
         .env("ANTHROPIC_BASE_URL", &url)
@@ -210,7 +218,7 @@ async fn an_unset_header_variable_keeps_the_server_out() {
     let (url, api) = fake_api(vec![(200, text_reply("hi"))]).await;
     let dir = tempfile::tempdir().unwrap();
     let home = home_with_server(dir.path(), &mcp_url);
-    let output = common::junees_binary(dir.path(), &home)
+    let output = common::junees_binary(&work(dir.path()), &home)
         .args(["-p", "hello", "--no-session"])
         .env("ANTHROPIC_API_KEY", "sk-test")
         .env("ANTHROPIC_BASE_URL", &url)

@@ -49,6 +49,7 @@ fn settings(program: &Path) -> Settings {
         unattended: false,
         // The test machines have no user namespaces for Chrome's sandbox.
         no_sandbox: true,
+        profiles: None,
     }
 }
 
@@ -232,7 +233,15 @@ async fn opens_a_page_and_works_with_its_elements() {
     };
     let _lock = LOCK.lock().await;
     let (address, seen) = serve("127.0.0.1", home_routes()).await;
-    let tool = BrowserTool::new(settings(&program), Vec::new(), true);
+    // A profiles folder as in a state folder, short enough for Chrome's
+    // socket to go in the profile.
+    let state = tempfile::tempdir_in("/tmp").unwrap();
+    let profiles = state.path().join(super::PROFILES_FOLDER);
+    let settings = Settings {
+        profiles: Some(profiles.clone()),
+        ..settings(&program)
+    };
+    let tool = BrowserTool::new(settings, Vec::new(), true);
     let base = format!("http://{address}");
 
     let output = run(&tool, json!({"action": "open", "url": format!("{base}/")})).await;
@@ -248,6 +257,17 @@ async fn opens_a_page_and_works_with_its_elements() {
     assert_eq!(
         std::fs::metadata(&profile).unwrap().permissions().mode() & 0o777,
         0o700
+    );
+    assert_eq!(profile.parent(), Some(profiles.as_path()));
+    // Chrome's socket folder is in the profile, not in a temporary folder.
+    let names: Vec<String> = std::fs::read_dir(&profile)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|name| name.starts_with("org.chromium.")),
+        "{names:?}"
     );
 
     // Type, then click the button that reads the field.
@@ -404,6 +424,7 @@ async fn opens_a_page_and_works_with_its_elements() {
     let output = run(&tool, json!({"action": "close"})).await;
     assert_eq!(output.content, "the browser is closed");
     assert_gone(pid, &pids, &profile).await;
+    assert_eq!(std::fs::read_dir(&profiles).unwrap().count(), 0);
     let output = run(&tool, json!({"action": "snapshot"})).await;
     assert!(
         output.content.contains("no page is open"),
@@ -1093,11 +1114,13 @@ fn a_long_temporary_folder_puts_the_profile_in_tmp() {
     assert_eq!(process::profile_base(long), Path::new("/tmp"));
     let short = Path::new("/var/tmp/u");
     assert_eq!(process::profile_base(short), short);
-    // Chrome's own temporary files (its socket folder) go in the profile.
+    // Chrome's own temporary files (its socket folder) go in the
+    // temporary folder the profile chose.
     let command = process::command(
         Path::new("/x/chrome"),
         &Settings::default(),
         &[],
+        Path::new("/state/browser/p"),
         Path::new("/tmp/p"),
     );
     let tmpdir = command
@@ -1106,6 +1129,48 @@ fn a_long_temporary_folder_puts_the_profile_in_tmp() {
         .find(|(name, _)| *name == "TMPDIR")
         .and_then(|(_, value)| value);
     assert_eq!(tmpdir, Some(std::ffi::OsStr::new("/tmp/p")));
+    assert!(
+        command
+            .as_std()
+            .get_args()
+            .any(|arg| arg == "--user-data-dir=/state/browser/p")
+    );
+}
+
+#[test]
+fn profiles_go_in_the_state_folder_and_chromes_socket_stays_short() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    // A short state folder: the profile is also Chrome's temporary folder.
+    let state = tempfile::tempdir_in("/tmp").unwrap();
+    let folder = state.path().join("browser");
+    let profile = process::Profile::new(Some(&folder)).unwrap();
+    let path = profile.path().to_path_buf();
+    assert_eq!(path.parent(), Some(folder.as_path()));
+    assert_eq!(profile.temp(), path);
+    assert_eq!((mode(&folder), mode(&path)), (0o700, 0o700));
+    assert!(process::socket_fits(profile.temp()));
+    drop(profile);
+    assert!(!path.exists());
+
+    // A long one: the profile stays there, the socket goes to a
+    // private folder of its own in a short temporary folder.
+    let long = state.path().join("s".repeat(80)).join("browser");
+    let profile = process::Profile::new(Some(&long)).unwrap();
+    let path = profile.path().to_path_buf();
+    let temp = profile.temp().to_path_buf();
+    assert_eq!(path.parent(), Some(long.as_path()));
+    assert_ne!(temp, path);
+    assert!(process::socket_fits(&temp), "{}", temp.display());
+    assert!(
+        temp.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("junees-browser-")
+    );
+    assert_eq!((mode(&path), mode(&temp)), (0o700, 0o700));
+    drop(profile);
+    assert!(!path.exists() && !temp.exists());
 }
 
 #[test]
@@ -1128,8 +1193,17 @@ fn settings_and_registration() {
             allow_private: true,
             unattended: true,
             no_sandbox: true,
+            profiles: None,
         }
     );
+    // In the state folder, made absolute.
+    for (key, value, folder) in [
+        ("JUNEES_HOME", "/data/j", "/data/j/browser"),
+        ("HOME", "/home/u", "/home/u/.junees/browser"),
+    ] {
+        let settings = Settings::read(|k| (k == key).then(|| value.to_string())).unwrap();
+        assert_eq!(settings.profiles, Some(PathBuf::from(folder)));
+    }
     let err = Settings::read(|key| (key == ENABLE_ENV).then(|| "maybe".to_string())).unwrap_err();
     assert!(err.to_string().contains(ENABLE_ENV), "{err}");
 
@@ -1173,6 +1247,7 @@ fn the_browser_gets_no_secret_variables() {
         &settings,
         &["DB_PASSWORD".to_string()],
         Path::new("/tmp/p"),
+        Path::new("/tmp/p"),
     );
     let removed: Vec<String> = command
         .as_std()
@@ -1212,6 +1287,7 @@ fn the_browser_gets_no_secret_variables() {
         Path::new("/x/chrome"),
         &Settings::default(),
         &[],
+        Path::new("/tmp/p"),
         Path::new("/tmp/p"),
     );
     assert!(

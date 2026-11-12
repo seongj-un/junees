@@ -8,7 +8,7 @@ Rust로 만드는 AI 에이전트 하네스. LLM이 도구를 호출하며 일�
 - 장기 작업: 큰 목표를 검증 가능한 기능 목록으로 쪼개고, 매번 새 컨텍스트로 시작하는 세션들이 기능 하나씩 구현, 검증, 커밋한다. 완료 판정은 모델이 아니라 하네스가 검증 명령의 종료 코드로 한다.
 - 어디서나: 터미널, 디스코드와 텔레그램 봇, 일정에 맞춘 예약 작업, GitHub 웹훅으로 시작하는 PR 리뷰와 merge 흐름.
 - 기억과 확장: 세션 기록과 검색, 영구 메모리, 스킬, 프로젝트 지침 파일, 서브에이전트, MCP 서버, 플러그인.
-- 안전장치: 명령 정책, 대화 모드의 실행 전 승인, 도구 환경에서 비밀 값 숨기기. 샌드박스는 아니다([명령 정책과 실행 전 승인](docs/safety.md)).
+- 안전장치: 명령 정책, Linux Landlock 실행 격리(작업 폴더 밖 쓰기와 설정, 비밀 파일 읽기를 커널이 막는다), 대화 모드의 실행 전 승인, 도구 환경에서 비밀 값 숨기기([명령 정책, 실행 격리, 실행 전 승인](docs/safety.md)).
 
 ## 설치
 
@@ -127,6 +127,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [컨텍스트 관리](docs/context.md): 프롬프트 캐싱, 오래된 도구 결과 비우기, 압축.
 - [기본 도구](docs/tools.md): `bash`, `read_file`, `write_file`, `edit_file`.
 - [명령 정책](docs/safety.md#명령-정책): 치명적인 명령과 비밀 파일을 다루는 명령을 실행 전에 막는다.
+- [실행 격리](docs/safety.md#실행-격리-landlock): `bash` 명령을 Linux Landlock으로 묶어 작업 폴더 밖 쓰기, 설정과 비밀 파일 읽기, (설정하면) TCP를 커널이 막는다.
 - [실행 전 승인](docs/safety.md#실행-전-승인): 대화 모드에서 위험할 수 있는 도구 호출을 먼저 묻는다.
 - [점검](docs/doctor.md): `junees doctor`로 설치와 설정을 점검한다(기본은 네트워크 없이).
 
@@ -143,7 +144,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [docs/context.md](docs/context.md): 컨텍스트 관리
 - [docs/tools.md](docs/tools.md): 기본 도구와 `edit_file`
 - [docs/browser.md](docs/browser.md): 브라우저 도구
-- [docs/safety.md](docs/safety.md): 명령 정책, 실행 전 승인
+- [docs/safety.md](docs/safety.md): 명령 정책, 실행 격리(Landlock), 실행 전 승인
 - [docs/doctor.md](docs/doctor.md): 점검(`junees doctor`)
 - [docs/architecture.md](docs/architecture.md): 구조(모듈 설명과 테스트 목록)
 - [docs/long-running.md](docs/long-running.md): 단계별 계획과 진행 장부(각 단계에서 무엇을 왜 그렇게 만들었는지, 리뷰 반영 기록)

@@ -126,6 +126,16 @@ pub fn parse(line: &str) -> Option<Slash> {
     })
 }
 
+/// Whether `/name` is one of these commands (with or without what it
+/// takes after it).
+pub fn is_command(name: &str) -> bool {
+    match parse(&format!("/{name}")) {
+        None => false,
+        Some(Slash::Bad(message)) => !message.starts_with("unknown command"),
+        Some(_) => true,
+    }
+}
+
 /// `/mcp`, `/mcp login <server>` and `/mcp logout <server>`.
 fn mcp(arg: Option<&str>) -> Slash {
     const USAGE: &str = "use /mcp, /mcp login <server> or /mcp logout <server>";
@@ -231,6 +241,12 @@ mod tests {
         assert_eq!(parse("/new"), Some(Slash::New));
         assert_eq!(parse("/reset"), Some(Slash::New));
         assert_eq!(parse("/model"), Some(Slash::Model(None)));
+        for name in ["model", "search", "skill", "exit", "mcp", "image"] {
+            assert!(is_command(name), "{name}");
+        }
+        for name in ["tmp", "start", "etc/hosts", ""] {
+            assert!(!is_command(name), "{name}");
+        }
         assert_eq!(
             parse("/model claude-opus-4-1"),
             Some(Slash::Model(Some("claude-opus-4-1".into())))

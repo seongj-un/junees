@@ -38,6 +38,16 @@ fn command(home: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
     command
 }
 
+/// Where the tool writes the sleep's pid: a subfolder of `home`, which is
+/// also the working folder and the state folder. Under the Landlock
+/// sandbox a working folder holding the settings file gets rules on its
+/// entries only, so new files go into a folder that exists beforehand.
+fn pid_path(home: &Path) -> std::path::PathBuf {
+    let dir = home.join("run");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("pid")
+}
+
 /// Waits up to ten seconds for `check` to hold.
 async fn until(what: &str, mut check: impl FnMut() -> bool) {
     for _ in 0..500 {
@@ -87,7 +97,7 @@ fn journals(home: &Path) -> String {
 #[tokio::test]
 async fn sigterm_during_a_prompt_run_stops_the_tool_and_exits_143() {
     let home = tempfile::tempdir().unwrap();
-    let pid_file = home.path().join("pid");
+    let pid_file = pid_path(home.path());
     let (url, server) = fake_api(vec![(200, slow_bash(&pid_file))]).await;
     let child = command(home.path(), &url, &["-p", "sleep a while"])
         .stdin(Stdio::null())
@@ -119,7 +129,7 @@ async fn sigterm_during_a_prompt_run_stops_the_tool_and_exits_143() {
 #[tokio::test]
 async fn ctrl_c_in_the_repl_cancels_the_turn_and_the_next_input_works() {
     let home = tempfile::tempdir().unwrap();
-    let pid_file = home.path().join("pid");
+    let pid_file = pid_path(home.path());
     let (url, server) = fake_api(vec![
         (200, slow_bash(&pid_file)),
         (200, text_reply("Back again.")),

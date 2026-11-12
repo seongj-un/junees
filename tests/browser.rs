@@ -1,9 +1,10 @@
 //! The `browser` tool through the real binary against a fake API: `-p`
 //! opens a loopback page, gets its text marked as page content, has
 //! `evaluate` refused (nobody to ask), gets a screenshot block, and leaves
-//! no browser process or profile behind. TMPDIR is long, as on some
-//! machines: Chrome's socket path in it would be too long, so the profile
-//! goes to `/tmp`. Needs a real browser in `JUNEES_TEST_BROWSER`; skips
+//! no browser process or profile behind. The profile goes in
+//! `$JUNEES_HOME/browser`, which is long here, as is TMPDIR: Chrome's
+//! socket path in either would be too long, so its temporary folder goes
+//! to `/tmp`. Needs a real browser in `JUNEES_TEST_BROWSER`; skips
 //! (saying why) without one.
 
 use std::path::{Path, PathBuf};
@@ -82,7 +83,7 @@ fn last_result(request: &str) -> Value {
         .unwrap()
 }
 
-/// The browser profiles in `/tmp`.
+/// Chrome's temporary folders in `/tmp`.
 fn profiles_in_tmp() -> Vec<String> {
     std::fs::read_dir("/tmp")
         .unwrap()
@@ -190,14 +191,18 @@ async fn print_mode_browses_a_loopback_page() {
     assert_eq!(blocks[1]["type"], "image", "{blocks:?}");
     assert_eq!(blocks[1]["source"]["media_type"], "image/png");
 
-    // Nothing of the browser is left: no process, no profile.
+    // Nothing of the browser is left: no process, no profile, no
+    // temporary folder.
+    let profiles = home.path().join(".junees/browser");
+    assert!(profiles.is_dir());
     let new = || {
-        let mut found = processes_naming("--user-data-dir=/tmp/junees-browser-");
-        found.retain(|cmdline| {
-            !before
-                .iter()
-                .any(|profile| cmdline.contains(profile.as_str()))
-        });
+        let mut found = processes_naming(&format!("--user-data-dir={}/", profiles.display()));
+        found.extend(
+            std::fs::read_dir(&profiles)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path().display().to_string()),
+        );
         found.extend(
             profiles_in_tmp()
                 .into_iter()
