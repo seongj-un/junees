@@ -12,7 +12,7 @@
 4. API 키를 골랐으면 대화 모델(기본 `claude-sonnet-4-6`)을 묻고, 작업 기본 예산(시간 기본 `2h`, 토큰 상한은 선택)을 묻고 저장한다.
 5. 마지막으로 디스코드 봇을 설정할지 묻는다(선택, 기본 아니오. 이 질문에서 입력이 끝나면 건너뛴다). `y`면 봇 토큰(화면에 보이지 않게, 디스코드 토큰 모양이 아니면 값을 되풀이하지 않고 다시 묻는다), 허용할 사용자 id(하나 이상), 멘션 없이 답할 채널 id(선택, `none`이면 비움)를 묻는다. [디스코드 게이트웨이](gateways.md#디스코드-게이트웨이) 참고.
 
-Ctrl-C나 입력 끝(Ctrl-D)이면 아무것도 저장하지 않고 끝난다. 터미널이 아니면(cron, 파이프) 마법사를 띄우지 않고 `no API key: run `junees setup`, or set ANTHROPIC_API_KEY` 오류로 끝난다. 백엔드가 `claude-code`면(설정, `JUNEES_BACKEND`, 작업의 `--backend`) 키가 필요 없으므로 대화든 작업이든 마법사 없이 실행한다.
+Ctrl-C나 입력 끝(Ctrl-D)이면 아무것도 저장하지 않고 끝난다. 터미널이 아니면(cron, 파이프) 마법사를 띄우지 않고 `no API key: run `junees setup`, or set ANTHROPIC_API_KEY` 오류로 끝난다. 백엔드가 `claude-code`면(설정, `JUNEES_BACKEND`, 작업의 `--backend`) 키가 필요 없으므로 대화든 작업이든 마법사 없이 실행한다. `JUNEES_PROVIDER=openai`일 때도 마법사를 띄우지 않는다(질문이 Claude에 관한 것뿐이라, [OpenAI 호환 API](#openai-호환-api)는 설정 파일이나 환경 변수로 정한다).
 
 파일은 TOML의 단순한 부분만 쓴다: 한 줄에 `키 = 값`, 값은 따옴표 문자열이나 숫자, `true`/`false`, `#` 주석. 표(`[...]`)와 배열은 받지 않는다. 키마다 환경 변수 하나에 대응하고, **환경 변수가 있으면 파일보다 우선한다**(`/model`, `/backend`로 바꾼 값은 그보다도 우선하지만 이 실행에만 적용되고 파일은 바꾸지 않는다). 모르는 키, 따옴표 없는 문자열(`model = claude-...`), 같은 키 두 번은 `<경로> is not a valid settings file ... line N: ...` 오류로 알려 준다.
 
@@ -24,9 +24,28 @@ task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
 task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 ```
 
-그 밖의 키: `base_url`, `prices`([사용량과 비용](usage.md#사용량과-비용)), `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `task_skill_manage`, `subagents`, `subagent_max_turns`, `subagent_max_tokens`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `sandbox`, `sandbox_write`, `sandbox_read`, `webhook_sandbox_read`(쉼표로 구분한 문자열), `sandbox_network`, `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `claude_code_unattended`(예약 작업과 웹훅에서 claude-code 백엔드 허용, [실행 격리](safety.md#실행-격리-landlock)), `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `context_files`(쉼표로 구분한 문자열, [프로젝트 지침 파일](memory-and-skills.md#프로젝트-지침-파일)), `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`, `telegram_token`, `telegram_allowed_users`, `telegram_parallel`, `telegram_approval_timeout`, `telegram_format`(`html` 또는 `plain`, [텔레그램 게이트웨이](gateways.md#대화와-출력)), `timezone`, `cron_max_time`, `cron_max_tokens`, `webhook_max_time`, `webhook_max_tokens`, `github_token`, `github_api_url`, `github_repos`, `github_allow_unattended`, `github_flow_merge`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `discord_*`는 `JUNEES_DISCORD_*`, `telegram_*`는 `JUNEES_TELEGRAM_*`, `cron_*`는 `JUNEES_CRON_*`, `webhook_*`는 `JUNEES_WEBHOOK_*`, `github_*`는 `JUNEES_GITHUB_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
+그 밖의 키: `base_url`, `provider`, `openai_base_url`, `openai_api_key`([OpenAI 호환 API](#openai-호환-api)), `prices`([사용량과 비용](usage.md#사용량과-비용)), `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `task_skill_manage`, `subagents`, `subagent_max_turns`, `subagent_max_tokens`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `sandbox`, `sandbox_write`, `sandbox_read`, `webhook_sandbox_read`(쉼표로 구분한 문자열), `sandbox_network`, `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `claude_code_unattended`(예약 작업과 웹훅에서 claude-code 백엔드 허용, [실행 격리](safety.md#실행-격리-landlock)), `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `context_files`(쉼표로 구분한 문자열, [프로젝트 지침 파일](memory-and-skills.md#프로젝트-지침-파일)), `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`, `telegram_token`, `telegram_allowed_users`, `telegram_parallel`, `telegram_approval_timeout`, `telegram_format`(`html` 또는 `plain`, [텔레그램 게이트웨이](gateways.md#대화와-출력)), `timezone`, `cron_max_time`, `cron_max_tokens`, `webhook_max_time`, `webhook_max_tokens`, `github_token`, `github_api_url`, `github_repos`, `github_allow_unattended`, `github_flow_merge`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `openai_base_url`은 `OPENAI_BASE_URL`, `openai_api_key`는 `OPENAI_API_KEY`, `discord_*`는 `JUNEES_DISCORD_*`, `telegram_*`는 `JUNEES_TELEGRAM_*`, `cron_*`는 `JUNEES_CRON_*`, `webhook_*`는 `JUNEES_WEBHOOK_*`, `github_*`는 `JUNEES_GITHUB_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
 파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령과, 이 파일이 든 폴더(`$JUNEES_HOME`)를 통째로 다루는 명령을 막는다([명령 정책](safety.md#명령-정책) 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽 명령 정책은 차단 목록일 뿐이어서 다른 변수나 실행 중에 만든 경로, 더 위 폴더를 통째로 다루는 명령은 놓친다. 그런 읽기는 [실행 격리](safety.md#실행-격리-landlock)(Landlock, 지원하는 커널에서 기본으로 켜짐)가 커널에서 막는다. 꺼져 있거나 지원하지 않는 커널에서는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
+
+## OpenAI 호환 API
+
+`provider = "openai"`(`JUNEES_PROVIDER=openai`)이면 api 백엔드가 Anthropic Messages API 대신 OpenAI Chat Completions API(`POST <openai_base_url>/chat/completions`)를 부른다. 같은 형식을 쓰는 서버면 된다: OpenAI, OpenRouter, Ollama(`/v1`), vLLM, LM Studio 등. claude-code 백엔드와는 따로다(`backend = "api"`일 때만 의미가 있다).
+
+```toml
+provider = "openai"
+openai_base_url = "https://openrouter.ai/api/v1"   # OPENAI_BASE_URL, 기본 https://api.openai.com/v1
+openai_api_key = "sk-or-v1-..."                    # OPENAI_API_KEY
+model = "openai/gpt-4o-mini"                       # JUNEES_MODEL, 이 provider에서는 꼭 적는다
+```
+
+- 주소: https만 받는다. 평문 http는 키와 대화 전체가 네트워크에 그대로 실리므로 서버가 이 컴퓨터에 있을 때(`localhost`, `127.0.0.0/8`, `::1`)만 받는다. 리다이렉트는 따라가지 않는다.
+- 키: `Authorization: Bearer <키>`로 보낸다. 루프백 주소의 서버는 키 없이 부를 수 있고, 그 밖의 주소에서 키가 없으면 시작할 때 오류다. `OPENAI_API_KEY`는 `ANTHROPIC_API_KEY`처럼 bash, MCP 서버, 플러그인, `claude` 자식 환경에서 지우고, `junees doctor` 출력에서 가린다. 메모리와 스킬에 저장하는 글의 비밀 값 검사는 OpenAI 프로젝트 키(`sk-proj-` 등)와 OpenRouter 키(`sk-or-v1-`)도 찾는다.
+- 모델: 기본값(`claude-sonnet-4-6`)은 이 provider에서 쓰지 않으므로 `model`을 꼭 적는다(없으면 시작할 때 오류). 서버가 아는 모델 이름은 `junees doctor --online`이 `GET <openai_base_url>/models`로 보여 준다. `/model`로 바꿀 때 `claude-`로 시작하지 않아도 경고하지 않는다. `context_window`는 모델에 맞게 따로 정한다(기본 200000).
+- 출력 상한: OpenAI 자체 API(`api.openai.com`)에는 `max_completion_tokens`로, 다른 서버에는 호환 서버들이 받는 `max_tokens`로 보낸다(OpenAI는 `max_tokens`를 deprecated로 두고 추론 모델에서 받지 않는다).
+- 꺼지는 Anthropic 전용 기능: 프롬프트 캐시 표시(`cache_control`, OpenAI 쪽은 서버가 알아서 캐시한다), 확장 사고(`thinking_budget`), 서버 웹 검색(`web_search`)은 보내지 않는다. 설정해 두면 무시하고 `junees doctor`가 경고한다.
+- 사용량: `usage.prompt_tokens`에서 캐시된 토큰(`prompt_tokens_details.cached_tokens`, 서버가 주면 `cache_write_tokens`)을 빼 입력으로, 그 둘을 캐시 읽기/쓰기로 센다. 스트리밍은 `stream_options.include_usage`로 마지막 조각의 사용량을 받는다. 사용량을 주지 않는 서버면 0으로 남아 비용과 컨텍스트 크기 추정이 되지 않고, 컨텍스트 초과 오류가 오면 그때 압축한다. 가격표에는 Claude 모델만 있으므로 비용을 보려면 `prices`에 모델 가격을 적는다([사용량과 비용](usage.md#사용량과-비용)).
+- 오류: 401/403은 키 문제로, 429와 5xx는 재시도(`retry-after`를 따름)하되 크레딧 소진·지출 한도(`insufficient_quota` 등) 429는 재시도하지 않는다. 400 `context_length_exceeded`(또는 "maximum context length" 문구)는 컨텍스트 초과로 보고 도구 결과 비우기와 압축을 한다. 이미지를 가리키는 400은 Anthropic과 같이 다음 요청부터 그 이미지를 안내 한 줄로 바꾼다.
 
 ## 환경 변수
 
@@ -36,6 +55,9 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (api 백엔드에서 필수, 또는 설정 파일 `api_key`) | Anthropic API 키 |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API 주소 |
+| `JUNEES_PROVIDER` | `anthropic` | api 백엔드가 부를 API: `anthropic`(Messages API) 또는 `openai`(Chat Completions와 그 호환 서버, [OpenAI 호환 API](#openai-호환-api)) |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | `provider = openai`의 API 주소. https만, 평문 http는 localhost와 루프백 주소에만 |
+| `OPENAI_API_KEY` | (없음, 또는 설정 파일 `openai_api_key`) | `provider = openai`의 키. 루프백 주소의 서버(Ollama 등)는 없어도 된다 |
 | `JUNEES_BACKEND` | `api` | 대화와 작업을 돌릴 것: `api`(Junees의 에이전트) 또는 `claude-code`([구독 모드](subscription.md#구독-모드-claude-code-백엔드)) |
 | `JUNEES_MODEL` | `claude-sonnet-4-6` | 모델 |
 | `JUNEES_PRICES` | (없음) | 비용 추정에 쓸 모델 가격, `<모델>=<입력>/<출력>` 쉼표 목록 ([사용량과 비용](usage.md#사용량과-비용)) |
