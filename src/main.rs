@@ -334,6 +334,10 @@ fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     ) || settings.file_exists()
         || settings.path().is_none()
         || settings.env("ANTHROPIC_API_KEY").is_some()
+        // The questions are about Claude; an OpenAI-compatible provider is
+        // set up in the settings (docs/configuration.md).
+        || junees::provider::Kind::parse(settings.get(junees::provider::PROVIDER_ENV).as_deref())
+            .is_ok_and(|kind| kind == junees::provider::Kind::OpenAi)
     {
         return false;
     }
