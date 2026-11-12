@@ -98,6 +98,12 @@ pub async fn register(
     let fields = answer
         .object()
         .ok_or("the client registration answer is not a JSON object")?;
+    registered(&fields)
+}
+
+/// The client a registration answer describes. A secret goes with
+/// `token_endpoint_auth_method` `none` is ignored: the client is public.
+fn registered(fields: &serde_json::Map<String, Value>) -> Result<Client, String> {
     let id = fields
         .get("client_id")
         .and_then(Value::as_str)
@@ -108,12 +114,11 @@ pub async fn register(
         .and_then(Value::as_str)
         .filter(|secret| !secret.is_empty())
         .map(str::to_string);
-    let auth = match (
-        fields
-            .get("token_endpoint_auth_method")
-            .and_then(Value::as_str),
-        &secret,
-    ) {
+    let method = fields
+        .get("token_endpoint_auth_method")
+        .and_then(Value::as_str);
+    let secret = secret.filter(|_| method != Some("none"));
+    let auth = match (method, &secret) {
         (_, None) => "none",
         (Some("client_secret_post"), Some(_)) => "client_secret_post",
         (_, Some(_)) => "client_secret_basic",
@@ -297,6 +302,35 @@ mod tests {
             err(json!({"access_token": "a", "token_type": "Bearer", "expires_in": "soon"}))
                 .contains("expires_in")
         );
+    }
+
+    #[test]
+    fn a_registration_answer_gives_the_client() {
+        let client = |body: Value| registered(body.as_object().unwrap());
+        let public = client(json!({"client_id": "c1"})).ok().unwrap();
+        assert_eq!(
+            (public.auth.as_str(), public.secret.as_deref()),
+            ("none", None)
+        );
+        // A public client: a secret alongside is not used.
+        let none = client(json!({"client_id": "c1", "client_secret": "pw",
+            "token_endpoint_auth_method": "none"}))
+        .ok()
+        .unwrap();
+        assert_eq!((none.auth.as_str(), none.secret.as_deref()), ("none", None));
+        let mut form = Vec::new();
+        assert!(none.authenticate(&mut form).is_none());
+        assert_eq!(form, [("client_id", "c1")]);
+        let post = client(json!({"client_id": "c1", "client_secret": "pw",
+            "token_endpoint_auth_method": "client_secret_post"}))
+        .ok()
+        .unwrap();
+        assert_eq!(post.auth, "client_secret_post");
+        let basic = client(json!({"client_id": "c1", "client_secret": "pw"}))
+            .ok()
+            .unwrap();
+        assert_eq!(basic.auth, "client_secret_basic");
+        assert!(client(json!({"client_secret": "pw"})).is_err());
     }
 
     #[test]
