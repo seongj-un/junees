@@ -373,6 +373,8 @@ pub struct Process {
     child: Child,
     pid: i32,
     stderr: Arc<Mutex<Vec<u8>>>,
+    /// The proxy hosts Chrome was started with ([`proxies`]).
+    proxies: Vec<String>,
     // Dropped after the process is gone (fields drop after `drop`).
     profile: Profile,
 }
@@ -404,6 +406,7 @@ pub fn launch(
         profile.path(),
         profile.temp(),
     );
+    let proxies = command_proxies(&command);
     let (read_fd, write_fd) = (child_reads.as_raw_fd(), child_writes.as_raw_fd());
     // SAFETY: only async-signal-safe calls (fcntl, dup2) between fork and
     // exec. Both ends are first copied above fd 10 so that neither copy
@@ -448,6 +451,7 @@ pub fn launch(
         child,
         pid,
         stderr,
+        proxies,
         profile,
     };
     let pipes = Pipes {
@@ -456,6 +460,104 @@ pub fn launch(
         to_browser: pipe::Sender::from_owned_fd(to_child).context("cannot write to the browser")?,
     };
     Ok((process, pipes))
+}
+
+/// The variables Chrome on Linux takes its proxies from when no desktop
+/// proxy settings apply (`net/proxy_resolution/proxy_config_service_linux.cc`),
+/// each also read in the other case when unset (`base::Environment`).
+const PROXY_ENV: &[&str] = &[
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "ftp_proxy",
+    "SOCKS_SERVER",
+];
+
+/// The hosts of the proxies Chrome uses with these arguments and this
+/// environment: `--proxy-server` when given (Chrome then ignores the
+/// environment), else the proxy variables. A proxy chosen by a PAC
+/// script (`auto_proxy`, `--proxy-pac-url`) or by desktop settings is
+/// not known here.
+pub fn proxies(env: impl Fn(&str) -> Option<String>, args: &[String]) -> Vec<String> {
+    let mut specs = Vec::new();
+    if args.iter().any(|arg| arg == "--no-proxy-server") {
+        return Vec::new();
+    }
+    if let Some(server) = args
+        .iter()
+        .rev()
+        .find_map(|arg| arg.strip_prefix("--proxy-server="))
+    {
+        // `[<scheme>=]<uri>[,<uri>...]`, rules separated by `;`.
+        for rule in server.split(';') {
+            let uris = match rule.split_once('=') {
+                Some((scheme, uris)) if !scheme.contains(['/', ':']) => uris,
+                _ => rule,
+            };
+            specs.extend(uris.split([',', ' ']).map(str::to_string));
+        }
+    } else {
+        for name in PROXY_ENV {
+            let other = if name.starts_with(|c: char| c.is_ascii_lowercase()) {
+                name.to_ascii_uppercase()
+            } else {
+                name.to_ascii_lowercase()
+            };
+            let value = env(name)
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| env(&other).filter(|value| !value.trim().is_empty()));
+            specs.extend(value);
+        }
+    }
+    let mut hosts: Vec<String> = Vec::new();
+    for host in specs.iter().filter_map(|spec| proxy_host(spec)) {
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+/// The host of a proxy URI (`[scheme://][user:pass@]host[:port][/]`),
+/// lowercased, IPv6 without brackets; `None` for none or `direct://`.
+fn proxy_host(spec: &str) -> Option<String> {
+    let spec = spec.trim();
+    let (scheme, rest) = spec.split_once("://").unwrap_or(("", spec));
+    if scheme.eq_ignore_ascii_case("direct") {
+        return None;
+    }
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// [`proxies`] for the arguments and environment `command` gives Chrome.
+fn command_proxies(command: &Command) -> Vec<String> {
+    let command = command.as_std();
+    let args: Vec<String> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let set: Vec<(String, Option<String>)> = command
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    proxies(
+        |name| match set.iter().find(|(set, _)| set == name) {
+            Some((_, value)) => value.clone(),
+            None => std::env::var(name).ok(),
+        },
+        &args,
+    )
 }
 
 #[cfg(test)]
@@ -526,6 +628,11 @@ impl Process {
 
     pub fn profile(&self) -> &Path {
         self.profile.path()
+    }
+
+    /// The proxy hosts Chrome was started with.
+    pub fn proxies(&self) -> &[String] {
+        &self.proxies
     }
 
     /// The last lines Chrome wrote to stderr, for a start-up failure.

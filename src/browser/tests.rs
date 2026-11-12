@@ -469,9 +469,8 @@ async fn refuses_other_schemes_and_private_addresses() {
         ..settings(&program)
     };
     let policy = Policy {
-        allow_private: false,
         public_for_test: Some("127.0.0.1".parse().unwrap()),
-        resolve_for_test: None,
+        ..Policy::new(false)
     };
     let tool = BrowserTool::with_policy(settings, Vec::new(), true, policy);
 
@@ -649,9 +648,9 @@ async fn pages_that_come_from_a_private_address_are_left() {
         ..settings(&program)
     };
     let policy = Policy {
-        allow_private: false,
         public_for_test: Some("127.0.0.1".parse().unwrap()),
-        resolve_for_test: Some(("rebind.test".into(), "93.184.216.34".parse().unwrap())),
+        resolve_for_test: vec![("rebind.test".into(), "93.184.216.34".parse().unwrap())],
+        ..Policy::new(false)
     };
     let tool = BrowserTool::with_policy(settings, Vec::new(), true, policy);
 
@@ -702,6 +701,135 @@ async fn pages_that_come_from_a_private_address_are_left() {
     // The check comes after the answer: the service was reached, but
     // nothing of it was shown.
     assert!(!private_seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pages_through_a_proxy_on_a_private_address_are_shown() {
+    let Some(program) = chromium("pages_through_a_proxy_on_a_private_address_are_shown") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    // A proxy on 127.0.0.2 serves site.test, which Junees resolves to a
+    // public address: Chrome reports the proxy's address for the page.
+    let (proxy, proxy_seen) = serve(
+        "127.0.0.2",
+        HashMap::from([(
+            "http://site.test/",
+            (
+                200,
+                "",
+                "<title>Site</title><p>public site through the proxy</p>".to_string(),
+            ),
+        )]),
+    )
+    .await;
+    // rebind.test skips the proxy and comes straight from 127.0.0.3.
+    let (private, private_seen) = serve(
+        "127.0.0.3",
+        HashMap::from([(
+            "/",
+            (
+                200,
+                "",
+                "<title>Internal</title><p>internal secret</p>".to_string(),
+            ),
+        )]),
+    )
+    .await;
+    let proxy_arg = format!("--proxy-server=http://{proxy}");
+    let _args = TestArgs::set(&[
+        &proxy_arg,
+        "--proxy-bypass-list=rebind.test",
+        "--host-resolver-rules=MAP rebind.test 127.0.0.3",
+    ]);
+    let settings = Settings {
+        allow_private: false,
+        ..settings(&program)
+    };
+    let public: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+    let policy = Policy {
+        resolve_for_test: vec![("site.test".into(), public), ("rebind.test".into(), public)],
+        ..Policy::new(false)
+    };
+    let tool = BrowserTool::with_policy(settings, Vec::new(), true, policy);
+
+    let output = run(&tool, json!({"action": "open", "url": "http://site.test/"})).await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("public site through the proxy"),
+        "{}",
+        output.content
+    );
+    assert!(
+        proxy_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|target| target == "http://site.test/")
+    );
+
+    // A page that does not come through the proxy is still checked.
+    let rebound = format!("http://rebind.test:{}/", private.port());
+    let output = run(&tool, json!({"action": "open", "url": rebound})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with(page::PRIVATE_PAGE),
+        "{}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("internal secret"),
+        "{}",
+        output.content
+    );
+    assert_blank(&tool).await;
+    run(&tool, json!({"action": "close"})).await;
+    assert!(!private_seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn proxies_come_from_the_arguments_or_the_environment() {
+    let env = |vars: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.to_string())
+        }
+    };
+    let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        process::proxies(
+            env(&[
+                ("http_proxy", "http://user:pa:ss@10.0.0.5:3128/"),
+                ("HTTP_PROXY", "http://10.9.9.9:1/"),
+                ("HTTPS_PROXY", "Proxy.Corp:8080"),
+                ("all_proxy", "socks5://[fd00::1]:1080"),
+                ("ftp_proxy", " "),
+                ("FTP_PROXY", "10.0.0.5:21"),
+                ("socks_server", "127.0.0.1:1080"),
+            ]),
+            &[]
+        ),
+        ["fd00::1", "10.0.0.5", "proxy.corp", "127.0.0.1"]
+    );
+    assert!(process::proxies(env(&[]), &[]).is_empty());
+    // --proxy-server wins over the environment.
+    let http = env(&[("http_proxy", "10.0.0.5:3128")]);
+    assert_eq!(
+        process::proxies(
+            &http,
+            &args(&[
+                "--headless=new",
+                "--proxy-server=http=127.0.0.2:8080;https=https://p2:443,direct://"
+            ])
+        ),
+        ["127.0.0.2", "p2"]
+    );
+    assert_eq!(
+        process::proxies(&http, &args(&["--proxy-server=socks5://[::1]:1080"])),
+        ["::1"]
+    );
+    assert!(process::proxies(&http, &args(&["--no-proxy-server"])).is_empty());
 }
 
 #[tokio::test]

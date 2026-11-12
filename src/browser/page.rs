@@ -169,9 +169,12 @@ impl Browser {
         program: &std::path::Path,
         settings: &Settings,
         hidden_env: &[String],
-        policy: Policy,
+        mut policy: Policy,
     ) -> Result<Self> {
         let (process, pipes) = process::launch(program, settings, hidden_env)?;
+        if !policy.allow_private {
+            policy.proxies = super::address::proxy_addresses(process.proxies()).await;
+        }
         let (connection, reader, raw_events) =
             Connection::new(pipes.from_browser, pipes.to_browser);
         let (events, _) = broadcast::channel(1024);
