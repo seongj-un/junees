@@ -30,13 +30,22 @@ fn bash_calls(commands: &[&str]) -> Value {
     })
 }
 
+/// The working folder under `home`: a subfolder, so the Landlock sandbox
+/// lets commands create files in it (a working folder holding the state
+/// folder keeps new entries out of its top level).
+fn work(home: &Path) -> std::path::PathBuf {
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    work
+}
+
 fn command(home: &Path, url: &str, args: &[&str]) -> tokio::process::Command {
-    let mut command = common::junees_binary(home, home);
+    let mut command = common::junees_binary(&work(home), home);
     command
         .args(args)
         .env("ANTHROPIC_API_KEY", "sk-fake")
         .env("ANTHROPIC_BASE_URL", url)
-        .env("JUNEES_HOME", home)
+        .env("JUNEES_HOME", home.join(".junees"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -84,7 +93,7 @@ async fn converse(home: &Path, url: &str, approval: Option<&str>, input: &str) -
 #[tokio::test]
 async fn without_a_terminal_risky_calls_are_declined_and_others_run() {
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join("marker"), "keep me").unwrap();
+    std::fs::write(work(home.path()).join("marker"), "keep me").unwrap();
     let (url, server) = fake_api(vec![
         (200, bash_calls(&["rm marker", "touch made"])),
         (200, text_reply("Done.")),
@@ -100,11 +109,11 @@ async fn without_a_terminal_risky_calls_are_declined_and_others_run() {
         "{stderr}"
     );
     assert!(
-        home.path().join("marker").exists(),
+        work(home.path()).join("marker").exists(),
         "rm ran without approval"
     );
     assert!(
-        home.path().join("made").exists(),
+        work(home.path()).join("made").exists(),
         "a safe command did not run"
     );
     let requests = tokio::time::timeout(Duration::from_secs(10), server)
@@ -129,7 +138,7 @@ async fn without_a_terminal_risky_calls_are_declined_and_others_run() {
 #[tokio::test]
 async fn approval_off_runs_risky_calls_in_the_conversation_mode() {
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join("marker"), "remove me").unwrap();
+    std::fs::write(work(home.path()).join("marker"), "remove me").unwrap();
     let (url, server) = fake_api(vec![
         (200, bash_calls(&["rm marker"])),
         (200, text_reply("Done.")),
@@ -137,7 +146,7 @@ async fn approval_off_runs_risky_calls_in_the_conversation_mode() {
     .await;
     let stderr = converse(home.path(), &url, Some("off"), "clean up\n").await;
     assert!(!stderr.contains("not a terminal"), "{stderr}");
-    assert!(!home.path().join("marker").exists());
+    assert!(!work(home.path()).join("marker").exists());
     let requests = server.await.unwrap();
     assert!(!results(&requests[1])[0].2);
 }
@@ -145,7 +154,7 @@ async fn approval_off_runs_risky_calls_in_the_conversation_mode() {
 #[tokio::test]
 async fn a_prompt_run_never_asks() {
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join("marker"), "remove me").unwrap();
+    std::fs::write(work(home.path()).join("marker"), "remove me").unwrap();
     let (url, server) = fake_api(vec![
         (200, bash_calls(&["rm marker"])),
         (200, text_reply("Done.")),
@@ -161,7 +170,7 @@ async fn a_prompt_run_never_asks() {
     assert!(output.status.success(), "{stderr}");
     assert!(!stderr.contains("approval"), "{stderr}");
     assert!(
-        !home.path().join("marker").exists(),
+        !work(home.path()).join("marker").exists(),
         "-p did not run the call"
     );
     let requests = server.await.unwrap();
@@ -203,7 +212,7 @@ fn terminal() -> (std::fs::File, std::os::fd::OwnedFd) {
 #[tokio::test]
 async fn streamed_text_and_the_question_share_the_terminal() {
     let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join("marker"), "remove me").unwrap();
+    std::fs::write(work(home.path()).join("marker"), "remove me").unwrap();
     let ask = json!({
         "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
         "content": [
@@ -262,7 +271,7 @@ async fn streamed_text_and_the_question_share_the_terminal() {
         text < call && call < question && question < answer,
         "{shown}"
     );
-    assert!(!home.path().join("marker").exists(), "{shown}");
+    assert!(!work(home.path()).join("marker").exists(), "{shown}");
     let requests = tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .unwrap()
