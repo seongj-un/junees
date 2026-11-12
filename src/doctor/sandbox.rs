@@ -21,7 +21,7 @@ pub(super) fn check(report: &mut Report, settings: &Settings, support: Support, 
                 AREA,
                 "settings",
                 format!("{err:#}"),
-                "fix sandbox, sandbox_write, sandbox_read or sandbox_network",
+                "fix sandbox, sandbox_write, sandbox_read, webhook_sandbox_read or sandbox_network",
             );
             return;
         }
