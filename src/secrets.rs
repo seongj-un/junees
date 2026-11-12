@@ -9,6 +9,12 @@
 /// Prefixes of well-known credential formats, with what they are.
 const PREFIXES: &[(&str, &str)] = &[
     ("sk-ant-", "an Anthropic API key"),
+    // OpenAI project, service account and admin keys (older `sk-` keys are
+    // long mixed runs, which the run rule finds), and OpenRouter keys.
+    ("sk-proj-", "an OpenAI API key"),
+    ("sk-svcacct-", "an OpenAI API key"),
+    ("sk-admin-", "an OpenAI API key"),
+    ("sk-or-v1-", "an OpenRouter API key"),
     ("ghp_", "a GitHub token"),
     ("gho_", "a GitHub token"),
     ("ghu_", "a GitHub token"),
@@ -664,6 +670,15 @@ mod tests {
             (format!("{sha1} ghp_{filler}"), "a GitHub token"),
             (format!("github_pat_{filler}"), "a GitHub token"),
             (format!("key sk-ant-{filler}"), "an Anthropic API key"),
+            (
+                format!("OPENAI_API_KEY=sk-proj-{filler}"),
+                "an OpenAI API key",
+            ),
+            (format!("sk-svcacct-{filler}"), "an OpenAI API key"),
+            (
+                format!("key: sk-or-v1-{}", "0123abcd".repeat(2)),
+                "an OpenRouter API key",
+            ),
             (
                 format!("-----BEGIN RSA {} KEY-----", "PRIVATE"),
                 "a private key",
