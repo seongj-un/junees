@@ -814,10 +814,10 @@ fn proxies_come_from_the_arguments_or_the_environment() {
     );
     assert!(process::proxies(env(&[]), &[]).is_empty());
     // --proxy-server wins over the environment.
-    let http = env(&[("http_proxy", "10.0.0.5:3128")]);
+    let http = &env(&[("http_proxy", "10.0.0.5:3128")]);
     assert_eq!(
         process::proxies(
-            &http,
+            http,
             &args(&[
                 "--headless=new",
                 "--proxy-server=http=127.0.0.2:8080;https=https://p2:443,direct://"
@@ -826,10 +826,10 @@ fn proxies_come_from_the_arguments_or_the_environment() {
         ["127.0.0.2", "p2"]
     );
     assert_eq!(
-        process::proxies(&http, &args(&["--proxy-server=socks5://[::1]:1080"])),
+        process::proxies(http, &args(&["--proxy-server=socks5://[::1]:1080"])),
         ["::1"]
     );
-    assert!(process::proxies(&http, &args(&["--no-proxy-server"])).is_empty());
+    assert!(process::proxies(http, &args(&["--no-proxy-server"])).is_empty());
 }
 
 #[test]
