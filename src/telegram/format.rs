@@ -400,12 +400,14 @@ fn link(chars: &[char], at: usize, end: usize) -> Option<(usize, String, usize)>
 }
 
 /// `raw` if it is an http(s) address a link may point to: no spaces or
-/// control characters, a host, at most [`MAX_URL`] long. Any other scheme
+/// control characters, a host, at most [`MAX_URL`] long once escaped for
+/// the `href` (`&` grows to `&amp;`; the cut reserves room for the tag
+/// by that length). Any other scheme
 /// (`javascript:`, `data:`, `tg://user?id=` which would notify a user,
 /// a relative path) stays as typed.
 fn link_address(raw: &str) -> Option<String> {
     if raw.is_empty()
-        || raw.len() > MAX_URL
+        || length(&escape(raw, true)) > MAX_URL
         || raw.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return None;
@@ -962,6 +964,23 @@ mod tests {
             html("[x](HTTPS://A.B/c)"),
             "<a href=\"HTTPS://A.B/c\">x</a>"
         );
+    }
+
+    #[test]
+    fn an_address_too_long_once_escaped_stays_text() {
+        // 1012 characters as written, five times that in the `href`.
+        let text = format!("[hello world](https://a.b/?{})", "&".repeat(1000));
+        let parts = render(&text, false, LIMIT);
+        check(&parts, LIMIT);
+        assert!(parts.iter().all(|p| !p.html.contains("<a ")), "{parts:#?}");
+        // Cut by length (no per-character pieces): about 5000 characters.
+        assert!(parts.len() <= 3, "{}", parts.len());
+        // Cut once at the space (dropped), then between characters.
+        let joined: String = parts.iter().map(|p| p.plain.as_str()).collect();
+        assert_eq!(joined, text.replacen(' ', "", 1));
+        // Just under the limit once escaped: still a link.
+        let fits = format!("https://a.b/{}", "&".repeat((MAX_URL - 12) / 5));
+        assert!(html(&format!("[x]({fits})")).starts_with("<a href="));
     }
 
     /// Checks every message: within `limit`, tags balanced and in order.
