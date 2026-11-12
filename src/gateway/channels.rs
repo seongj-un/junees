@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use super::Log;
-use super::ask::{AnswerSlot, DiscordAsk, fence_safe};
+use super::ask::{AnswerSlot, DiscordAsk, Press, fence_safe};
 use super::engine::{Conversation, Engines, Progress};
 use super::platform::Platform;
 use super::sessions::{self, SessionIndex};
@@ -182,6 +182,16 @@ impl<P: Platform> Channels<P> {
         self.channels
             .get(channel)
             .is_some_and(|known| known.state.answers.waiting())
+    }
+
+    /// A press on an approval question's button in `channel` (the router
+    /// checked that the user may answer); false when it answers nothing:
+    /// no question waits there, or another one does
+    /// ([`AnswerSlot::press`]).
+    pub fn press(&self, channel: &str, press: Press) -> bool {
+        self.channels
+            .get(channel)
+            .is_some_and(|known| known.state.answers.press(press))
     }
 
     /// A message for the bot that is no command: the answer to a waiting
@@ -740,7 +750,9 @@ async fn turn<P: Platform>(
         loop {
             tokio::select! {
                 biased;
-                Some(item) = progress.recv() => show(shared, channel, &mut tools, item).await,
+                Some(item) = progress.recv() => {
+                    show(shared, channel, &state.answers, &mut tools, item).await
+                }
                 result = &mut run => break result,
                 _ = typing.tick() => {
                     if !state.answers.waiting()
@@ -753,7 +765,7 @@ async fn turn<P: Platform>(
         }
     };
     while let Ok(item) = progress.try_recv() {
-        show(shared, channel, &mut tools, item).await;
+        show(shared, channel, &state.answers, &mut tools, item).await;
     }
     flush_tools(shared, channel, &mut tools).await;
     store(&state.usage, conversation.usage());
@@ -802,14 +814,37 @@ fn error_text(err: &anyhow::Error, new: &str) -> String {
 async fn show<P: Platform>(
     shared: &Shared<P>,
     channel: &str,
+    answers: &AnswerSlot,
     tools: &mut Vec<String>,
     item: Progress,
 ) {
+    let place = shared.platform.place();
     match item {
         Progress::Tool(line) => tools.push(line),
-        Progress::Text(text) | Progress::Note(text) | Progress::Question(text) => {
+        Progress::Text(text) | Progress::Note(text) => {
             flush_tools(shared, channel, tools).await;
             shared.say(channel, &text).await;
+        }
+        Progress::Question(question) => {
+            flush_tools(shared, channel, tools).await;
+            match shared.platform.post_question(channel, &question).await {
+                Ok(Some(message)) => answers.posted(&question.id, message),
+                Ok(None) => shared.say(channel, &question.text).await,
+                Err(err) => {
+                    // Text answers still work.
+                    (shared.log)(&format!(
+                        "{place} {channel}: cannot post the question with buttons: {err:#}"
+                    ));
+                    shared.say(channel, &question.text).await;
+                }
+            }
+        }
+        Progress::Answered { id, outcome } => {
+            if let Err(err) = shared.platform.close_question(channel, &id, &outcome).await {
+                (shared.log)(&format!(
+                    "{place} {channel}: cannot take the buttons off a question: {err:#}"
+                ));
+            }
         }
     }
 }

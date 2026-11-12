@@ -10,6 +10,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::ask::Question;
 use crate::agent::{Agent, AgentOptions, Event};
 use crate::approval::{Approval, ApprovalMode, Ask};
 use crate::cancel::Cancel;
@@ -45,7 +46,10 @@ pub enum Progress {
     /// Something the user should know: a cut-off reply, a compaction.
     Note(String),
     /// An approval question (see [`super::ask`]).
-    Question(String),
+    Question(Question),
+    /// The question `id` ended: answered, timed out or dropped, as
+    /// `outcome` says.
+    Answered { id: String, outcome: String },
 }
 
 /// Turns the agent's events into [`Progress`]: text is held until its
