@@ -42,6 +42,8 @@ pub struct Mcp {
     tools: Vec<(String, usize, server::RemoteTool)>,
     /// Why the server list could not be read.
     problem: Option<String>,
+    /// The state folder of the saved OAuth logins, if they are used.
+    home: Option<PathBuf>,
 }
 
 impl Mcp {
@@ -60,8 +62,16 @@ impl Mcp {
         let path = home.join(config::FILE_NAME);
         match config::load(&path) {
             Ok(configs) => {
-                let mut mcp =
-                    Self::start_servers(configs, hidden_env, workdir, Timeouts::default()).await;
+                let env: EnvLookup = Arc::new(|name: &str| std::env::var(name).ok());
+                let mut mcp = Self::start_in(
+                    configs,
+                    hidden_env,
+                    workdir,
+                    Timeouts::default(),
+                    env,
+                    Some(home),
+                )
+                .await;
                 mcp.path = Some(path);
                 mcp
             }
@@ -95,12 +105,26 @@ impl Mcp {
         timeouts: Timeouts,
         env: EnvLookup,
     ) -> Self {
+        Self::start_in(configs, hidden_env, workdir, timeouts, env, None).await
+    }
+
+    /// [`Mcp::start_servers_with_env`] with the saved OAuth logins of the
+    /// state folder `home` ([`oauth`]); they are never started here.
+    pub async fn start_in(
+        configs: Vec<ServerConfig>,
+        hidden_env: &[String],
+        workdir: &Path,
+        timeouts: Timeouts,
+        env: EnvLookup,
+        home: Option<&Path>,
+    ) -> Self {
         let servers: Vec<Arc<Server>> = configs
             .into_iter()
             .map(|config| {
                 Arc::new(
                     Server::new(config, hidden_env.to_vec(), workdir.to_path_buf(), timeouts)
-                        .with_env(Arc::clone(&env)),
+                        .with_env(Arc::clone(&env))
+                        .with_oauth_home(home.map(Path::to_path_buf)),
                 )
             })
             .collect();
@@ -130,6 +154,7 @@ impl Mcp {
             servers,
             tools,
             problem: None,
+            home: home.map(Path::to_path_buf),
         }
     }
 
@@ -235,9 +260,15 @@ impl Mcp {
                 Status::Stopped(reason) => format!("stopped: {reason}"),
             };
             let env: Vec<&str> = server.config.env.keys().map(String::as_str).collect();
+            let login = self
+                .home
+                .as_deref()
+                .and_then(|home| oauth::overview(home, &server.config))
+                .map(|login| format!(", {login}"))
+                .unwrap_or_default();
             let place = match &server.config.http {
                 Some(http) => format!(
-                    "Streamable HTTP `{}`{}",
+                    "Streamable HTTP `{}`{}{login}",
                     http.origin(),
                     if http.headers.is_empty() {
                         String::new()
@@ -303,6 +334,31 @@ impl Mcp {
             });
         }
         lines
+    }
+
+    /// The server named `name`, if the list has one.
+    pub fn server(&self, name: &str) -> Option<&Arc<Server>> {
+        self.servers.iter().find(|server| server.name() == name)
+    }
+
+    /// Starts the server `name` again (after a login); a line saying how
+    /// it went.
+    pub async fn restart(&self, name: &str) -> Option<String> {
+        let server = self.server(name)?;
+        if !server.config.enabled {
+            return Some(format!("mcp: {name} is disabled in mcp.json"));
+        }
+        let had_tools = self
+            .tools
+            .iter()
+            .any(|(_, index, _)| Arc::ptr_eq(&self.servers[*index], server));
+        Some(match server.start().await {
+            Ok(()) if had_tools => format!("mcp: {name} started again"),
+            Ok(()) => {
+                format!("mcp: {name} started; its tools reach the model from the next junees run")
+            }
+            Err(reason) => format!("mcp: {name} failed to start: {reason}"),
+        })
     }
 
     /// Ends every server: closes its input, then SIGTERM and SIGKILL to
