@@ -36,8 +36,49 @@ pub(super) fn programs(report: &mut Report, path: Option<&OsStr>) {
     }
 }
 
-/// The jobs of `junees cron` and whether a daemon runs them.
-pub(super) fn cron(report: &mut Report, home: &Path) {
+/// A check of the unattended `what` (`job`, `route`) `name` working in
+/// `dir` when that is the home folder `user_home` or holds it: refused
+/// since `--allow-home` exists, unless added with it.
+fn home_folder(
+    report: &mut Report,
+    area: &'static str,
+    (what, name): (&str, &str),
+    dir: &Path,
+    allow_home: bool,
+    user_home: Option<&Path>,
+) {
+    if !crate::tools::holds_home(dir, user_home) {
+        return;
+    }
+    let check = format!("{what} {name} folder");
+    if allow_home {
+        report.ok(
+            area,
+            &check,
+            format!(
+                "works in {}, the home folder or a folder holding it (added with --allow-home)",
+                shown(dir)
+            ),
+        );
+    } else {
+        report.warn(
+            area,
+            &check,
+            format!(
+                "works in {}, the home folder or a folder holding it: its runs are refused",
+                shown(dir)
+            ),
+            format!(
+                "remove the {what} and add it again with a project folder (--dir), or with \
+                 --allow-home to accept that its runs may change the home folder"
+            ),
+        );
+    }
+}
+
+/// The jobs of `junees cron`, whether a daemon runs them, and the jobs
+/// working in the home folder `user_home`.
+pub(super) fn cron(report: &mut Report, home: &Path, user_home: Option<&Path>) {
     const AREA: &str = "cron";
     let path = crate::cron::store::Store::new(home).path();
     let jobs = match crate::cron::store::read(&path) {
@@ -55,6 +96,16 @@ pub(super) fn cron(report: &mut Report, home: &Path) {
             return;
         }
     };
+    for job in &jobs {
+        home_folder(
+            report,
+            AREA,
+            ("job", job.label()),
+            &job.dir,
+            job.allow_home,
+            user_home,
+        );
+    }
     let waiting = jobs
         .iter()
         .filter(|job| !job.paused && job.next_run.is_some())
@@ -80,9 +131,15 @@ pub(super) fn cron(report: &mut Report, home: &Path) {
     }
 }
 
-/// The webhook routes, their secrets (there and private, never shown)
-/// and whether a server answers them.
-pub(super) fn webhooks(report: &mut Report, home: &Path, settings: &Settings) {
+/// The webhook routes, their secrets (there and private, never shown),
+/// the routes working in the home folder `user_home` and whether a
+/// server answers them.
+pub(super) fn webhooks(
+    report: &mut Report,
+    home: &Path,
+    settings: &Settings,
+    user_home: Option<&Path>,
+) {
     const AREA: &str = "webhooks";
     let path = crate::webhook::store::Store::new(home).path();
     let routes = match crate::webhook::store::read(&path) {
@@ -101,6 +158,14 @@ pub(super) fn webhooks(report: &mut Report, home: &Path, settings: &Settings) {
         }
     };
     for route in &routes {
+        home_folder(
+            report,
+            AREA,
+            ("route", &route.name),
+            &route.dir,
+            route.allow_home,
+            user_home,
+        );
         let name = format!("route {}", route.name);
         match &route.secret {
             None if !route.no_secret => report.warn(

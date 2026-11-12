@@ -353,8 +353,9 @@ pub async fn run_with(
     settings::telegram(&mut report, settings);
     settings::slack(&mut report, settings);
     if let Some(home) = home.as_deref() {
-        services::cron(&mut report, home);
-        services::webhooks(&mut report, home, settings);
+        let user_home = settings.env("HOME").map(std::path::PathBuf::from);
+        services::cron(&mut report, home, user_home.as_deref());
+        services::webhooks(&mut report, home, settings, user_home.as_deref());
         files::sessions(&mut report, home);
         services::mcp(&mut report, home, path, &|key| settings.env(key));
         services::plugins(&mut report, home);

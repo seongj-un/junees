@@ -150,6 +150,72 @@ async fn a_broken_settings_file_is_a_finding_not_an_error() {
 }
 
 #[tokio::test]
+async fn doctor_warns_about_a_job_in_the_home_folder() {
+    let home = Home::new("timezone = \"UTC\"\n");
+    let root = home.root.to_str().unwrap();
+    let output = home
+        .junees(
+            &[
+                "cron",
+                "add",
+                "every 2h",
+                "hi",
+                "--name",
+                "h",
+                "--dir",
+                root,
+                "--allow-home",
+            ],
+            "",
+        )
+        .await;
+    let (_, stderr) = text(&output);
+    assert!(output.status.success(), "{stderr}");
+    let check = |report: &Value| -> Value {
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "job h folder")
+            .cloned()
+            .unwrap_or_else(|| panic!("no job check in {report}"))
+    };
+    let output = home.junees(&["doctor", "--json"], "").await;
+    let report: Value = serde_json::from_str(&text(&output).0).unwrap();
+    let found = check(&report);
+    assert_eq!(found["status"], "ok", "{found}");
+    assert!(
+        found["detail"].as_str().unwrap().contains("--allow-home"),
+        "{found}"
+    );
+
+    // Saved without the mark, as before --allow-home existed.
+    let path = home.state.join("cron/jobs.json");
+    let mut jobs: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    jobs["jobs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("allow_home");
+    std::fs::write(&path, serde_json::to_string(&jobs).unwrap()).unwrap();
+    let output = home.junees(&["doctor", "--json"], "").await;
+    let report: Value = serde_json::from_str(&text(&output).0).unwrap();
+    let found = check(&report);
+    assert_eq!(found["status"], "warn", "{found}");
+    assert_eq!(found["area"], "cron");
+    assert!(
+        found["detail"]
+            .as_str()
+            .unwrap()
+            .contains("its runs are refused"),
+        "{found}"
+    );
+    assert!(
+        found["fix"].as_str().unwrap().contains("--allow-home"),
+        "{found}"
+    );
+}
+
+#[tokio::test]
 async fn doctor_help_and_bad_arguments() {
     let home = Home::new("");
     let output = home.junees(&["doctor", "--help"], "").await;
