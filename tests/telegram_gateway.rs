@@ -556,6 +556,7 @@ fn start(
             poll: Duration::from_secs(1),
             backoff_start: Duration::from_millis(50),
             backoff_max: Duration::from_millis(200),
+            album_wait: Duration::from_secs(1),
         },
         typing_every: Duration::from_secs(3600),
         log,
@@ -1214,6 +1215,52 @@ async fn a_caption_is_never_a_command() {
     let content = &common::body_of(&requests[0])["messages"][0]["content"];
     assert_eq!(content[0]["type"], "image", "{content}");
     assert_eq!(content[1]["text"], "/new", "{content}");
+}
+
+#[tokio::test]
+async fn an_album_split_over_two_answers_is_one_input() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    bot.file("ph1", "photos/file_1.png", png(20, 10));
+    bot.file("ph2", "photos/file_2.png", png(30, 20));
+    let (api, served) = common::fake_api(vec![
+        (200, common::text_reply("Two pictures.")),
+        (200, common::text_reply("After them.")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let me = USER.to_string();
+    // The first part alone in one getUpdates answer, the second in the
+    // next one (#58).
+    let first = bot.push(photo(USER, "ph1", Some("compare these"), Some("album-5")));
+    bot.wait_offset(first + 1).await;
+    bot.push(photo(USER, "ph2", None, Some("album-5")));
+    bot.push(private(USER, "and then this"));
+    bot.wait_post(&me, |p| p == "After them.").await;
+    running.stop().await;
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 2);
+    let content = &common::body_of(&requests[0])["messages"][0]["content"];
+    let kinds: Vec<&str> = content
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| block["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["image", "image", "text"], "{content}");
+    assert_eq!(content[2]["text"], "compare these");
+    assert_eq!(texts(&requests[1]).last().unwrap(), "user: and then this");
 }
 
 /// A photo from `from` in the group: part of `album`, with a caption (and

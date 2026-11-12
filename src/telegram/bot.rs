@@ -15,7 +15,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -174,6 +174,27 @@ struct Incoming<'a> {
     album: Vec<&'a Value>,
 }
 
+/// The parts of an album received so far, held back until no part came
+/// for a while.
+struct Held {
+    key: AlbumKey,
+    messages: Vec<Value>,
+    /// When to hand them on if no other part comes.
+    due: Instant,
+}
+
+/// The album `message` belongs to: chat, sender, `media_group_id`.
+fn album_key(message: &Value) -> Option<AlbumKey> {
+    Some((
+        message.pointer("/chat/id")?.as_i64()?,
+        message
+            .pointer("/from/id")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        message.get("media_group_id")?.as_str()?.to_string(),
+    ))
+}
+
 /// Albums remembered as taken in a group.
 const ALBUMS: usize = 64;
 
@@ -188,47 +209,95 @@ pub struct Router {
     /// Users already reported as not allowed (reported once).
     strangers: HashSet<i64>,
     /// Albums whose first part was for the bot in a group, newest last
-    /// ([`ALBUMS`] at most): the parts that come in a later `getUpdates`
-    /// answer have no caption (no mention), and are taken too.
+    /// ([`ALBUMS`] at most): the parts that come after the album was
+    /// handed on have no caption (no mention), and are taken too.
     albums: VecDeque<AlbumKey>,
+    /// Albums being received ([`Self::handle`]).
+    held: Vec<Held>,
+    /// How long an album waits for its next part.
+    album_wait: Duration,
 }
 
 impl Router {
-    pub fn new(shared: Arc<Shared<Telegram>>, allowed: HashSet<i64>, me: Me) -> Self {
+    /// `album_wait`: how long an album's parts are held back for the
+    /// next one ([`Self::handle`]).
+    pub fn new(
+        shared: Arc<Shared<Telegram>>,
+        allowed: HashSet<i64>,
+        me: Me,
+        album_wait: Duration,
+    ) -> Self {
         Self {
             channels: Channels::new(shared),
             allowed,
             me,
             strangers: HashSet::new(),
             albums: VecDeque::new(),
+            held: Vec::new(),
+            album_wait,
         }
     }
 
-    /// Handles a batch of updates from `getUpdates`, in order. The
-    /// messages of one album in a row become one input.
+    /// Handles a batch of updates from `getUpdates`, in order. Telegram
+    /// sends the messages of an album one by one, and a long poll answers
+    /// as soon as the first is there, so the rest may come in the next
+    /// answers: an album's parts are held until none came for
+    /// `album_wait` ([`Self::next_due`], [`Self::flush_due`]) and then
+    /// become one input. Another message in the same chat hands the held
+    /// albums of that chat on first, so the chat keeps its order.
     pub fn handle(&mut self, updates: &[Value]) {
-        let messages: Vec<&Value> = updates
-            .iter()
-            .filter_map(|update| update.get("message"))
-            .collect();
-        let mut incoming: Vec<Incoming> = Vec::new();
-        for message in messages {
-            let group = message.get("media_group_id").and_then(Value::as_str);
-            if let (Some(group), Some(last)) = (group, incoming.last_mut())
-                && last.message.get("media_group_id").and_then(Value::as_str) == Some(group)
-                && last.message.pointer("/chat/id") == message.pointer("/chat/id")
-                && last.message.pointer("/from/id") == message.pointer("/from/id")
-            {
-                last.album.push(message);
+        let now = Instant::now();
+        for message in updates.iter().filter_map(|update| update.get("message")) {
+            if let Some(key) = album_key(message) {
+                let due = now + self.album_wait;
+                match self.held.iter_mut().find(|held| held.key == key) {
+                    Some(held) => {
+                        held.messages.push(message.clone());
+                        held.due = due;
+                    }
+                    None => self.held.push(Held {
+                        key,
+                        messages: vec![message.clone()],
+                        due,
+                    }),
+                }
                 continue;
             }
-            incoming.push(Incoming {
+            if let Some(chat) = message.pointer("/chat/id").and_then(Value::as_i64) {
+                self.release(|held| held.key.0 == chat);
+            }
+            self.message(Incoming {
                 message,
                 album: Vec::new(),
             });
         }
-        for item in incoming {
-            self.message(item);
+        self.flush_due();
+    }
+
+    /// When the next held album is due, if one is held.
+    pub fn next_due(&self) -> Option<Instant> {
+        self.held.iter().map(|held| held.due).min()
+    }
+
+    /// Hands on the held albums that are due.
+    pub fn flush_due(&mut self) {
+        let now = Instant::now();
+        self.release(|held| held.due <= now);
+    }
+
+    /// Hands on the held albums `pick` chooses, oldest first.
+    fn release(&mut self, pick: impl Fn(&Held) -> bool) {
+        let (ready, kept): (Vec<Held>, Vec<Held>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|held| pick(held));
+        self.held = kept;
+        for held in ready {
+            if let Some((message, rest)) = held.messages.split_first() {
+                self.message(Incoming {
+                    message,
+                    album: rest.iter().collect(),
+                });
+            }
         }
     }
 
