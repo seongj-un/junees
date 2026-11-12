@@ -1474,6 +1474,113 @@ fn profiles_go_in_the_state_folder_and_chromes_socket_stays_short() {
 }
 
 #[test]
+fn profiles_left_by_a_process_that_is_gone_are_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    let state = tempfile::tempdir_in("/tmp").unwrap();
+    let folder = state.path().join("browser");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A live profile of this process: its lock is held.
+    let live = process::Profile::new(Some(&folder)).unwrap();
+    // A profile whose owner died: its lock file is there, unlocked; it
+    // names Chrome's separate temporary folder, which goes too.
+    let dead = folder.join("00112233445566aa");
+    std::fs::create_dir(&dead).unwrap();
+    std::fs::write(dead.join("junees.lock"), "").unwrap();
+    std::fs::write(dead.join("Cookies"), "secret").unwrap();
+    let temp = Path::new("/tmp").join(format!(
+        "junees-browser-{}",
+        crate::cron::store::random_hex(16)
+    ));
+    std::fs::create_dir(&temp).unwrap();
+    std::fs::write(
+        dead.join("junees-temp"),
+        temp.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    // A dead profile naming a folder Junees did not make: that folder stays.
+    let other = state.path().join("keep-me");
+    std::fs::create_dir(&other).unwrap();
+    let dead_other = folder.join("00112233445566bb");
+    std::fs::create_dir(&dead_other).unwrap();
+    std::fs::write(dead_other.join("junees.lock"), "").unwrap();
+    std::fs::write(
+        dead_other.join("junees-temp"),
+        other.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    // Without a lock file: kept while new (it may be starting), removed
+    // when old (from before the lock).
+    let young = folder.join("00112233445566cc");
+    std::fs::create_dir(&young).unwrap();
+    let old = folder.join("00112233445566dd");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::File::open(&old)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60))
+        .unwrap();
+    // Not profiles: another name, and a link with a profile's name.
+    let note = folder.join("notes");
+    std::fs::create_dir(&note).unwrap();
+    std::fs::write(note.join("junees.lock"), "").unwrap();
+    let link = folder.join("00112233445566ee");
+    std::os::unix::fs::symlink(&other, &link).unwrap();
+    std::fs::write(other.join("junees.lock"), "").unwrap();
+
+    // The next start removes the dead ones.
+    let next = process::Profile::new(Some(&folder)).unwrap();
+    for gone in [&dead, &dead_other, &old, &temp] {
+        assert!(!gone.exists(), "{} is still there", gone.display());
+    }
+    for kept in [live.path(), next.path(), &young, &note, &other] {
+        assert!(kept.exists(), "{} was removed", kept.display());
+    }
+    assert!(link.symlink_metadata().is_ok());
+    drop(next);
+
+    // A profile whose lock another process holds is kept until that
+    // process is gone.
+    let held = folder.join("00112233445566ff");
+    std::fs::create_dir(&held).unwrap();
+    let lock = held.join("junees.lock");
+    std::fs::write(&lock, "").unwrap();
+    let mut owner = std::process::Command::new("flock")
+        .arg(&lock)
+        .args(["sleep", "60"])
+        .process_group(0)
+        .spawn()
+        .expect("flock(1) runs");
+    let taken = || {
+        let file = std::fs::File::open(&lock).unwrap();
+        // SAFETY: flock on a descriptor `file` owns; closing it unlocks.
+        unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                libc::LOCK_EX | libc::LOCK_NB,
+            ) != 0
+        }
+    };
+    let mut waited = 0;
+    while !taken() {
+        assert!(waited < 100, "flock(1) did not take the lock");
+        std::thread::sleep(Duration::from_millis(50));
+        waited += 1;
+    }
+    drop(process::Profile::new(Some(&folder)).unwrap());
+    assert!(held.exists());
+    // SAFETY: kills the process group this test started (flock and its
+    // sleep, which shares the locked descriptor).
+    unsafe {
+        libc::killpg(owner.id() as i32, libc::SIGKILL);
+    }
+    owner.wait().unwrap();
+    drop(process::Profile::new(Some(&folder)).unwrap());
+    assert!(!held.exists());
+    drop(live);
+}
+
+#[test]
 fn settings_and_registration() {
     let none = |_: &str| None;
     assert_eq!(Settings::read(none).unwrap(), Settings::default());
