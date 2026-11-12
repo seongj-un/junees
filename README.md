@@ -1,7 +1,7 @@
 # Junees
 
 Rust로 만드는 AI 에이전트 하네스. LLM이 도구를 호출하며 일을 처리하는 루프를 바닥부터 직접 만든다.
-[Hermes Agent](https://github.com/NousResearch/hermes-agent)에서 영감을 받았고, 단일 바이너리와 적은 메모리 사용을 목표로 한다.
+단일 바이너리와 적은 메모리 사용을 목표로 한다.
 
 - 단일 바이너리: `junees` 하나로 대화, 한 번 실행, 장기 작업, 채팅 봇, 예약 작업, 웹훅 서버를 모두 돌린다.
 - 두 가지 백엔드: Anthropic API 키로 Junees 자신의 에이전트를 돌리거나(`api`), Claude Pro/Max 구독으로 로그인한 공식 Claude Code CLI에 맡긴다(`claude-code`).
