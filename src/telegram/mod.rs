@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -204,10 +204,18 @@ pub struct Poller {
     /// The ids handed out lately, oldest first ([`RECENT`] at most): an
     /// update the server sends again is not run twice.
     recent: VecDeque<i64>,
+    /// When polls were refused with a conflict lately, oldest first.
+    conflicts: VecDeque<Instant>,
 }
 
 /// Update ids remembered against duplicates.
 const RECENT: usize = 4096;
+
+/// Conflicts (409: another program polls the same bot) waited out within
+/// [`CONFLICT_WINDOW`]; the next one ends the gateway. A one-off
+/// `getUpdates` passes, a second gateway on the same token does not.
+const CONFLICT_TRIES: usize = 5;
+const CONFLICT_WINDOW: Duration = Duration::from_secs(600);
 
 impl Poller {
     pub fn new(api: Arc<Api>, timing: Timing, log: Log) -> Self {
@@ -217,7 +225,22 @@ impl Poller {
             log,
             offset: None,
             recent: VecDeque::new(),
+            conflicts: VecDeque::new(),
         }
+    }
+
+    /// Counts a conflict; whether there were too many lately.
+    fn too_many_conflicts(&mut self) -> bool {
+        let now = Instant::now();
+        while self
+            .conflicts
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= CONFLICT_WINDOW)
+        {
+            self.conflicts.pop_front();
+        }
+        self.conflicts.push_back(now);
+        self.conflicts.len() > CONFLICT_TRIES
     }
 
     /// The next updates, in order, none handed out before; polls (and
@@ -240,6 +263,7 @@ impl Poller {
                     }
                 }
                 Err(err) if err.is_fatal() => return Err(err),
+                Err(err) if err.is_conflict() && self.too_many_conflicts() => return Err(err),
                 Err(err) => {
                     (self.log)(&format!(
                         "{err}; polling again in {:.1}s",

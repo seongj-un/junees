@@ -58,17 +58,22 @@ pub enum ApiError {
 
 impl ApiError {
     /// The token is wrong (401 Unauthorized; 404 Not Found when the path
-    /// names no bot), or another program takes this bot's updates (409
-    /// Conflict: another `getUpdates` or a webhook). Polling again would
-    /// not help.
+    /// names no bot). Polling again would not help.
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
             ApiError::Refused {
-                code: 401 | 404 | 409,
+                code: 401 | 404,
                 ..
             }
         )
+    }
+
+    /// Another program takes this bot's updates (409 Conflict: another
+    /// `getUpdates` or a webhook). It may pass (a one-off `getUpdates`
+    /// to look at the updates), so the poller tries again a few times.
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, ApiError::Refused { code: 409, .. })
     }
 }
 
@@ -648,7 +653,7 @@ mod tests {
         assert!(text.contains("Unauthorized: [hidden]"), "{text}");
         let err = api.get_updates(None, Duration::ZERO, 1).await.unwrap_err();
         assert!(
-            err.is_fatal() && err.to_string().contains("deleteWebhook"),
+            err.is_conflict() && !err.is_fatal() && err.to_string().contains("deleteWebhook"),
             "{err}"
         );
         let seen = seen.lock().unwrap().clone();

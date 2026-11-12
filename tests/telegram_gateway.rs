@@ -63,6 +63,8 @@ struct BotState {
     unauthorized: AtomicBool,
     /// Answer this many sendMessage calls with 429 first.
     limit_next: Mutex<usize>,
+    /// Answer this many getUpdates calls with 409 first.
+    conflict_next: Mutex<usize>,
     /// file_id to (file_path, bytes).
     files: Mutex<HashMap<String, (String, Vec<u8>)>>,
 }
@@ -258,7 +260,21 @@ async fn serve(mut socket: TcpStream, state: Arc<BotState>) {
                     body: body.clone(),
                 });
                 state.notify.notify_waiters();
-                ok(Value::Array(get_updates(&state, &body).await))
+                let conflict = {
+                    let mut left = state.conflict_next.lock().unwrap();
+                    let conflict = *left > 0;
+                    *left = left.saturating_sub(1);
+                    conflict
+                };
+                if conflict {
+                    refused(
+                        409,
+                        "Conflict: terminated by other getUpdates request",
+                        None,
+                    )
+                } else {
+                    ok(Value::Array(get_updates(&state, &body).await))
+                }
             }
             "sendMessage" => {
                 let limited = {
@@ -821,6 +837,40 @@ async fn forwarded_messages_are_marked_and_never_commands() {
     bot.push(private(USER, "my own"));
     bot.wait_post(&me, |p| p == "reply 2: my own").await;
     running.stop().await;
+}
+
+#[tokio::test]
+async fn a_conflict_is_waited_out_a_few_times() {
+    let bot = FakeBot::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    // Someone else's one-off getUpdates: the gateway polls on.
+    *bot.state.conflict_next.lock().unwrap() = 3;
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    let me = USER.to_string();
+    bot.push(private(USER, "still here?"));
+    bot.wait_post(&me, |p| p == "reply 1: still here?").await;
+    let log = running.stop().await;
+    assert_eq!(
+        log.iter().filter(|line| line.contains("error 409")).count(),
+        3,
+        "{log:#?}"
+    );
+
+    // A second gateway on the same token keeps taking the updates: the
+    // gateway ends after a few tries and says why.
+    *bot.state.conflict_next.lock().unwrap() = usize::MAX;
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    let (result, log) = running.ended().await;
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(
+        err.contains("error 409") && err.contains("deleteWebhook"),
+        "{err}"
+    );
+    assert_eq!(
+        log.iter().filter(|line| line.contains("error 409")).count(),
+        5,
+        "{log:#?}"
+    );
 }
 
 #[tokio::test]
