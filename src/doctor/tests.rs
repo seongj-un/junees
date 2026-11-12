@@ -924,9 +924,12 @@ async fn saved_oauth_logins_are_checked_offline_and_never_shown() {
     let now = store::now();
     let home = &fixture.home;
     let save = |name: &str, saved: &Saved| store::write(home, name, saved).unwrap();
+    // Half an hour past 2 h: the check reads the clock again and rounds
+    // the time left down to hours, so an expiry of exactly 2 h shows as
+    // "1 h" once a second has passed.
     save(
         "docs",
-        &saved_login("https://mcp.example.com/mcp", Some(now + 7200), true),
+        &saved_login("https://mcp.example.com/mcp", Some(now + 7200 + 1800), true),
     );
     save(
         "stale",
