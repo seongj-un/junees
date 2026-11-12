@@ -183,6 +183,10 @@ impl Socket {
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ping.tick().await;
         let mut said_hello = false;
+        // When the last frame came. Only received frames move it: the
+        // pings sent in between must not restart the silence timer, or a
+        // dead connection whose writes still succeed is never noticed.
+        let mut last_frame = tokio::time::Instant::now();
         loop {
             let wait = if said_hello {
                 self.timing.idle
@@ -195,6 +199,13 @@ impl Socket {
                     let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
                     return End::Shutdown;
                 }
+                _ = tokio::time::sleep_until(last_frame + wait) => {
+                    (self.log)(&format!(
+                        "slack: nothing from the connection for {}s; connecting again",
+                        wait.as_secs_f64()
+                    ));
+                    return End::Again { fast: said_hello };
+                }
                 _ = ping.tick() => {
                     if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
                         (self.log)("slack: the connection broke");
@@ -202,28 +213,26 @@ impl Socket {
                     }
                     continue;
                 }
-                frame = tokio::time::timeout(wait, socket.next()) => frame,
+                frame = socket.next() => frame,
             };
             let text = match frame {
-                Err(_) => {
-                    (self.log)(&format!(
-                        "slack: nothing from the connection for {}s; connecting again",
-                        wait.as_secs()
-                    ));
-                    return End::Again { fast: said_hello };
-                }
-                Ok(None) | Ok(Some(Err(_))) => {
+                None | Some(Err(_)) => {
                     (self.log)("slack: the connection broke");
                     return End::Again { fast: false };
                 }
-                Ok(Some(Ok(Message::Close(_)))) => {
-                    (self.log)("slack: the connection was closed");
-                    return End::Again { fast: said_hello };
+                Some(Ok(frame)) => {
+                    last_frame = tokio::time::Instant::now();
+                    match frame {
+                        Message::Close(_) => {
+                            (self.log)("slack: the connection was closed");
+                            return End::Again { fast: said_hello };
+                        }
+                        Message::Text(text) => text,
+                        // Pings are answered by the library; pongs and the
+                        // rest only show the connection lives.
+                        _ => continue,
+                    }
                 }
-                Ok(Some(Ok(Message::Text(text)))) => text,
-                // Pings are answered by the library; pongs and the rest
-                // only show the connection lives.
-                Ok(Some(Ok(_))) => continue,
             };
             let Ok(envelope) = serde_json::from_str::<Value>(text.as_str()) else {
                 continue;

@@ -65,6 +65,9 @@ enum Command {
     Send(String),
     /// Closes the TCP connection without a close frame.
     Drop,
+    /// Keeps the connection open but stops reading and sending (no pongs
+    /// either), like a connection that died somewhere on the way.
+    Hold,
 }
 
 #[derive(Default)]
@@ -75,6 +78,10 @@ struct SlackState {
     acks: Mutex<Vec<String>>,
     /// WebSocket connections accepted so far.
     connections: AtomicUsize,
+    /// While set, new connections get no `hello` and nothing else.
+    mute: AtomicBool,
+    /// Connections kept silent because of `mute`.
+    muted: AtomicUsize,
     /// The newest connection's command channel.
     current: Mutex<Option<UnboundedSender<Command>>>,
     next: AtomicUsize,
@@ -353,6 +360,14 @@ async fn socket_mode(socket: TcpStream, state: Arc<SlackState>) {
     let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
         return;
     };
+    if state.mute.load(Ordering::SeqCst) {
+        state.muted.fetch_add(1, Ordering::SeqCst);
+        state.notify.notify_waiters();
+        // Hold the socket without reading until the gateway gives up.
+        tokio::time::sleep(WAIT).await;
+        drop(ws);
+        return;
+    }
     let (commands, mut received) = mpsc::unbounded_channel();
     let hello = json!({"type": "hello", "num_connections": 1,
         "connection_info": {"app_id": "A1"},
@@ -376,6 +391,17 @@ async fn socket_mode(socket: TcpStream, state: Arc<SlackState>) {
                     }
                 }
                 Some(Command::Drop) | None => return,
+                Some(Command::Hold) => {
+                    // Wait (not reading) until a newer connection replaces
+                    // this one's command channel.
+                    while let Some(command) = received.recv().await {
+                        if matches!(command, Command::Drop) {
+                            break;
+                        }
+                    }
+                    drop(ws);
+                    return;
+                }
             },
             frame = ws.next() => match frame {
                 Some(Ok(Message::Text(text))) => {
@@ -548,6 +574,23 @@ fn start(
     home: Option<PathBuf>,
     cwd: &Path,
 ) -> Running {
+    let timing = Timing {
+        ping_every: Duration::from_secs(30),
+        idle: Duration::from_secs(60),
+        connect_timeout: Duration::from_secs(5),
+        backoff_start: Duration::from_millis(50),
+        backoff_max: Duration::from_millis(200),
+    };
+    start_timed(config, engines, home, cwd, timing)
+}
+
+fn start_timed(
+    config: SlackConfig,
+    engines: Arc<dyn Engines>,
+    home: Option<PathBuf>,
+    cwd: &Path,
+    timing: Timing,
+) -> Running {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&lines);
     let log: Log = Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_string()));
@@ -557,13 +600,7 @@ fn start(
         home,
         cwd: cwd.to_path_buf(),
         memory: None,
-        timing: Timing {
-            ping_every: Duration::from_secs(30),
-            idle: Duration::from_secs(60),
-            connect_timeout: Duration::from_secs(5),
-            backoff_start: Duration::from_millis(50),
-            backoff_max: Duration::from_millis(200),
-        },
+        timing,
         log,
     };
     let stop = Cancel::new();
@@ -735,6 +772,41 @@ async fn reconnects_when_slack_asks_and_when_the_connection_breaks() {
             "{request:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_silent_connection_is_dropped_although_pings_go_out() {
+    let s = FakeSlack::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    // Pings go out more often than the silence limits, as with the
+    // defaults (30 s pings, 90 s idle): they must not keep it open.
+    let timing = Timing {
+        ping_every: Duration::from_millis(50),
+        idle: Duration::from_millis(300),
+        connect_timeout: Duration::from_millis(300),
+        backoff_start: Duration::from_millis(20),
+        backoff_max: Duration::from_millis(50),
+    };
+    s.state.mute.store(true, Ordering::SeqCst);
+    let running = start_timed(slack(&s, &[]), fake(), None, dir.path(), timing);
+    // No `hello`: given up after the connect timeout, then tried again.
+    s.until("two silent connections", || {
+        s.state.muted.load(Ordering::SeqCst) >= 2
+    })
+    .await;
+    s.state.mute.store(false, Ordering::SeqCst);
+    s.wait_connections(1).await;
+    // After `hello` the connection goes quiet and stops reading.
+    s.send(Command::Hold);
+    s.wait_connections(2).await;
+    s.push(dm(USER, "after the silence"));
+    s.wait_post(DM, |p| p == "reply 1: after the silence").await;
+    let log = running.stop().await;
+    assert!(
+        log.iter()
+            .any(|l| l.contains("nothing from the connection for 0.3s")),
+        "{log:#?}"
+    );
 }
 
 #[tokio::test]
