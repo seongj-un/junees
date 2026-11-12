@@ -67,6 +67,9 @@ pub(crate) struct Knobs {
     refresh_fails: bool,
     /// tools/call answers 403 insufficient_scope.
     forbid: bool,
+    /// The `resource` of the protected resource metadata, if not the
+    /// server's address.
+    resource: Option<String>,
     clients: Vec<(String, Vec<String>)>,
     grants: Vec<Grant>,
     access: Vec<String>,
@@ -96,6 +99,7 @@ impl Default for Knobs {
             refresh: true,
             refresh_fails: false,
             forbid: false,
+            resource: None,
             clients: Vec::new(),
             grants: Vec::new(),
             access: Vec::new(),
@@ -268,8 +272,8 @@ impl Fake {
             ("GET", "/.well-known/oauth-protected-resource/mcp") => (
                 200,
                 Vec::new(),
-                json!({"resource": self.url(), "authorization_servers": [issuer],
-                    "scopes_supported": ["files:read"]})
+                json!({"resource": knobs.resource.clone().unwrap_or_else(|| self.url()),
+                    "authorization_servers": [issuer], "scopes_supported": ["files:read"]})
                 .to_string(),
             ),
             ("GET", "/.well-known/oauth-authorization-server") => {
@@ -539,6 +543,8 @@ async fn a_login_by_browser_saves_tokens_that_only_its_server_gets() {
             "POST /token",
         ]
     );
+    // The probe carried no token.
+    assert_eq!(fake.seen()[0].authorization, None);
     let token_request = &fake.seen()[4];
     assert_eq!(token_request.field("resource"), Some(fake.url()));
     assert_eq!(
@@ -634,6 +640,25 @@ async fn an_answer_from_another_issuer_never_reaches_the_token_endpoint() {
     );
     assert!(!fake.paths().contains(&"POST /token".to_string()));
     assert!(!store::path(home.path(), "docs").exists());
+}
+
+#[tokio::test]
+async fn metadata_for_another_resource_stops_the_login() {
+    let home = tempfile::tempdir().unwrap();
+    for resource in ["http://127.0.0.1:1/mcp", "{}/mcp/other", "{}/mc"] {
+        let fake = Fake::start(Knobs::default()).await;
+        fake.knobs().resource = Some(resource.replace("{}", &fake.issuer()));
+        let config = server_config(json!({"url": fake.url()}));
+        let (mut ui, _address, _paste) = new_ui();
+        let message = login(home.path(), &config, &no_env, &mut ui, WAIT)
+            .await
+            .unwrap_err();
+        assert!(message.contains("for another resource"), "{message}");
+        assert_eq!(
+            fake.paths(),
+            ["POST /mcp", "GET /.well-known/oauth-protected-resource/mcp"]
+        );
+    }
 }
 
 #[tokio::test]
