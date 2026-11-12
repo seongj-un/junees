@@ -1,5 +1,6 @@
 //! Telegram as the channel engine's platform ([`crate::gateway::platform`]):
-//! posts through `sendMessage` in plain text, typing through
+//! posts through `sendMessage` (as HTML converted from the model's
+//! Markdown, [`super::format`], or in plain text), typing through
 //! `sendChatAction`, and images through `getFile` and the file download.
 
 use std::sync::Arc;
@@ -10,15 +11,18 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::api::{Api, Target};
+use super::config::Format;
+use super::format;
 use crate::approval::{Request, render};
-use crate::gateway::ask::human;
+use crate::gateway::ask::{fence_safe, human};
 use crate::gateway::platform::Platform;
 use crate::gateway::split::split_plain;
 use crate::images::{Image, MAX_IMAGE_BYTES, too_large};
 use crate::prompt_text::escape_hidden;
 
 /// The longest `text` of `sendMessage` ("1-4096 characters after entities
-/// parsing"; with no `parse_mode` the text is sent as it is).
+/// parsing"). Posts are cut to it after conversion, tags and entities
+/// counted, which is never less than Telegram counts.
 pub const MESSAGE_LIMIT: usize = 4096;
 
 /// Images of one message (or one album) that are read; an album holds
@@ -207,6 +211,7 @@ pub struct Telegram {
     pub api: Arc<Api>,
     /// The bot's username, for `/help`.
     pub username: String,
+    pub format: Format,
 }
 
 impl Telegram {
@@ -253,28 +258,50 @@ impl Platform for Telegram {
         "chat"
     }
 
+    /// Any length: [`Platform::post`] cuts the text itself, after the
+    /// HTML conversion and the mention breaking that make it longer (a
+    /// cut before the conversion could split a code block in two).
     fn message_limit(&self) -> usize {
-        MESSAGE_LIMIT
+        usize::MAX
     }
 
     fn code_blocks(&self) -> bool {
         false
     }
 
-    /// In a group (Telegram gives groups negative chat ids), `@name`s are
-    /// broken first ([`defuse_mentions`]); the few added characters may
-    /// need one more message.
+    /// Converts the text to HTML ([`format::render`]) and sends it in
+    /// messages of at most [`MESSAGE_LIMIT`]; a message whose HTML
+    /// Telegram cannot parse (400 "can't parse entities": nothing was
+    /// sent, so sending again is safe) goes again as plain text. With
+    /// `telegram_format = plain` the text goes as written. In a group
+    /// (Telegram gives groups negative chat ids), `@name`s are broken
+    /// first ([`defuse_mentions`]), in HTML outside code only.
     async fn post(&self, channel: &str, text: &str) -> Result<()> {
         let target = Self::target(channel)?;
-        if target.chat >= 0 {
-            return self
-                .api
-                .send_message(target, text)
-                .await
-                .map_err(Into::into);
+        let group = target.chat < 0;
+        if self.format == Format::Plain {
+            let text = if group {
+                defuse_mentions(text)
+            } else {
+                text.to_string()
+            };
+            for part in split_plain(&text, MESSAGE_LIMIT) {
+                self.api.send_message(target, &part).await?;
+            }
+            return Ok(());
         }
-        for part in split_plain(&defuse_mentions(text), MESSAGE_LIMIT) {
-            self.api.send_message(target, &part).await?;
+        for part in format::render(text, group, MESSAGE_LIMIT) {
+            match self.api.send_html(target, &part.html).await {
+                Ok(()) => {}
+                Err(err) if err.is_unparsable() => {
+                    self.api
+                        .note(&format!("{err}; sending that message as plain text"));
+                    for piece in split_plain(&part.plain, MESSAGE_LIMIT) {
+                        self.api.send_message(target, &piece).await?;
+                    }
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
         Ok(())
     }
@@ -311,8 +338,12 @@ impl Platform for Telegram {
             .to_string()
     }
 
+    /// As code in HTML, so the commands show as they are.
     fn tool_lines(&self, lines: &str) -> String {
-        lines.to_string()
+        match self.format {
+            Format::Html => format!("```\n{}\n```", fence_safe(lines)),
+            Format::Plain => lines.to_string(),
+        }
     }
 
     fn private_place(&self) -> &'static str {
@@ -324,18 +355,19 @@ impl Platform for Telegram {
     }
 }
 
-/// An approval question in plain text (no Markdown on Telegram).
+/// An approval question. What the call does is in a code block, so in
+/// HTML the command shows exactly as it runs (no `*` or backtick in it
+/// becomes formatting) and cannot close the block ([`fence_safe`]); plain
+/// text shows the fences as typed.
 pub fn question(request: &Request, timeout: Duration) -> String {
     let mut details = render(request);
-    details.push_str(&format!(
-        "     always allows: {}\n",
-        request.kinds.join(", ")
-    ));
+    details.push_str(&format!("     always allows: {}", request.kinds.join(", ")));
     format!(
-        "Approve this tool call?\n{details}Reply y to run it, n to decline (n <reason> tells the \
+        "Approve this tool call?\n```\n{}\n```\nReply y to run it, n to decline (n <reason> tells the \
          model why), a to allow this kind for the rest of this chat's conversation. Anything \
          else declines with your words as the reason. No answer within {} declines. In a \
          group, reply to this message.",
+        fence_safe(&details),
         human(timeout)
     )
 }
@@ -445,18 +477,28 @@ mod tests {
     }
 
     #[test]
-    fn the_question_is_plain_text() {
+    fn the_question_shows_the_command_as_code() {
         let request = Request {
             tool: "bash".into(),
-            target: "rm -r build".into(),
+            target: "rm -r build/**/*.o `x` ```".into(),
             reasons: vec!["deletes files".into()],
             preview: None,
             kinds: vec!["bash: delete".into()],
         };
         let text = question(&request, Duration::from_secs(300));
-        assert!(text.starts_with("Approve this tool call?\n"), "{text}");
-        assert!(text.contains("approve bash: rm -r build"), "{text}");
+        assert!(text.starts_with("Approve this tool call?\n```\n"), "{text}");
         assert!(text.contains("within 5m"), "{text}");
-        assert!(!text.contains("```") && !text.contains("**"), "{text}");
+        let parts = format::render(&text, true, MESSAGE_LIMIT);
+        assert_eq!(parts.len(), 1, "{parts:#?}");
+        let html = &parts[0].html;
+        assert!(
+            html.contains("<pre>  ?? approve bash: rm -r build/**/*.o `x` `\u{200b}`\u{200b}`\n"),
+            "{html}"
+        );
+        assert!(
+            html.contains("always allows: bash: delete</pre>\nReply y"),
+            "{html}"
+        );
+        assert!(!html.contains("<b>") && !html.contains("<code>"), "{html}");
     }
 }

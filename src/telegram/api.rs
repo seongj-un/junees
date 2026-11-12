@@ -69,6 +69,16 @@ impl ApiError {
         )
     }
 
+    /// Telegram could not read the HTML of a message (400 "Bad Request:
+    /// can't parse entities: ..."): the message was not sent.
+    pub fn is_unparsable(&self) -> bool {
+        matches!(
+            self,
+            ApiError::Refused { code: 400, description, .. }
+                if description.to_ascii_lowercase().contains("can't parse entities")
+        )
+    }
+
     /// Another program takes this bot's updates (409 Conflict: another
     /// `getUpdates` or a webhook). It may pass (a one-off `getUpdates`
     /// to look at the updates), so the poller tries again a few times.
@@ -247,14 +257,37 @@ impl Api {
         }
     }
 
-    /// `sendMessage` of plain `text` (no `parse_mode`: the model's
-    /// Markdown shows as written, and nothing in it can fail to parse),
-    /// without link previews.
+    /// `sendMessage` of plain `text` (no `parse_mode`: Markdown shows as
+    /// written, and nothing in it can fail to parse), without link
+    /// previews.
     pub async fn send_message(&self, target: Target, text: &str) -> Result<(), ApiError> {
+        self.send(target, text, None).await
+    }
+
+    /// `sendMessage` of `html` with `parse_mode` HTML ("Formatting
+    /// options", HTML style), without link previews.
+    pub async fn send_html(&self, target: Target, html: &str) -> Result<(), ApiError> {
+        self.send(target, html, Some("HTML")).await
+    }
+
+    /// Writes `line` to the gateway's log.
+    pub fn note(&self, line: &str) {
+        (self.log)(line);
+    }
+
+    async fn send(
+        &self,
+        target: Target,
+        text: &str,
+        parse_mode: Option<&str>,
+    ) -> Result<(), ApiError> {
         let mut body = json!({
             "text": text,
             "link_preview_options": {"is_disabled": true},
         });
+        if let Some(mode) = parse_mode {
+            body["parse_mode"] = json!(mode);
+        }
         target.fields(&mut body);
         self.call("sendMessage", body, CALL_TIMEOUT, Retry::Once)
             .await
