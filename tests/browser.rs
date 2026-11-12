@@ -1,8 +1,10 @@
 //! The `browser` tool through the real binary against a fake API: `-p`
 //! opens a loopback page, gets its text marked as page content, has
 //! `evaluate` refused (nobody to ask), gets a screenshot block, and leaves
-//! no browser process or profile behind. Needs a real browser in
-//! `JUNEES_TEST_BROWSER`; skips (saying why) without one.
+//! no browser process or profile behind. TMPDIR is long, as on some
+//! machines: Chrome's socket path in it would be too long, so the profile
+//! goes to `/tmp`. Needs a real browser in `JUNEES_TEST_BROWSER`; skips
+//! (saying why) without one.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -80,6 +82,16 @@ fn last_result(request: &str) -> Value {
         .unwrap()
 }
 
+/// The browser profiles in `/tmp`.
+fn profiles_in_tmp() -> Vec<String> {
+    std::fs::read_dir("/tmp")
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("junees-browser-"))
+        .collect()
+}
+
 /// Processes whose command line names `marker`.
 fn processes_naming(marker: &str) -> Vec<String> {
     let mut found = Vec::new();
@@ -101,7 +113,9 @@ async fn print_mode_browses_a_loopback_page() {
     };
     let home = tempfile::tempdir().unwrap();
     let work = home.path().join("work");
-    let tmp = home.path().join("tmp");
+    // Chrome's socket under it would be past the 107-byte limit.
+    let tmp = home.path().join("t".repeat(80));
+    let before = profiles_in_tmp();
     std::fs::create_dir(&work).unwrap();
     std::fs::create_dir(&tmp).unwrap();
     let page = page_server().await;
@@ -177,14 +191,27 @@ async fn print_mode_browses_a_loopback_page() {
     assert_eq!(blocks[1]["source"]["media_type"], "image/png");
 
     // Nothing of the browser is left: no process, no profile.
-    let marker = tmp.join("junees-browser-").display().to_string();
+    let new = || {
+        let mut found = processes_naming("--user-data-dir=/tmp/junees-browser-");
+        found.retain(|cmdline| {
+            !before
+                .iter()
+                .any(|profile| cmdline.contains(profile.as_str()))
+        });
+        found.extend(
+            profiles_in_tmp()
+                .into_iter()
+                .filter(|profile| !before.contains(profile)),
+        );
+        found
+    };
     for _ in 0..50 {
-        if processes_naming(&marker).is_empty() {
+        if new().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(processes_naming(&marker), Vec::<String>::new());
+    assert_eq!(new(), Vec::<String>::new());
     let left: Vec<_> = std::fs::read_dir(&tmp)
         .unwrap()
         .flatten()

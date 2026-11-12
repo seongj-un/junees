@@ -1087,6 +1087,28 @@ fn titles_addresses_and_notes_are_capped() {
 }
 
 #[test]
+fn a_long_temporary_folder_puts_the_profile_in_tmp() {
+    // Momus's TMPDIR: Chrome's socket path in it was 110 bytes.
+    let long = Path::new("/home/hermes/.hermes/profiles/momus/cache/scratch/.tmpAbCdEf/tmp");
+    assert_eq!(process::profile_base(long), Path::new("/tmp"));
+    let short = Path::new("/var/tmp/u");
+    assert_eq!(process::profile_base(short), short);
+    // Chrome's own temporary files (its socket folder) go in the profile.
+    let command = process::command(
+        Path::new("/x/chrome"),
+        &Settings::default(),
+        &[],
+        Path::new("/tmp/p"),
+    );
+    let tmpdir = command
+        .as_std()
+        .get_envs()
+        .find(|(name, _)| *name == "TMPDIR")
+        .and_then(|(_, value)| value);
+    assert_eq!(tmpdir, Some(std::ffi::OsStr::new("/tmp/p")));
+}
+
+#[test]
 fn settings_and_registration() {
     let none = |_: &str| None;
     assert_eq!(Settings::read(none).unwrap(), Settings::default());

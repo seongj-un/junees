@@ -100,14 +100,36 @@ pub async fn version(program: &Path) -> Result<String> {
     Ok(text.lines().next().unwrap_or_default().to_string())
 }
 
-/// A private (0700) temporary profile folder, removed when dropped.
+/// The longest unix socket path (`sun_path` holds 108 bytes with the NUL).
+const MAX_SOCKET_PATH: usize = 107;
+/// What Chromium adds to its temporary folder for its single-instance
+/// socket, and room for other builds' longer names (Chrome's
+/// `com.google.Chrome.XXXXXX` is shorter).
+const SOCKET_SUFFIX: usize = "/org.chromium.Chromium.XXXXXX/SingletonSocket".len() + 8;
+/// `/junees-browser-` and 16 hex digits.
+const PROFILE_NAME: usize = "/junees-browser-".len() + 16;
+
+/// Where the profile folder goes: the temporary folder `temp`, or `/tmp`
+/// when Chrome's socket in a profile there would be too long a path (a
+/// long TMPDIR made Chrome end at once).
+pub fn profile_base(temp: &Path) -> PathBuf {
+    if temp.as_os_str().len() + PROFILE_NAME + SOCKET_SUFFIX <= MAX_SOCKET_PATH {
+        temp.to_path_buf()
+    } else {
+        PathBuf::from("/tmp")
+    }
+}
+
+/// A private (0700) temporary profile folder, removed when dropped. It is
+/// also Chrome's temporary folder (TMPDIR), so what Chrome puts there goes
+/// with it.
 #[derive(Debug)]
 pub struct Profile(PathBuf);
 
 impl Profile {
     pub fn new() -> std::io::Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
-        let path = std::env::temp_dir().join(format!(
+        let path = profile_base(&std::env::temp_dir()).join(format!(
             "junees-browser-{}",
             crate::cron::store::random_hex(16)
         ));
@@ -123,21 +145,8 @@ impl Profile {
 
 impl Drop for Profile {
     fn drop(&mut self) {
-        // Chrome keeps its single-instance socket in a folder of its own in
-        // the temporary folder (`org.chromium.Chromium.*` or
-        // `com.google.Chrome.*`; a socket path inside the profile could be
-        // too long), linked from the profile, and leaves it there when
-        // killed.
-        if let Ok(socket) = std::fs::read_link(self.0.join("SingletonSocket"))
-            && let Some(folder) = socket.parent()
-            && folder.parent() == Some(std::env::temp_dir().as_path())
-            && folder.file_name().is_some_and(|name| {
-                let name = name.to_string_lossy();
-                name.starts_with("org.chromium.") || name.starts_with("com.google.")
-            })
-        {
-            let _ = std::fs::remove_dir_all(folder);
-        }
+        // Chrome's single-instance socket folder (`org.chromium.Chromium.*`)
+        // is in its temporary folder, the profile: it goes with it.
         // A dying helper process may still write a file: try again.
         for _ in 0..10 {
             if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
@@ -271,6 +280,7 @@ pub(super) fn command(
     command
         .arg("about:blank")
         .current_dir(profile)
+        .env("TMPDIR", profile)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
