@@ -1816,6 +1816,18 @@ async fn the_browser_program_and_its_version() {
         &format!("Chromium 145.0.7632.6 ({})", browser.display()),
     );
     expect(&report, "browser", "program", Status::Ok, "sandbox off");
+    // Chrome's proxy, from the variables it reads.
+    fixture.set("HTTPS_PROXY", "http://user:secret@10.0.0.5:3128/");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "browser",
+        "program",
+        Status::Ok,
+        "through the proxy 10.0.0.5 (pages that come from its address are not checked",
+    );
+    assert!(!report.text().contains("secret"), "{}", report.text());
+    fixture.set("HTTPS_PROXY", "");
 
     // Off, with a path set: still looked at, but only a warning.
     fixture.set("JUNEES_BROWSER", "off");
@@ -1838,4 +1850,24 @@ async fn the_browser_program_and_its_version() {
     fixture.set("JUNEES_HOME", "/tmp/junees-short");
     let report = fixture.run(false).await;
     assert!(!has(&report, "browser", "profiles"), "{}", report.text());
+
+    // Unconfined commands could drive the browser through its pipe.
+    let none = Some(crate::sandbox::Support::Unavailable(
+        "no Landlock here".into(),
+    ));
+    let report = fixture.run_landlock(false, none.clone()).await;
+    expect(&report, "browser", "pipe", Status::Warn, "no Landlock here");
+    let report = fixture
+        .run_landlock(false, Some(crate::sandbox::Support::Abi(4)))
+        .await;
+    assert!(!has(&report, "browser", "pipe"), "{}", report.text());
+    fixture.set("JUNEES_SANDBOX", "off");
+    let report = fixture
+        .run_landlock(false, Some(crate::sandbox::Support::Abi(4)))
+        .await;
+    expect(&report, "browser", "pipe", Status::Warn, "sandbox = off");
+    // `require` without Landlock runs no command at all.
+    fixture.set("JUNEES_SANDBOX", "require");
+    let report = fixture.run_landlock(false, none).await;
+    assert!(!has(&report, "browser", "pipe"), "{}", report.text());
 }

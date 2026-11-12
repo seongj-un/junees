@@ -1,6 +1,6 @@
 //! The `browser` tool's program: found, and `--version` (offline: Chrome
-//! prints its version and exits); and a profiles folder too long to hold
-//! Chrome's socket.
+//! prints its version and exits), with the proxy Chrome would use; and a
+//! profiles folder too long to hold Chrome's socket.
 
 use std::ffi::OsStr;
 
@@ -11,12 +11,30 @@ use super::{Report, shown};
 
 const AREA: &str = "browser";
 
-pub(super) async fn check(report: &mut Report, settings: &SettingsFile, path: Option<&OsStr>) {
+pub(super) async fn check(
+    report: &mut Report,
+    settings: &SettingsFile,
+    path: Option<&OsStr>,
+    support: &crate::sandbox::Support,
+) {
     let browser = match Settings::read(|key| settings.get(key)) {
         Ok(browser) => browser,
         // The settings check already names the bad value.
         Err(_) => return,
     };
+    // A bad sandbox setting is the sandbox check's to report.
+    if let Ok(sandbox) = crate::sandbox::Settings::read(|key| {
+        settings.get(key).map(|value| value.trim().to_string())
+    }) && let Some(warning) =
+        crate::browser::unconfined_warning(&browser, Some(&sandbox), support)
+    {
+        report.warn(
+            AREA,
+            "pipe",
+            warning,
+            "use a kernel with Landlock (Linux 5.13 or later), or set sandbox = auto",
+        );
+    }
     if !browser.enabled && browser.path.is_none() {
         report.skip(
             AREA,
@@ -56,6 +74,14 @@ pub(super) async fn check(report: &mut Report, settings: &SettingsFile, path: Op
             }
             if browser.no_sandbox {
                 detail.push_str("; Chrome's sandbox off (browser_no_sandbox)");
+            }
+            let proxies = process::proxies(|name| settings.env(name), &[]);
+            if !proxies.is_empty() {
+                detail.push_str(&format!(
+                    "; through the proxy {} (pages that come from its address are not checked \
+                     for DNS rebinding: the proxy resolves the names)",
+                    crate::prompt_text::escape_hidden(&proxies.join(", "))
+                ));
             }
             report.ok(AREA, "program", detail);
         }

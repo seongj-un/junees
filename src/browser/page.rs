@@ -44,12 +44,27 @@ const MARK_CLOSED: &str =
     "function() { if (globalThis.__juneesGuard) globalThis.__juneesGuard.closed(this); }";
 /// The object group of the handles [`Browser::mark_closed_hosts`] takes.
 const CLOSED_GROUP: &str = "junees-closed-hosts";
+/// The most hosts of closed shadow roots marked one by one per check (two
+/// DevTools calls each, per world); a page with more counts as closed
+/// everywhere ([`CLOSED_EVERYWHERE`]).
+pub const MAX_CLOSED_HOSTS: usize = 256;
+/// The most frames told [`CLOSED_EVERYWHERE`] besides the top one.
+const MAX_CLOSED_FRAMES: usize = 16;
+/// Makes every element count as inside a closed shadow root in the guard
+/// of the world it runs in.
+const CLOSED_EVERYWHERE: &str =
+    "globalThis.__juneesGuard && globalThis.__juneesGuard.closedEverywhere()";
 
 /// Notes of one kind kept until the model looks; older ones are only
 /// counted ([`Notes::more`]), so a page cannot fill the result with them.
 pub const MAX_NOTES: usize = 20;
 /// Characters of one note.
 pub const MAX_NOTE: usize = 300;
+/// Why the browser shows nothing of a page that came from a private or
+/// local address after its name passed the check ([`Policy::check_remote`]).
+pub const PRIVATE_PAGE: &str = "not shown: a page came from a private or local address, \
+     although its name passed the check before the browser connected (the name's answer \
+     changed: DNS rebinding?); the browser left it for a blank page";
 
 /// Things that happened since the model last looked, reported with the
 /// next result.
@@ -60,6 +75,9 @@ pub struct Notes {
     pub downloads: Vec<String>,
     /// Notes dropped to keep each list at [`MAX_NOTES`].
     pub more: usize,
+    /// Requests blocked since the browser started (`blocked` keeps the
+    /// newest only).
+    pub blocked_total: usize,
     /// Page targets opened by the page (popups, `target=_blank`).
     pub popups: Vec<String>,
 }
@@ -67,6 +85,7 @@ pub struct Notes {
 impl Notes {
     pub fn block(&mut self, reason: &str) {
         keep(&mut self.blocked, &mut self.more, reason);
+        self.blocked_total += 1;
     }
 
     pub fn dialog(&mut self, line: &str) {
@@ -125,6 +144,9 @@ pub struct Browser {
     world: Option<i64>,
     events: broadcast::Sender<Event>,
     notes: Arc<Mutex<Notes>>,
+    /// The address of a page the guard found to come from a private or
+    /// local address, until an action reports it.
+    private_page: Arc<Mutex<Option<String>>>,
     guard: Guard,
     _reader: Reader,
     // Dropped last: kills the browser and removes the profile.
@@ -147,18 +169,23 @@ impl Browser {
         program: &std::path::Path,
         settings: &Settings,
         hidden_env: &[String],
-        policy: Policy,
+        mut policy: Policy,
     ) -> Result<Self> {
         let (process, pipes) = process::launch(program, settings, hidden_env)?;
+        if !policy.allow_private {
+            policy.proxies = super::address::proxy_addresses(process.proxies()).await;
+        }
         let (connection, reader, raw_events) =
             Connection::new(pipes.from_browser, pipes.to_browser);
         let (events, _) = broadcast::channel(1024);
         let notes = Arc::new(Mutex::new(Notes::default()));
+        let private_page = Arc::new(Mutex::new(None));
         let guard = Guard(tokio::spawn(guard(
             connection.clone(),
             raw_events,
             events.clone(),
             Arc::clone(&notes),
+            Arc::clone(&private_page),
             Arc::new(policy),
         )));
         let mut browser = Self {
@@ -168,6 +195,7 @@ impl Browser {
             world: None,
             events,
             notes,
+            private_page,
             guard,
             _reader: reader,
             process,
@@ -243,6 +271,8 @@ impl Browser {
         self.session = session;
         self.world = None;
         self.call_page("Page.enable", json!({})).await?;
+        // The address each document came from (see `guard`).
+        self.call_page("Network.enable", json!({})).await?;
         // The input guard runs in every frame of every document before
         // the page's own scripts, so its listeners come first.
         self.call_page(
@@ -284,7 +314,18 @@ impl Browser {
 
     /// What happened since the last call, cleared.
     pub fn take_notes(&self) -> Notes {
-        std::mem::take(&mut *self.notes.lock().unwrap_or_else(PoisonError::into_inner))
+        let mut notes = self.notes.lock().unwrap_or_else(PoisonError::into_inner);
+        let total = notes.blocked_total;
+        let taken = std::mem::take(&mut *notes);
+        notes.blocked_total = total;
+        taken
+    }
+
+    fn blocked_total(&self) -> usize {
+        self.notes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .blocked_total
     }
 
     async fn call_browser(&self, method: &str, params: Value) -> Result<Value> {
@@ -306,16 +347,30 @@ impl Browser {
     pub async fn navigate(&mut self, url: &str) -> Result<()> {
         let mut events = self.events.subscribe();
         self.world = None;
+        // An earlier page left this way is in the notes already.
+        self.private_page
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let blocked_before = self.blocked_total();
         let result = self.call_page("Page.navigate", json!({"url": url})).await?;
         if let Some(error) = result["errorText"].as_str() {
-            let blocked = self
-                .notes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .blocked
-                .clone();
-            if let Some(reason) = blocked.last() {
-                bail!("not opened: {reason}");
+            // The guard left a page from a private address (which ends
+            // this navigation too).
+            self.refuse_private_page().await?;
+            // Only a request blocked during this navigation says why; its
+            // reason names a host a redirect chose.
+            let reason = {
+                let notes = self.notes.lock().unwrap_or_else(PoisonError::into_inner);
+                (notes.blocked_total > blocked_before)
+                    .then(|| notes.blocked.last().cloned())
+                    .flatten()
+            };
+            if let Some(reason) = reason {
+                bail!(
+                    "not opened: the browser blocked a request of the page\n{}",
+                    super::tool::wrap(&reason)
+                );
             }
             bail!("the page did not open: {error}");
         }
@@ -383,6 +438,7 @@ impl Browser {
                 let ready = self.evaluate_in_page("document.readyState", false).await;
                 if ready
                     .ok()
+                    .and_then(Result::ok)
                     .and_then(|v| v.as_str().map(str::to_string))
                     .as_deref()
                     != Some("complete")
@@ -402,12 +458,24 @@ impl Browser {
     /// Takes a snapshot in a new isolated world, which the element
     /// actions then use.
     pub async fn snapshot(&mut self) -> Result<Snapshot> {
+        self.refuse_private_page().await?;
         let world = self.new_world().await?;
         // The guard is already there unless this document came without
         // it; then it starts here, late but still before the actions.
         self.evaluate_in(world, &format!("{GUARD_JS}\n;0")).await?;
-        self.mark_closed_hosts(world).await?;
+        if self.mark_closed_hosts(world).await? {
+            self.notes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .dialog(&format!(
+                    "the page has more than {MAX_CLOSED_HOSTS} closed shadow roots, whose \
+                     insides cannot be checked: every click, Enter or Space and typing on it \
+                     asks the user first"
+                ));
+        }
         let value = self.evaluate_in(world, SNAPSHOT_JS).await?;
+        // A page that came while the snapshot ran is not read either.
+        self.refuse_private_page().await?;
         self.world = Some(world);
         let refs = value["refs"]
             .as_array()
@@ -434,11 +502,35 @@ impl Browser {
 
     /// The page's title and address, read in a fresh isolated world.
     pub async fn location(&mut self) -> Result<(String, String)> {
+        self.refuse_private_page().await?;
         let world = self.new_world().await?;
         let value = self
             .evaluate_in(world, "({title: document.title, url: location.href})")
             .await?;
+        self.refuse_private_page().await?;
         Ok((text(&value["title"]), text(&value["url"])))
+    }
+
+    /// Fails when a page came from a private or local address since the
+    /// last call (the guard saw its response and sent the tab to a blank
+    /// page): makes sure the tab is blank, and nothing of the page is read.
+    pub async fn refuse_private_page(&mut self) -> Result<()> {
+        let Some(url) = self
+            .private_page
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return Ok(());
+        };
+        self.world = None;
+        let _ = self
+            .call_page("Page.navigate", json!({"url": "about:blank"}))
+            .await;
+        bail!(
+            "{PRIVATE_PAGE}\n{}",
+            super::tool::wrap(&format!("its address: {url}"))
+        )
     }
 
     async fn new_world(&self) -> Result<i64> {
@@ -487,14 +579,42 @@ impl Browser {
     /// and the checks run in) and of their own frame, and the rules treat
     /// them like frames of another site. A flat DOMSnapshot rather than
     /// `DOM.getDocument`, which fails on deeply nested pages; a closed
-    /// root without nodes in it holds nothing to click.
-    async fn mark_closed_hosts(&self, world: i64) -> Result<()> {
+    /// root without nodes in it holds nothing to click. A page with more
+    /// than [`MAX_CLOSED_HOSTS`] hosts (which would keep every check busy
+    /// for seconds) counts as closed everywhere instead: `true` then.
+    async fn mark_closed_hosts(&self, world: i64) -> Result<bool> {
         let snapshot = self
             .call_page("DOMSnapshot.captureSnapshot", json!({"computedStyles": []}))
             .await?;
         let hosts = closed_hosts(&snapshot);
         if hosts.is_empty() {
-            return Ok(());
+            return Ok(false);
+        }
+        if hosts.len() > MAX_CLOSED_HOSTS {
+            self.evaluate_in(world, CLOSED_EVERYWHERE).await?;
+            let mut frames: Vec<&str> = Vec::new();
+            for (frame, _) in &hosts {
+                if frames.len() == MAX_CLOSED_FRAMES {
+                    break;
+                }
+                if *frame != self.target && !frames.contains(&frame.as_str()) {
+                    frames.push(frame);
+                }
+            }
+            for frame in frames {
+                // A frame whose world cannot be made has no guard to tell.
+                if let Ok(made) = self
+                    .call_page(
+                        "Page.createIsolatedWorld",
+                        json!({"frameId": frame, "worldName": WORLD}),
+                    )
+                    .await
+                    && let Some(id) = made["executionContextId"].as_i64()
+                {
+                    let _ = self.evaluate_in(id, CLOSED_EVERYWHERE).await;
+                }
+            }
+            return Ok(true);
         }
         let mut worlds = HashMap::from([(self.target.clone(), world)]);
         for (frame, node) in hosts {
@@ -545,7 +665,7 @@ impl Browser {
                 json!({"objectGroup": CLOSED_GROUP}),
             )
             .await;
-        Ok(())
+        Ok(false)
     }
 
     /// Runs one of the snapshot's element functions that checks an
@@ -570,8 +690,14 @@ impl Browser {
     }
 
     /// Runs `expression` in the page's own JavaScript (`evaluate`), with a
-    /// time limit.
-    pub async fn evaluate_in_page(&self, expression: &str, await_promise: bool) -> Result<Value> {
+    /// time limit. The outer error is the browser's (it went away, did not
+    /// answer, refused the call); the inner one is what the script threw,
+    /// text the page chooses.
+    pub async fn evaluate_in_page(
+        &self,
+        expression: &str,
+        await_promise: bool,
+    ) -> Result<std::result::Result<Value, String>> {
         let result = self
             .call_page(
                 "Runtime.evaluate",
@@ -584,15 +710,17 @@ impl Browser {
             )
             .await?;
         if let Some(details) = result.get("exceptionDetails") {
-            bail!("{}", exception(details));
+            return Ok(Err(exception(details)));
         }
-        Ok(result["result"].get("value").cloned().unwrap_or_else(|| {
-            json!(
-                result["result"]["description"]
-                    .as_str()
-                    .unwrap_or("undefined")
-            )
-        }))
+        Ok(Ok(result["result"].get("value").cloned().unwrap_or_else(
+            || {
+                json!(
+                    result["result"]["description"]
+                        .as_str()
+                        .unwrap_or("undefined")
+                )
+            },
+        )))
     }
 
     /// Moves the mouse to `(x, y)` (the page's mousemove handlers run
@@ -876,13 +1004,16 @@ fn exception(details: &Value) -> String {
 
 /// Handles the events the browser needs an answer to, then passes every
 /// event on to the actions waiting for one: paused requests (checked
-/// against `policy`), dialogs (dismissed), downloads (refused by the
-/// browser; noted) and new tabs (noted).
+/// against `policy`), documents that came from a private or local address
+/// although their name passed (left for a blank page, `private_page`
+/// set) or without an address (noted), dialogs (dismissed), downloads (refused by the browser; noted)
+/// and new tabs (noted).
 async fn guard(
     connection: Connection,
     mut raw: mpsc::UnboundedReceiver<Event>,
     events: broadcast::Sender<Event>,
     notes: Arc<Mutex<Notes>>,
+    private_page: Arc<Mutex<Option<String>>>,
     policy: Arc<Policy>,
 ) {
     while let Some(event) = raw.recv().await {
@@ -911,6 +1042,45 @@ async fn guard(
                     };
                     let _ = connection.call(method, params, session.as_deref()).await;
                 });
+            }
+            // Chrome resolves a name again when it connects: a name whose
+            // answer changed since `policy.check` (DNS rebinding) shows here,
+            // before the page's load event. Set before the event goes on,
+            // so the action that waits for the load sees it.
+            "Network.responseReceived" if event.params["type"] == "Document" => {
+                let response = &event.params["response"];
+                let url = cut(response["url"].as_str().unwrap_or_default(), MAX_NOTE);
+                let remote = document_remote(&policy, response);
+                if remote == Remote::Unknown {
+                    notes
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .dialog(&format!(
+                            "a page came without the address it was loaded from (not from a \
+                             service worker), so it was not checked for DNS rebinding: {url}"
+                        ));
+                }
+                if let Remote::Private(ip) = remote {
+                    notes
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .dialog(&format!(
+                            "a page came from {ip}, a private or local address (DNS \
+                             rebinding?); the browser left it for a blank page: {url}"
+                        ));
+                    *private_page.lock().unwrap_or_else(PoisonError::into_inner) = Some(url);
+                    let connection = connection.clone();
+                    let session = event.session.clone();
+                    tokio::spawn(async move {
+                        let _ = connection
+                            .call(
+                                "Page.navigate",
+                                json!({"url": "about:blank"}),
+                                session.as_deref(),
+                            )
+                            .await;
+                    });
+                }
             }
             "Page.javascriptDialogOpening" => {
                 let kind = event.params["type"]
@@ -965,7 +1135,41 @@ async fn guard(
             }
             _ => {}
         }
-        let _ = events.send(event);
+        // The actions wait for page events only; a page's requests would
+        // crowd them out.
+        if !event.method.starts_with("Network.") {
+            let _ = events.send(event);
+        }
+    }
+}
+
+/// What the address a document came from says ([`Policy::check_remote`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Remote {
+    /// Allowed, or nothing to check: not fetched (no http/https), from a
+    /// service worker, or every address allowed.
+    Fine,
+    /// A private or local address.
+    Private(std::net::IpAddr),
+    /// Fetched, but Chrome named no address: not checked, only noted.
+    Unknown,
+}
+
+/// The verdict on a `Network.Response` of a document.
+pub(super) fn document_remote(policy: &Policy, response: &Value) -> Remote {
+    let remote = response["remoteIPAddress"].as_str().unwrap_or_default();
+    if remote.is_empty() {
+        let url = response["url"].as_str().unwrap_or_default();
+        let fetched = url.starts_with("http://") || url.starts_with("https://");
+        return if fetched && !policy.allow_private && response["fromServiceWorker"] != true {
+            Remote::Unknown
+        } else {
+            Remote::Fine
+        };
+    }
+    match policy.check_remote(remote) {
+        Ok(()) => Remote::Fine,
+        Err(ip) => Remote::Private(ip),
     }
 }
 

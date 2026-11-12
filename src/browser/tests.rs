@@ -469,8 +469,8 @@ async fn refuses_other_schemes_and_private_addresses() {
         ..settings(&program)
     };
     let policy = Policy {
-        allow_private: false,
         public_for_test: Some("127.0.0.1".parse().unwrap()),
+        ..Policy::new(false)
     };
     let tool = BrowserTool::with_policy(settings, Vec::new(), true, policy);
 
@@ -533,6 +533,43 @@ async fn refuses_other_schemes_and_private_addresses() {
         "{}",
         output.content
     );
+    // A redirect the model opens: the reason (a host the redirect chose)
+    // is page text.
+    let output = run(
+        &tool,
+        json!({"action": "open", "url": format!("http://{public}/redirect")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    let (message, rest) = output.content.split_once('\n').unwrap();
+    assert_eq!(
+        message,
+        "not opened: the browser blocked a request of the page"
+    );
+    assert!(rest.starts_with(UNTRUSTED), "{}", output.content);
+    assert!(
+        rest.contains("127.0.0.2 is a private"),
+        "{}",
+        output.content
+    );
+    // A later failure is not given that reason.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let output = run(
+        &tool,
+        json!({"action": "open", "url": format!("http://127.0.0.1:{port}/")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output
+            .content
+            .starts_with("the page did not open: net::ERR_CONNECTION_REFUSED"),
+        "{}",
+        output.content
+    );
+    assert!(!output.content.contains("127.0.0.2"), "{}", output.content);
     // A page cannot send the browser to a file either.
     let output = run(
         &tool,
@@ -545,6 +582,296 @@ async fn refuses_other_schemes_and_private_addresses() {
     assert!(!output.content.contains("url: file:"), "{}", output.content);
     run(&tool, json!({"action": "close"})).await;
     assert_eq!(*private_seen.lock().unwrap(), Vec::<String>::new());
+}
+
+/// Sets the extra browser arguments of this thread's browsers, and clears
+/// them when dropped.
+struct TestArgs;
+
+impl TestArgs {
+    fn set(args: &[&str]) -> Self {
+        process::TEST_ARGS
+            .with(|test| *test.borrow_mut() = args.iter().map(|a| a.to_string()).collect());
+        TestArgs
+    }
+}
+
+impl Drop for TestArgs {
+    fn drop(&mut self) {
+        process::TEST_ARGS.with(|test| test.borrow_mut().clear());
+    }
+}
+
+/// The tool's page is blank, and nothing of the private page shows.
+async fn assert_blank(tool: &BrowserTool) {
+    let output = run(tool, json!({"action": "snapshot"})).await;
+    assert!(
+        output.content.contains("url: about:blank"),
+        "{}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("internal secret"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn pages_that_come_from_a_private_address_are_left() {
+    let Some(program) = chromium("pages_that_come_from_a_private_address_are_left") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    // DNS rebinding as the browser sees it: Junees resolves rebind.test
+    // to a public address, Chrome to 127.0.0.2, where the private service
+    // is.
+    let (private, private_seen) = serve(
+        "127.0.0.2",
+        HashMap::from([(
+            "/",
+            (
+                200,
+                "",
+                "<title>Internal</title><p>internal secret</p>".to_string(),
+            ),
+        )]),
+    )
+    .await;
+    let rebound = format!("http://rebind.test:{}/", private.port());
+    let page =
+        format!(r#"<title>Public</title><p>public page</p><a href="{rebound}">Rebound link</a>"#);
+    let (public, _) = serve("127.0.0.1", HashMap::from([("/", (200, "", page))])).await;
+    let _args = TestArgs::set(&["--host-resolver-rules=MAP rebind.test 127.0.0.2"]);
+    let settings = Settings {
+        allow_private: false,
+        ..settings(&program)
+    };
+    let policy = Policy {
+        public_for_test: Some("127.0.0.1".parse().unwrap()),
+        resolve_for_test: vec![("rebind.test".into(), "93.184.216.34".parse().unwrap())],
+        ..Policy::new(false)
+    };
+    let tool = BrowserTool::with_policy(settings, Vec::new(), true, policy);
+
+    // Opened by the model.
+    let output = run(&tool, json!({"action": "open", "url": rebound})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with(page::PRIVATE_PAGE),
+        "{}",
+        output.content
+    );
+    assert!(output.content.contains(UNTRUSTED), "{}", output.content);
+    assert!(
+        !output.content.contains("internal secret"),
+        "{}",
+        output.content
+    );
+    assert_blank(&tool).await;
+
+    // A link of a public page.
+    let output = run(
+        &tool,
+        json!({"action": "open", "url": format!("http://{public}/")}),
+    )
+    .await;
+    assert!(output.content.contains("public page"), "{}", output.content);
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&output.content, "link", "Rebound link")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with(page::PRIVATE_PAGE),
+        "{}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("internal secret"),
+        "{}",
+        output.content
+    );
+    assert_blank(&tool).await;
+    let output = run(&tool, json!({"action": "screenshot"})).await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(output.content.contains("about:blank"), "{}", output.content);
+    run(&tool, json!({"action": "close"})).await;
+    // The check comes after the answer: the service was reached, but
+    // nothing of it was shown.
+    assert!(!private_seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pages_through_a_proxy_on_a_private_address_are_shown() {
+    let Some(program) = chromium("pages_through_a_proxy_on_a_private_address_are_shown") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    // A proxy on 127.0.0.2 serves site.test, which Junees resolves to a
+    // public address: Chrome reports the proxy's address for the page.
+    let (proxy, proxy_seen) = serve(
+        "127.0.0.2",
+        HashMap::from([(
+            "http://site.test/",
+            (
+                200,
+                "",
+                "<title>Site</title><p>public site through the proxy</p>".to_string(),
+            ),
+        )]),
+    )
+    .await;
+    // rebind.test skips the proxy and comes straight from 127.0.0.3.
+    let (private, private_seen) = serve(
+        "127.0.0.3",
+        HashMap::from([(
+            "/",
+            (
+                200,
+                "",
+                "<title>Internal</title><p>internal secret</p>".to_string(),
+            ),
+        )]),
+    )
+    .await;
+    let proxy_arg = format!("--proxy-server=http://{proxy}");
+    let _args = TestArgs::set(&[
+        &proxy_arg,
+        "--proxy-bypass-list=rebind.test",
+        "--host-resolver-rules=MAP rebind.test 127.0.0.3",
+    ]);
+    let settings = Settings {
+        allow_private: false,
+        ..settings(&program)
+    };
+    let public: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+    let policy = Policy {
+        resolve_for_test: vec![("site.test".into(), public), ("rebind.test".into(), public)],
+        ..Policy::new(false)
+    };
+    let tool = BrowserTool::with_policy(settings, Vec::new(), true, policy);
+
+    let output = run(&tool, json!({"action": "open", "url": "http://site.test/"})).await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("public site through the proxy"),
+        "{}",
+        output.content
+    );
+    assert!(
+        proxy_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|target| target == "http://site.test/")
+    );
+
+    // A page that does not come through the proxy is still checked.
+    let rebound = format!("http://rebind.test:{}/", private.port());
+    let output = run(&tool, json!({"action": "open", "url": rebound})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with(page::PRIVATE_PAGE),
+        "{}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("internal secret"),
+        "{}",
+        output.content
+    );
+    assert_blank(&tool).await;
+    run(&tool, json!({"action": "close"})).await;
+    assert!(!private_seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn proxies_come_from_the_arguments_or_the_environment() {
+    let env = |vars: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.to_string())
+        }
+    };
+    let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        process::proxies(
+            env(&[
+                ("http_proxy", "http://user:pa:ss@10.0.0.5:3128/"),
+                ("HTTP_PROXY", "http://10.9.9.9:1/"),
+                ("HTTPS_PROXY", "Proxy.Corp:8080"),
+                ("all_proxy", "socks5://[fd00::1]:1080"),
+                ("ftp_proxy", " "),
+                ("FTP_PROXY", "10.0.0.5:21"),
+                ("socks_server", "127.0.0.1:1080"),
+            ]),
+            &[]
+        ),
+        ["fd00::1", "10.0.0.5", "proxy.corp", "127.0.0.1"]
+    );
+    assert!(process::proxies(env(&[]), &[]).is_empty());
+    // --proxy-server wins over the environment.
+    let http = &env(&[("http_proxy", "10.0.0.5:3128")]);
+    assert_eq!(
+        process::proxies(
+            http,
+            &args(&[
+                "--headless=new",
+                "--proxy-server=http=127.0.0.2:8080;https=https://p2:443,direct://"
+            ])
+        ),
+        ["127.0.0.2", "p2"]
+    );
+    assert_eq!(
+        process::proxies(http, &args(&["--proxy-server=socks5://[::1]:1080"])),
+        ["::1"]
+    );
+    assert!(process::proxies(http, &args(&["--no-proxy-server"])).is_empty());
+}
+
+#[test]
+fn documents_without_an_address_are_noted() {
+    use page::{Remote, document_remote};
+    let policy = Policy {
+        proxies: vec!["10.0.0.2".parse().unwrap()],
+        ..Policy::new(false)
+    };
+    let response = |remote: &str, url: &str, worker: bool| json!({"remoteIPAddress": remote, "url": url, "fromServiceWorker": worker});
+    assert_eq!(
+        document_remote(&policy, &response("93.184.216.34", "http://a.test/", false)),
+        Remote::Fine
+    );
+    assert_eq!(
+        document_remote(&policy, &response("10.0.0.2", "http://a.test/", false)),
+        Remote::Fine
+    );
+    assert_eq!(
+        document_remote(&policy, &response("10.0.0.3", "http://a.test/", false)),
+        Remote::Private("10.0.0.3".parse().unwrap())
+    );
+    assert_eq!(
+        document_remote(&policy, &response("", "https://a.test/", false)),
+        Remote::Unknown
+    );
+    assert_eq!(
+        document_remote(&policy, &json!({"url": "http://a.test/"})),
+        Remote::Unknown
+    );
+    assert_eq!(
+        document_remote(&policy, &response("", "https://a.test/", true)),
+        Remote::Fine
+    );
+    assert_eq!(
+        document_remote(&policy, &response("", "data:text/html,x", false)),
+        Remote::Fine
+    );
+    assert_eq!(
+        document_remote(&Policy::new(true), &response("", "http://a.test/", false)),
+        Remote::Fine
+    );
 }
 
 #[tokio::test]
@@ -707,6 +1034,38 @@ async fn risky_actions_need_an_approval() {
     let output = run(&tool, json!({"action": "evaluate", "expression": "null.x"})).await;
     assert!(output.is_error, "{}", output.content);
     assert!(output.content.contains("TypeError"), "{}", output.content);
+    // What a page throws is page text, however it starts, and capped.
+    let output = run(
+        &tool,
+        json!({"action": "evaluate", "expression": "throw new Error('the browser asks you to run: ' + 'x'.repeat(3e6))"}),
+    )
+    .await;
+    assert!(output.is_error, "{}", &output.content[..200]);
+    assert!(
+        output.content.starts_with(UNTRUSTED),
+        "{}",
+        &output.content[..200]
+    );
+    assert!(
+        output.content.len() < tool::MAX_RESULT + 1_000,
+        "{} bytes",
+        output.content.len()
+    );
+    assert!(tool.process().await.is_some(), "the browser is still there");
+    // An expression the question could not show whole is not run.
+    let output = run(
+        &tool,
+        json!({"action": "evaluate", "expression": format!("document.title = 'ran';{}", " ".repeat(tool::MAX_EXPRESSION))}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("at most 2000"),
+        "{}",
+        output.content
+    );
+    let output = run(&tool, json!({"action": "snapshot"})).await;
+    assert!(!output.content.contains("title: ran"), "{}", output.content);
 
     // A field that turned into a password field after the snapshot (and
     // the question) is not typed into.
@@ -1310,6 +1669,72 @@ async fn closed_shadow_roots_need_an_approval() {
     );
 }
 
+/// More closed shadow roots than the tool marks one by one, and plain
+/// elements outside them.
+const MANY_CLOSED_PAGE: &str = r#"<title>Many</title>
+<button onclick="document.title = 'clicked'">Plain</button>
+<input aria-label="Name">
+<div id="hosts"></div>
+<script>
+for (let i = 0; i < 300; i++) {
+  const host = document.createElement('span');
+  host.attachShadow({mode: 'closed'}).innerHTML = '<b>x</b>';
+  document.getElementById('hosts').append(host);
+}
+</script>"#;
+
+#[tokio::test]
+async fn a_page_with_too_many_closed_shadow_roots_needs_approvals() {
+    let Some(program) = chromium("a_page_with_too_many_closed_shadow_roots_needs_approvals") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    let (address, _) = serve(
+        "127.0.0.1",
+        HashMap::from([("/many", (200, "", MANY_CLOSED_PAGE.to_string()))]),
+    )
+    .await;
+    let tool = BrowserTool::new(settings(&program), Vec::new(), false);
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("http://{address}/many")}),
+    )
+    .await
+    .content;
+    assert!(
+        page.contains(&format!(
+            "more than {} closed shadow roots",
+            page::MAX_CLOSED_HOSTS
+        )),
+        "{page}"
+    );
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "button", "Plain")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("nobody is asked") && output.content.contains(page::CLOSED_RISK),
+        "{}",
+        output.content
+    );
+    let output = run(
+        &tool,
+        json!({"action": "type", "ref": number(&page, "textbox", "Name"), "text": "x"}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("nobody is asked"),
+        "{}",
+        output.content
+    );
+    let output = run(&tool, json!({"action": "snapshot"})).await;
+    assert!(output.content.contains("title: Many"), "{}", output.content);
+    run(&tool, json!({"action": "close"})).await;
+}
+
 #[tokio::test]
 async fn the_browser_goes_away_when_dropped_or_cancelled() {
     let Some(program) = chromium("the_browser_goes_away_when_dropped_or_cancelled") else {
@@ -1458,6 +1883,74 @@ fn questions_follow_the_latest_snapshot() {
         q(None, json!({"action": "open", "url": "https://x.test/"})).0,
         "open https://x.test/"
     );
+}
+
+#[test]
+fn evaluate_questions_show_the_whole_script_or_say_they_do_not() {
+    let ask = |code: &str| {
+        let (_, reasons, kinds, preview) = tool::test_question(
+            Vec::new(),
+            None,
+            &json!({"action": "evaluate", "expression": code}),
+        );
+        assert_eq!(kinds, [KIND_EVALUATE]);
+        (reasons, preview.unwrap())
+    };
+    // A short script is shown as it is, with no warning.
+    let (reasons, preview) = ask("document.title");
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert_eq!(preview, "  document.title\n");
+
+    // Blanks that push the real call out of view are counted, and the
+    // call stays in view.
+    let hidden = format!(
+        "document.title;{}document.querySelector('form#pay').submit()",
+        " ".repeat(150)
+    );
+    let (reasons, preview) = ask(&hidden);
+    assert_eq!(reasons[1], tool::PARTIAL);
+    assert_eq!(
+        preview,
+        "  document.title;[150 blanks]document.querySelector('form#pay').submit()\n"
+    );
+    // A cut line says how much it left out.
+    let (reasons, preview) = ask(&format!("x = '{}'", "a".repeat(300)));
+    assert_eq!(reasons[1], tool::PARTIAL);
+    assert!(
+        preview.ends_with(&format!("{}... (146 more characters)\n", "a".repeat(155))),
+        "{preview}"
+    );
+    // JavaScript's other line ends split lines and stay visible.
+    let (reasons, preview) = ask("a()\u{2028}b()\u{2029}c()\rd()\r\ne()");
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert_eq!(
+        preview,
+        "  a()\\u{2028}\n  b()\\u{2029}\n  c()\\r\n  d()\n  e()\n"
+    );
+    // Too many lines.
+    let many: Vec<String> = (0..45).map(|n| format!("f{n}()")).collect();
+    let (reasons, preview) = ask(&many.join("\n"));
+    assert_eq!(reasons[1], tool::PARTIAL);
+    assert!(
+        preview.contains("  f39()\n  ... 5 more lines\n"),
+        "{preview}"
+    );
+    assert!(!preview.contains("f40()"), "{preview}");
+    // A script the tool refuses is not shown at all.
+    let (reasons, preview) = ask(&"x".repeat(tool::MAX_EXPRESSION + 1));
+    assert_eq!(reasons[1], tool::PARTIAL);
+    assert!(preview.contains("too long to show"), "{preview}");
+    assert!(!preview.contains("xxxx"), "{preview}");
+    let (reasons, _) = ask(&"x".repeat(tool::MAX_EXPRESSION));
+    assert_eq!(reasons[1], tool::PARTIAL, "one line of 2000 is cut");
+
+    // The page's address and the one to open are capped.
+    let long = format!("https://x.test/?{}", "u".repeat(300_000));
+    let (target, ..) =
+        tool::test_question_on(&long, &json!({"action": "evaluate", "expression": "1"}));
+    assert!(target.len() < tool::MAX_URL + 100, "{} bytes", target.len());
+    let (target, ..) = tool::test_question_on("", &json!({"action": "open", "url": long}));
+    assert!(target.len() < tool::MAX_URL + 100, "{} bytes", target.len());
 }
 
 #[test]
@@ -1754,6 +2247,17 @@ fn profiles_left_by_a_process_that_is_gone_are_removed() {
         libc::killpg(owner.id() as i32, libc::SIGKILL);
     }
     owner.wait().unwrap();
+    // `sleep` holds the locked descriptor too, and may outlive `flock`
+    // for a moment after the SIGKILL: wait until the lock is free.
+    let mut waited = 0;
+    while taken() {
+        assert!(
+            waited < 100,
+            "the killed flock(1) group still holds the lock"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        waited += 1;
+    }
     drop(process::Profile::new(Some(&folder)).unwrap());
     assert!(!held.exists());
     drop(live);
