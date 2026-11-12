@@ -236,10 +236,10 @@ impl Ruleset {
                 continue;
             }
             // Not followed: a link swapped in now is skipped, not granted.
-            if let Some((fd, kind)) = open_path(&path, false)? {
-                if !kind.is_symlink() {
-                    self.add(&fd, kind.is_dir(), rights)?;
-                }
+            if let Some((fd, kind)) = open_path(&path, false)?
+                && !kind.is_symlink()
+            {
+                self.add(&fd, kind.is_dir(), rights)?;
             }
         }
         Ok(())
