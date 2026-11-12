@@ -475,6 +475,35 @@ async fn unconfined_processes_environment_is_out_of_reach() {
     assert!(open.content.contains("environ-read"), "{}", open.content);
 }
 
+#[test]
+fn confined_commands_lose_the_session_bus_agent_and_tmux() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let sandbox = layout.sandbox(settings());
+    let Prepared::Confined(confinement, _) = sandbox.prepare(&layout.path("work")) else {
+        panic!("not confined");
+    };
+    let mut tokio_command = tokio::process::Command::new("true");
+    let mut std_command = std::process::Command::new("true");
+    for name in ESCAPE_ENV_VARS {
+        tokio_command.env(name, "/run/user/1000/bus");
+        std_command.env(name, "/run/user/1000/bus");
+    }
+    confinement.apply(&mut tokio_command);
+    confinement.apply_std(&mut std_command);
+    for envs in [tokio_command.as_std().get_envs(), std_command.get_envs()] {
+        let envs: Vec<_> = envs.collect();
+        for name in ESCAPE_ENV_VARS {
+            assert!(
+                envs.contains(&(std::ffi::OsStr::new(name), None)),
+                "{name}: {envs:?}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn commands_run_with_no_new_privs() {
     if !landlock() {

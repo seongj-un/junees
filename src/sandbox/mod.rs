@@ -80,6 +80,22 @@ pub const NETWORK_ENV: &str = "JUNEES_SANDBOX_NETWORK";
 /// The temporary folders commands may always write in, besides `$TMPDIR`.
 const TEMP_FOLDERS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm"];
 
+/// Variables that lead a confined command to a process outside the
+/// sandbox that runs commands for it: the user's D-Bus session bus
+/// (`systemd-run --user`), the user's runtime folder where it and other
+/// user services listen, the ssh agent, and tmux (`tmux send-keys` into
+/// another pane). Landlock does not handle connecting to a unix socket,
+/// so leaving them out of a confined command's environment only stops
+/// such an escape by accident: a command can still name the sockets
+/// itself (docs/safety.md, the limits of the sandbox).
+pub const ESCAPE_ENV_VARS: &[&str] = &[
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "SSH_AUTH_SOCK",
+    "TMUX",
+    "TMUX_PANE",
+];
+
 /// The sandbox settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -476,9 +492,13 @@ pub struct Confinement {
 
 impl Confinement {
     /// Makes `command`'s process put itself under the ruleset (with
-    /// `no_new_privs`) right before it runs the program. Spawning fails
-    /// when that fails.
+    /// `no_new_privs`) right before it runs the program, and takes the
+    /// [`ESCAPE_ENV_VARS`] out of its environment. Spawning fails when
+    /// the ruleset cannot be applied.
     pub fn apply(&self, command: &mut tokio::process::Command) {
+        for name in ESCAPE_ENV_VARS {
+            command.env_remove(name);
+        }
         #[cfg(target_os = "linux")]
         {
             let fd = self.ruleset.raw_fd();
@@ -496,6 +516,9 @@ impl Confinement {
 
     /// [`Self::apply`] for a std command.
     pub fn apply_std(&self, command: &mut std::process::Command) {
+        for name in ESCAPE_ENV_VARS {
+            command.env_remove(name);
+        }
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::process::CommandExt;
