@@ -443,6 +443,8 @@ async fn unattended_runs_cannot_read_home_credentials() {
         settings_file: Some(layout.settings_file()),
         sandbox: Some(Settings {
             unattended,
+            // The webhook runs' own list names the keys too.
+            webhook_read: read.clone().unwrap_or_default(),
             read,
             ..settings()
         }),
@@ -498,7 +500,8 @@ async fn unattended_runs_cannot_read_home_credentials() {
     .await;
     shows(&keys, &["ssh-private", "other-private", "ssh-public"]);
     hides(&keys, &["aws-secret", "kube-token"]);
-    // A webhook run reads none of them, whatever `sandbox_read` says.
+    // A webhook run reads none of them, whatever `sandbox_read` and
+    // `webhook_sandbox_read` say.
     let webhook = run(
         &work,
         Sandbox::for_tools(&tools(true, true, read)).unwrap(),
