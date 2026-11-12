@@ -443,8 +443,8 @@ fn config_entries(bytes: Option<&[u8]>) -> Option<std::collections::BTreeMap<Str
     Some(entries)
 }
 
-/// The test command: `sh -c` in `worktree`, in a process group of its
-/// own, without the repository variables, Junees's credentials, the
+/// The test command: `sh -c` in `worktree`, in a session and process
+/// group of its own ([`crate::tools::own_session`]), without the repository variables, Junees's credentials, the
 /// variables in `hidden`, and the user's git and GitHub CLI credentials
 /// like the model's shell ([`crate::tools::strip_git_credentials`], with
 /// `gh_config` as the GitHub CLI folder): it runs code of the pull request
@@ -461,8 +461,8 @@ fn test_command(
         .arg(command)
         .current_dir(worktree)
         .stdin(std::process::Stdio::null())
-        .process_group(0)
         .kill_on_drop(true);
+    crate::tools::own_session(&mut child);
     for name in git::REPO_ENV_VARS
         .iter()
         .chain(crate::tools::SECRET_ENV_VARS)

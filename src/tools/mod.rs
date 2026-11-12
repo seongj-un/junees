@@ -15,7 +15,7 @@ mod write_file;
 pub use bash::Bash;
 #[cfg(test)]
 pub(crate) use bash::testing;
-pub(crate) use bash::{Capture, GroupGuard};
+pub(crate) use bash::{Capture, GroupGuard, own_session};
 pub use edit_file::EditFile;
 pub(crate) use policy::resolve;
 pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};
