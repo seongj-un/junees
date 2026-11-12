@@ -56,6 +56,10 @@ pub struct Rest {
     log: Log,
 }
 
+/// The message flag that turns off link previews (embeds) of a message
+/// (docs.discord.com, resources/message, "Message Flags": 1 << 2).
+pub const SUPPRESS_EMBEDS: u64 = 1 << 2;
+
 #[derive(Default)]
 struct Limits {
     /// Routes that have no requests left until the instant.
@@ -93,13 +97,17 @@ impl Rest {
     }
 
     /// Create Message with `content` (at most 2000 characters). Mentions
-    /// in it do not notify anyone (`allowed_mentions: {parse: []}`): the
-    /// text comes from the model. A retried post cannot show twice: its
-    /// tries share one enforced `nonce` (module docs).
+    /// in it do not notify anyone (`allowed_mentions: {parse: []}`) and
+    /// its links get no previews ([`SUPPRESS_EMBEDS`]): the text comes
+    /// from the model, and Discord fetching a link it wrote
+    /// (`https://host/?d=<secret>`) would send data out without any tool
+    /// call. A retried post cannot show twice: its tries share one
+    /// enforced `nonce` (module docs).
     pub async fn create_message(&self, channel: &str, content: &str) -> Result<()> {
         let body = json!({
             "content": content,
             "allowed_mentions": {"parse": []},
+            "flags": SUPPRESS_EMBEDS,
             "nonce": nonce(),
             "enforce_nonce": true,
         });

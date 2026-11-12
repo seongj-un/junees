@@ -878,13 +878,15 @@ async fn answers_only_allowed_users_where_it_is_addressed() {
         );
     }
     assert_eq!(rest.posts("504").len(), 2, "{:?}", rest.posts("504"));
-    // Every post asks Discord not to ping anyone.
+    // Every post asks Discord not to ping anyone and not to preview
+    // links (SUPPRESS_EMBEDS).
     for request in rest
         .requests()
         .iter()
         .filter(|r| r.path.ends_with("/messages"))
     {
         assert_eq!(request.body["allowed_mentions"], json!({"parse": []}));
+        assert_eq!(request.body["flags"], json!(4), "{:?}", request.body);
     }
     let text = log.join("\n");
     assert_eq!(
