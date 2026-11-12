@@ -3,19 +3,34 @@
 //! images from `files.slack.com`. Bots have no typing indicator in the
 //! Web API (it belonged to the retired RTM API), so `typing` does
 //! nothing.
+//!
+//! Approval questions carry Block Kit buttons ([`Platform::post_question`]):
+//! the question's (last) message is a `section` block of mrkdwn and an
+//! `actions` block of `button` elements whose `action_id` and `value` are
+//! [`button_data`] (`junees:<id>:<y|a|n>`, 41 characters; a button's
+//! `action_id` takes up to 255, its `value` up to 2000, "Button element").
+//! A section's text holds at most 3000 characters ("Section block"),
+//! so a longer question is cut before its last part gets the buttons.
+//! When the question ends, `chat.update` replaces the blocks with the
+//! question and the result, without the buttons. Presses come to the
+//! router ([`super::bot`]).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::api::Api;
-use super::format::to_mrkdwn;
+use super::format::{escape, to_mrkdwn};
 use crate::approval::{Request, render};
-use crate::gateway::ask::{fence_safe, human};
+use crate::gateway::ask::{
+    Choice, Question, WITH_BUTTONS, button_data, fence_safe, human, without_buttons,
+};
 use crate::gateway::platform::Platform;
+use crate::gateway::split::{length, split_message};
 use crate::images::{Image, MAX_IMAGE_BYTES, too_large};
 use crate::prompt_text::escape_hidden;
 
@@ -142,12 +157,58 @@ impl Target {
     }
 }
 
+/// The longest text of a `section` block ("Section block": "maximum
+/// length is 3000 characters"), counted here in UTF-16 units, which are
+/// never fewer than characters.
+pub const SECTION_LIMIT: usize = 3000;
+
 /// Slack, for the channel engine.
 pub struct Slack {
     pub api: Arc<Api>,
+    /// The questions posted with buttons, by question id, until they end.
+    questions: Mutex<HashMap<String, Posted>>,
+}
+
+/// A question message with buttons.
+struct Posted {
+    /// The Slack channel id.
+    channel: String,
+    ts: String,
+    /// Its section's mrkdwn, which the edit keeps.
+    text: String,
 }
 
 impl Slack {
+    pub fn new(api: Arc<Api>) -> Self {
+        Self {
+            api,
+            questions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn questions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Posted>> {
+        self.questions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Posts `parts`, then `last` without the words about buttons, after
+    /// posting the question with buttons failed with `err`.
+    async fn post_without_buttons(
+        &self,
+        channel: &str,
+        parts: &[String],
+        last: &str,
+        err: anyhow::Error,
+    ) -> anyhow::Error {
+        let last = without_buttons(last);
+        for part in parts.iter().map(String::as_str).chain([last.as_str()]) {
+            if let Err(again) = self.post(channel, part).await {
+                return anyhow!("{err:#}; posting it without buttons failed too: {again:#}");
+            }
+        }
+        anyhow!("{err:#}; posted it without buttons")
+    }
     async fn fetch(&self, file: &SlackFile) -> Result<Image, String> {
         let name = format!("\"{}\"", file.name);
         let bytes = match self
@@ -230,6 +291,120 @@ impl Platform for Slack {
     fn question(request: &Request, timeout: Duration) -> String {
         question(request, timeout)
     }
+
+    /// The question's last message (it is cut like any post, and again
+    /// to fit a section) carries the buttons.
+    async fn post_question(&self, channel: &str, question: &Question) -> Result<Option<String>> {
+        let (parts, last) = button_parts(&question.text);
+        for (at, part) in parts.iter().enumerate() {
+            if let Err(err) = self.post(channel, part).await {
+                return Err(self
+                    .post_without_buttons(channel, &parts[at..], &last, err)
+                    .await);
+            }
+        }
+        let target = Target::parse(channel);
+        let text = to_mrkdwn(&last);
+        let ts = match self
+            .api
+            .post_blocks(
+                &target.channel,
+                target.thread_ts.as_deref(),
+                &text,
+                question_blocks(&text, question),
+            )
+            .await
+        {
+            Ok(ts) => ts,
+            Err(err) => {
+                return Err(self
+                    .post_without_buttons(channel, &[], &last, err.into())
+                    .await);
+            }
+        };
+        self.questions().insert(
+            question.id.clone(),
+            Posted {
+                channel: target.channel,
+                ts: ts.clone(),
+                text,
+            },
+        );
+        Ok(Some(ts))
+    }
+
+    /// The buttons go; the result shows in bold under the question, as a
+    /// section of its own.
+    async fn close_question(&self, _channel: &str, id: &str, outcome: &str) -> Result<()> {
+        let Some(posted) = self.questions().remove(id) else {
+            return Ok(());
+        };
+        let line = format!("*{}*", escape(outcome));
+        let blocks = json!([section(&posted.text), section(&line)]);
+        self.api
+            .update_message(
+                &posted.channel,
+                &posted.ts,
+                &format!("{}\n\n{line}", posted.text),
+                blocks,
+            )
+            .await
+            .map_err(Into::into)
+    }
+}
+
+/// `text`, a question in Markdown, cut into the messages before the one
+/// with the buttons and that one, whose mrkdwn fits a section
+/// ([`SECTION_LIMIT`]; escaping makes `&` five characters long).
+fn button_parts(text: &str) -> (Vec<String>, String) {
+    let mut parts = split_message(text, MESSAGE_LIMIT);
+    let mut last = parts.pop().unwrap_or_default();
+    let mut limit = MESSAGE_LIMIT;
+    // At 475 units even text of nothing but `&` fits.
+    while length(&to_mrkdwn(&last)) > SECTION_LIMIT && limit > 500 {
+        limit /= 2;
+        let mut pieces = split_message(&last, limit);
+        last = pieces.pop().unwrap_or_default();
+        parts.extend(pieces);
+    }
+    (parts, last)
+}
+
+/// A `section` block of mrkdwn `text`, `verbatim` so Slack does not turn
+/// plain words into links or mentions ("Text object": "When set to
+/// `true`, Slack will continue to process all markdown formatting ... but
+/// it won't modify any plain-text content").
+fn section(text: &str) -> Value {
+    json!({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": text, "verbatim": true},
+    })
+}
+
+/// The blocks of a question's message: its mrkdwn `text`, then one
+/// `actions` block with a button for each choice
+/// ([`Choice::offered`]).
+fn question_blocks(text: &str, question: &Question) -> Value {
+    let buttons: Vec<Value> = Choice::offered(question)
+        .into_iter()
+        .map(|choice| {
+            let data = button_data(&question.id, choice);
+            let mut button = json!({
+                "type": "button",
+                "text": {"type": "plain_text", "text": choice.label()},
+                "action_id": data,
+                "value": data,
+            });
+            // "Button element": `primary` is green, `danger` red.
+            match choice {
+                Choice::Allow => button["style"] = json!("primary"),
+                Choice::Decline => button["style"] = json!("danger"),
+                Choice::Always => {}
+            }
+            button
+        })
+        .collect();
+    json!([section(text), {"type": "actions", "elements": buttons}])
 }
 
 /// An approval question, in Markdown that [`to_mrkdwn`] turns into
@@ -241,8 +416,8 @@ pub fn question(request: &Request, timeout: Duration) -> String {
         request.kinds.join(", ")
     ));
     format!(
-        "**Approve this tool call?**\n```\n{}```\nReply `y` to run it, `n` to decline (`n \
-         <reason>` tells the model why), `a` to allow this kind for the rest of this \
+        "**Approve this tool call?**\n```\n{}```\n{WITH_BUTTONS} `y` to run it, `n` to decline \
+         (`n <reason>` tells the model why), `a` to allow this kind for the rest of this \
          conversation. Anything else declines with your words as the reason. No answer within \
          {} declines. In a channel, reply in this thread.",
         fence_safe(&details),
@@ -312,6 +487,75 @@ mod tests {
             .collect();
         let (files, notes) = attachments(&json!({"files": many}));
         assert_eq!((files.len(), notes.len()), (MAX_ATTACHMENTS, 2));
+    }
+
+    #[test]
+    fn a_long_question_is_cut_so_its_last_part_fits_a_section() {
+        let request = Request {
+            tool: "bash".into(),
+            target: format!("echo {}", "a&b<c> ".repeat(450)),
+            reasons: vec!["runs a command".into()],
+            preview: None,
+            kinds: vec!["bash: run".into()],
+        };
+        let text = question(&request, Duration::from_secs(300));
+        assert!(
+            length(&text) <= MESSAGE_LIMIT,
+            "one message before escaping"
+        );
+        assert!(length(&to_mrkdwn(&text)) > SECTION_LIMIT);
+        let (parts, last) = button_parts(&text);
+        assert!(!parts.is_empty());
+        assert!(length(&to_mrkdwn(&last)) <= SECTION_LIMIT);
+        assert!(last.contains(WITH_BUTTONS), "{last}");
+        // Every part keeps its code block closed.
+        for part in parts.iter().chain([&last]) {
+            assert_eq!(part.matches("```").count() % 2, 0, "{part}");
+        }
+        // A short one stays whole.
+        let short = question(
+            &Request {
+                target: "ls".into(),
+                ..request
+            },
+            Duration::from_secs(9),
+        );
+        assert_eq!(button_parts(&short), (vec![], short.clone()));
+    }
+
+    #[test]
+    fn buttons_carry_the_question_id() {
+        let mut question = Question {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            text: "q".into(),
+            always: false,
+        };
+        let blocks = question_blocks("*q* &amp;", &question);
+        assert_eq!(
+            blocks[0],
+            json!({"type": "section",
+                   "text": {"type": "mrkdwn", "text": "*q* &amp;", "verbatim": true}})
+        );
+        let values: Vec<&str> = blocks[1]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            values,
+            [
+                "junees:0123456789abcdef0123456789abcdef:y",
+                "junees:0123456789abcdef0123456789abcdef:n"
+            ]
+        );
+        question.always = true;
+        let blocks = question_blocks("q", &question);
+        assert_eq!(blocks[1]["elements"][1]["text"]["text"], "Always allow");
+        assert_eq!(
+            blocks[1]["elements"][1]["action_id"],
+            blocks[1]["elements"][1]["value"]
+        );
     }
 
     #[test]
