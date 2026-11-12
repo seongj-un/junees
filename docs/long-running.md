@@ -399,6 +399,7 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 스펙에서 바꾼 것: 디스코드의 "이미 처리됨" 응답은 type 7로 메시지를 고치지 않고 누른 사람에게만 보이는 type 4로 했다(끝난 질문의 메시지는 엔진이 이미 고쳤고, 허용 목록 밖 사람의 누름이 메시지를 바꾸지 못하게)
 - 테스트: 단위 `gateway/ask.rs`(id 모양과 서로 다름, 버튼 데이터 왕복과 거절 목록, 다른 id/다른 메시지/없는 Always/끝난 질문의 누름 거절, 메시지 id를 알기 전 누름, 글 답과 시간 초과와 취소의 `Answered`). 통합 `tests/discord_gateway.rs` `buttons_answer_questions_of_allowed_users_only`(가짜 Gateway/REST: 버튼 셋과 `custom_id` 길이, 허용 목록 밖 사람의 누름은 EPHEMERAL과 로그 한 번, 짐작한 id, Decline은 type 6과 PATCH(버튼 없음, 결과, `allowed_mentions`), 지난 질문 버튼과 다른 채널의 누름 거절, Allow로 실행, 시간 초과 뒤 편집과 그 뒤 누름 거절, 글 답 `y`도 편집, 로그에 상호작용 토큰 없음). `tests/telegram_gateway.rs` `buttons_answer_questions_of_allowed_users_only`(같은 흐름을 가짜 Bot API로: `answerCallbackQuery`의 안내, 다른 메시지 id, `editMessageText`의 빈 키보드와 `<b>` 결과, `allowed_updates`)와 `a_button_answers_only_in_its_forum_topic`(같은 버튼도 토픽 밖에서는 거절)
 - 남은 위험: 실제 디스코드와 텔레그램으로는 눌러 보지 않았다(가짜 서버만). 디스코드 3초 마감은 Gateway 이벤트가 늦게 오거나 REST가 느리면 넘길 수 있다(그러면 디스코드가 "상호작용 실패"를 보이지만 질문은 이미 답을 받았다). 재시작 전 질문 메시지에는 버튼이 남는다(눌러도 안내만). 디스코드 앱에 Interactions Endpoint URL을 넣으면 누름이 오지 않는다(문서화)
+- 리뷰 반영(PR #79, Momus와 Argus): 질문에 답한 사용자가 30초 안에 답 낱말 하나만(`y`/`yes`/`a`/`always`/`n`/`no`) 다시 보내면 늦은 답으로 보고 새 턴의 입력으로 넘기지 않고 이미 답했다고 알린다(`AnswerSlot::late`, 답한 뒤 그 사용자의 첫 메시지 하나만). 매번 묻는 종류뿐인 질문에 `a`로 답하면 결과 줄은 `Allowed.`. 디스코드는 상호작용 id의 시각으로 15분이 지난 누름을 응답 없이 버린다(토큰 만료. 3초 같은 짧은 한도는 이 컴퓨터 시계가 몇 초만 어긋나도 모든 누름을 버리게 된다). 버튼을 단 질문을 올리지 못하면 플랫폼이 아직 올리지 않은 부분만 버튼 안내 없이(`Reply ...`, `ask::without_buttons`) 올린다. 디스코드 질문 편집에도 `flags: SUPPRESS_EMBEDS`를 보낸다.
 
 ## 상태
 
