@@ -538,13 +538,13 @@ junees mcp logout docs    # 저장한 로그인을 지운다
 - 찾기: 토큰 없이 `server/discover`를 POST해 401의 `resource_metadata` 주소(없으면 `/.well-known/oauth-protected-resource/<경로>`, 그다음 루트)에서 보호 자원 메타데이터(RFC 9728)를 읽는다. 그 `resource`가 서버 주소를 덮어야 하고(같은 scheme/호스트/포트, 서버 경로가 그 경로이거나 그 아래), 이 값을 `resource`(RFC 8707)로 모든 인가/토큰 요청에 보낸다. `authorization_servers`의 첫 https 서버(또는 `oauth.issuer`)의 메타데이터를 명세 순서대로 찾는다(`/.well-known/oauth-authorization-server`, OpenID `/.well-known/openid-configuration`, 발급자 경로가 있으면 경로 삽입과 덧붙이기). 문서의 `issuer`가 그 발급자와 글자 그대로 같아야 하고, `code_challenge_methods_supported`에 `S256`이 없으면 로그인하지 않는다.
 - 클라이언트: `oauth.client_id`(사용자가 미리 등록한 클라이언트, 직접 호스팅하는 Client ID Metadata Document URL도 여기에)가 있으면 그것, 없으면 동적 등록(RFC 7591: `application_type: native`, 공개 클라이언트, 리다이렉트 URI는 이번 로그인의 루프백 주소)을 쓴다. 둘 다 안 되면 `oauth.client_id`를 넣으라고 안내한다. Junees는 자기 Client ID Metadata Document를 호스팅하지 않는다(명세가 권하는 1순위지만 고정 https 주소가 필요하다).
 - 인가: PKCE(S256), 무작위 `state`, `resource`, scope(아래)를 붙인 인가 주소를 출력한다. 브라우저는 열지 않는다. 답은 `127.0.0.1`의 임의 포트에서 한 번만 듣는 수신기(`/callback`)로 받는다. `state`가 다른 요청은 오류 페이지를 받고 버려지며, 맞는 답 하나를 받으면 수신기를 닫는다. 브라우저가 다른 컴퓨터에 있으면(헤드리스 서버) 열리지 않는 페이지의 주소 전체(또는 `?code=...&state=...`)를 터미널에 붙여 넣는다. 5분 안에 답이 없으면 끝낸다. 대화의 `/mcp login`은 Ctrl-C로 취소한다. 답의 `iss`는 RFC 9207대로 확인하고(서버가 `authorization_response_iss_parameter_supported`를 밝혔는데 없거나, 있는데 발급자와 다르면 거절하고 코드를 쓰지 않는다. 다를 때는 답의 오류 문구도 보여 주지 않는다), 그다음 코드를 `code_verifier`, `redirect_uri`, `resource`와 함께 토큰 엔드포인트로 바꾼다.
-- scope: `oauth.scope`가 있으면 그것만. 없으면 401 챌린지의 `scope`, 없으면 보호 자원 메타데이터의 `scopes_supported`(그것도 없으면 scope를 보내지 않는다)에, 같은 발급자에서 전에 받은 scope와 그 뒤 서버가 `403 insufficient_scope`로 더 요구한 scope를 더하고(step-up), 인가 서버가 `offline_access`를 밝혔으면 리프레시 토큰을 위해 더한다. 실행 중 403 `insufficient_scope`가 오면 그 호출은 실패하고(`it needs more permissions ...; log in again`) 요구된 scope를 저장해 두어 다음 로그인이 함께 요청한다.
-- 저장: `$JUNEES_HOME/secrets/mcp-oauth/<서버>.json`(0600, 폴더 0700, 임시 파일 뒤 rename)에 access/refresh 토큰, 만료 시각, 발급자, 토큰 엔드포인트, resource, 서버 `url`, 클라이언트 id(동적 등록이 준 secret 포함), scope. `secrets/`는 config.toml처럼 모델의 도구가 읽지도 쓰지도 못하는 폴더다. 남이 읽을 수 있는 권한이거나 링크면 쓰지 않는다(`chmod 600` 안내). `junees mcp logout`은 이 파일만 지운다(인가 서버 쪽 철회는 하지 않는다).
+- scope: `oauth.scope`가 있으면 그것만. 없으면 401 챌린지의 `scope`, 없으면 보호 자원 메타데이터의 `scopes_supported`(그것도 없으면 scope를 보내지 않는다)에, 같은 발급자에서 전에 받은 scope와 그 뒤 서버가 `403 insufficient_scope`로 더 요구한 scope를 더하고(step-up), 인가 서버가 `offline_access`를 밝혔으면 리프레시 토큰을 위해 더한다. 실행 중 403 `insufficient_scope`가 오면 그 호출은 실패하고(`it needs more permissions ...; log in again`) 요구된 scope를 저장해 두어 다음 로그인이 함께 요청한다. `oauth.scope`가 있으면 로그인은 그것만 요청하므로, 안내는 요구된 scope를 `oauth.scope`에 더한 뒤 다시 로그인하라고 바뀐다(`add `files:write` to `oauth.scope` of `docs` in mcp.json, then log in again`).
+- 저장: `$JUNEES_HOME/secrets/mcp-oauth/<서버>.json`(0600, 폴더 0700, 임시 파일 뒤 rename)에 access/refresh 토큰, 만료 시각, 발급자, 토큰 엔드포인트, resource, 서버 `url`, 클라이언트 id(동적 등록이 준 secret 포함), scope. `secrets/`는 config.toml처럼 모델의 도구가 읽지도 쓰지도 못하는 폴더다. 남이 읽을 수 있는 권한이거나 링크면 쓰지 않는다(`chmod 600` 안내). `junees mcp logout`은 이 파일만 지운다(인가 서버 쪽 철회는 하지 않는다). 로그인의 저장과 로그아웃은 갱신과 같은 폴더 잠금을 잡는다.
 - 사용: 그 서버의 모든 요청(알림과 종료 `DELETE` 포함)에 `Authorization: Bearer <토큰>`(민감 표시)을 붙인다. 저장된 `url`이 지금 mcp.json의 `url`과 다르면(다른 서버로 바뀐 것) 토큰을 보내지 않고 다시 로그인하라고 한다. 메타데이터, 등록, 토큰 요청에는 보내지 않는다. 리다이렉트는 여전히 따라가지 않는다.
-- 갱신: 만료 1분 전이면 요청 전에, 서버가 401로 답하면 한 번 리프레시 토큰으로 새 토큰을 받아 그 요청을 다시 보낸다. 동시에 401을 받은 요청들도 한 번만 갱신하고, 다른 junees 프로세스(예약 작업 등)와는 `secrets/mcp-oauth` 폴더의 `flock`으로 차례를 맞춘다(인가 서버가 리프레시 토큰을 바꿔 주면 먼저 갱신한 쪽의 토큰을 읽어 쓴다). 새 리프레시 토큰이 없으면 이전 것을 그대로 둔다. 갱신이 거절되면(`invalid_grant` 등) 그 서버는 이유와 `junees mcp login` 안내와 함께 실패한다.
+- 갱신: 만료 1분 전이면 요청 전에, 서버가 401로 답하면 한 번 리프레시 토큰으로 새 토큰을 받아 그 요청을 다시 보낸다. 동시에 401을 받은 요청들도 한 번만 갱신하고, 다른 junees 프로세스(예약 작업 등)와는 `secrets/mcp-oauth` 폴더의 `flock`으로 차례를 맞춘다(인가 서버가 리프레시 토큰을 바꿔 주면 먼저 갱신한 쪽의 토큰을 읽어 쓴다). 새 리프레시 토큰이 없으면 이전 것을 그대로 둔다. 갱신은 잠금 안에서 저장된 파일을 먼저 본다: 파일이 없으면(다른 터미널의 `junees mcp logout`) 갱신하지 않고 `its saved login was removed (`junees mcp logout docs`)`로, 다른 주소(`url`을 바꾼 뒤의 새 로그인)의 로그인이면 `replaced by a login for another address ... start junees again`으로 그 호출이 실패하고 파일은 건드리지 않는다. 그래서 떠 있는 Junees가 로그아웃을 되살리거나 새 로그인을 덮어쓰지 않는다. 같은 주소의 새 로그인이면 그 토큰을 가져다 쓴다. 로그아웃 뒤에도 이미 메모리에 있는 액세스 토큰은 서버가 거절하거나 만료될 때까지 쓰인다(인가 서버에서 철회하면 바로 끊긴다). 잠금은 모든 서버가 함께 쓰므로 토큰 요청 한도(30초)보다 15초 더 기다린다. 갱신이 거절되면(`invalid_grant` 등) 그 서버는 이유와 `junees mcp login` 안내와 함께 실패한다.
 - `headers`와의 관계: mcp.json `headers`에 `Authorization`이 있으면 그 헤더가 이긴다. 그 서버에는 로그인할 수 없고(`mcp login`이 거절), 저장된 로그인도 쓰지 않는다. 같은 서버에 `oauth`와 `Authorization` 헤더를 같이 쓰면 mcp.json 오류다. 다른 헤더(`X-Team` 등)는 OAuth 토큰과 함께 보낸다.
 - `oauth`(선택): `{"client_id": "...", "client_secret": "env:NAME", "scope": "files:read", "issuer": "https://auth.example.com"}`. `client_secret`은 헤더처럼 환경 변수 참조만 받고 그 변수는 bash와 서버에게 숨긴다. `issuer`는 보호 자원 메타데이터가 여러 인가 서버를 줄 때 고르며 목록에 없으면 거절한다.
-- 보안: 인가 서버의 모든 주소와 리다이렉트 URI는 https(루프백만 http). 토큰, 코드, 리프레시 토큰, 클라이언트 secret은 모델, 도구 결과, 세션 기록, 오류 문장, `/mcp`, doctor에 나오지 않는다.
+- 보안: 인가 서버의 모든 주소와 리다이렉트 URI는 https(루프백만 http). 루프백 http는 MCP 서버의 `url`도 이 컴퓨터일 때만 받는다. 원격 서버의 메타데이터가 `http://127.0.0.1:<포트>/...`를 적어 이 컴퓨터의 다른 서비스로 요청을 보내게 하지 못한다. 동적 등록이 `token_endpoint_auth_method: none`이라고 답하면 함께 준 secret은 쓰지 않는다(공개 클라이언트). 토큰, 코드, 리프레시 토큰, 클라이언트 secret은 모델, 도구 결과, 세션 기록, 오류 문장, `/mcp`, doctor에 나오지 않는다.
 
 
 승인(`JUNEES_APPROVAL`, 아래 실행 전 승인 절): `risky`(기본)에서는 `trust`가 없는 서버의 도구를 부를 때마다 "외부 도구"로 묻는다. 질문에는 서버와 원래 도구 이름, 인자 JSON 앞부분(8줄)이 나오고, `a`는 그 도구 하나를 이번 실행 동안 허용한다. `all`은 trust 서버의 도구도 묻고, `off`는 묻지 않는다. 게이트웨이는 같은 질문을 채널에서 묻는다. `-p`는 사람이 없으므로 묻지 않는다(기존 정책 그대로).
@@ -1015,15 +1015,15 @@ src/
       config.rs          mcp.json `oauth` (client_id, client_secret env 참조, scope, issuer)
       challenge.rs       WWW-Authenticate 파싱 (Bearer의 resource_metadata, scope, error)
       discovery.rs       토큰 없는 probe, 보호 자원 메타데이터(RFC 9728)와 resource 확인, 인가 서버 메타데이터(RFC 8414/OIDC, 발급자 일치, S256)
-      fetch.rs           메타데이터/등록/토큰 요청 (https, 루프백만 http, 리다이렉트 거절, 1 MiB, URL 없는 오류, OAuth 오류 문구)
+      fetch.rs           메타데이터/등록/토큰 요청 (https, 루프백 서버에만 루프백 http, 리다이렉트 거절, 1 MiB, URL 없는 오류, OAuth 오류 문구)
       pkce.rs            PKCE S256과 무작위 state
       token.rs           동적 클라이언트 등록(RFC 7591), 코드 교환과 갱신(resource 포함), 클라이언트 인증(none/basic/post), 토큰 응답 검사
       redirect.rs        127.0.0.1 한 번 수신기(state 검사), 붙여 넣은 주소 읽기
       login.rs           junees mcp login 흐름 (scope 선택과 step-up, iss 확인, 저장), 로그아웃
-      store.rs           secrets/mcp-oauth/<서버>.json (0600/0700, 원자적 쓰기, 갱신 잠금)
-      auth.rs            저장된 로그인 사용: Bearer 헤더, 만료 전과 401 뒤 한 번 갱신, 다른 주소면 쓰지 않음, 403 scope 기억
+      store.rs           secrets/mcp-oauth/<서버>.json (0600/0700, 원자적 쓰기, 갱신/로그인/로그아웃 잠금)
+      auth.rs            저장된 로그인 사용: Bearer 헤더, 만료 전과 401 뒤 한 번 갱신(로그아웃/다른 주소의 새 로그인이면 갱신 안 함), 다른 주소면 쓰지 않음, 403 scope 기억
       cli.rs             junees mcp login/logout 인자와 터미널 입출력
-      tests.rs           루프백 가짜 인가 서버+MCP 서버로 전체 로그인(수신기, 붙여 넣기), PKCE, state/iss 거절, 갱신, step-up, 무인 실행, 주소 바뀜, 헤더 우선, 비노출
+      tests.rs           루프백 가짜 인가 서버+MCP 서버로 전체 로그인(수신기, 붙여 넣기), PKCE, state/iss 거절, 갱신, 갱신과 로그아웃/재로그인 겹침, 잠금 대기, step-up, 무인 실행, 주소 바뀜, 헤더 우선, 비노출
     mod.rs             Mcp: 서버 묶음 시작/보고/종료, 도구 등록, 승인용 외부 도구 목록, /mcp 보기(전송 종류, 로그인 상태), 로그인 뒤 다시 띄우기
   plugins/           플러그인 ($JUNEES_HOME/plugins/<이름>/plugin.json)
     manifest.rs        plugin.json 읽기와 검사 (도구, 훅, 프롬프트, 명령 경로, 시간 한도, 0600/자기 소유, 값을 되풀이하지 않는 오류)
