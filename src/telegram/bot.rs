@@ -9,7 +9,7 @@
 //! chat, and is left to the other bots in a group. `/start`, which
 //! Telegram sends when a user opens the bot, shows the help.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -106,6 +106,12 @@ struct Incoming<'a> {
     album: Vec<&'a Value>,
 }
 
+/// Albums remembered as taken in a group.
+const ALBUMS: usize = 64;
+
+/// An album in a chat: chat id, sender, `media_group_id`.
+type AlbumKey = (i64, i64, String);
+
 /// The router: hands the bot's messages to the chats.
 pub struct Router {
     channels: Channels<Telegram>,
@@ -113,6 +119,10 @@ pub struct Router {
     me: Me,
     /// Users already reported as not allowed (reported once).
     strangers: HashSet<i64>,
+    /// Albums whose first part was for the bot in a group, newest last
+    /// ([`ALBUMS`] at most): the parts that come in a later `getUpdates`
+    /// answer have no caption (no mention), and are taken too.
+    albums: VecDeque<AlbumKey>,
 }
 
 impl Router {
@@ -122,6 +132,7 @@ impl Router {
             allowed,
             me,
             strangers: HashSet::new(),
+            albums: VecDeque::new(),
         }
     }
 
@@ -215,8 +226,22 @@ impl Router {
             .and_then(Value::as_i64)
             == Some(self.me.id);
         let answering = self.channels.answering(&channel);
-        if !(direct || mentioned || replied || answering) {
+        let album = message
+            .get("media_group_id")
+            .and_then(Value::as_str)
+            .map(|id| (chat, user, id.to_string()));
+        let rest_of_album = album.as_ref().is_some_and(|key| self.albums.contains(key));
+        if !(direct || mentioned || replied || answering || rest_of_album) {
             return;
+        }
+        if let Some(key) = album
+            && !direct
+            && !rest_of_album
+        {
+            if self.albums.len() == ALBUMS {
+                self.albums.pop_front();
+            }
+            self.albums.push_back(key);
         }
         let mut content = strip_mention(&text, &self.me.username);
         // `@bot /stop`: in a group the mention often comes first. A command

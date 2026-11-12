@@ -1071,6 +1071,72 @@ async fn photos_and_albums_reach_the_model() {
     );
 }
 
+/// A photo from `from` in the group: part of `album`, with a caption (and
+/// its mention entities) or none.
+fn group_photo(from: i64, file_id: &str, caption: Option<&str>, album: &str) -> Value {
+    let mut message = photo(from, file_id, None, Some(album));
+    let in_group = group(from, caption.unwrap_or_default());
+    message["chat"] = in_group["chat"].clone();
+    if let Some(caption) = caption {
+        message["caption"] = json!(caption);
+        message["caption_entities"] = in_group["entities"].clone();
+    }
+    message
+}
+
+#[tokio::test]
+async fn a_group_album_split_over_two_answers_is_taken_whole() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    bot.file("ph1", "photos/file_1.png", png(20, 10));
+    bot.file("ph2", "photos/file_2.png", png(30, 20));
+    bot.file("ph3", "photos/file_3.png", png(40, 20));
+    let (api, served) = common::fake_api(vec![
+        (200, common::text_reply("First picture.")),
+        (200, common::text_reply("Second picture.")),
+        (200, common::text_reply("Done.")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let chat = GROUP.to_string();
+    bot.push(group_photo(
+        USER,
+        "ph1",
+        Some("@junees_bot compare these"),
+        "album-9",
+    ));
+    bot.wait_post(&chat, |p| p == "First picture.").await;
+    // The rest of the album comes in a later answer, with no caption.
+    bot.push(group_photo(USER, "ph2", None, "album-9"));
+    bot.wait_post(&chat, |p| p == "Second picture.").await;
+    // An album nobody addressed to the bot is still left alone.
+    bot.push(group_photo(USER, "ph3", None, "album-10"));
+    bot.push(group(USER, "@junees_bot done"));
+    bot.wait_post(&chat, |p| p == "Done.").await;
+    running.stop().await;
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    let second = common::body_of(&requests[1]);
+    let last = second["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["content"][0]["type"], "image", "{last}");
+    let downloads: Vec<String> = bot
+        .calls("getFile")
+        .iter()
+        .map(|r| r.body["file_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(downloads, ["ph1", "ph2"]);
+}
+
 // ------------------------------------------------------------- Binary
 
 #[tokio::test]
