@@ -3,6 +3,8 @@
 
 pub mod anthropic;
 mod error;
+mod http;
+pub mod openai;
 mod stream;
 
 pub use error::ProviderError;
@@ -12,6 +14,67 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::message::{ContentBlock, Message, StopReason, Usage};
+
+/// The setting that picks the API of the `api` backend (`provider` in
+/// the settings file).
+pub const PROVIDER_ENV: &str = "JUNEES_PROVIDER";
+
+/// Which API the `api` backend talks to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Kind {
+    /// Anthropic's Messages API ([`anthropic`]).
+    #[default]
+    Anthropic,
+    /// The OpenAI Chat Completions API and the servers that speak it
+    /// ([`openai`]).
+    OpenAi,
+}
+
+impl Kind {
+    /// The value of [`PROVIDER_ENV`]; unset is Anthropic.
+    pub fn parse(value: Option<&str>) -> anyhow::Result<Self> {
+        match value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("" | "anthropic") => Ok(Kind::Anthropic),
+            Some("openai") => Ok(Kind::OpenAi),
+            Some(_) => anyhow::bail!(
+                "{PROVIDER_ENV} (`provider`) must be anthropic or openai, got `{}`",
+                value.unwrap_or_default().trim()
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Anthropic => "anthropic",
+            Kind::OpenAi => "openai",
+        }
+    }
+}
+
+/// The model client the settings ask for: the provider, its address and
+/// key, the model, streaming, and the Anthropic-only extras (thinking
+/// budget, web search) where they apply.
+pub fn from_config(config: &crate::config::Config) -> anyhow::Result<Box<dyn Provider>> {
+    Ok(match &config.openai {
+        None => Box::new(
+            anthropic::AnthropicProvider::new(
+                config.api_key.clone(),
+                config.base_url.clone(),
+                config.model.clone(),
+            )?
+            .with_thinking(config.thinking_budget)
+            .with_streaming(config.stream)
+            .with_web_search(config.web_search.clone()),
+        ),
+        Some(settings) => Box::new(
+            openai::OpenAiProvider::new(settings.clone(), config.model.clone())?
+                .with_streaming(config.stream),
+        ),
+    })
+}
 
 /// A tool as advertised to the model.
 #[derive(Debug, Clone, PartialEq, Serialize)]

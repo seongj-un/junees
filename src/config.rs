@@ -28,8 +28,15 @@ pub const MIN_THINKING_BUDGET: u32 = 1024;
 /// in logs by accident.
 #[derive(Clone)]
 pub struct Config {
+    /// Which API the `api` backend talks to (`JUNEES_PROVIDER`).
+    pub provider: crate::provider::Kind,
+    /// The Anthropic API key; empty with the OpenAI provider.
     pub api_key: String,
+    /// The Anthropic API's address.
     pub base_url: String,
+    /// The OpenAI-compatible API's address and key, read only with
+    /// `provider = openai` (and then always there).
+    pub openai: Option<crate::provider::openai::Settings>,
     pub model: String,
     pub max_tokens: u32,
     pub max_turns: usize,
@@ -80,7 +87,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// Reads `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `JUNEES_MODEL`,
+    /// Reads `JUNEES_PROVIDER`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
+    /// `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `JUNEES_MODEL`,
     /// `JUNEES_MAX_TOKENS`, `JUNEES_MAX_TURNS`, `JUNEES_CONTEXT_WINDOW`,
     /// `JUNEES_COMPACT_THRESHOLD`, `JUNEES_THINKING_BUDGET`, `JUNEES_HOME`, `HOME`,
     /// `JUNEES_DENY_COMMANDS`, `JUNEES_ALLOW_DANGEROUS`,
@@ -116,13 +124,27 @@ impl Config {
                 .filter(|value| !value.is_empty())
         };
 
-        let api_key = if need_key {
-            get("ANTHROPIC_API_KEY").context(
+        let provider = crate::provider::Kind::parse(get(crate::provider::PROVIDER_ENV).as_deref())?;
+        let openai = (provider == crate::provider::Kind::OpenAi)
+            .then(|| crate::provider::openai::Settings::read(get))
+            .transpose()?;
+        let api_key = match (need_key, &openai) {
+            (false, _) => String::new(),
+            (true, None) => get("ANTHROPIC_API_KEY").context(
                 "no API key: run `junees setup`, or set ANTHROPIC_API_KEY \
                  (get a key at https://console.anthropic.com)",
-            )?
-        } else {
-            String::new()
+            )?,
+            (true, Some(openai)) => {
+                openai.require_key()?;
+                if get("JUNEES_MODEL").is_none() {
+                    bail!(
+                        "provider = openai needs a model: set model (JUNEES_MODEL) to a model id \
+                         {} knows (`junees doctor --online` lists them)",
+                        openai.base_url
+                    );
+                }
+                String::new()
+            }
         };
         let max_tokens = parse_or(
             get("JUNEES_MAX_TOKENS"),
@@ -227,7 +249,9 @@ impl Config {
         let browser = crate::browser::Settings::read(get)?;
 
         Ok(Self {
+            provider,
             api_key,
+            openai,
             base_url: get("ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             model: get("JUNEES_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens,
@@ -319,6 +343,74 @@ mod tests {
         let err = config(&[]).err().unwrap();
         assert!(err.to_string().contains("ANTHROPIC_API_KEY"));
         assert!(config(&[("ANTHROPIC_API_KEY", "  ")]).is_err());
+    }
+
+    #[test]
+    fn the_openai_provider_needs_its_own_key_and_a_model() {
+        use crate::provider::Kind;
+        let anthropic = config(&[("ANTHROPIC_API_KEY", "k")]).unwrap();
+        assert_eq!(anthropic.provider, Kind::Anthropic);
+        assert!(anthropic.openai.is_none());
+        // Its address is not even looked at then.
+        let ignored = config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("OPENAI_BASE_URL", "http://example.com/v1"),
+        ]);
+        assert!(ignored.unwrap().openai.is_none());
+
+        let openai = config(&[
+            ("JUNEES_PROVIDER", " OpenAI "),
+            ("OPENAI_API_KEY", "sk-test"),
+            ("JUNEES_MODEL", "gpt-test"),
+        ])
+        .unwrap();
+        assert_eq!(openai.provider, Kind::OpenAi);
+        assert_eq!(openai.api_key, "");
+        let settings = openai.openai.unwrap();
+        assert_eq!(settings.base_url, crate::provider::openai::DEFAULT_BASE_URL);
+        assert_eq!(settings.api_key.as_deref(), Some("sk-test"));
+        // A local server needs no key.
+        let local = config(&[
+            ("JUNEES_PROVIDER", "openai"),
+            ("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1"),
+            ("JUNEES_MODEL", "llama"),
+        ])
+        .unwrap();
+        assert_eq!(local.openai.unwrap().api_key, None);
+
+        for (pairs, expected) in [
+            (
+                vec![("JUNEES_PROVIDER", "openai"), ("JUNEES_MODEL", "m")],
+                "OPENAI_API_KEY",
+            ),
+            (
+                vec![("JUNEES_PROVIDER", "openai"), ("OPENAI_API_KEY", "k")],
+                "needs a model",
+            ),
+            (
+                vec![
+                    ("JUNEES_PROVIDER", "openai"),
+                    ("OPENAI_API_KEY", "k"),
+                    ("JUNEES_MODEL", "m"),
+                    ("OPENAI_BASE_URL", "http://10.0.0.2/v1"),
+                ],
+                "must use https",
+            ),
+            (vec![("JUNEES_PROVIDER", "gemini")], "anthropic or openai"),
+        ] {
+            let err = config(&pairs)
+                .err()
+                .unwrap_or_else(|| panic!("{pairs:?} was accepted"));
+            assert!(format!("{err:#}").contains(expected), "{err:#}");
+        }
+        // Without a key (the claude-code backend), neither key nor model
+        // is needed.
+        let without = Config::read(
+            |key| (key == "JUNEES_PROVIDER").then(|| "openai".into()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(without.provider, Kind::OpenAi);
     }
 
     #[test]

@@ -32,7 +32,8 @@ src/
     discord.rs         디스코드 첨부 중 이미지 고르기, CDN에서만 내려받기(리다이렉트 제한, 시간, 크기)
   web_search.rs      웹 검색 서버 도구 설정과 도구 정의, 인용 출처 목록, 압축용 검색 블록 요약
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
-  provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
+  provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한), 설정의 provider로 클라이언트 고르기(from_config), 공용 재시도(http.rs)
+    openai/          OpenAI Chat Completions 호환 클라이언트 (대화 변환: tool_calls/tool 메시지/image_url, 응답과 사용량, 오류 매핑, 스트림 조각 합치기)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
   sandbox/           bash 명령의 Landlock 실행 격리
     mod.rs             설정(sandbox, sandbox_write/read/network, 무인 실행은 require), 커널 지원(ABI) 확인, 명령마다 규칙 만들기와 auto/require 판단, 자식에 걸기, doctor용 시험 자식
@@ -193,12 +194,13 @@ src/
     claude.rs          claude --version, --online의 auth status, 환경 정리와 bubblewrap, user namespace 제한(/proc/sys)
     sandbox.rs         Landlock ABI와 sandbox 설정, bash와 같은 규칙으로 묶은 시험 sh(설정 파일 읽기 실패 확인)
     services.rs        git/gh, cron 데몬과 웹훅 서버(잠금으로 판단), 웹훅 시크릿, MCP 명령 찾기(실행 안 함), 켜진 플러그인
-    online.rs          --online: 키 확인 요청 GET /v1/models, 최신 릴리스 확인(update와 같은 요청)
+    online.rs          --online: 키 확인 요청 GET /v1/models(provider = openai면 GET <openai_base_url>/models와 모델 이름), 최신 릴리스 확인(update와 같은 요청)
     tests.rs           임시 상태 폴더, 가짜 PATH와 /proc/sys, 가짜 claude, 가짜 API로 각 점검의 ok/경고/실패
 tests/
-  common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림), 테스트 환경의 JUNEES_*/ANTHROPIC_*/CLAUDE_CODE_* 변수와 GH_TOKEN/GITHUB_TOKEN/GH_ENTERPRISE_TOKEN/GITHUB_ENTERPRISE_TOKEN/GH_CONFIG_DIR을 지우고, 인자로 받은 임시 cwd와 HOME에서 도는 바이너리 명령(junees_binary(cwd, home), 크레이트 폴더나 그 안, 그 위의 폴더는 거부, 모든 바이너리 테스트가 이것으로 시작)
+  common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림), 테스트 환경의 JUNEES_*/ANTHROPIC_*/OPENAI_*/CLAUDE_CODE_* 변수와 GH_TOKEN/GITHUB_TOKEN/GH_ENTERPRISE_TOKEN/GITHUB_ENTERPRISE_TOKEN/GH_CONFIG_DIR을 지우고, 인자로 받은 임시 cwd와 HOME에서 도는 바이너리 명령(junees_binary(cwd, home), 크레이트 폴더나 그 안, 그 위의 폴더는 거부, 모든 바이너리 테스트가 이것으로 시작)
   binary_env.rs        junees_binary가 지우는 변수와 남기는 변수, 주어진 임시 폴더에서만 돌고 크레이트 쪽 폴더는 거부하는지, 모든 바이너리 테스트가 그 헬퍼를 쓰는지 검증(명령은 실행하지 않음)
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
+  openai_client.rs     가짜 Chat Completions 서버로 OpenAI 호환 클라이언트 검증 (Bearer 키와 루프백에서 키 없이, 재시도와 재시도하지 않는 오류, 조각난 스트림과 include_usage, 병렬 도구 호출과 tool 메시지·이미지 왕복, 바이너리 -p와 junees usage 비용)
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행, 이어 간 세션의 thinking 블록 보존 검증
   secret_env.rs        기본 bash에서 API 키, 웹훅 URL, 디스코드 토큰, GitHub 토큰, Claude Code 토큰이 보이지 않는지 검증
   sandbox.rs           실제 바이너리와 가짜 API로 모델의 bash 명령이 Landlock 안에서 도는지(실행 중에 만든 경로로도 설정 파일, secrets 읽기와 memory 쓰기 실패, 작업 폴더 쓰기 성공)

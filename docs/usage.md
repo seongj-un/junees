@@ -189,3 +189,31 @@ junees usage --by source           # 터미널, discord, telegram, slack, cron, 
 - claude-code 백엔드: `/image`, `--image`, 디스코드 이미지는 "images are sent on the api backend only"로 거절한다. Claude Code에는 텍스트만 넘기므로, 파일을 읽으라고 하면 Claude Code의 Read 도구가 이미지를 연다.
 - API가 거절한 이미지: 헤더는 맞지만 데이터가 깨진 파일처럼 Junees가 미리 걸러 내지 못한 이미지 때문에 호출이 400 `invalid_request_error`로 끝나고 오류 문구에 image가 들어 있으면, 그 턴이 끝난 마지막 user 메시지(이번 입력과, 실패한 앞 턴에서 붙은 입력, 또는 도구 결과)의 이미지를 `[image removed: the API rejected the request that carried it, so it is not sent again]` 한 줄로 바꾸고(입력 이미지는 몇 개든 한 줄, 도구 결과는 출력 뒤에 그 줄) `!! the API rejected an image in this message; ...` 경고로 알린다. 기록에는 `clear_images { note }` 항목으로 남아 `-c`/`--resume`으로 이어 가도 그 이미지는 다시 가지 않고, 글은 남아 다음 입력과 함께 간다. image를 말하지 않는 400(도구 스키마, thinking 설정 등)과 컨텍스트 초과는 이미지를 그대로 둔다. 앞 턴에서 API가 이미 받아 준 이미지와 마지막 메시지가 아닌 곳의 이미지는 건드리지 않는다(앞 메시지를 바꾸면 thinking 블록이 거절되므로).
 - 한계: 한 요청에 이미지가 20개를 넘으면 API가 이미지마다 더 작은 크기 제한을 둔다(문서: 각 변 3000 px 이하 권장). Junees는 이를 세지 않으므로, 큰 스크린샷을 많이 읽은 긴 세션은 400을 받을 수 있다. 이때 걸린 이미지가 앞 턴들에 있으면 아래처럼 빠지지 않으므로 `/new`(디스코드는 `!new`)로 새로 시작한다. `/compact`는 최근 두 입력과 그 이미지를 남기므로 도움이 되지 않을 수 있다. MCP 서버가 돌려준 이미지는 지금처럼 한 줄 설명으로만 간다.
+
+## OpenAI 호환 API로 쓰기
+
+api 백엔드는 Anthropic 대신 OpenAI Chat Completions 형식의 서버를 부를 수 있다(`provider = "openai"`, 설정 전체는 [OpenAI 호환 API](configuration.md#openai-호환-api)). 도구, 승인, 세션, 압축, 서브에이전트, 이미지 입력, `junees usage`는 그대로 동작한다.
+
+Ollama(이 컴퓨터에서 도는 서버라 키가 필요 없다):
+
+```sh
+ollama pull llama3.2
+JUNEES_PROVIDER=openai OPENAI_BASE_URL=http://localhost:11434/v1 \
+  JUNEES_MODEL=llama3.2 JUNEES_CONTEXT_WINDOW=128000 junees "이 폴더에 뭐가 있어?"
+```
+
+OpenRouter(설정 파일에 두는 예):
+
+```toml
+provider = "openai"
+openai_base_url = "https://openrouter.ai/api/v1"
+openai_api_key = "sk-or-v1-..."
+model = "openai/gpt-4o-mini"
+prices = "openai/gpt-4o-mini=0.15/0.6"
+```
+
+- 모델은 도구 호출(function calling)을 지원해야 한다. 지원하지 않는 모델은 도구 없이 답만 하거나 서버가 400으로 거절한다. 로컬 모델은 도구 인자를 깨진 JSON으로 내기도 하는데, 그런 호출은 받은 글 그대로 도구에 넘겨 도구가 입력 오류로 돌려주고, 모델은 그 오류를 보고 다시 부른다.
+- 여러 도구를 한 번에 부르는 응답(`parallel_tool_calls`)은 도구 결과를 같은 순서의 `tool` 메시지로 돌려보낸다. `tool` 메시지는 글만 받으므로 `read_file`이 돌려준 이미지는 그 뒤 user 메시지에 `image_url`(data URL)로 붙인다.
+- 스트리밍(`JUNEES_STREAM`, 기본 켜짐)은 `stream: true`와 `stream_options.include_usage`로 받고, `content` 조각은 오는 대로 보여 주고 `tool_calls` 조각은 `index`별로 `arguments`를 이어 붙인다. `[DONE]` 전에 연결이 끊기면(완료 이유가 이미 왔으면 그대로 받는다) 처음부터 다시 요청한다.
+- 확장 사고, 서버 웹 검색, 프롬프트 캐시 표시는 Anthropic 전용이라 이 provider에서는 꺼진다. `junees doctor`가 provider와 주소를 보여 주고, 설정해 둔 Anthropic 전용 설정을 경고하며, `--online`이면 `GET <openai_base_url>/models`로 키와 모델 이름을 확인한다.
+

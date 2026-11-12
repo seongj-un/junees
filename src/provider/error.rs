@@ -18,17 +18,47 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    /// The conversation no longer fits the model's context window.
+    /// The conversation no longer fits the model's context window: the
+    /// Anthropic API says the prompt is too long, OpenAI-compatible
+    /// servers name the context length (OpenAI's error code
+    /// `context_length_exceeded`, which [`super::openai`] keeps as the
+    /// kind).
+    ///
+    /// Not when the output limit alone is the window or more
+    /// ([`Self::is_output_limit_too_large`]): no shorter history fits then.
     pub fn is_context_overflow(&self) -> bool {
+        if self.is_output_limit_too_large() {
+            return false;
+        }
         match self {
+            Self::Api {
+                kind: Some(kind), ..
+            } if kind == "context_length_exceeded" => true,
             Self::Api {
                 status: 400,
                 message,
                 ..
             } => {
                 let message = message.to_lowercase();
-                message.contains("prompt is too long") || message.contains("context window")
+                message.contains("prompt is too long")
+                    || message.contains("context window")
+                    || message.contains("context length")
             }
+            _ => false,
+        }
+    }
+
+    /// The output limit asked for (`max_tokens`) is the model's whole
+    /// context window or more, as vLLM and OpenAI word it for a model
+    /// with a small window: compacting the conversation cannot help,
+    /// lowering `max_tokens` does.
+    pub fn is_output_limit_too_large(&self) -> bool {
+        match self {
+            Self::Api {
+                status: 400,
+                message,
+                ..
+            } => window_and_output(message).is_some_and(|(window, output)| output >= window),
             _ => false,
         }
     }
@@ -117,6 +147,13 @@ impl fmt::Display for ProviderError {
                          to 0; models that think by default keep doing so)"
                     )?;
                 }
+                if *status == 400 && window_and_output(message).is_some() {
+                    write!(
+                        f,
+                        " (the output limit counts toward the model's context window: on a \
+                         model with a small window, lower max_tokens (JUNEES_MAX_TOKENS))"
+                    )?;
+                }
                 if self.is_web_search_disabled() {
                     write!(
                         f,
@@ -130,6 +167,41 @@ impl fmt::Display for ProviderError {
             Self::Decode(err) => write!(f, "could not parse the API response: {err}"),
         }
     }
+}
+
+/// The context window and the output limit an error message names, as
+/// vLLM and OpenAI write them: "This model's maximum context length is
+/// 4096 tokens. However, you requested 8292 tokens (100 in the messages,
+/// 8192 in the completion)", or newer vLLM: "'max_tokens' or
+/// 'max_completion_tokens' is too large: 8192. This model's maximum
+/// context length is 4096 tokens and your request has 100 input tokens".
+fn window_and_output(message: &str) -> Option<(u64, u64)> {
+    let message = message.to_lowercase();
+    let window = number_after(&message, "maximum context length is")?;
+    let output = number_before(&message, "in the completion")
+        .or_else(|| number_after(&message, "is too large:"))?;
+    Some((window, output))
+}
+
+/// The number right after `marker` in `text`.
+fn number_after(text: &str, marker: &str) -> Option<u64> {
+    let (_, rest) = text.split_once(marker)?;
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// The number right before `marker` in `text`.
+fn number_before(text: &str, marker: &str) -> Option<u64> {
+    let (head, _) = text.split_once(marker)?;
+    let head = head.trim_end();
+    let start = head
+        .rfind(|c: char| !c.is_ascii_digit())
+        .map_or(0, |at| at + 1);
+    head[start..].parse().ok()
 }
 
 impl std::error::Error for ProviderError {
@@ -176,6 +248,66 @@ mod tests {
         assert!(overflow.is_context_overflow());
         assert!(!api(400, None, "messages: field required").is_context_overflow());
         assert!(!api(500, None, "prompt is too long").is_context_overflow());
+        // OpenAI-compatible servers.
+        assert!(
+            api(
+                400,
+                Some("invalid_request_error"),
+                "This model's maximum context length is 32768 tokens. However, you requested \
+                 40000 tokens."
+            )
+            .is_context_overflow()
+        );
+        assert!(api(413, Some("context_length_exceeded"), "too long").is_context_overflow());
+        assert!(!api(400, Some("invalid_request_error"), "bad tool schema").is_context_overflow());
+    }
+
+    #[test]
+    fn an_output_limit_larger_than_the_window_is_no_overflow() {
+        // vLLM, older and newer wording, for max_tokens 8192 on a 4096 window.
+        for message in [
+            "This model's maximum context length is 4096 tokens. However, you requested 8292 \
+             tokens (100 in the messages, 8192 in the completion). Please reduce the length of \
+             the messages or completion.",
+            "'max_tokens' or 'max_completion_tokens' is too large: 8192. This model's maximum \
+             context length is 4096 tokens and your request has 100 input tokens (8192 > 4096 \
+             - 100).",
+        ] {
+            let err = api(400, Some("BadRequestError"), message);
+            assert!(err.is_output_limit_too_large(), "{message}");
+            assert!(!err.is_context_overflow(), "{message}");
+            assert!(err.to_string().contains("lower max_tokens"), "{err}");
+            // OpenAI's code does not make it one either.
+            let coded = api(400, Some("context_length_exceeded"), message);
+            assert!(!coded.is_context_overflow(), "{message}");
+        }
+        // A long conversation with a small output limit is an overflow,
+        // and still names the limit.
+        let long = api(
+            400,
+            Some("invalid_request_error"),
+            "This model's maximum context length is 32768 tokens. However, you requested 40000 \
+             tokens (31808 in the messages, 8192 in the completion).",
+        );
+        assert!(long.is_context_overflow());
+        assert!(!long.is_output_limit_too_large());
+        assert!(long.to_string().contains("JUNEES_MAX_TOKENS"), "{long}");
+        // Without the numbers nothing changes.
+        let plain = api(
+            400,
+            None,
+            "This model's maximum context length is 8192 tokens.",
+        );
+        assert!(plain.is_context_overflow());
+        assert!(!plain.to_string().contains("JUNEES_MAX_TOKENS"), "{plain}");
+        assert!(
+            !api(
+                500,
+                None,
+                "maximum context length is 1 tokens (0 in the messages, 9 in the completion)"
+            )
+            .is_output_limit_too_large()
+        );
     }
 
     #[test]

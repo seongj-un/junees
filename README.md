@@ -5,6 +5,7 @@ Rust로 만드는 AI 에이전트 하네스. LLM이 도구를 호출하며 일�
 
 - 단일 바이너리: `junees` 하나로 대화, 한 번 실행, 장기 작업, 채팅 봇, 예약 작업, 웹훅 서버를 모두 돌린다.
 - 두 가지 백엔드: Anthropic API 키로 Junees 자신의 에이전트를 돌리거나(`api`), Claude Pro/Max 구독으로 로그인한 공식 Claude Code CLI에 맡긴다(`claude-code`).
+- OpenAI 호환 API: `api` 백엔드는 Anthropic 대신 OpenAI Chat Completions 형식의 서버(OpenAI, OpenRouter, Ollama, vLLM, LM Studio)도 부른다(`provider = "openai"`, [OpenAI 호환 API](docs/configuration.md#openai-호환-api)).
 - 장기 작업: 큰 목표를 검증 가능한 기능 목록으로 쪼개고, 매번 새 컨텍스트로 시작하는 세션들이 기능 하나씩 구현, 검증, 커밋한다. 완료 판정은 모델이 아니라 하네스가 검증 명령의 종료 코드로 한다.
 - 어디서나: 터미널, 디스코드·텔레그램 봇과 슬랙 앱, 일정에 맞춘 예약 작업, GitHub 웹훅으로 시작하는 PR 리뷰와 merge 흐름.
 - 기억과 확장: 세션 기록과 검색, 영구 메모리, 스킬, 프로젝트 지침 파일, 서브에이전트, MCP 서버, 플러그인.

@@ -284,7 +284,8 @@ pub struct Transcript {
     pub messages: Vec<Message>,
     pub usage: Usage,
     /// Size of the conversation as of the last model call that searched
-    /// nothing (see [`Usage::context_tokens`]); 0 until one is measured,
+    /// nothing and reported its usage (see [`Usage::context_tokens`]); 0
+    /// until one is measured,
     /// and again after a compaction.
     pub context_tokens: u64,
     /// Estimated size of what the history gained since `context_tokens`
@@ -345,8 +346,11 @@ impl Transcript {
                 // tools"), so it says nothing about the size. Its reply,
                 // search results included, is estimated instead, on top of
                 // the last size measured, until a call without a search
-                // measures it again.
-                if usage.web_searches() == 0 {
+                // measures it again. A call that reported no usage at all
+                // (an OpenAI-compatible server that leaves it out, or a
+                // stream cut off before its usage chunk) measured nothing
+                // either: a size of 0 would keep compaction from starting.
+                if usage.web_searches() == 0 && usage.context_tokens() > 0 {
                     self.context_tokens = usage.context_tokens();
                     self.unmeasured_tokens = 0;
                     self.reply_measured = true;
@@ -2664,6 +2668,29 @@ mod tests {
         );
         transcript.apply(Entry::Usage(plain(300)));
         assert_eq!(transcript.context_tokens, 300);
+    }
+
+    #[test]
+    fn a_call_without_usage_keeps_the_last_size_and_estimates_its_reply() {
+        let mut transcript = Transcript::default();
+        let reply = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::text("a reply of some length")],
+        };
+        transcript.apply(Entry::Usage(Usage {
+            input_tokens: 100,
+            ..Default::default()
+        }));
+        // Measured with its call.
+        transcript.apply(Entry::Message(reply.clone()));
+        assert_eq!(transcript.context_size(), 100);
+        // The server sent no usage for the next call.
+        transcript.apply(Entry::Usage(Usage::default()));
+        transcript.apply(Entry::Message(reply.clone()));
+        let estimate = estimate_tokens(&reply.content);
+        assert!(estimate > 0);
+        assert_eq!(transcript.context_tokens, 100);
+        assert_eq!(transcript.context_size(), 100 + estimate);
     }
 
     #[test]

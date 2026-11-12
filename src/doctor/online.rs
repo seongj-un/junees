@@ -106,8 +106,14 @@ pub(super) async fn slack(report: &mut Report, settings: &Settings) {
     }
 }
 
-/// `GET /v1/models?limit=1` with the key: no tokens are used.
+/// `GET /v1/models?limit=1` with the key: no tokens are used. Only on
+/// the Anthropic provider.
 pub(super) async fn api_key(report: &mut Report, settings: &Settings) {
+    let provider =
+        crate::provider::Kind::parse(settings.get(crate::provider::PROVIDER_ENV).as_deref());
+    if provider.is_ok_and(|kind| kind != crate::provider::Kind::Anthropic) {
+        return;
+    }
     let Some(key) = settings.get("ANTHROPIC_API_KEY") else {
         report.skip(AREA, "API key", "no key to check");
         return;
@@ -168,5 +174,133 @@ pub(super) async fn api_key(report: &mut Report, settings: &Settings) {
                 "try again later; check base_url if it stays",
             ),
         },
+    }
+}
+
+/// With provider = openai, `GET <openai_base_url>/models` with the key
+/// (none for a server on this machine without one): whether the server
+/// takes it, and whether it lists the model. No tokens are used.
+pub(super) async fn openai_models(report: &mut Report, settings: &Settings) {
+    use crate::provider::{Kind, PROVIDER_ENV, openai};
+    const NAME: &str = "OpenAI-compatible API";
+    if Kind::parse(settings.get(PROVIDER_ENV).as_deref()).ok() != Some(Kind::OpenAi) {
+        return;
+    }
+    let get = |key: &str| {
+        settings
+            .get(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let Ok(openai) = openai::Settings::read(get) else {
+        report.skip(AREA, NAME, "openai_base_url does not read (see settings)");
+        return;
+    };
+    if openai.api_key.is_none() && !openai.is_local() {
+        report.skip(AREA, NAME, "no key to check");
+        return;
+    }
+    let url = format!("{}/models", openai.base_url);
+    let host = reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "the API".to_string());
+    let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            report.warn(
+                AREA,
+                NAME,
+                format!("cannot set up the HTTP client: {}", err.without_url()),
+                "try again",
+            );
+            return;
+        }
+    };
+    let mut request = client.get(&url);
+    if let Some(key) = &openai.api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            report.warn(
+                AREA,
+                NAME,
+                format!(
+                    "no answer from {host}: {}",
+                    crate::notify::describe(err, TIMEOUT)
+                ),
+                "check the network and openai_base_url (OPENAI_BASE_URL); is the server running?",
+            );
+            return;
+        }
+    };
+    let status = response.status().as_u16();
+    if matches!(status, 401 | 403) {
+        report.fail(
+            AREA,
+            NAME,
+            format!("{host} refused the key (HTTP {status})"),
+            "check openai_api_key (OPENAI_API_KEY)",
+        );
+        return;
+    }
+    if !(200..300).contains(&status) {
+        report.warn(
+            AREA,
+            NAME,
+            format!("{host} answered HTTP {status} to GET /models, so the key is not confirmed"),
+            "try again later; check openai_base_url if it stays",
+        );
+        return;
+    }
+    let models: Vec<String> = match response.json::<serde_json::Value>().await {
+        Ok(body) => body["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model["id"].as_str().map(str::to_string))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let taken = if openai.api_key.is_some() {
+        format!("{host} accepts the key")
+    } else {
+        format!("{host} answers without a key")
+    };
+    match settings
+        .get("JUNEES_MODEL")
+        .map(|model| model.trim().to_string())
+    {
+        Some(model) if !models.is_empty() && !models.contains(&model) => report.warn(
+            AREA,
+            NAME,
+            format!(
+                "{taken}, but the model `{model}` is not among the {} models it lists",
+                models.len()
+            ),
+            format!(
+                "set model to one it lists, such as {}",
+                models
+                    .iter()
+                    .take(5)
+                    .map(|model| format!("`{model}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Some(model) if !models.is_empty() => {
+            report.ok(AREA, NAME, format!("{taken} and lists the model `{model}`"))
+        }
+        _ => report.ok(
+            AREA,
+            NAME,
+            format!("{taken} ({} models listed)", models.len()),
+        ),
     }
 }

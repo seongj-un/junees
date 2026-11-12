@@ -13,12 +13,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 /// Variables that change what the binary does or which account it uses:
-/// all of Junees's own settings, the API's, Claude Code's, the GitHub
+/// all of Junees's own settings, the APIs', Claude Code's, the GitHub
 /// tokens and `gh`'s own login folder. A developer's
 /// `JUNEES_BACKEND=claude-code` would otherwise make a test call the real
 /// `claude`, and their `GH_CONFIG_DIR` would give a test's `gh` their
 /// login even under a temporary HOME.
-pub const SCRUBBED_PREFIXES: &[&str] = &["JUNEES_", "ANTHROPIC_", "CLAUDE_CODE_"];
+pub const SCRUBBED_PREFIXES: &[&str] = &["JUNEES_", "ANTHROPIC_", "OPENAI_", "CLAUDE_CODE_"];
 pub const SCRUBBED_NAMES: &[&str] = &[
     "GH_TOKEN",
     "GITHUB_TOKEN",
