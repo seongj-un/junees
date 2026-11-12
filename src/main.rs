@@ -487,6 +487,16 @@ fn api_agent(
     mcp.register(&mut tools);
     plugins.register(&mut tools);
     junees::github::register(&mut tools, &config.github, cwd, gate.is_some());
+    let browser = junees::browser::register(
+        &mut tools,
+        &config.browser,
+        &config.tools.hidden_env,
+        if gate.is_some() {
+            junees::browser::Run::Asked
+        } else {
+            junees::browser::Run::NotAsked
+        },
+    );
     let mut agent = Agent::new(
         make_provider(config)?,
         tools,
@@ -505,7 +515,8 @@ fn api_agent(
     if let Some(gate) = gate {
         let gate = gate
             .with_external_tools(mcp.external_tools())
-            .with_external_tools(plugins.external_tools());
+            .with_external_tools(plugins.external_tools())
+            .with_questions(junees::browser::TOOL_NAME, browser);
         agent = agent.with_gate(Box::new(gate));
     }
     if let Some(after_turn) = plugins.after_turn() {

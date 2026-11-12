@@ -1545,3 +1545,61 @@ async fn the_sandbox_is_tried_with_a_confined_child() {
         "JUNEES_SANDBOX must be auto, require or off",
     );
 }
+
+#[tokio::test]
+async fn the_browser_program_and_its_version() {
+    let mut fixture = Fixture::new();
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "browser",
+        "program",
+        Status::Skip,
+        "the browser tool is off",
+    );
+
+    // On, but nothing on PATH.
+    fixture.set("JUNEES_BROWSER", "on");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "browser",
+        "program",
+        Status::Fail,
+        "no browser found",
+    );
+
+    // A program on PATH that prints no version.
+    fixture.program("chromium");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "browser",
+        "program",
+        Status::Fail,
+        "--version` failed",
+    );
+
+    // The configured program, run with `--version` only.
+    let browser = fake_claude(
+        &fixture.root,
+        "[ \"$1\" = --version ] && echo 'Chromium 145.0.7632.6' && exit 0",
+    );
+    fixture.set("JUNEES_BROWSER_PATH", &browser.display().to_string());
+    fixture.set("JUNEES_BROWSER_NO_SANDBOX", "1");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "browser",
+        "program",
+        Status::Ok,
+        &format!("Chromium 145.0.7632.6 ({})", browser.display()),
+    );
+    expect(&report, "browser", "program", Status::Ok, "sandbox off");
+
+    // Off, with a path set: still looked at, but only a warning.
+    fixture.set("JUNEES_BROWSER", "off");
+    fixture.set("JUNEES_BROWSER_PATH", "/nonexistent/chrome");
+    let report = fixture.run(false).await;
+    expect(&report, "browser", "program", Status::Warn, "is not a file");
+}

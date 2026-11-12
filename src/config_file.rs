@@ -88,6 +88,11 @@ pub const KEYS: &[(&str, &str)] = &[
     ("github_repos", "JUNEES_GITHUB_REPOS"),
     ("github_allow_unattended", "JUNEES_GITHUB_ALLOW_UNATTENDED"),
     ("github_flow_merge", "JUNEES_GITHUB_FLOW_MERGE"),
+    ("browser", "JUNEES_BROWSER"),
+    ("browser_path", "JUNEES_BROWSER_PATH"),
+    ("browser_allow_private", "JUNEES_BROWSER_ALLOW_PRIVATE"),
+    ("browser_unattended", "JUNEES_BROWSER_UNATTENDED"),
+    ("browser_no_sandbox", "JUNEES_BROWSER_NO_SANDBOX"),
 ];
 
 const HEADER: &str = "\

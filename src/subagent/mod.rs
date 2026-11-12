@@ -30,7 +30,7 @@ pub const NAME: &str = "delegate";
 /// Tools a subagent does not get: `delegate` itself (subagents do not
 /// delegate further), and the tools that change the user's memory and
 /// skills, which only the conversation with the user should touch.
-pub const WITHHELD: &[&str] = &[NAME, "memory", "skill_manage"];
+pub const WITHHELD: &[&str] = &[NAME, "memory", "skill_manage", crate::browser::TOOL_NAME];
 
 /// Tasks one `delegate` call may hold.
 pub const MAX_TASKS: usize = 10;
