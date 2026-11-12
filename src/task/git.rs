@@ -131,6 +131,9 @@ pub struct Repo {
     sandbox: Option<Sandbox>,
     /// The git folder fixed with `GIT_DIR` ([`Repo::pinned`]).
     git_dir: Option<PathBuf>,
+    /// Why confined git may not run here: its git folder lies outside
+    /// the work tree and nothing shows it belongs to it ([`GitDir`]).
+    unowned: Option<String>,
 }
 
 impl Repo {
@@ -140,28 +143,36 @@ impl Repo {
             root: root.into(),
             sandbox: None,
             git_dir: None,
+            unowned: None,
         }
     }
 
     /// Git in `root` under `sandbox`, the sandbox of the sessions' bash
     /// there ([`Sandbox::for_tools`]; `None` when their commands are not
-    /// confined). In a linked worktree whose git folders lie outside
-    /// `root` ([`linked_git_dir`]), git may also write the repository's
-    /// git folder; the sessions' commands still may not. Its git folder
-    /// is then pinned like [`Repo::pinned`] to the one checked here: a
-    /// confined process left running could swap the `.git` file between
-    /// that check and a later command, which would then run with write
-    /// access to the common folder for a git folder of its own making
-    /// (settings with a filter).
+    /// confined). When the git folder lies outside `root` and belongs to
+    /// it ([`outside_git_dir`]: a linked worktree, a submodule, a
+    /// `--separate-git-dir` repository), git may also write that folder
+    /// (for a linked worktree, the repository's common one); the
+    /// sessions' commands still may not. The git folder is then pinned
+    /// like [`Repo::pinned`] to the one checked here: a confined process
+    /// left running could swap the `.git` file between that check and a
+    /// later command, which would then run with that write access for a
+    /// git folder of its own making (settings with a filter). A git
+    /// folder outside `root` that does not belong to it gets no write,
+    /// and confined git refuses to run there.
     pub fn confined(root: impl Into<PathBuf>, sandbox: Option<Sandbox>) -> Self {
         let root = root.into();
-        let linked = sandbox.as_ref().and_then(|_| linked_git_dir(&root));
-        let git_dir = linked.as_ref().map(|linked| linked.own.clone());
-        let sandbox = sandbox.map(|sandbox| sandbox.with_write(linked.map(|linked| linked.common)));
+        let (git_dir, write, unowned) = match sandbox.as_ref().map(|_| outside_git_dir(&root)) {
+            Some(GitDir::Outside { own, write }) => (Some(own), Some(write), None),
+            Some(GitDir::Unowned(why)) => (None, None, Some(why)),
+            Some(GitDir::Inside) | None => (None, None, None),
+        };
+        let sandbox = sandbox.map(|sandbox| sandbox.with_write(write));
         Self {
             root,
             sandbox,
             git_dir,
+            unowned,
         }
     }
 
@@ -173,6 +184,7 @@ impl Repo {
             root: root.into(),
             sandbox: None,
             git_dir: Some(git_dir.into()),
+            unowned: None,
         }
     }
 
@@ -202,6 +214,9 @@ impl Repo {
             Some(Prepared::Confined(confinement, _)) => Some(confinement),
             Some(Prepared::Refused(reason)) => bail!("git was not run: {reason}"),
         };
+        if let (Some(_), Some(why)) = (&confinement, &self.unowned) {
+            bail!("git was not run: {why}");
+        }
         if let Some(confinement) = &confinement {
             confinement.apply_std(&mut command);
         }
@@ -253,23 +268,31 @@ impl Repo {
     }
 }
 
-/// The git folders of a linked worktree ([`linked_git_dir`]).
-struct Linked {
-    /// The worktree's own git folder, `<common>/worktrees/<name>`.
-    own: PathBuf,
-    /// The repository's common git folder.
-    common: PathBuf,
+/// Where the git folder of a work tree under the sandbox is
+/// ([`outside_git_dir`]).
+enum GitDir {
+    /// In the work tree (`.git` is a folder), or git found none: git runs
+    /// as it is.
+    Inside,
+    /// Outside the work tree and belonging to it: harness git may write
+    /// `write`, with `own` pinned.
+    Outside { own: PathBuf, write: PathBuf },
+    /// Outside the work tree, and nothing shows it belongs to it: why.
+    Unowned(String),
 }
 
-/// The git folders when `root` is a linked worktree (`git worktree add`)
-/// whose own git folder lies outside it: the harness's commits write in
-/// the common one (index, objects, the branch), which the sandbox of
-/// `root` does not allow. Only a folder that names this work tree back
-/// counts (`<common>/worktrees/<name>/gitdir` is `root/.git`), so a `.git`
+/// Where the git folder of `root` is. The harness's commits write in it
+/// (index, objects, the branch), which the sandbox of `root` does not
+/// allow when it lies outside `root`. It belongs to `root` only when
+/// `root/.git` points at it and the folder, which a session cannot write,
+/// names `root` back: a linked worktree's `gitdir` file
+/// (`<common>/worktrees/<name>/gitdir` is `root/.git`; the common folder
+/// is written then), or `core.worktree` in its config (submodules,
+/// `--separate-git-dir` after `git config core.worktree`). So a `.git`
 /// file a session pointed at another repository gets no write into that
 /// one.
-fn linked_git_dir(root: &Path) -> Option<Linked> {
-    let out = git(
+fn outside_git_dir(root: &Path) -> GitDir {
+    let Ok(out) = git(
         root,
         &[
             "rev-parse",
@@ -277,18 +300,87 @@ fn linked_git_dir(root: &Path) -> Option<Linked> {
             "--git-dir",
             "--git-common-dir",
         ],
-    )
-    .ok()?;
-    let mut lines = out.lines();
-    let own = std::fs::canonicalize(lines.next()?).ok()?;
-    let common = std::fs::canonicalize(lines.next()?).ok()?;
-    let root = std::fs::canonicalize(root).ok()?;
-    if own.starts_with(&root) || own.parent()? != common.join("worktrees") {
-        return None;
+    ) else {
+        return GitDir::Inside;
+    };
+    let mut lines = out.lines().map(std::fs::canonicalize);
+    let (Some(Ok(own)), Some(Ok(common)), Ok(root)) =
+        (lines.next(), lines.next(), std::fs::canonicalize(root))
+    else {
+        return GitDir::Inside;
+    };
+    if own.starts_with(&root) {
+        return GitDir::Inside;
     }
-    let back = std::fs::read_to_string(own.join("gitdir")).ok()?;
-    let back = std::fs::canonicalize(own.join(back.trim_end_matches('\n'))).ok()?;
-    (back == root.join(".git")).then_some(Linked { own, common })
+    let unowned = |why: &str| {
+        GitDir::Unowned(format!(
+            "its git folder {} lies outside the working folder {} and {why}, so the \
+             sandboxed git may not write it",
+            own.display(),
+            root.display()
+        ))
+    };
+    if dot_git_target(&root).as_ref() != Some(&own) {
+        return unowned("`.git` does not point at it");
+    }
+    if own.parent() == Some(&common.join("worktrees")) {
+        let back = std::fs::read_to_string(own.join("gitdir"))
+            .ok()
+            .and_then(|back| std::fs::canonicalize(own.join(back.trim_end_matches('\n'))).ok());
+        return if back == Some(root.join(".git")) {
+            GitDir::Outside { own, write: common }
+        } else {
+            unowned("its `gitdir` file does not name this work tree")
+        };
+    }
+    if own != common {
+        return unowned("it is no linked worktree's");
+    }
+    let config = own.join("config");
+    let config = config.to_string_lossy();
+    let named = git(
+        &root,
+        &[
+            "config",
+            "--file",
+            &config,
+            "--no-includes",
+            "--get",
+            "core.worktree",
+        ],
+    );
+    match named {
+        Ok(named) => {
+            let named = std::fs::canonicalize(own.join(named.trim_end_matches('\n'))).ok();
+            if named.as_ref() == Some(&root) {
+                GitDir::Outside {
+                    write: own.clone(),
+                    own,
+                }
+            } else {
+                unowned("its core.worktree names another folder")
+            }
+        }
+        Err(_) => unowned(&format!(
+            "names no work tree (core.worktree; for a `git init --separate-git-dir` \
+             repository, run `git config core.worktree {}` once)",
+            root.display()
+        )),
+    }
+}
+
+/// The folder `root/.git` stands for: the `gitdir:` of a `.git` file
+/// (relative to `root`), or the `.git` folder itself.
+fn dot_git_target(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if !std::fs::metadata(&dot_git).ok()?.is_file() {
+        return std::fs::canonicalize(dot_git).ok();
+    }
+    let text = std::fs::read_to_string(&dot_git).ok()?;
+    let target = text
+        .strip_prefix("gitdir: ")?
+        .trim_end_matches(['\n', '\r']);
+    std::fs::canonicalize(root.join(target)).ok()
 }
 
 /// New files larger than this (1 MiB) stay out of harness commits: build
@@ -1033,6 +1125,82 @@ mod tests {
         let side = git(main, &["log", "--format=%s", "side"]).unwrap();
         assert_eq!(side, "on side\nfirst\n");
         assert_eq!(subjects(other.path()), ["other"]);
+    }
+
+    #[test]
+    fn a_separate_git_folder_needs_core_worktree_to_commit_in_the_sandbox() {
+        if !landlock() {
+            return;
+        }
+        let trees = tempfile::tempdir().unwrap();
+        let root = trees.path().join("repo");
+        let git_dir = tempfile::tempdir().unwrap();
+        let git_dir = git_dir.path().join("gitdir");
+        let (shown_dir, shown_root) = (git_dir.to_string_lossy(), root.to_string_lossy());
+        git(
+            trees.path(),
+            &["init", "-q", "--separate-git-dir", &shown_dir, &shown_root],
+        )
+        .unwrap();
+        for (key, value) in [
+            ("user.name", "Junees Test"),
+            ("user.email", "test@junees.invalid"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&root, &["config", key, value]).unwrap();
+        }
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        commit_all(&root, "first").unwrap();
+
+        // Nothing in the git folder names the work tree: refused, with how
+        // to fix it.
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        let refused = Repo::confined(&root, Some(sandbox()));
+        let err = refused.commit_all("refused").unwrap_err().to_string();
+        assert!(err.contains("git config core.worktree"), "{err}");
+
+        git(&root, &["config", "core.worktree", &shown_root]).unwrap();
+        let confined = Repo::confined(&root, Some(sandbox()));
+        assert!(confined.commit_all("second").unwrap().made);
+        assert_eq!(subjects(&root), ["second", "first"]);
+    }
+
+    #[test]
+    fn a_submodule_commits_in_the_sandbox() {
+        if !landlock() {
+            return;
+        }
+        let source = repo();
+        std::fs::write(source.path().join("s.txt"), "s").unwrap();
+        commit_all(source.path(), "source").unwrap();
+        let outer = repo();
+        let shown = source.path().to_string_lossy();
+        git(
+            outer.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &shown,
+                "sub",
+            ],
+        )
+        .unwrap();
+        let sub = outer.path().join("sub");
+        for (key, value) in [
+            ("user.name", "Junees Test"),
+            ("user.email", "test@junees.invalid"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&sub, &["config", key, value]).unwrap();
+        }
+        assert!(std::fs::metadata(sub.join(".git")).unwrap().is_file());
+        std::fs::write(sub.join("t.txt"), "t").unwrap();
+        let confined = Repo::confined(&sub, Some(sandbox()));
+        assert!(confined.commit_all("in sub").unwrap().made);
+        assert_eq!(subjects(&sub), ["in sub", "source"]);
     }
 
     #[test]
