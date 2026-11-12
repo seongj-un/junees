@@ -2,6 +2,7 @@
 
 mod bash;
 mod edit_file;
+mod file_access;
 pub mod gh_command;
 mod instruction_files;
 mod policy;
@@ -17,6 +18,7 @@ pub use bash::Bash;
 pub(crate) use bash::testing;
 pub(crate) use bash::{Capture, GroupGuard, own_session};
 pub use edit_file::EditFile;
+pub use file_access::{UNATTENDED_CREDENTIALS, unattended_folder_warning};
 pub(crate) use policy::resolve;
 pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};
 pub use read_file::ReadFile;

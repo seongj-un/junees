@@ -410,6 +410,104 @@ async fn webhook_hides(layout: &Layout, command: &str, secret: &str) {
 }
 
 #[tokio::test]
+async fn unattended_runs_cannot_read_home_credentials() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let files = [
+        (".ssh/id_ed25519", "ssh-private"),
+        (".ssh/deploy_key", "other-private"),
+        (".ssh/id_ed25519.pub", "ssh-public"),
+        (".ssh/known_hosts", "known-host"),
+        (".aws/credentials", "aws-secret"),
+    ];
+    for (path, text) in files {
+        std::fs::create_dir_all(home.join(path).parent().unwrap()).unwrap();
+        std::fs::write(home.join(path), format!("{text}\n")).unwrap();
+    }
+    // A credential folder that is a link: its target is hidden too.
+    std::fs::create_dir_all(layout.path("outside/kube")).unwrap();
+    std::fs::write(layout.path("outside/kube/config"), "kube-token\n").unwrap();
+    std::os::unix::fs::symlink(layout.path("outside/kube"), home.join(".kube")).unwrap();
+    let mut command = String::new();
+    for path in files.iter().map(|(path, _)| home.join(path)).chain([
+        layout.path("outside/kube/config"),
+        home.join(".kube/config"),
+    ]) {
+        command.push_str(&format!("cat {} 2>/dev/null; ", path.display()));
+    }
+    let tools = |webhook, unattended, read: Option<Vec<PathBuf>>| ToolSettings {
+        settings_file: Some(layout.settings_file()),
+        sandbox: Some(Settings {
+            unattended,
+            read,
+            ..settings()
+        }),
+        webhook,
+        ..ToolSettings::default()
+    };
+    let work = layout.path("work");
+    let shows = |output: &ToolOutput, texts: &[&str]| {
+        for text in texts {
+            assert!(output.content.contains(text), "{text}: {}", output.content);
+        }
+    };
+    let hides = |output: &ToolOutput, texts: &[&str]| {
+        for text in texts {
+            assert!(!output.content.contains(text), "{text}: {}", output.content);
+        }
+    };
+    let all = [
+        "ssh-private",
+        "other-private",
+        "ssh-public",
+        "known-host",
+        "aws-secret",
+        "kube-token",
+    ];
+    let attended = run(
+        &work,
+        Sandbox::for_tools(&tools(false, false, None)).unwrap(),
+        &command,
+    )
+    .await;
+    shows(&attended, &all);
+    // A scheduled job keeps ssh's public files.
+    let cron = run(
+        &work,
+        Sandbox::for_tools(&tools(false, true, None)).unwrap(),
+        &command,
+    )
+    .await;
+    shows(&cron, &["ssh-public", "known-host"]);
+    hides(
+        &cron,
+        &["ssh-private", "other-private", "aws-secret", "kube-token"],
+    );
+    // Naming ~/.ssh in `sandbox_read` gives a job its keys back, and only
+    // those; naming `/` gives nothing back.
+    let read = Some(vec![PathBuf::from("/"), home.join(".ssh")]);
+    let keys = run(
+        &work,
+        Sandbox::for_tools(&tools(false, true, read.clone())).unwrap(),
+        &command,
+    )
+    .await;
+    shows(&keys, &["ssh-private", "other-private", "ssh-public"]);
+    hides(&keys, &["aws-secret", "kube-token"]);
+    // A webhook run reads none of them, whatever `sandbox_read` says.
+    let webhook = run(
+        &work,
+        Sandbox::for_tools(&tools(true, true, read)).unwrap(),
+        &command,
+    )
+    .await;
+    hides(&webhook, &all);
+}
+
+#[tokio::test]
 async fn reads_can_be_narrowed() {
     if !landlock() {
         return;

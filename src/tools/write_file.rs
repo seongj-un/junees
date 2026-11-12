@@ -3,23 +3,34 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{SettingsFile, Tool, ToolOutput, ToolSettings, str_arg};
+use super::file_access::FileAccess;
+use super::{Tool, ToolOutput, ToolSettings, str_arg};
 
 /// Writes a whole file, creating parent directories as needed.
 #[derive(Default)]
 pub struct WriteFile {
-    settings_file: Option<SettingsFile>,
+    access: FileAccess,
     /// The instruction file names it refuses ([`ToolSettings::protected_instruction_files`]).
     instruction_files: Vec<String>,
 }
 
 impl WriteFile {
-    /// Refuses the settings file of `settings`, and in a webhook run the
-    /// project instruction files.
+    /// Refuses the settings file of `settings`, in a webhook run the
+    /// project instruction files, and in an unattended run paths outside
+    /// its folders ([`FileAccess`]).
     pub fn with_settings(settings: &ToolSettings) -> Self {
         Self {
-            settings_file: settings.settings_file.clone(),
+            access: FileAccess::new(settings),
             instruction_files: settings.protected_instruction_files(),
+        }
+    }
+
+    /// A tool with the rules of `access` (tests).
+    #[cfg(test)]
+    pub(crate) fn with_access(access: FileAccess) -> Self {
+        Self {
+            access,
+            ..Self::default()
         }
     }
 }
@@ -55,14 +66,14 @@ impl Tool for WriteFile {
             Ok(content) => content,
             Err(err) => return err,
         };
-        if let Some(file) = &self.settings_file
+        if let Some(file) = self.access.settings_file()
             && file.is(Path::new(path))
         {
             return ToolOutput::error(file.refusal(path));
         }
         if let Some(folder) = self
-            .settings_file
-            .as_ref()
+            .access
+            .settings_file()
             .and_then(|file| file.data_folder(Path::new(path)))
         {
             return ToolOutput::error(folder.refusal(path));
@@ -73,16 +84,31 @@ impl Tool for WriteFile {
             return ToolOutput::error(super::instruction_files::refusal(path, name));
         }
 
-        if let Some(parent) = Path::new(path).parent()
-            && !parent.as_os_str().is_empty()
-            && let Err(err) = tokio::fs::create_dir_all(parent).await
-        {
-            return ToolOutput::error(format!("cannot create {}: {err}", parent.display()));
-        }
-        match tokio::fs::write(path, content).await {
-            Ok(()) => ToolOutput::ok(format!("wrote {} bytes to {path}", content.len())),
-            Err(err) => ToolOutput::error(format!("cannot write {path}: {err}")),
-        }
+        let access = self.access.clone();
+        let names = self.instruction_files.clone();
+        let (owned, content) = (path.to_string(), content.to_string());
+        // One blocking call from the checks to the rename: dropping this
+        // future (a cancelled turn) cannot stop it half way.
+        tokio::task::spawn_blocking(move || write(&access, &names, &owned, &content))
+            .await
+            .unwrap_or_else(|err| ToolOutput::error(format!("cannot write {path}: {err}")))
+    }
+}
+
+/// Writes `content` to `path`: its folder (made when missing) opened and
+/// checked, the new content renamed over the name, or written in place
+/// when the folder has no room for a temporary file.
+fn write(access: &FileAccess, names: &[String], path: &str, content: &str) -> ToolOutput {
+    let target = match access.open_write(path, true) {
+        Ok(target) => target,
+        Err(refusal) => return ToolOutput::error(refusal.message(path, "write")),
+    };
+    if let Some(name) = super::instruction_files::path_named(target.real(), names) {
+        return ToolOutput::error(super::instruction_files::refusal(path, name));
+    }
+    match target.replace(content.as_bytes(), true) {
+        Ok(()) => ToolOutput::ok(format!("wrote {} bytes to {path}", content.len())),
+        Err(err) => ToolOutput::error(format!("cannot write {path}: {err}")),
     }
 }
 
@@ -118,10 +144,10 @@ mod tests {
         let (_dir, root, file) = crate::tools::settings_file::testing::home();
         let config = root.join(".junees/config.toml");
         std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
-        let tool = WriteFile {
+        let tool = WriteFile::with_settings(&ToolSettings {
             settings_file: Some(file),
-            ..WriteFile::default()
-        };
+            ..ToolSettings::default()
+        });
         for path in [
             config.clone(),
             root.join(".junees/sessions/../config.toml"),
@@ -156,10 +182,10 @@ mod tests {
         let (_dir, root, file) = crate::tools::settings_file::testing::home();
         let user = root.join(".junees/memory/user.md");
         std::os::unix::fs::symlink(&user, root.join("link")).unwrap();
-        let tool = WriteFile {
+        let tool = WriteFile::with_settings(&ToolSettings {
             settings_file: Some(file),
-            ..WriteFile::default()
-        };
+            ..ToolSettings::default()
+        });
         for (path, tool_name) in [
             (user.clone(), "memory"),
             (root.join(".junees/sessions/../memory/user.md"), "memory"),

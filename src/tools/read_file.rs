@@ -3,15 +3,14 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use std::io::Read as _;
 use std::path::Path;
-
-use tokio::io::AsyncReadExt;
 
 use crate::images::{self, Image, MediaType};
 
+use super::file_access::FileAccess;
 use super::{
-    MAX_FILE_BYTES, SettingsFile, Tool, ToolOutput, ToolSettings, opt_u64_arg, str_arg,
-    truncate_middle,
+    MAX_FILE_BYTES, Tool, ToolOutput, ToolSettings, opt_u64_arg, str_arg, truncate_middle,
 };
 
 const DEFAULT_LIMIT: u64 = 2000;
@@ -21,15 +20,22 @@ const MAX_OUTPUT_CHARS: usize = 50_000;
 /// an image the model looks at ([`crate::images`]).
 #[derive(Default)]
 pub struct ReadFile {
-    settings_file: Option<SettingsFile>,
+    access: FileAccess,
 }
 
 impl ReadFile {
-    /// Refuses the settings file of `settings`.
+    /// Refuses the settings file of `settings`, and in an unattended run
+    /// paths outside its folders ([`FileAccess`]).
     pub fn with_settings(settings: &ToolSettings) -> Self {
         Self {
-            settings_file: settings.settings_file.clone(),
+            access: FileAccess::new(settings),
         }
+    }
+
+    /// A tool with the rules of `access` (tests).
+    #[cfg(test)]
+    pub(crate) fn with_access(access: FileAccess) -> Self {
+        Self { access }
     }
 }
 
@@ -71,32 +77,17 @@ impl Tool for ReadFile {
             Ok(limit) => limit.unwrap_or(DEFAULT_LIMIT).max(1) as usize,
             Err(err) => return err,
         };
-        if let Some(file) = &self.settings_file
+        if let Some(file) = self.access.settings_file()
             && file.is(Path::new(path))
         {
             return ToolOutput::error(file.refusal(path));
         }
 
-        match tokio::fs::metadata(path).await {
-            Ok(meta) if !meta.is_file() => {
-                return ToolOutput::error(format!("{path} is not a regular file"));
-            }
-            Ok(meta) if meta.len() > MAX_FILE_BYTES => {
-                if MediaType::detect(&head(path).await).is_some() {
-                    return ToolOutput::error(format!("{path}: {}", images::too_large(meta.len())));
-                }
-                return ToolOutput::error(format!(
-                    "{path} is {} bytes; read_file reads files up to {} MB. \
-                     Use bash (head, tail, sed -n, grep) to look at parts of it.",
-                    meta.len(),
-                    MAX_FILE_BYTES / (1024 * 1024)
-                ));
-            }
-            Ok(_) => {}
-            Err(err) => return ToolOutput::error(format!("cannot read {path}: {err}")),
-        }
-        let bytes = match tokio::fs::read(path).await {
-            Ok(bytes) => bytes,
+        let access = self.access.clone();
+        let owned = path.to_string();
+        let bytes = match tokio::task::spawn_blocking(move || load(&access, &owned)).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(output)) => return output,
             Err(err) => return ToolOutput::error(format!("cannot read {path}: {err}")),
         };
         if MediaType::detect(&bytes).is_some() {
@@ -148,14 +139,42 @@ impl Tool for ReadFile {
     }
 }
 
-/// The first bytes of the file at `path`, enough to tell an image; empty
-/// when it cannot be read.
-async fn head(path: &str) -> Vec<u8> {
+/// The bytes of the regular file at `path`, opened and checked by
+/// `access`, or the error for the model.
+fn load(access: &FileAccess, path: &str) -> Result<Vec<u8>, ToolOutput> {
+    let opened = access
+        .open_read(path)
+        .map_err(|refusal| ToolOutput::error(refusal.message(path, "read")))?;
+    let mut file = opened.file;
     let mut bytes = Vec::new();
-    if let Ok(file) = tokio::fs::File::open(path).await {
-        let _ = file.take(16).read_to_end(&mut bytes).await;
+    let mut len = opened.meta.len();
+    if len <= MAX_FILE_BYTES {
+        (&mut file)
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|err| ToolOutput::error(format!("cannot read {path}: {err}")))?;
+        len = bytes.len() as u64;
     }
-    bytes
+    if len > MAX_FILE_BYTES {
+        // The first bytes tell an image.
+        let mut head = bytes;
+        head.truncate(16);
+        if head.is_empty() {
+            let _ = file.take(16).read_to_end(&mut head);
+        }
+        if MediaType::detect(&head).is_some() {
+            return Err(ToolOutput::error(format!(
+                "{path}: {}",
+                images::too_large(len)
+            )));
+        }
+        return Err(ToolOutput::error(format!(
+            "{path} is {len} bytes; read_file reads files up to {} MB. \
+             Use bash (head, tail, sed -n, grep) to look at parts of it.",
+            MAX_FILE_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -180,9 +199,10 @@ mod tests {
         // A webhook secret file.
         std::fs::create_dir_all(root.join(".junees/secrets")).unwrap();
         std::fs::write(root.join(".junees/secrets/hook"), "secret-key").unwrap();
-        let tool = ReadFile {
+        let tool = ReadFile::with_settings(&ToolSettings {
             settings_file: Some(file),
-        };
+            ..ToolSettings::default()
+        });
         for path in [
             config.clone(),
             root.join(".junees/secrets/hook"),
@@ -305,9 +325,14 @@ mod tests {
     async fn refuses_devices_and_directories() {
         let output = read(json!({"path": "/dev/zero"})).await;
         assert!(output.is_error);
-        assert!(output.content.ends_with("is not a regular file"));
+        assert!(
+            output.content.contains("leads into /dev"),
+            "{}",
+            output.content
+        );
         let dir = tempfile::tempdir().unwrap();
-        assert!(read(json!({"path": dir.path()})).await.is_error);
+        let output = read(json!({"path": dir.path()})).await;
+        assert!(output.content.ends_with("is not a regular file"));
     }
 
     #[tokio::test]

@@ -324,6 +324,15 @@ async fn prepare(lookup: &Lookup, job: &Job) -> Result<(Box<dyn Engine>, super::
 /// when [`crate::claude_code::check_unattended`] allows it.
 pub async fn engine_in(lookup: &Lookup, dir: &Path) -> Result<Box<dyn Engine>> {
     std::env::set_current_dir(dir).with_context(|| format!("cannot work in {}", dir.display()))?;
+    let home = lookup("HOME")
+        .filter(|home| !home.trim().is_empty())
+        .map(|home| std::path::PathBuf::from(home.trim()));
+    let state = config_file::home_dir(|key| lookup(key));
+    if let Some(warning) =
+        crate::tools::unattended_folder_warning(dir, home.as_deref(), state.as_deref())
+    {
+        eprintln!("  !! {warning}");
+    }
     let engine: Box<dyn Engine> = match Backend::from_lookup(|key| lookup(key))? {
         Backend::Api => Box::new(ApiEngine::new(Config::from_lookup(|key| lookup(key))?)),
         Backend::ClaudeCode => {
