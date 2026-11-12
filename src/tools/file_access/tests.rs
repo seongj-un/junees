@@ -420,7 +420,7 @@ fn unattended_no_write_adds_authorized_keys_and_path_folders_in_home() {
         PathBuf::from("relative/bin"),
     ])
     .unwrap();
-    let paths = super::unattended_no_write(&home);
+    let paths = super::unattended_no_write(&home, None);
     let paths: Vec<PathBuf> = paths
         .into_iter()
         .chain(super::program_folders(&home, Some(&path)))
@@ -458,6 +458,31 @@ fn unattended_no_write_adds_authorized_keys_and_path_folders_in_home() {
         home.join("tools/../escape"),
     ] {
         assert!(!paths.contains(&path), "{}: {paths:?}", path.display());
+    }
+}
+
+#[test]
+fn unattended_no_write_follows_a_config_folder_moved_inside_home() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let moved = home.join("dotfiles/config");
+    let paths = super::unattended_no_write(&home, Some(moved.as_os_str()));
+    for name in ["systemd", "autostart", "git", "environment.d", "fish"] {
+        assert!(paths.contains(&moved.join(name)), "{name}: {paths:?}");
+    }
+    assert!(paths.contains(&home.join(".config/systemd")), "{paths:?}");
+    // Outside the home folder, relative or not plainly named: not added.
+    for config in [
+        layout.path("outside/config"),
+        PathBuf::from("relative/config"),
+        home.join("a/../config"),
+    ] {
+        let paths = super::unattended_no_write(&home, Some(config.as_os_str()));
+        assert!(
+            !paths.contains(&config.join("systemd")),
+            "{}: {paths:?}",
+            config.display()
+        );
     }
 }
 

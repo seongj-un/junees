@@ -121,17 +121,30 @@ const PROGRAM_FOLDERS: &[&str] = &[".local/bin", "bin"];
 /// commands or settings.
 const SSH_WRITABLE: &[&str] = &["known_hosts", "known_hosts.old", "known_hosts2"];
 
+/// The entries of [`UNATTENDED_NO_WRITE`] in `~/.config`, which programs
+/// look for in `$XDG_CONFIG_HOME` instead when it is set.
+const XDG_CONFIG_NO_WRITE: &[&str] = &["fish", "systemd", "environment.d", "autostart", "git"];
+
 /// The paths under `home` an unattended run may not change, as written:
-/// [`UNATTENDED_NO_WRITE`] and every other entry of `~/.ssh` but
+/// [`UNATTENDED_NO_WRITE`], the same folders of `~/.config` in
+/// `xdg_config` (`$XDG_CONFIG_HOME`) when that is a plainly named folder
+/// inside `home`, and every other entry of `~/.ssh` but
 /// [`SSH_WRITABLE`] (ssh's `config` may `Include` a file there or run a
 /// script there as `ProxyCommand`, and sshd reads any
 /// `authorized_keys*` its settings name). The program folders are apart
 /// ([`program_folders`]).
-pub fn unattended_no_write(home: &Path) -> Vec<PathBuf> {
+pub fn unattended_no_write(home: &Path, xdg_config: Option<&OsStr>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = UNATTENDED_NO_WRITE
         .iter()
         .map(|name| home.join(name))
         .collect();
+    if let Some(config) = xdg_config.map(Path::new).filter(|config| {
+        config.is_absolute()
+            && !config.components().any(|c| c == Component::ParentDir)
+            && within_home(config, home)
+    }) {
+        out.extend(XDG_CONFIG_NO_WRITE.iter().map(|name| config.join(name)));
+    }
     if let Ok(entries) = std::fs::read_dir(home.join(".ssh")) {
         out.extend(
             entries
@@ -163,15 +176,24 @@ pub fn program_folders(home: &Path, path_var: Option<&OsStr>) -> Vec<PathBuf> {
             continue;
         }
         let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-        let inside = |home: &Path| dir.starts_with(home) || real.starts_with(home);
         let is_home = |home: &Path| dir == home || real == home;
-        if (inside(home) || inside(&real_home)) && !is_home(home) && !is_home(&real_home) {
+        if within_home(&dir, home) && !is_home(home) && !is_home(&real_home) {
             out.push(dir);
         }
     }
     out.sort();
     out.dedup();
     out
+}
+
+/// Whether `path` is `home` or inside it, as written or with links
+/// resolved (either side).
+fn within_home(path: &Path, home: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (real_path, real_home) = (real(path), real(home));
+    [path, real_path.as_path()]
+        .iter()
+        .any(|path| path.starts_with(home) || path.starts_with(&real_home))
 }
 
 /// Why the working folder `dir` of an unattended run is a risky choice,
@@ -665,7 +687,11 @@ impl Scope {
             read,
             read_setting: "sandbox_read",
             denied,
-            no_write: home.map(unattended_no_write).unwrap_or_default(),
+            no_write: home
+                .map(|home| {
+                    unattended_no_write(home, std::env::var_os("XDG_CONFIG_HOME").as_deref())
+                })
+                .unwrap_or_default(),
             programs: home
                 .map(|home| program_folders(home, std::env::var_os("PATH").as_deref()))
                 .unwrap_or_default(),
