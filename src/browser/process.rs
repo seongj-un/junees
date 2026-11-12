@@ -10,7 +10,7 @@
 //! does not outlive Junees even when Junees is killed.
 
 use std::ffi::OsStr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -440,13 +440,10 @@ fn scrub(command: &mut Command, hidden_env: &[String]) {
 
 /// A pipe whose two ends close on exec: (read end, write end).
 fn cloexec_pipe() -> Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0 as RawFd; 2];
-    // SAFETY: pipe2 writes two new descriptors into `fds`.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
-        return Err(std::io::Error::last_os_error()).context("cannot create a pipe");
-    }
-    // SAFETY: both descriptors are new and owned by nothing else.
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+    // `std::io::pipe` sets close-on-exec on both ends (`pipe2` on Linux,
+    // `pipe` + `fcntl` where there is no `pipe2`, as on macOS).
+    let (read, write) = std::io::pipe().context("cannot create a pipe")?;
+    Ok((OwnedFd::from(read), OwnedFd::from(write)))
 }
 
 /// A copy of `fd` numbered 10 or above, closed on exec.

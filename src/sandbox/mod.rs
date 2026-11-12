@@ -218,6 +218,7 @@ pub struct Sandbox {
     /// Paths commands may neither read nor change.
     hidden: Vec<PathBuf>,
     /// Paths commands may read but not change.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     read_only: Vec<PathBuf>,
     /// The kernel's support; tests put a fake one here.
     support: Option<Support>,
