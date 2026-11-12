@@ -4,8 +4,8 @@
 //!
 //! It only reads: no file is written, no lock is kept (a running daemon
 //! or server is seen through its lock, taken for a moment if free), no MCP server
-//! or plugin command is started, and the only program run is
-//! `claude --version`. The network is used only with `--online`: one
+//! or plugin command is started, and the only programs run are
+//! `claude --version` and the browser's `--version`. The network is used only with `--online`: one
 //! request that shows whether the API takes the key, and
 //! `claude auth status`.
 //!
@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use crate::config_file::Settings;
 use crate::prompt_text::escape_hidden;
 
+mod browser;
 mod claude;
 mod files;
 mod online;
@@ -46,6 +47,8 @@ each check, with one line on how to fix it:
   claude-code   `claude --version`, and bubblewrap and user namespaces for
                 Claude Code's environment scrub
   programs      git and gh on PATH
+  browser       the browser program and its `--version`, when the browser
+                tool is on or browser_path is set
   and the Discord settings, the cron daemon, the webhook routes, their
   secrets and server, the size of the saved sessions, the MCP servers'
   commands (not started), HTTP header variables (not contacted) and saved
@@ -320,6 +323,7 @@ pub async fn run_with(
     settings::keys(&mut report, settings, read.backend);
     claude::check(&mut report, settings, &read, path, probe, online).await;
     services::programs(&mut report, path);
+    browser::check(&mut report, settings, path).await;
     settings::discord(&mut report, settings);
     settings::telegram(&mut report, settings);
     if let Some(home) = home.as_deref() {
