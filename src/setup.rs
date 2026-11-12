@@ -15,6 +15,7 @@ use crate::config::DEFAULT_MODEL;
 use crate::config_file::ConfigFile;
 use crate::gateway::config::{Token, snowflakes};
 use crate::secrets::secret_kind;
+use crate::slack::config::{Kind, Token as SlackToken, user_ids};
 use crate::task::budget::parse_duration;
 use crate::tools::ToolSettings;
 
@@ -232,6 +233,7 @@ pub async fn wizard(
         }
     }
     ask_discord(io, &mut file).await?;
+    ask_slack(io, &mut file).await?;
     Ok(file)
 }
 
@@ -349,6 +351,122 @@ async fn ask_discord(io: &mut dyn Prompter, file: &mut ConfigFile) -> Result<()>
     }
     io.say("Start the bot with `junees gateway`.");
     Ok(())
+}
+
+/// The optional Slack step (`junees gateway slack`): the bot token and the
+/// app-level token (both hidden) and the users it answers. Like the
+/// Discord step, the end of input at its first question skips it; inside
+/// it, cancels.
+async fn ask_slack(io: &mut dyn Prompter, file: &mut ConfigFile) -> Result<()> {
+    let configured = file.get("slack_bot_token").is_some() || file.get("slack_app_token").is_some();
+    let question = if configured {
+        "Change the Slack app settings (junees gateway slack)? [y/N] > "
+    } else {
+        "Set up the Slack app too (junees gateway slack, optional)? [y/N] > "
+    };
+    let Some(answer) = io.line(question).await? else {
+        return Ok(());
+    };
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Ok(());
+    }
+    io.say(
+        "Create the app at https://api.slack.com/apps from the manifest in docs/gateways.md \
+         (\"슬랙 게이트웨이\": Socket Mode and Interactivity on), then install it to the \
+         workspace.",
+    );
+    ask_slack_token(
+        io,
+        file,
+        Kind::Bot,
+        "Slack bot token, xoxb-...",
+        "the Bot User OAuth Token on the OAuth & Permissions page",
+    )
+    .await?;
+    ask_slack_token(
+        io,
+        file,
+        Kind::App,
+        "Slack app-level token, xapp-...",
+        "Basic Information, App-Level Tokens, scope connections:write",
+    )
+    .await?;
+    let current = file.get("slack_allowed_users").map(str::to_string);
+    loop {
+        let shown = current
+            .as_deref()
+            .map_or_else(String::new, |users| format!(" [{users}]"));
+        let answer = ask(
+            io,
+            &format!("Slack member ids the app answers (U...), separated by commas{shown} > "),
+        )
+        .await?;
+        let value = match (answer.is_empty(), &current) {
+            (true, Some(users)) => users.clone(),
+            _ => answer,
+        };
+        match user_ids(Some(value), "slack_allowed_users") {
+            Ok(ids) if !ids.is_empty() => {
+                let mut ids: Vec<String> = ids.into_iter().collect();
+                ids.sort();
+                file.set("slack_allowed_users", ids.join(","));
+                break;
+            }
+            Ok(_) => io.say(
+                "  give at least one: in Slack open your profile, then the menu, then Copy \
+                 member ID",
+            ),
+            Err(err) => io.say(&format!("  {err}")),
+        }
+    }
+    io.say("Start the app with `junees gateway slack`.");
+    Ok(())
+}
+
+/// Asks for one of the Slack tokens without showing it, until it has the
+/// shape of `kind`; an empty answer keeps the one saved.
+async fn ask_slack_token(
+    io: &mut dyn Prompter,
+    file: &mut ConfigFile,
+    kind: Kind,
+    what: &str,
+    from: &str,
+) -> Result<()> {
+    let key = match kind {
+        Kind::Bot => "slack_bot_token",
+        Kind::App => "slack_app_token",
+    };
+    let saved = file.get(key).is_some();
+    let keep = if saved {
+        "Enter keeps the current one"
+    } else {
+        from
+    };
+    loop {
+        let Some(answer) = io
+            .secret(&format!("{what} (not shown as you type; {keep}) > "))
+            .await?
+        else {
+            bail!(CANCELLED);
+        };
+        let token = answer.trim();
+        if token.is_empty() {
+            if saved {
+                return Ok(());
+            }
+            io.say("  the app needs this token");
+            continue;
+        }
+        // The error never repeats what was typed: it may be some other
+        // secret. It says so when the two tokens are swapped.
+        if let Err(err) = SlackToken::new(token, kind) {
+            io.say(&format!("  {err}; try again"));
+            continue;
+        }
+        file.set(key, token);
+        io.say("  token saved.");
+        return Ok(());
+    }
 }
 
 /// One trimmed answer; the end of input cancels the setup.
@@ -720,6 +838,101 @@ mod tests {
         )
         .await;
         assert_eq!(skipped.unwrap().get("discord_token"), None);
+    }
+
+    /// Slack tokens of the right shapes, made at run time.
+    fn slack_tokens() -> (String, String) {
+        (
+            ["xoxb", "1-2-wizard-secret-bot"].join("-"),
+            ["xapp", "1-A1-wizard-secret-app"].join("-"),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_slack_step_is_optional_and_hides_the_tokens() {
+        let (bot, app) = slack_tokens();
+        let (bot, app): (&'static str, &'static str) = (bot.leak(), app.leak());
+        let (file, io) = run(
+            &[
+                "2",
+                KEY,
+                "",
+                "",
+                "",
+                "n",
+                "y",
+                // The bot token: not one, then the app token, then it.
+                "not a token",
+                app,
+                bot,
+                // The app token: empty, the bot token, then it.
+                "",
+                bot,
+                app,
+                // The users: none, a name, then two ids.
+                "",
+                "me",
+                "U2B, U1A",
+            ],
+            &ready(),
+            ConfigFile::default(),
+        )
+        .await;
+        let file = file.unwrap();
+        assert_eq!(file.get("slack_bot_token"), Some(bot));
+        assert_eq!(file.get("slack_app_token"), Some(app));
+        assert_eq!(file.get("slack_allowed_users"), Some("U1A,U2B"));
+        assert_eq!(file.get("discord_token"), None);
+        // The key and the six token answers were hidden, and none shows.
+        assert_eq!(io.secret_questions, 7);
+        assert!(!io.shown.contains("wizard-secret"), "{}", io.shown);
+        assert!(
+            io.shown.contains("it is the app-level token"),
+            "{}",
+            io.shown
+        );
+        assert!(io.shown.contains("it is the bot token"), "{}", io.shown);
+        assert!(
+            io.shown.contains("the app needs this token"),
+            "{}",
+            io.shown
+        );
+        assert!(io.shown.contains("at least one"), "{}", io.shown);
+        assert!(io.shown.contains("member ids"), "{}", io.shown);
+        assert!(io.shown.contains("Interactivity on"), "{}", io.shown);
+        assert!(io.shown.contains("`junees gateway slack`"), "{}", io.shown);
+
+        // Again: Enter keeps everything.
+        let (again, io) = run(
+            &["", "", "", "", "", "n", "y", "", "", ""],
+            &ready(),
+            file.clone(),
+        )
+        .await;
+        assert!(again.unwrap() == file);
+        assert!(
+            io.shown.contains("Change the Slack app settings"),
+            "{}",
+            io.shown
+        );
+        assert!(io.shown.contains("[U1A,U2B]"), "{}", io.shown);
+
+        // No, or the end of input, skips the step; the end of input inside
+        // it cancels.
+        let (skipped, _) = run(
+            &["2", KEY, "", "", "", "n", "n"],
+            &ready(),
+            ConfigFile::default(),
+        )
+        .await;
+        assert_eq!(skipped.unwrap().get("slack_bot_token"), None);
+        let (cancelled, _) = run(
+            &["2", KEY, "", "", "", "n", "y", bot],
+            &ready(),
+            ConfigFile::default(),
+        )
+        .await;
+        assert_eq!(cancelled.err().unwrap().to_string(), CANCELLED);
     }
 
     #[tokio::test]

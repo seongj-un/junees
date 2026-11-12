@@ -268,8 +268,10 @@ async fn the_first_run_on_a_terminal_sets_up_without_showing_the_key() {
     type_line("");
     let at = wait_for(&screen, "or none [none] > ", at).await;
     type_line("");
-    // The optional Discord step; Enter skips it.
+    // The optional Discord and Slack steps; Enter skips them.
     let at = wait_for(&screen, "(junees gateway, optional)? [y/N] > ", at).await;
+    type_line("");
+    let at = wait_for(&screen, "(junees gateway slack, optional)? [y/N] > ", at).await;
     type_line("");
     wait_for(&screen, "Hi from the fake API.", at).await;
 
