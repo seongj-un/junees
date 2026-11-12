@@ -1,6 +1,7 @@
 //! The Slack gateway against a fake Slack on loopback: a Web API
-//! (`auth.test`, `apps.connections.open`, `chat.postMessage`, files) and
-//! a Socket Mode WebSocket server that sends events and records the
+//! (`auth.test`, `apps.connections.open`, `chat.postMessage`,
+//! `chat.update`, `chat.postEphemeral`, files) and a Socket Mode
+//! WebSocket server that sends events and button presses and records the
 //! acknowledgements. Nothing here reaches slack.com.
 
 mod common;
@@ -89,6 +90,10 @@ struct SlackState {
     unauthorized: AtomicBool,
     /// Answer this many `chat.postMessage` calls with 429 first.
     limit_next: Mutex<usize>,
+    /// Refuse `chat.postMessage` calls with `blocks` (`invalid_blocks`).
+    refuse_blocks: AtomicBool,
+    /// The `ts` of the last message posted.
+    last_ts: AtomicUsize,
     /// Path under `/files/` to bytes.
     files: Mutex<HashMap<String, Vec<u8>>>,
     ws_url: Mutex<String>,
@@ -142,9 +147,26 @@ impl FakeSlack {
     fn posts(&self, key: &str) -> Vec<String> {
         self.calls("chat.postMessage")
             .into_iter()
-            .filter(|r| post_key(&r.body) == key && !r.path.contains("limited"))
+            .filter(|r| {
+                post_key(&r.body) == key
+                    && !r.path.contains("limited")
+                    && !r.path.contains("refused")
+            })
             .map(|r| r.body["text"].as_str().unwrap_or_default().to_string())
             .collect()
+    }
+
+    /// Sends a `block_actions` payload in an `interactive` envelope;
+    /// returns the envelope id.
+    fn press(&self, payload: Value) -> String {
+        let n = self.state.next.fetch_add(1, Ordering::SeqCst);
+        let envelope = format!("env-{n}");
+        self.send(Command::Send(
+            json!({"envelope_id": envelope, "type": "interactive",
+                   "accepts_response_payload": true, "payload": payload})
+            .to_string(),
+        ));
+        envelope
     }
 
     async fn until(&self, what: &str, done: impl Fn() -> bool) {
@@ -247,7 +269,7 @@ fn answer(socket_status: u16, headers: &str, body: Value) -> (u16, String, Vec<u
 }
 
 async fn serve(mut socket: TcpStream, state: Arc<SlackState>) {
-    let Some((mut path, auth, body)) = read_http(&mut socket).await else {
+    let Some((mut path, auth, mut body)) = read_http(&mut socket).await else {
         return;
     };
     let bot = format!("Bearer {}", bot_token());
@@ -275,6 +297,17 @@ async fn serve(mut socket: TcpStream, state: Arc<SlackState>) {
                 let url = format!("{}?ticket={n}", state.ws_url.lock().unwrap());
                 answer(200, "", json!({"ok": true, "url": url}))
             }
+            "/api/chat.postMessage"
+                if auth == bot
+                    && body.get("blocks").is_some()
+                    && state.refuse_blocks.load(Ordering::SeqCst) =>
+            {
+                path.push_str("#refused");
+                answer(200, "", json!({"ok": false, "error": "invalid_blocks"}))
+            }
+            "/api/chat.update" | "/api/chat.postEphemeral" if auth == bot => {
+                answer(200, "", json!({"ok": true, "channel": body["channel"]}))
+            }
             "/api/chat.postMessage" if auth == bot => {
                 let limited = {
                     let mut left = state.limit_next.lock().unwrap();
@@ -290,10 +323,14 @@ async fn serve(mut socket: TcpStream, state: Arc<SlackState>) {
                         json!({"ok": false, "error": "ratelimited"}),
                     )
                 } else {
+                    // Each message its own ts, which the test can press.
+                    let n = state.last_ts.fetch_add(1, Ordering::SeqCst) + 1;
+                    let ts = format!("1800000000.{n:06}");
+                    body["_sent_ts"] = json!(ts);
                     answer(
                         200,
                         "",
-                        json!({"ok": true, "channel": body["channel"], "ts": "9.9"}),
+                        json!({"ok": true, "channel": body["channel"], "ts": ts}),
                     )
                 }
             }
@@ -1042,6 +1079,295 @@ async fn risky_calls_wait_for_an_answer_in_the_dm_and_the_thread() {
         );
     }
     assert!(home.path().join("gateway/slack.lock").exists());
+}
+
+/// The `chat.postMessage` bodies to `key` that carried blocks.
+fn buttoned(s: &FakeSlack, key: &str) -> Vec<Value> {
+    s.calls("chat.postMessage")
+        .into_iter()
+        .filter(|r| post_key(&r.body) == key && r.body.get("blocks").is_some())
+        .map(|r| r.body)
+        .collect()
+}
+
+/// The texts `chat.postEphemeral` showed `user`.
+fn ephemerals(s: &FakeSlack, user: &str) -> Vec<String> {
+    s.calls("chat.postEphemeral")
+        .into_iter()
+        .filter(|r| r.body["user"] == user)
+        .map(|r| r.body["text"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The `chat.update` bodies so far.
+fn updates(s: &FakeSlack) -> Vec<Value> {
+    s.calls("chat.update").into_iter().map(|r| r.body).collect()
+}
+
+/// A `block_actions` payload: `user` pressed the button with `value` on
+/// the message `post` (a `chat.postMessage` body) made.
+fn press_on(user: &str, post: &Value, value: &str) -> Value {
+    let channel = post["channel"].as_str().unwrap();
+    let ts = post["_sent_ts"].as_str().unwrap();
+    let mut message = json!({"type": "message", "bot_id": "BBOT", "user": BOT_ID, "ts": ts,
+                             "text": post["text"]});
+    let mut container = json!({"type": "message", "message_ts": ts, "channel_id": channel,
+                               "is_ephemeral": false});
+    if let Some(thread) = post["thread_ts"].as_str() {
+        message["thread_ts"] = json!(thread);
+        container["thread_ts"] = json!(thread);
+    }
+    // The name holds what mrkdwn must escape.
+    let name = if user == USER { "sam<&>" } else { "eve" };
+    json!({
+        "type": "block_actions", "team": {"id": "T1", "domain": "team"},
+        "user": {"id": user, "username": name, "name": name, "team_id": "T1"},
+        "api_app_id": "A1", "container": container, "trigger_id": "1.2.3",
+        "channel": {"id": channel, "name": "somewhere"}, "message": message,
+        "response_url": "https://hooks.slack.com/actions/T1/1/fake",
+        "actions": [{"type": "button", "action_id": value, "block_id": "b1", "value": value,
+                     "text": {"type": "plain_text", "text": "Allow"},
+                     "action_ts": "1700000001.000001"}],
+    })
+}
+
+/// The button values of a question post: Allow, (Always allow,) Decline.
+fn button_values(post: &Value) -> Vec<String> {
+    post["blocks"][1]["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|button| button["value"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn buttons_answer_questions_of_allowed_users_only() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let s = FakeSlack::start().await;
+    let file = cwd.path().join("note.txt");
+    let (api, served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("declined, fine")),
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+        (200, write_call(&file)),
+        (200, common::text_reply("timed out")),
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote again")),
+        (200, write_call(&file)),
+        (200, common::text_reply("plain")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(SLACK_NOTE),
+    );
+    let running = start(
+        slack(&s, &[("JUNEES_SLACK_APPROVAL_TIMEOUT", "5s")]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    s.wait_connections(1).await;
+
+    // The question: a section and the buttons.
+    s.push(dm(USER, "write a note"));
+    s.until("a question with buttons", || !buttoned(&s, DM).is_empty())
+        .await;
+    let question = buttoned(&s, DM).remove(0);
+    let blocks = question["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2, "{question}");
+    assert_eq!(blocks[0]["type"], "section");
+    assert_eq!(blocks[0]["text"]["type"], "mrkdwn");
+    assert_eq!(blocks[0]["text"]["verbatim"], true);
+    let section = blocks[0]["text"]["text"].as_str().unwrap();
+    assert!(
+        section.starts_with("*Approve this tool call?*"),
+        "{section}"
+    );
+    assert!(
+        section.contains("Press a button, or reply `y`"),
+        "{section}"
+    );
+    assert_eq!(question["text"].as_str(), Some(section));
+    assert_eq!(blocks[1]["type"], "actions");
+    let buttons = blocks[1]["elements"].as_array().unwrap();
+    let labels: Vec<&str> = buttons
+        .iter()
+        .map(|b| b["text"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, ["Allow", "Always allow", "Decline"]);
+    for button in buttons {
+        assert_eq!(button["type"], "button");
+        assert_eq!(button["action_id"], button["value"]);
+    }
+    assert_eq!(buttons[0]["style"], "primary");
+    assert_eq!(buttons[2]["style"], "danger");
+    let values = button_values(&question);
+    let id = values[0]
+        .strip_prefix("junees:")
+        .and_then(|rest| rest.strip_suffix(":y"))
+        .unwrap()
+        .to_string();
+    assert_eq!(id.len(), 32, "{id}");
+    assert_eq!(values[2], format!("junees:{id}:n"));
+
+    // Presses that answer nothing: a stranger's (twice, logged once), a
+    // guessed id, another message, a button that is not Junees's.
+    let mut envelopes = vec![
+        s.press(press_on(STRANGER, &question, &values[0])),
+        s.press(press_on(STRANGER, &question, &values[0])),
+        s.press(press_on(
+            USER,
+            &question,
+            &format!("junees:{}:y", "0123456789abcdef".repeat(2)),
+        )),
+    ];
+    let mut elsewhere = question.clone();
+    elsewhere["_sent_ts"] = json!("1800000000.999999");
+    envelopes.push(s.press(press_on(USER, &elsewhere, &values[0])));
+    envelopes.push(s.press(press_on(USER, &question, "approve")));
+    for envelope in &envelopes {
+        s.wait_ack(envelope).await;
+    }
+    s.until("five notes", || {
+        ephemerals(&s, STRANGER).len() + ephemerals(&s, USER).len() == 5
+    })
+    .await;
+    assert_eq!(
+        ephemerals(&s, STRANGER),
+        ["Only the users in slack_allowed_users can answer Junees."; 2]
+    );
+    let already =
+        "This question was already answered, timed out or stopped; the button does nothing now.";
+    assert_eq!(
+        ephemerals(&s, USER),
+        [already, already, "Junees does not know this button."]
+    );
+    assert!(updates(&s).is_empty());
+    assert!(!file.exists());
+
+    // Decline: the buttons go, the result shows, escaped.
+    s.wait_ack(&s.press(press_on(USER, &question, &values[2])))
+        .await;
+    s.wait_post(DM, |p| p == "declined, fine").await;
+    assert!(!file.exists());
+    let update = updates(&s).remove(0);
+    assert_eq!(update["channel"], DM);
+    assert_eq!(update["ts"], question["_sent_ts"]);
+    assert_eq!(update["parse"], "none");
+    let closed = update["blocks"].as_array().unwrap();
+    assert_eq!(closed.len(), 2, "{update}");
+    assert_eq!(closed[0], blocks[0]);
+    assert_eq!(closed[1]["text"]["text"], "*Declined by sam&lt;&amp;&gt;.*");
+    assert!(!update.to_string().contains("\"actions\""), "{update}");
+    // The old question's buttons do nothing now.
+    s.wait_ack(&s.press(press_on(USER, &question, &values[0])))
+        .await;
+    s.until("a note", || ephemerals(&s, USER).len() == 4).await;
+    assert_eq!(ephemerals(&s, USER)[3], already);
+
+    // In a thread: a press from another conversation does nothing; Allow
+    // runs the call; the presser's `y` right after is a late answer.
+    let asked = mention(USER, "now in the channel", None);
+    let root = asked["ts"].as_str().unwrap().to_string();
+    let thread = thread_key(&asked["ts"]);
+    s.push(asked);
+    s.until("a question in the thread", || {
+        !buttoned(&s, &thread).is_empty()
+    })
+    .await;
+    let question = buttoned(&s, &thread).remove(0);
+    assert_eq!(question["thread_ts"], root.as_str());
+    let values = button_values(&question);
+    let mut in_dm = press_on(USER, &question, &values[0]);
+    in_dm["channel"]["id"] = json!(DM);
+    in_dm["container"]["channel_id"] = json!(DM);
+    in_dm["message"]
+        .as_object_mut()
+        .unwrap()
+        .remove("thread_ts");
+    in_dm["container"]
+        .as_object_mut()
+        .unwrap()
+        .remove("thread_ts");
+    s.wait_ack(&s.press(in_dm)).await;
+    s.until("a note", || ephemerals(&s, USER).len() == 5).await;
+    s.wait_ack(&s.press(press_on(USER, &question, &values[0])))
+        .await;
+    s.wait_post(&thread, |p| p == "wrote it").await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "written\n");
+    std::fs::remove_file(&file).unwrap();
+    s.until("the thread's question closed", || updates(&s).len() == 2)
+        .await;
+    let update = updates(&s).remove(1);
+    assert_eq!(update["channel"], CHANNEL);
+    assert_eq!(update["ts"], question["_sent_ts"]);
+    let line = update["blocks"][1]["text"]["text"].as_str().unwrap();
+    assert!(line.starts_with("*Allowed"), "{line}");
+    s.push(in_channel(USER, "y", Some(&root)));
+    s.wait_post(&thread, |p| p.contains("already answered"))
+        .await;
+
+    // No answer: declined, and a press afterwards does nothing.
+    s.push(dm(USER, "once more"));
+    s.wait_post(DM, |p| p == "(no answer within 5s: declined)")
+        .await;
+    s.wait_post(DM, |p| p == "timed out").await;
+    s.until("the timed out question closed", || updates(&s).len() == 3)
+        .await;
+    assert_eq!(
+        updates(&s)[2]["blocks"][1]["text"]["text"],
+        "*No answer within 5s: declined.*"
+    );
+    let question = buttoned(&s, DM).remove(1);
+    s.wait_ack(&s.press(press_on(USER, &question, &button_values(&question)[0])))
+        .await;
+    s.until("a note", || ephemerals(&s, USER).len() == 6).await;
+    assert_eq!(ephemerals(&s, USER)[5], already);
+    assert!(!file.exists());
+
+    // A text answer still works, and takes the buttons off too.
+    s.push(dm(USER, "again"));
+    s.until("a third question", || buttoned(&s, DM).len() == 3)
+        .await;
+    s.push(dm(USER, "y"));
+    s.wait_post(DM, |p| p == "wrote again").await;
+    s.until("the third question closed", || updates(&s).len() == 4)
+        .await;
+    assert_eq!(updates(&s)[3]["blocks"][1]["text"]["text"], "*Allowed.*");
+    std::fs::remove_file(&file).unwrap();
+
+    // Buttons refused: the question comes as text, answered in text.
+    s.state.refuse_blocks.store(true, Ordering::SeqCst);
+    s.push(dm(USER, "plain please"));
+    let posts = s.wait_post(DM, |p| p.contains("Reply `y` to run it")).await;
+    assert!(!posts.last().unwrap().contains("Press a button"));
+    s.push(dm(USER, "n"));
+    s.wait_post(DM, |p| p == "plain").await;
+    let log = running.stop().await;
+    assert_eq!(updates(&s).len(), 4);
+    assert!(!file.exists());
+    let strangers = log
+        .iter()
+        .filter(|l| l.contains("ignoring button presses of user U222"))
+        .count();
+    assert_eq!(strangers, 1, "{log:#?}");
+    assert!(
+        log.iter()
+            .any(|l| l.contains("cannot post the question with buttons")
+                && l.contains("invalid_blocks")
+                && l.contains("posted it without buttons")),
+        "{log:#?}"
+    );
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert!(
+        texts(&requests[1]).last().unwrap().contains("declined"),
+        "{:?}",
+        texts(&requests[1])
+    );
 }
 
 /// A PNG header of `width` x `height`: enough for Junees, which never
