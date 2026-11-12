@@ -132,6 +132,8 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_SLACK_PARALLEL        [slack_parallel] conversations running a turn at once (default 2)
   JUNEES_SLACK_APPROVAL_TIMEOUT  [slack_approval_timeout] wait for an approval answer
                                before declining (default 5m)
+  JUNEES_TELEGRAM_FORMAT         [telegram_format] replies as html (Markdown shown formatted;
+                                 default) or plain text
   JUNEES_TIMEZONE         [timezone] zone of `junees cron` schedules (default the system's)
   JUNEES_CRON_MAX_TIME    [cron_max_time] time one scheduled run may take (default 30m)
   JUNEES_CRON_MAX_TOKENS  [cron_max_tokens] tokens one scheduled run may use (default 1000000)

@@ -38,7 +38,7 @@ use junees::task::budget::Budget;
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
 use junees::telegram::config::TelegramConfig;
-use junees::telegram::{TELEGRAM_NOTE, TelegramGateway};
+use junees::telegram::{TelegramGateway, telegram_note};
 use junees::tools::{ToolRegistry, ToolSettings};
 use junees::web_search;
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -814,7 +814,7 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
 /// [`discord_gateway`].
 async fn telegram_gateway(settings: &Settings) -> Result<ExitCode> {
     let telegram = TelegramConfig::from_lookup(|key| settings.get(key))?;
-    let started = gateway_engines(settings, TELEGRAM_NOTE).await?;
+    let started = gateway_engines(settings, telegram_note(telegram.format)).await?;
     let cancel = Cancel::new();
     cancel_on_signals(Signals::install()?, cancel.clone());
     eprintln!(

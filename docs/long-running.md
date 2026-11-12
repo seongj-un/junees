@@ -381,6 +381,14 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 테스트: 단위(`slack/config.rs` 설정과 토큰 모양·바꿔 넣기·비노출·루프백 주소, `api.rs` 루프백 가짜로 헤더의 토큰과 경로, 토큰 지운 오류, fatal 판별, 429 Retry-After와 끊긴 post 재전송 없음, 파일 호스트 규칙과 같은 호스트 리다이렉트/다른 호스트 거절과 크기 상한, `socket.rs` WebSocket 주소 규칙, `bot.rs` 멘션 지우기와 기억 상한, `format.rs` 이스케이프/인라인/짝 없는 표시/블록/들어온 표기, `platform.rs` 대화 키와 파일 고르기와 질문), `cli.rs`, `secrets.rs`, `search`, `doctor`(오프라인 검사와 `--online` `auth.test`). 통합 `tests/slack_gateway.rs` 9개(가짜 Web API + 가짜 Socket Mode 서버)
 - 남은 위험: 실제 슬랙에는 연결해 보지 않았다(가짜 서버만). mrkdwn 변환이 실제 슬랙 화면에서 어떻게 보이는지(중첩, 한글 옆 `_기울임_`)는 확인하지 못했다. ack한 뒤 처리 전에 죽으면 그 이벤트는 다시 오지 않는다. `disconnect` 뒤 새 연결을 여는 짧은 사이에 온 이벤트는 슬랙이 다른 연결로 보내거나 재전송에 맡긴다
 
+### 텔레그램 서식 (로드맵 12단계 B)
+- 문서: Bot API "Formatting options"(https://core.telegram.org/bots/api#formatting-options, 2026-11-12 `curl`)의 HTML style(지원 태그, `<` `>` `&`만 이스케이프, 이름 붙은 엔티티는 넷)과 중첩 규칙. `src/telegram/format.rs` 머리 주석에 인용했다.
+- 새 모듈 `src/telegram/format.rs`(Markdown → 원자 열(열기/닫기/글자) → 그룹이면 멘션 끊기 → 나누기). 공유 파일은 연결만: `config_file.rs`(키 `telegram_format`), `cli.rs`(도움말 한 줄), `main.rs`(형식에 맞는 시스템 프롬프트 문단). `gateway/channels.rs`와 `Platform` 트레이트는 바꾸지 않았다: 텔레그램의 `message_limit`을 제한 없음으로 두고 `post`가 바꾼 뒤에 직접 나눈다(먼저 나누면 코드 블록이 둘로 갈려 짝 없는 울타리가 된다).
+- 결정: MarkdownV2 대신 HTML(이스케이프가 셋뿐). 나누기 길이는 HTML 원문 길이(텔레그램이 세는 길이 이상). 짝 없는 표시와 닫히지 않은 코드 블록은 글자 그대로. 강조는 단어 경계에서만(CommonMark보다 보수적: `2*3*4`, `snake_case`). 링크는 http/https만. 굵게 안의 인라인 코드는 굵게를 닫고 다시 연다(문서상 굵게는 code를 담을 수 없다). 400 `can't parse entities`면 그 조각만 평문으로 다시 보낸다. 도구 줄(html)과 승인 질문(두 형식 모두)의 내용은 코드 블록: `Platform::question`은 `self`가 없는 함수라 형식을 모르므로, 명령이 서식으로 바뀌지 않게 두 형식 모두 울타리로 감쌌다(`plain`에서는 울타리가 글자로 보인다).
+- #63 남은 항목: html의 코드 안 `@이름`에는 U+2060을 넣지 않는다(멘션 엔티티는 code/pre 안에 있을 수 없다). 평문으로 다시 보낼 때는 코드였던 자리도 끊는다(원자 열의 평문 전용 글자).
+- 테스트: 단위 `telegram/format.rs`(각 요소, 중첩과 굵게 안 코드, 짝 없는 표시, 이스케이프와 언어 이름, 링크 주소 거절, 태그 안에서 자르고 다시 열기, 엔티티를 자르지 않기(한글 포함), 링크가 갈릴 때 주소 유지, 코드 안 멘션, 빈 메시지), `config.rs`(형식 읽기), `platform.rs`(질문의 코드 블록). 통합 `tests/telegram_gateway.rs`: 그룹 답의 HTML과 코드 안 `@이름`, 가짜 Bot API의 400 뒤 평문 재전송과 로그, `plain` 형식의 `parse_mode` 없음, 긴 코드 블록을 HTML로 나눌 때 언어째 다시 열기, 도구 줄의 `<pre>`.
+- 남은 위험: 실제 텔레그램으로는 보내 보지 않았다(가짜 Bot API만). 텔레그램이 문서와 달리 받지 않는 조합(예: 인용 안의 코드)은 400 뒤 평문 재전송으로만 처리된다. 표와 제목은 글 그대로다.
+
 ## 상태
 
 - [x] 1단계 에이전트 루프 (PR #1)

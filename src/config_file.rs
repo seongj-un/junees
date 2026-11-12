@@ -79,6 +79,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("slack_allowed_users", "JUNEES_SLACK_ALLOWED_USERS"),
     ("slack_parallel", "JUNEES_SLACK_PARALLEL"),
     ("slack_approval_timeout", "JUNEES_SLACK_APPROVAL_TIMEOUT"),
+    ("telegram_format", "JUNEES_TELEGRAM_FORMAT"),
     ("timezone", "JUNEES_TIMEZONE"),
     ("cron_max_time", "JUNEES_CRON_MAX_TIME"),
     ("cron_max_tokens", "JUNEES_CRON_MAX_TOKENS"),
