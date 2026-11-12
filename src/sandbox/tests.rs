@@ -616,8 +616,9 @@ async fn unattended_runs_in_the_home_folder_cannot_change_what_runs_later() {
             ..settings()
         },
         Vec::new(),
-        unattended_no_write(&tools(true), Some(&path)),
-    );
+        unattended_no_write(&tools(true)),
+    )
+    .with_programs(program_folders(&tools(true), Some(&path)));
     let on_path = run(
         &home,
         sandbox,
@@ -744,6 +745,93 @@ async fn unattended_jobs_in_the_home_folder_cannot_change_ssh_or_cargo_settings(
             attended.content
         );
     }
+}
+
+#[tokio::test]
+async fn unattended_runs_in_a_program_folder_on_path_still_write_there() {
+    // A scheduled job working in (or in a folder inside) a folder on the
+    // daemon's PATH: its working folder stays writable. Only the working
+    // folder's rules leave the program folder out, so a `sandbox_write`
+    // folder around it still does not reach the programs.
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let scripts = home.join("scripts");
+    std::fs::create_dir_all(scripts.join("job")).unwrap();
+    std::fs::write(scripts.join("job/old.txt"), "old\n").unwrap();
+    std::fs::write(scripts.join("tool"), "#!/bin/sh\n").unwrap();
+    let tools = ToolSettings {
+        settings_file: Some(SettingsFile::new(
+            layout.path("outside/.junees/config.toml"),
+            Some(home.clone()),
+        )),
+        sandbox: Some(Settings {
+            unattended: true,
+            ..settings()
+        }),
+        ..ToolSettings::default()
+    };
+    let path = std::env::join_paths([scripts.clone(), PathBuf::from("/usr/bin")]).unwrap();
+    let sandbox = |write: Vec<PathBuf>| {
+        Sandbox::new(
+            Settings {
+                unattended: true,
+                write,
+                ..settings()
+            },
+            Vec::new(),
+            unattended_no_write(&tools),
+        )
+        .with_programs(program_folders(&tools, Some(&path)))
+    };
+    let command = "echo a > made && echo made-ok; echo b >> old.txt && echo old-ok; \
+                   mkdir d && echo mkdir-ok; \
+                   { echo x > ../git; } 2>/dev/null || echo git-refused; \
+                   { echo x >> ../tool; } 2>/dev/null || echo tool-refused";
+    let inside = run(
+        &scripts.join("job"),
+        sandbox(vec![scripts.clone()]),
+        command,
+    )
+    .await;
+    let text = &inside.content;
+    for line in [
+        "made-ok",
+        "old-ok",
+        "mkdir-ok",
+        "git-refused",
+        "tool-refused",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    assert!(!text.contains("work in a subfolder"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(scripts.join("job/old.txt")).unwrap(),
+        "old\nb\n"
+    );
+    assert!(!scripts.join("git").exists());
+    assert_eq!(
+        std::fs::read_to_string(scripts.join("tool")).unwrap(),
+        "#!/bin/sh\n"
+    );
+    // The program folder itself as the working folder: it is the job's
+    // folder, so it stays writable (the cron run warns about it,
+    // `unattended_folder_warning`).
+    let itself = run(&scripts, sandbox(Vec::new()), "echo a > own && echo own-ok").await;
+    assert!(itself.content.contains("own-ok"), "{}", itself.content);
+    // Another program folder is still protected from a job inside the
+    // first one.
+    std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+    let other = run(
+        &scripts.join("job"),
+        sandbox(vec![home.join(".local")]),
+        "{ echo x > ../../.local/bin/ls; } 2>/dev/null || echo local-refused",
+    )
+    .await;
+    assert!(other.content.contains("local-refused"), "{}", other.content);
+    assert!(!home.join(".local/bin/ls").exists());
 }
 
 #[tokio::test]

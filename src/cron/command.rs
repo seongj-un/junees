@@ -328,9 +328,13 @@ pub async fn engine_in(lookup: &Lookup, dir: &Path) -> Result<Box<dyn Engine>> {
         .filter(|home| !home.trim().is_empty())
         .map(|home| std::path::PathBuf::from(home.trim()));
     let state = config_file::home_dir(|key| lookup(key));
-    if let Some(warning) =
-        crate::tools::unattended_folder_warning(dir, home.as_deref(), state.as_deref())
-    {
+    let path_var = lookup("PATH").map(std::ffi::OsString::from);
+    if let Some(warning) = crate::tools::unattended_folder_warning(
+        dir,
+        home.as_deref(),
+        state.as_deref(),
+        path_var.as_deref(),
+    ) {
         eprintln!("  !! {warning}");
     }
     let engine: Box<dyn Engine> = match Backend::from_lookup(|key| lookup(key))? {
