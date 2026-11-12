@@ -56,6 +56,8 @@ cargo install --path .
 
 ## 업데이트
 
+올리기 전에 [CHANGELOG.md](../CHANGELOG.md)의 "업그레이드할 때 확인할 것"을 확인한다. 기존 설정이 다르게 동작하게 되는 변경이 거기 있다.
+
 ```sh
 junees update --check          # 새 릴리스가 있는지만
 junees update                  # 최신 릴리스가 더 새로우면 바꿔 넣기
