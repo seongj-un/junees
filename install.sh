@@ -99,8 +99,13 @@ target=$(detect_target)
 install_dir="${JUNEES_INSTALL_DIR:-${HOME:?HOME is not set}/.local/bin}"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/junees-install.XXXXXX")
+# The copy in the install folder before its rename; set while it exists.
+staged=""
 cleanup() {
     rm -rf "$tmp"
+    if [ -n "$staged" ]; then
+        rm -f "$staged"
+    fi
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
@@ -148,12 +153,16 @@ fi
 
 mkdir -p "$install_dir" || fail "cannot create $install_dir"
 staged="$install_dir/.junees.install.$$"
-cp "$binary" "$staged" || fail "cannot write in $install_dir (set JUNEES_INSTALL_DIR to a folder of yours)"
+if ! cp "$binary" "$staged"; then
+    rm -f "$staged"
+    fail "cannot write in $install_dir (set JUNEES_INSTALL_DIR to a folder of yours)"
+fi
 chmod 755 "$staged"
 if ! mv -f "$staged" "$install_dir/junees"; then
     rm -f "$staged"
     fail "cannot replace $install_dir/junees"
 fi
+staged=""
 
 say "installed junees $version ($target) as $install_dir/junees"
 case ":${PATH:-}:" in
