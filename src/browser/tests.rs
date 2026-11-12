@@ -707,6 +707,20 @@ async fn risky_actions_need_an_approval() {
     let output = run(&tool, json!({"action": "evaluate", "expression": "null.x"})).await;
     assert!(output.is_error, "{}", output.content);
     assert!(output.content.contains("TypeError"), "{}", output.content);
+    // An expression the question could not show whole is not run.
+    let output = run(
+        &tool,
+        json!({"action": "evaluate", "expression": format!("document.title = 'ran';{}", " ".repeat(tool::MAX_EXPRESSION))}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("at most 2000"),
+        "{}",
+        output.content
+    );
+    let output = run(&tool, json!({"action": "snapshot"})).await;
+    assert!(!output.content.contains("title: ran"), "{}", output.content);
 
     // A field that turned into a password field after the snapshot (and
     // the question) is not typed into.
@@ -1458,6 +1472,74 @@ fn questions_follow_the_latest_snapshot() {
         q(None, json!({"action": "open", "url": "https://x.test/"})).0,
         "open https://x.test/"
     );
+}
+
+#[test]
+fn evaluate_questions_show_the_whole_script_or_say_they_do_not() {
+    let ask = |code: &str| {
+        let (_, reasons, kinds, preview) = tool::test_question(
+            Vec::new(),
+            None,
+            &json!({"action": "evaluate", "expression": code}),
+        );
+        assert_eq!(kinds, [KIND_EVALUATE]);
+        (reasons, preview.unwrap())
+    };
+    // A short script is shown as it is, with no warning.
+    let (reasons, preview) = ask("document.title");
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert_eq!(preview, "  document.title\n");
+
+    // Blanks that push the real call out of view are counted, and the
+    // call stays in view.
+    let hidden = format!(
+        "document.title;{}document.querySelector('form#pay').submit()",
+        " ".repeat(150)
+    );
+    let (reasons, preview) = ask(&hidden);
+    assert_eq!(reasons[1], tool::PARTIAL);
+    assert_eq!(
+        preview,
+        "  document.title;[150 blanks]document.querySelector('form#pay').submit()\n"
+    );
+    // A cut line says how much it left out.
+    let (reasons, preview) = ask(&format!("x = '{}'", "a".repeat(300)));
+    assert_eq!(reasons[1], tool::PARTIAL);
+    assert!(
+        preview.ends_with(&format!("{}... (146 more characters)\n", "a".repeat(155))),
+        "{preview}"
+    );
+    // JavaScript's other line ends split lines and stay visible.
+    let (reasons, preview) = ask("a()\u{2028}b()\u{2029}c()\rd()\r\ne()");
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert_eq!(
+        preview,
+        "  a()\\u{2028}\n  b()\\u{2029}\n  c()\\r\n  d()\n  e()\n"
+    );
+    // Too many lines.
+    let many: Vec<String> = (0..45).map(|n| format!("f{n}()")).collect();
+    let (reasons, preview) = ask(&many.join("\n"));
+    assert_eq!(reasons[1], tool::PARTIAL);
+    assert!(
+        preview.contains("  f39()\n  ... 5 more lines\n"),
+        "{preview}"
+    );
+    assert!(!preview.contains("f40()"), "{preview}");
+    // A script the tool refuses is not shown at all.
+    let (reasons, preview) = ask(&"x".repeat(tool::MAX_EXPRESSION + 1));
+    assert_eq!(reasons[1], tool::PARTIAL);
+    assert!(preview.contains("too long to show"), "{preview}");
+    assert!(!preview.contains("xxxx"), "{preview}");
+    let (reasons, _) = ask(&"x".repeat(tool::MAX_EXPRESSION));
+    assert_eq!(reasons[1], tool::PARTIAL, "one line of 2000 is cut");
+
+    // The page's address and the one to open are capped.
+    let long = format!("https://x.test/?{}", "u".repeat(300_000));
+    let (target, ..) =
+        tool::test_question_on(&long, &json!({"action": "evaluate", "expression": "1"}));
+    assert!(target.len() < tool::MAX_URL + 100, "{} bytes", target.len());
+    let (target, ..) = tool::test_question_on("", &json!({"action": "open", "url": long}));
+    assert!(target.len() < tool::MAX_URL + 100, "{} bytes", target.len());
 }
 
 #[test]
