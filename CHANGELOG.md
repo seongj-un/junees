@@ -9,6 +9,10 @@
   - 그래서 예약 작업용으로 설정 파일에 `sandbox_read = "/, ~/.ssh"`를 적어도, 웹훅 실행의 `read_file`은 디스크 전체를 읽지 않습니다. 0.2.0에서 안내한 "`JUNEES_SANDBOX_READ`는 예약 작업 데몬의 환경에만" 우회는 더 필요 없습니다.
   - 웹훅 실행의 파일 도구가 `sandbox_read`의 폴더를 읽고 있었다면 그 폴더를 `webhook_sandbox_read`에 옮겨 적습니다. 여기에 자격 증명(`~/.ssh` 등)을 적어도 웹훅 실행은 읽지 않습니다.
   - 예약 작업과 대화는 그대로입니다: 예약 작업의 파일 도구와 bash는 계속 `sandbox_read`를 따르고, 거기 적은 자격 증명을 예약 작업의 bash가 다시 읽습니다. 웹훅 실행의 bash 읽기도 계속 `sandbox_read`를 따릅니다(주면 좁아질 뿐이고, 자격 증명은 0.2.0처럼 모두 숨깁니다).
+- **작업 폴더가 홈인 무인 실행의 bash (#75 남은 위험)**
+  - 예약 작업과 웹훅 실행의 bash는 이제 파일 도구와 같이 셸 시작 파일(`~/.bashrc`, `~/.profile` 등), systemd user 유닛(`~/.config/systemd`, `~/.local/share/systemd`), `~/.config/autostart`, `~/.gitconfig`, `~/.config/git`, `~/.ssh/authorized_keys*`, `~/.local/bin`, `~/bin`, 그리고 데몬 `PATH`에 든 홈 아래 폴더(`~/.cargo/bin` 등)에 쓰지 못합니다(읽기는 됩니다). 파일 도구의 쓰기 거절 목록에도 `~/.local/bin`, `~/bin`, PATH 폴더가 더해졌습니다.
+  - 작업 폴더가 홈이면 무인 실행의 bash는 홈, `~/.config`, `~/.local/share` 바로 아래에 새 파일이나 폴더를 만들지 못합니다(이미 있는 하위 폴더 안은 됩니다). 예약 작업이 `cargo install`이나 `pip install --user`로 `~/.cargo/bin`, `~/.local/bin`에 설치하던 경우도 실패합니다. 작업과 웹훅 경로에는 프로젝트 폴더를 주세요.
+  - 대화, `-p`, `task` 모드는 그대로입니다.
 - **게이트웨이 승인 버튼 (#79, #80)**
   - 디스코드, 텔레그램, Slack 게이트웨이의 승인 질문에 버튼(Allow, Always allow, Decline)이 붙습니다. 글 답장 `y`/`n`/`a`도 그대로 됩니다.
   - 기존 Slack 앱은 앱 설정의 Interactivity & Shortcuts에서 Interactivity를 켜야 버튼이 동작합니다(Socket Mode라 Request URL은 필요 없습니다). 켜지 않으면 버튼을 눌러도 Junees에 아무것도 오지 않으니 글로 답합니다.
