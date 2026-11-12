@@ -21,6 +21,14 @@ pub const MAX_RESULT: usize = 10_000;
 /// Characters of a page title and of a page address in a result.
 pub const MAX_TITLE: usize = 300;
 pub const MAX_URL: usize = 2_000;
+/// Characters of an `evaluate` expression; a longer one is refused, so
+/// the approval question never asks about a script it cannot show.
+pub const MAX_EXPRESSION: usize = 2_000;
+/// Lines, characters per line and the longest run of blanks the approval
+/// question shows of an `evaluate` expression as they are.
+const PREVIEW_LINES: usize = 40;
+const PREVIEW_WIDTH: usize = 160;
+const PREVIEW_BLANKS: usize = 16;
 /// The largest screenshot sent, in bytes; a larger one is sent as JPEG.
 pub const MAX_SCREENSHOT_BYTES: usize = 2 * 1024 * 1024;
 
@@ -145,15 +153,20 @@ impl ToolQuestions for Questions {
 fn question(known: &Known, input: &Value) -> Question {
     let action = input.get("action").and_then(Value::as_str).unwrap_or("");
     let element = element_number(input);
+    // The page sets its own address (`history.pushState`), the model the
+    // one to open: both are capped so the reasons stay in view.
     let on = if known.url.is_empty() {
         String::new()
     } else {
-        format!(" on {}", known.url)
+        format!(" on {}", page::cut(&known.url, MAX_URL))
     };
     let target = match (action, element) {
         ("open" | "navigate", _) => format!(
             "open {}",
-            input.get("url").and_then(Value::as_str).unwrap_or("?")
+            page::cut(
+                input.get("url").and_then(Value::as_str).unwrap_or("?"),
+                MAX_URL
+            )
         ),
         (_, Some(n)) => format!("{action} element {n}{on}"),
         _ => format!("{action}{on}"),
@@ -193,19 +206,28 @@ fn question(known: &Known, input: &Value) -> Question {
         }
         _ => return (target, Vec::new(), Vec::new(), None),
     };
+    let mut reasons = vec![reason];
     let preview = match action {
-        "evaluate" => input
-            .get("expression")
-            .and_then(Value::as_str)
-            .map(|code| preview_lines(code, 12)),
+        "evaluate" => input.get("expression").and_then(Value::as_str).map(|code| {
+            let (preview, partial) = script_preview(code);
+            if partial {
+                reasons.push(PARTIAL.to_string());
+            }
+            preview
+        }),
         "type" => input
             .get("text")
             .and_then(Value::as_str)
             .map(|text| format!("text: {} characters (not shown)\n", text.chars().count())),
         _ => None,
     };
-    (target, vec![reason], vec![kind.to_string()], preview)
+    (target, reasons, vec![kind.to_string()], preview)
 }
+
+/// The reason added when the question shows an `evaluate` script only in
+/// part.
+pub const PARTIAL: &str = "the script below is only partially shown (long lines cut, long runs of \
+     blanks shortened or lines left out): what is not shown runs too";
 
 /// What the latest snapshot says Enter (or Space, when `space`) would
 /// do: in element `element`, else in the element the last action
@@ -228,18 +250,96 @@ fn key_risk(known: &Known, element: Option<usize>, space: bool) -> String {
     }
 }
 
-fn preview_lines(text: &str, max: usize) -> String {
+/// An `evaluate` script as the approval question shows it, and whether
+/// any of it is not shown as written. Lines end where JavaScript ends
+/// them (also at `\r`, U+2028 and U+2029, which are shown as escapes);
+/// a cut line ends in `...` and the number of characters left out; long
+/// runs of blanks, which could push code out of view, are shortened to
+/// their count. Scripts over [`MAX_EXPRESSION`] are not shown: the tool
+/// refuses them.
+fn script_preview(code: &str) -> (String, bool) {
+    let total = code.chars().count();
+    if total > MAX_EXPRESSION {
+        return (
+            format!(
+                "  ({total} characters: too long to show; the browser tool refuses expressions \
+                 over {MAX_EXPRESSION} characters without running them)\n"
+            ),
+            true,
+        );
+    }
+    let lines = script_lines(code);
     let mut out = String::new();
-    for line in text.lines().take(max) {
+    let mut partial = false;
+    for line in lines.iter().take(PREVIEW_LINES) {
         out.push_str("  ");
-        out.extend(line.chars().take(160));
+        partial |= preview_line(line, &mut out);
         out.push('\n');
     }
-    let total = text.lines().count();
-    if total > max {
-        out.push_str(&format!("  ... {} more lines\n", total - max));
+    if lines.len() > PREVIEW_LINES {
+        out.push_str(&format!(
+            "  ... {} more lines\n",
+            lines.len() - PREVIEW_LINES
+        ));
+        partial = true;
     }
-    out
+    (out, partial)
+}
+
+/// `code` split where JavaScript ends a line: `\n`, `\r\n`, a lone `\r`,
+/// U+2028 and U+2029. Every end other than `\n` and `\r\n` stays visible
+/// as an escape at the end of its line.
+fn script_lines(code: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => lines.push(std::mem::take(&mut line)),
+            '\r' if chars.peek() == Some(&'\n') => {
+                chars.next();
+                lines.push(std::mem::take(&mut line));
+            }
+            '\r' | '\u{2028}' | '\u{2029}' => {
+                line.extend(c.escape_default());
+                lines.push(std::mem::take(&mut line));
+            }
+            c => line.push(c),
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// Appends `line` to `out`, at most [`PREVIEW_WIDTH`] characters shown,
+/// runs of over [`PREVIEW_BLANKS`] blanks as `[N blanks]`; whether any
+/// of it is not shown as written.
+fn preview_line(line: &str, out: &mut String) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let mut partial = false;
+    let mut shown = 0;
+    let mut at = 0;
+    while at < chars.len() {
+        if shown >= PREVIEW_WIDTH {
+            out.push_str(&format!("... ({} more characters)", chars.len() - at));
+            return true;
+        }
+        let run = chars[at..].iter().take_while(|c| c.is_whitespace()).count();
+        if run > PREVIEW_BLANKS {
+            let mark = format!("[{run} blanks]");
+            shown += mark.chars().count();
+            out.push_str(&mark);
+            at += run;
+            partial = true;
+            continue;
+        }
+        out.push(chars[at]);
+        shown += 1;
+        at += 1;
+    }
+    partial
 }
 
 fn element_number(input: &Value) -> Option<usize> {
@@ -789,7 +889,10 @@ impl BrowserTool {
     }
 
     async fn screenshot(&self, browser: &mut Browser) -> Result<ToolOutput, Failure> {
+        browser.refuse_private_page().await?;
         let bytes = browser.screenshot(MAX_SCREENSHOT_BYTES).await?;
+        // `location` checks again: a page that came while the screenshot
+        // was taken is not sent.
         let (image, size) = crate::images::Image::from_bytes(&bytes).map_err(Failure::Error)?;
         let (title, url) = browser.location().await?;
         let notes = browser.take_notes();
@@ -814,14 +917,27 @@ impl BrowserTool {
             .get("expression")
             .and_then(Value::as_str)
             .ok_or_else(|| err("`evaluate` needs `expression`"))?;
+        let length = expression.chars().count();
+        if length > MAX_EXPRESSION {
+            return Err(err(format!(
+                "not run: the expression has {length} characters; `evaluate` takes at most \
+                 {MAX_EXPRESSION}, so the approval question can show all of it. Use shorter \
+                 expressions, one step at a time"
+            )));
+        }
         if !self.inner.asks {
             return Err(err(
                 "not run: `evaluate` runs only after the user approves it, and nobody is asked \
                  in this run (-p, JUNEES_APPROVAL=off, a scheduled or webhook run)",
             ));
         }
-        match browser.evaluate_in_page(expression, true).await {
-            Ok(value) => {
+        browser.refuse_private_page().await?;
+        let evaluated = browser.evaluate_in_page(expression, true).await;
+        // What a page that came while the script ran returned is not
+        // read.
+        browser.refuse_private_page().await?;
+        match evaluated {
+            Ok(Ok(value)) => {
                 let text = match &value {
                     Value::String(text) => text.clone(),
                     other => other.to_string(),
@@ -833,8 +949,21 @@ impl BrowserTool {
                     &notes,
                 ))))
             }
-            Err(error) if error.to_string().contains("the browser") => Err(error.into()),
-            Err(error) => Err(err(wrap(&format!("the script threw: {error:#}")))),
+            // What the page threw is its own text, of any length.
+            Ok(Err(thrown)) => Err(err(wrap(&crate::tools::truncate_middle(
+                &format!("the script threw: {thrown}"),
+                MAX_RESULT,
+            )))),
+            // The connection closed: the message is Junees's own, and
+            // `failed` drops the browser.
+            Err(error) if browser.is_closed() => Err(err(crate::tools::truncate_middle(
+                &format!("{error:#}"),
+                MAX_RESULT,
+            ))),
+            Err(error) => Err(err(wrap(&crate::tools::truncate_middle(
+                &format!("the script did not run: {error:#}"),
+                MAX_RESULT,
+            )))),
         }
     }
 }
@@ -981,6 +1110,17 @@ pub(crate) fn test_question(refs: Vec<Element>, focused: Option<usize>, input: &
             refs,
             focused,
             frame_focus: false,
+        },
+        input,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_question_on(url: &str, input: &Value) -> Question {
+    question(
+        &Known {
+            url: url.into(),
+            ..Known::default()
         },
         input,
     )

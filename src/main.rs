@@ -537,6 +537,15 @@ fn api_agent(
             junees::browser::Run::NotAsked
         },
     );
+    if browser.is_some()
+        && let Some(warning) = junees::browser::unconfined_warning(
+            &config.browser,
+            config.tools.sandbox.as_ref(),
+            &junees::sandbox::Support::current(),
+        )
+    {
+        eprintln!("  !! {warning}");
+    }
     let mut agent = Agent::new(
         make_provider(config)?,
         tools,

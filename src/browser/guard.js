@@ -29,6 +29,9 @@
   // Elements the tool found (through DevTools, which sees them) to host a
   // closed shadow root; see `closed` below.
   const closedHosts = new WeakSet();
+  // The page has more closed shadow roots than the tool marks one by one:
+  // every element counts as in one (see `closedEverywhere`).
+  let closedAll = false;
 
   const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
   const short = (text, max) => {
@@ -98,6 +101,7 @@
   // one (a slotted element is shown, and clicked, through the hidden
   // tree).
   function inClosed(el) {
+    if (closedAll) return true;
     for (let n = el; n; n = n.parentNode && n.parentNode.nodeType === Node.DOCUMENT_FRAGMENT_NODE
       ? n.parentNode.host : n.parentNode) {
       if (closedHosts.has(n)) return true;
@@ -252,6 +256,13 @@
     // another site.
     closed(el) {
       closedHosts.add(el);
+    },
+    // The page has too many closed shadow roots to mark each host (the
+    // tool caps the work per check): every click, Enter/Space and typing
+    // then needs the user's approval, like one into a closed root. Stays
+    // for this document.
+    closedEverywhere() {
+      closedAll = true;
     },
     // The events stopped since the guard was armed, and disarms it.
     take() {

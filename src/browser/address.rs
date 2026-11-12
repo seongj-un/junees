@@ -6,6 +6,7 @@
 //! (SSRF) through a link, an image, a redirect or a script either.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
 
 use reqwest::Url;
 
@@ -14,18 +15,30 @@ use reqwest::Url;
 pub struct Policy {
     /// Private, loopback and link-local addresses too.
     pub allow_private: bool,
+    /// The addresses of the proxies the browser connects through: a page
+    /// that came through one reports the proxy's address, not the site's,
+    /// so [`Policy::check_remote`] does not judge those.
+    pub proxies: Vec<IpAddr>,
     /// Tests: this one address counts as public, so a page on a loopback
     /// test server loads while the rest of loopback stays refused.
     #[cfg(test)]
     pub public_for_test: Option<IpAddr>,
+    /// Tests: [`Policy::check`] resolves these names to these addresses,
+    /// while the browser is told others (DNS rebinding as the browser sees
+    /// it) or a proxy resolves them.
+    #[cfg(test)]
+    pub resolve_for_test: Vec<(String, IpAddr)>,
 }
 
 impl Policy {
     pub fn new(allow_private: bool) -> Self {
         Self {
             allow_private,
+            proxies: Vec::new(),
             #[cfg(test)]
             public_for_test: None,
+            #[cfg(test)]
+            resolve_for_test: Vec::new(),
         }
     }
 
@@ -53,12 +66,18 @@ impl Policy {
 
     /// [`Policy::check_url`], then every address the host resolves to.
     /// Chrome resolves the name again when it connects, so a name whose
-    /// answer changes in between (DNS rebinding) is not caught.
+    /// answer changes in between (DNS rebinding) is not caught here; the
+    /// address a page then came from is checked with
+    /// [`Policy::check_remote`].
     pub async fn check(&self, url: &str) -> Result<(), String> {
         let parsed = self.check_url(url)?;
         let host = parsed.host_str().unwrap_or_default();
         if self.allow_private || ip_literal(host).is_some() {
             return Ok(());
+        }
+        #[cfg(test)]
+        if let Some((_, ip)) = self.resolve_for_test.iter().find(|(name, _)| name == host) {
+            return self.check_ip(*ip);
         }
         let port = parsed.port_or_known_default().unwrap_or(80);
         let addresses = tokio::net::lookup_host((host, port))
@@ -80,6 +99,27 @@ impl Policy {
         Ok(())
     }
 
+    /// The address `remote` (a response's `remoteIPAddress`) when the
+    /// browser may not show what came from it: a private or local address
+    /// although the name passed [`Policy::check`] (its answer changed in
+    /// between). No address (a cached or service worker response) passes,
+    /// and so does a proxy's address: the proxy resolved the name, so the
+    /// site's address is not known here.
+    pub fn check_remote(&self, remote: &str) -> Result<(), IpAddr> {
+        match ip_literal(remote) {
+            Some(ip)
+                if self
+                    .proxies
+                    .iter()
+                    .any(|proxy| proxy.to_canonical() == ip.to_canonical()) =>
+            {
+                Ok(())
+            }
+            Some(ip) => self.check_ip(ip).map_err(|_| ip),
+            None => Ok(()),
+        }
+    }
+
     fn check_ip(&self, ip: IpAddr) -> Result<(), String> {
         #[cfg(test)]
         if self.public_for_test == Some(ip) {
@@ -91,6 +131,25 @@ impl Policy {
             Err(private(&ip.to_string()))
         }
     }
+}
+
+/// The addresses of the proxy hosts `hosts` (names resolved here, as the
+/// browser will; a name that does not resolve in 5 seconds adds none).
+pub async fn proxy_addresses(hosts: &[String]) -> Vec<IpAddr> {
+    let mut addresses = Vec::new();
+    for host in hosts {
+        if let Some(ip) = ip_literal(host) {
+            addresses.push(ip);
+        } else if let Ok(Ok(found)) = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((host.as_str(), 0)),
+        )
+        .await
+        {
+            addresses.extend(found.map(|address| address.ip()));
+        }
+    }
+    addresses
 }
 
 fn private(host: &str) -> String {
@@ -287,5 +346,34 @@ mod tests {
         ] {
             assert!(allowed.check(url).await.is_ok(), "{url}");
         }
+    }
+
+    #[test]
+    fn the_address_a_page_came_from_is_checked() {
+        let policy = Policy::new(false);
+        for remote in [
+            "127.0.0.1",
+            "169.254.169.254",
+            "10.0.0.2",
+            "[::1]",
+            "::1",
+            "[fd00::1]",
+        ] {
+            assert!(policy.check_remote(remote).is_err(), "{remote}");
+        }
+        for remote in ["93.184.216.34", "[2606:4700:4700::1111]", ""] {
+            assert!(policy.check_remote(remote).is_ok(), "{remote}");
+        }
+        assert!(Policy::new(true).check_remote("127.0.0.1").is_ok());
+        // A proxy's address: the proxy resolved the name.
+        let proxied = Policy {
+            proxies: vec!["10.0.0.2".parse().unwrap(), "::1".parse().unwrap()],
+            ..Policy::new(false)
+        };
+        for remote in ["10.0.0.2", "::ffff:10.0.0.2", "[::1]"] {
+            assert!(proxied.check_remote(remote).is_ok(), "{remote}");
+        }
+        assert!(proxied.check_remote("10.0.0.3").is_err());
+        assert!(proxied.check_remote("127.0.0.1").is_err());
     }
 }
