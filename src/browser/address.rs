@@ -18,6 +18,11 @@ pub struct Policy {
     /// test server loads while the rest of loopback stays refused.
     #[cfg(test)]
     pub public_for_test: Option<IpAddr>,
+    /// Tests: [`Policy::check`] resolves this name to this address, while
+    /// the browser is told another one (DNS rebinding as the browser sees
+    /// it).
+    #[cfg(test)]
+    pub resolve_for_test: Option<(String, IpAddr)>,
 }
 
 impl Policy {
@@ -26,6 +31,8 @@ impl Policy {
             allow_private,
             #[cfg(test)]
             public_for_test: None,
+            #[cfg(test)]
+            resolve_for_test: None,
         }
     }
 
@@ -53,12 +60,20 @@ impl Policy {
 
     /// [`Policy::check_url`], then every address the host resolves to.
     /// Chrome resolves the name again when it connects, so a name whose
-    /// answer changes in between (DNS rebinding) is not caught.
+    /// answer changes in between (DNS rebinding) is not caught here; the
+    /// address a page then came from is checked with
+    /// [`Policy::check_remote`].
     pub async fn check(&self, url: &str) -> Result<(), String> {
         let parsed = self.check_url(url)?;
         let host = parsed.host_str().unwrap_or_default();
         if self.allow_private || ip_literal(host).is_some() {
             return Ok(());
+        }
+        #[cfg(test)]
+        if let Some((name, ip)) = &self.resolve_for_test
+            && name == host
+        {
+            return self.check_ip(*ip);
         }
         let port = parsed.port_or_known_default().unwrap_or(80);
         let addresses = tokio::net::lookup_host((host, port))
@@ -78,6 +93,17 @@ impl Policy {
             return Err(format!("cannot resolve {host}"));
         }
         Ok(())
+    }
+
+    /// The address `remote` (a response's `remoteIPAddress`) when the
+    /// browser may not show what came from it: a private or local address
+    /// although the name passed [`Policy::check`] (its answer changed in
+    /// between). No address (a cached or service worker response) passes.
+    pub fn check_remote(&self, remote: &str) -> Result<(), IpAddr> {
+        match ip_literal(remote) {
+            Some(ip) => self.check_ip(ip).map_err(|_| ip),
+            None => Ok(()),
+        }
     }
 
     fn check_ip(&self, ip: IpAddr) -> Result<(), String> {
@@ -287,5 +313,24 @@ mod tests {
         ] {
             assert!(allowed.check(url).await.is_ok(), "{url}");
         }
+    }
+
+    #[test]
+    fn the_address_a_page_came_from_is_checked() {
+        let policy = Policy::new(false);
+        for remote in [
+            "127.0.0.1",
+            "169.254.169.254",
+            "10.0.0.2",
+            "[::1]",
+            "::1",
+            "[fd00::1]",
+        ] {
+            assert!(policy.check_remote(remote).is_err(), "{remote}");
+        }
+        for remote in ["93.184.216.34", "[2606:4700:4700::1111]", ""] {
+            assert!(policy.check_remote(remote).is_ok(), "{remote}");
+        }
+        assert!(Policy::new(true).check_remote("127.0.0.1").is_ok());
     }
 }

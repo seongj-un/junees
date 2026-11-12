@@ -889,7 +889,10 @@ impl BrowserTool {
     }
 
     async fn screenshot(&self, browser: &mut Browser) -> Result<ToolOutput, Failure> {
+        browser.refuse_private_page().await?;
         let bytes = browser.screenshot(MAX_SCREENSHOT_BYTES).await?;
+        // `location` checks again: a page that came while the screenshot
+        // was taken is not sent.
         let (image, size) = crate::images::Image::from_bytes(&bytes).map_err(Failure::Error)?;
         let (title, url) = browser.location().await?;
         let notes = browser.take_notes();
@@ -928,7 +931,12 @@ impl BrowserTool {
                  in this run (-p, JUNEES_APPROVAL=off, a scheduled or webhook run)",
             ));
         }
-        match browser.evaluate_in_page(expression, true).await {
+        browser.refuse_private_page().await?;
+        let evaluated = browser.evaluate_in_page(expression, true).await;
+        // What a page that came while the script ran returned is not
+        // read.
+        browser.refuse_private_page().await?;
+        match evaluated {
             Ok(Ok(value)) => {
                 let text = match &value {
                     Value::String(text) => text.clone(),

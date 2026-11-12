@@ -458,6 +458,13 @@ pub fn launch(
     Ok((process, pipes))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: more arguments for the browsers this thread starts.
+    pub(super) static TEST_ARGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The browser's command line and environment, without the pipe: the
 /// profile `profile`, and `temp` as its temporary folder.
 pub(super) fn command(
@@ -495,6 +502,10 @@ pub(super) fn command(
     if settings.no_sandbox {
         command.arg("--no-sandbox");
     }
+    #[cfg(test)]
+    TEST_ARGS.with(|args| {
+        command.args(args.borrow().iter());
+    });
     command
         .arg("about:blank")
         .current_dir(profile)

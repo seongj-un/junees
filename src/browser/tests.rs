@@ -471,6 +471,7 @@ async fn refuses_other_schemes_and_private_addresses() {
     let policy = Policy {
         allow_private: false,
         public_for_test: Some("127.0.0.1".parse().unwrap()),
+        resolve_for_test: None,
     };
     let tool = BrowserTool::with_policy(settings, Vec::new(), true, policy);
 
@@ -545,6 +546,125 @@ async fn refuses_other_schemes_and_private_addresses() {
     assert!(!output.content.contains("url: file:"), "{}", output.content);
     run(&tool, json!({"action": "close"})).await;
     assert_eq!(*private_seen.lock().unwrap(), Vec::<String>::new());
+}
+
+/// Sets the extra browser arguments of this thread's browsers, and clears
+/// them when dropped.
+struct TestArgs;
+
+impl TestArgs {
+    fn set(args: &[&str]) -> Self {
+        process::TEST_ARGS
+            .with(|test| *test.borrow_mut() = args.iter().map(|a| a.to_string()).collect());
+        TestArgs
+    }
+}
+
+impl Drop for TestArgs {
+    fn drop(&mut self) {
+        process::TEST_ARGS.with(|test| test.borrow_mut().clear());
+    }
+}
+
+/// The tool's page is blank, and nothing of the private page shows.
+async fn assert_blank(tool: &BrowserTool) {
+    let output = run(tool, json!({"action": "snapshot"})).await;
+    assert!(
+        output.content.contains("url: about:blank"),
+        "{}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("internal secret"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn pages_that_come_from_a_private_address_are_left() {
+    let Some(program) = chromium("pages_that_come_from_a_private_address_are_left") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    // DNS rebinding as the browser sees it: Junees resolves rebind.test
+    // to a public address, Chrome to 127.0.0.2, where the private service
+    // is.
+    let (private, private_seen) = serve(
+        "127.0.0.2",
+        HashMap::from([(
+            "/",
+            (
+                200,
+                "",
+                "<title>Internal</title><p>internal secret</p>".to_string(),
+            ),
+        )]),
+    )
+    .await;
+    let rebound = format!("http://rebind.test:{}/", private.port());
+    let page =
+        format!(r#"<title>Public</title><p>public page</p><a href="{rebound}">Rebound link</a>"#);
+    let (public, _) = serve("127.0.0.1", HashMap::from([("/", (200, "", page))])).await;
+    let _args = TestArgs::set(&["--host-resolver-rules=MAP rebind.test 127.0.0.2"]);
+    let settings = Settings {
+        allow_private: false,
+        ..settings(&program)
+    };
+    let policy = Policy {
+        allow_private: false,
+        public_for_test: Some("127.0.0.1".parse().unwrap()),
+        resolve_for_test: Some(("rebind.test".into(), "93.184.216.34".parse().unwrap())),
+    };
+    let tool = BrowserTool::with_policy(settings, Vec::new(), true, policy);
+
+    // Opened by the model.
+    let output = run(&tool, json!({"action": "open", "url": rebound})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with(page::PRIVATE_PAGE),
+        "{}",
+        output.content
+    );
+    assert!(output.content.contains(UNTRUSTED), "{}", output.content);
+    assert!(
+        !output.content.contains("internal secret"),
+        "{}",
+        output.content
+    );
+    assert_blank(&tool).await;
+
+    // A link of a public page.
+    let output = run(
+        &tool,
+        json!({"action": "open", "url": format!("http://{public}/")}),
+    )
+    .await;
+    assert!(output.content.contains("public page"), "{}", output.content);
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&output.content, "link", "Rebound link")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.starts_with(page::PRIVATE_PAGE),
+        "{}",
+        output.content
+    );
+    assert!(
+        !output.content.contains("internal secret"),
+        "{}",
+        output.content
+    );
+    assert_blank(&tool).await;
+    let output = run(&tool, json!({"action": "screenshot"})).await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(output.content.contains("about:blank"), "{}", output.content);
+    run(&tool, json!({"action": "close"})).await;
+    // The check comes after the answer: the service was reached, but
+    // nothing of it was shown.
+    assert!(!private_seen.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
