@@ -6,7 +6,7 @@ use std::time::Duration;
 use super::{DEFAULT_LIMIT, MAX_LIMIT, Options, Query, SOURCES};
 
 pub const USAGE: &str = "usage: junees sessions search [--all] [--limit N] \
-                         [--source terminal|discord|telegram|cron|webhook|all] [--session ID] \
+                         [--source terminal|discord|telegram|slack|cron|webhook|all] [--session ID] \
                          <words or \"a phrase\">";
 
 /// A search a person asked for.
@@ -199,10 +199,7 @@ mod tests {
             (&["--limit"], "--limit needs a number"),
             (&["--limit", "0", "x"], "from 1 to 20"),
             (&["--limit", "21", "x"], "from 1 to 20"),
-            (
-                &["--source", "slack", "x"],
-                "unknown session source `slack`",
-            ),
+            (&["--source", "irc", "x"], "unknown session source `irc`"),
             (&["--sources", "x"], "unknown option `--sources`"),
             (&["--session"], "--session needs a session id"),
         ] {

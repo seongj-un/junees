@@ -150,7 +150,7 @@ pub const REPL_HELP: &str = "\
 /status            show where the task stands
 /sessions          list recent sessions and pick one to continue
 /search <words>    search the saved sessions of this folder (\"a phrase\" in quotes;
-                   --all every folder, --limit N, --source discord|telegram|cron|webhook)
+                   --all every folder, --limit N, --source discord|telegram|slack|cron|webhook)
 /new               start a new conversation (also /reset)
 /image <path> [<question>]
                    send an image with a question (PNG, JPEG, GIF or WebP up to
@@ -462,7 +462,8 @@ as written. Newest sessions first.
 Options:
   --all            every working folder, not only this one
   --limit <N>      sessions to show, 1 to 20 (default 5)
-  --source <S>     only sessions from terminal, discord, telegram, cron, webhook or all
+  --source <S>     only sessions from terminal, discord, telegram, slack, cron, webhook
+                   or all
                    (default all; repeat or use a comma list)
   --session <ID>   only this session (an id or the start of one), in any folder
 ";
