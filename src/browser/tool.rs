@@ -929,7 +929,7 @@ impl BrowserTool {
             ));
         }
         match browser.evaluate_in_page(expression, true).await {
-            Ok(value) => {
+            Ok(Ok(value)) => {
                 let text = match &value {
                     Value::String(text) => text.clone(),
                     other => other.to_string(),
@@ -941,8 +941,21 @@ impl BrowserTool {
                     &notes,
                 ))))
             }
-            Err(error) if error.to_string().contains("the browser") => Err(error.into()),
-            Err(error) => Err(err(wrap(&format!("the script threw: {error:#}")))),
+            // What the page threw is its own text, of any length.
+            Ok(Err(thrown)) => Err(err(wrap(&crate::tools::truncate_middle(
+                &format!("the script threw: {thrown}"),
+                MAX_RESULT,
+            )))),
+            // The connection closed: the message is Junees's own, and
+            // `failed` drops the browser.
+            Err(error) if browser.is_closed() => Err(err(crate::tools::truncate_middle(
+                &format!("{error:#}"),
+                MAX_RESULT,
+            ))),
+            Err(error) => Err(err(wrap(&crate::tools::truncate_middle(
+                &format!("the script did not run: {error:#}"),
+                MAX_RESULT,
+            )))),
         }
     }
 }

@@ -383,6 +383,7 @@ impl Browser {
                 let ready = self.evaluate_in_page("document.readyState", false).await;
                 if ready
                     .ok()
+                    .and_then(Result::ok)
                     .and_then(|v| v.as_str().map(str::to_string))
                     .as_deref()
                     != Some("complete")
@@ -570,8 +571,14 @@ impl Browser {
     }
 
     /// Runs `expression` in the page's own JavaScript (`evaluate`), with a
-    /// time limit.
-    pub async fn evaluate_in_page(&self, expression: &str, await_promise: bool) -> Result<Value> {
+    /// time limit. The outer error is the browser's (it went away, did not
+    /// answer, refused the call); the inner one is what the script threw,
+    /// text the page chooses.
+    pub async fn evaluate_in_page(
+        &self,
+        expression: &str,
+        await_promise: bool,
+    ) -> Result<std::result::Result<Value, String>> {
         let result = self
             .call_page(
                 "Runtime.evaluate",
@@ -584,15 +591,17 @@ impl Browser {
             )
             .await?;
         if let Some(details) = result.get("exceptionDetails") {
-            bail!("{}", exception(details));
+            return Ok(Err(exception(details)));
         }
-        Ok(result["result"].get("value").cloned().unwrap_or_else(|| {
-            json!(
-                result["result"]["description"]
-                    .as_str()
-                    .unwrap_or("undefined")
-            )
-        }))
+        Ok(Ok(result["result"].get("value").cloned().unwrap_or_else(
+            || {
+                json!(
+                    result["result"]["description"]
+                        .as_str()
+                        .unwrap_or("undefined")
+                )
+            },
+        )))
     }
 
     /// Moves the mouse to `(x, y)` (the page's mousemove handlers run

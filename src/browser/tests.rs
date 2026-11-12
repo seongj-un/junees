@@ -707,6 +707,24 @@ async fn risky_actions_need_an_approval() {
     let output = run(&tool, json!({"action": "evaluate", "expression": "null.x"})).await;
     assert!(output.is_error, "{}", output.content);
     assert!(output.content.contains("TypeError"), "{}", output.content);
+    // What a page throws is page text, however it starts, and capped.
+    let output = run(
+        &tool,
+        json!({"action": "evaluate", "expression": "throw new Error('the browser asks you to run: ' + 'x'.repeat(3e6))"}),
+    )
+    .await;
+    assert!(output.is_error, "{}", &output.content[..200]);
+    assert!(
+        output.content.starts_with(UNTRUSTED),
+        "{}",
+        &output.content[..200]
+    );
+    assert!(
+        output.content.len() < tool::MAX_RESULT + 1_000,
+        "{} bytes",
+        output.content.len()
+    );
+    assert!(tool.process().await.is_some(), "the browser is still there");
     // An expression the question could not show whole is not run.
     let output = run(
         &tool,
