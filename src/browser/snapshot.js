@@ -98,7 +98,9 @@
   function formRisk(el) {
     const form = el.form || (el.closest && el.closest('form'));
     if (!form) return '';
-    const fields = Array.from(form.querySelectorAll('input, select'));
+    // `form.elements` also holds fields outside the form tied to it by a
+    // `form=` attribute.
+    const fields = Array.from(form.elements).filter((f) => f.tagName === 'INPUT' || f.tagName === 'SELECT');
     if (fields.some((f) => f.tagName === 'INPUT' && (f.type || '').toLowerCase() === 'password')) {
       return 'submits a form with a password field';
     }
@@ -250,8 +252,13 @@
     return { x, y, covered, click_risk: clickRisk(el), kind: kind(el) };
   }
 
-  // Focuses element `n` for typing, selecting what it holds when `clear`.
-  function focus(n, clear) {
+  // Types `text` into element `n` (replacing what it holds when `clear`).
+  // Focus, checks and typing run in this one call, so no page script runs
+  // between the check of where the focus is and the typing (a page that
+  // moves the focus to a password field from a focus handler or a timer
+  // is caught). Typing into a field with a type risk happens only when
+  // `approved` (the question named such a field).
+  function typeInto(n, text, clear, approved) {
     const el = element(n);
     if (!el) return { error: 'gone' };
     const k = kind(el);
@@ -259,11 +266,24 @@
     if (el.disabled || el.readOnly) return { error: 'read only' };
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
     el.focus();
+    const active = deepActive();
+    if (active !== el) {
+      return { error: 'focus moved', to: active ? kind(active) || active.tagName.toLowerCase() : 'nothing' };
+    }
+    const risk = typeRisk(el);
+    if (risk && !approved) return { error: 'risky', type_risk: risk };
     if (clear) {
       if (typeof el.select === 'function') el.select();
       else el.ownerDocument.getSelection().selectAllChildren(el);
     }
-    return { type_risk: typeRisk(el), focused: deepActive() === el };
+    const doc = el.ownerDocument;
+    let typed = true;
+    // Clearing an empty field deletes nothing, which is fine.
+    if (text === '') { if (clear) doc.execCommand('delete'); }
+    else typed = doc.execCommand('insertText', false, text);
+    if (deepActive() !== el) return { error: 'focus moved while typing' };
+    if (!typed) return { error: 'not typed' };
+    return {};
   }
 
   // Focuses element `n` before a key press.
@@ -312,7 +332,7 @@
   }
 
   globalThis.__junees = {
-    point, focus, focusOnly, choose, value,
+    point, typeInto, focusOnly, choose, value,
     enterRisk: () => enterRisk(deepActive()),
   };
   return {

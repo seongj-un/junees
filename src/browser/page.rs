@@ -492,13 +492,6 @@ impl Browser {
         Ok(())
     }
 
-    /// Types `text` into the focused element.
-    pub async fn insert_text(&self, text: &str) -> Result<()> {
-        self.call_page("Input.insertText", json!({"text": text}))
-            .await
-            .map(drop)
-    }
-
     /// Presses `key` and waits for what it started.
     pub async fn press(&mut self, key: &Key) -> Result<()> {
         let mut events = self.events.subscribe();

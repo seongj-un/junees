@@ -555,21 +555,43 @@ impl BrowserTool {
         let clear = input.get("clear").and_then(Value::as_bool).unwrap_or(true);
         // Ask first, focus after: focusing runs the page's own handlers.
         self.allowed(&meta.type_risk, "")?;
-        let focus = browser
-            .element_call(&format!("focus({n}, {clear})"))
+        // Focus, the checks and the typing run in one call in the page
+        // (`typeInto`), so the page cannot move the focus in between.
+        let approved = !meta.type_risk.is_empty();
+        let text_json = serde_json::to_string(text).unwrap_or_default();
+        let typed = browser
+            .element_call(&format!("typeInto({n}, {text_json}, {clear}, {approved})"))
             .await?;
-        match focus["error"].as_str() {
+        match typed["error"].as_str() {
             Some("not editable") => {
                 return Err(err(format!(
                     "element {n} is a {}, not a field to type into",
-                    text_of(&focus["kind"])
+                    text_of(&typed["kind"])
                 )));
             }
             Some("read only") => return Err(err(format!("element {n} is read-only or disabled"))),
+            Some("risky") => {
+                self.allowed(&meta.type_risk, typed["type_risk"].as_str().unwrap_or(""))?;
+                return Err(err(format!("not typed: {STALE}")));
+            }
+            Some("focus moved") => {
+                return Err(err(format!(
+                    "not typed: the page moved the focus from element {n} to another element \
+                     ({}) when it was focused; nothing was typed. Take a snapshot",
+                    crate::prompt_text::escape_hidden(&page::cut(&text_of(&typed["to"]), 40))
+                )));
+            }
+            Some("focus moved while typing") => {
+                return Err(err(format!(
+                    "the page moved the focus away from element {n} while typing; the text may \
+                     have gone into another element. Take a snapshot"
+                )));
+            }
+            Some("not typed") => {
+                return Err(err(format!("element {n} did not take the text")));
+            }
             _ => {}
         }
-        self.allowed(&meta.type_risk, focus["type_risk"].as_str().unwrap_or(""))?;
-        browser.insert_text(text).await?;
         self.known().focused = Some(n);
         let value = browser.element_call(&format!("value({n})")).await?;
         let notes = browser.take_notes();
