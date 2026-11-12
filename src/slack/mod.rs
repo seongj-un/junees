@@ -54,6 +54,10 @@ pub const SLACK_NOTE: &str = "\n\nYou are talking with the user through Slack, n
     not, so prefer plain sentences and short lists. Long replies are cut into several \
     messages. Keep replies short.";
 
+/// How long a conversation may sit unused before its worker ends (its
+/// session stays saved and opens again with the next message).
+pub const CLOSE_IDLE: Duration = Duration::from_secs(30 * 60);
+
 /// How long the conversations get to stop when the gateway does.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
@@ -69,6 +73,8 @@ pub struct SlackGateway {
     /// What `!memory` shows.
     pub memory: Option<Memory>,
     pub timing: Timing,
+    /// See [`CLOSE_IDLE`].
+    pub close_idle: Duration,
     pub log: Log,
 }
 
@@ -88,6 +94,7 @@ impl SlackGateway {
             cwd,
             memory,
             timing: Timing::default(),
+            close_idle: CLOSE_IDLE,
             log: stderr_log(),
         }
     }
@@ -151,6 +158,13 @@ impl SlackGateway {
         );
         let log = Arc::clone(&self.log);
         let allowed = self.config.allowed_users.clone();
+        // Every Slack thread is a conversation of its own: close the ones
+        // nobody uses, or their workers and histories pile up.
+        let close_idle = self.close_idle;
+        let mut sweep = tokio::time::interval(
+            (close_idle / 4).clamp(Duration::from_millis(10), Duration::from_secs(60)),
+        );
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // The conversations run here, on this thread.
         let local = tokio::task::LocalSet::new();
         local
@@ -163,6 +177,7 @@ impl SlackGateway {
                     tokio::select! {
                         ended = &mut connection => break ended,
                         Some(payload) = received.recv() => router.handle(&payload),
+                        _ = sweep.tick() => router.close_idle(close_idle),
                     }
                 };
                 log("slack gateway: stopping");

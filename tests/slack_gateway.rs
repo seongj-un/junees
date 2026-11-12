@@ -22,7 +22,7 @@ use junees::gateway::Log;
 use junees::gateway::engine::{ApiEngines, Conversation, Engines, Progress};
 use junees::session::{Journal, Transcript};
 use junees::slack::config::SlackConfig;
-use junees::slack::{SLACK_NOTE, SlackGateway, Timing};
+use junees::slack::{CLOSE_IDLE, SLACK_NOTE, SlackGateway, Timing};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -581,7 +581,7 @@ fn start(
         backoff_start: Duration::from_millis(50),
         backoff_max: Duration::from_millis(200),
     };
-    start_timed(config, engines, home, cwd, timing)
+    start_timed(config, engines, home, cwd, timing, CLOSE_IDLE)
 }
 
 fn start_timed(
@@ -590,6 +590,7 @@ fn start_timed(
     home: Option<PathBuf>,
     cwd: &Path,
     timing: Timing,
+    close_idle: Duration,
 ) -> Running {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&lines);
@@ -601,6 +602,7 @@ fn start_timed(
         cwd: cwd.to_path_buf(),
         memory: None,
         timing,
+        close_idle,
         log,
     };
     let stop = Cancel::new();
@@ -788,7 +790,7 @@ async fn a_silent_connection_is_dropped_although_pings_go_out() {
         backoff_max: Duration::from_millis(50),
     };
     s.state.mute.store(true, Ordering::SeqCst);
-    let running = start_timed(slack(&s, &[]), fake(), None, dir.path(), timing);
+    let running = start_timed(slack(&s, &[]), fake(), None, dir.path(), timing, CLOSE_IDLE);
     // No `hello`: given up after the connect timeout, then tried again.
     s.until("two silent connections", || {
         s.state.muted.load(Ordering::SeqCst) >= 2
@@ -1066,6 +1068,76 @@ fn file(s: &FakeSlack, name: &str, mimetype: &str) -> Value {
            "mode": "hosted", "is_external": false,
            "url_private": format!("{}/T1-F1/{name}", s.files),
            "url_private_download": format!("{}/T1-F1/download/{name}", s.files)})
+}
+
+#[tokio::test]
+async fn idle_threads_close_and_open_their_session_again() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let s = FakeSlack::start().await;
+    let (api, served) = common::fake_api(vec![
+        (200, common::text_reply("first answer")),
+        (200, common::text_reply("second answer")),
+        (200, common::text_reply("dm answer")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "off"), cwd.path().into())
+            .with_note(SLACK_NOTE),
+    );
+    let timing = Timing {
+        ping_every: Duration::from_secs(30),
+        idle: Duration::from_secs(60),
+        connect_timeout: Duration::from_secs(5),
+        backoff_start: Duration::from_millis(50),
+        backoff_max: Duration::from_millis(200),
+    };
+    let running = start_timed(
+        slack(&s, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+        timing,
+        Duration::from_millis(200),
+    );
+    s.wait_connections(1).await;
+    let asked = mention(USER, "remember the word kiwi", None);
+    let thread = thread_key(&asked["ts"]);
+    s.push(asked.clone());
+    s.wait_post(&thread, |p| p == "first answer").await;
+    let closed = |log: &[String]| {
+        log.iter()
+            .any(|l| l.contains("slack: closed 1 idle conversation(s), 0 open"))
+    };
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !closed(&running.log.lock().unwrap()) {
+        assert!(tokio::time::Instant::now() < deadline, "no worker closed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The thread's reply (no mention) reaches a new worker, which resumes
+    // the saved session: the model sees the first exchange.
+    s.push(in_channel(
+        USER,
+        "which word?",
+        Some(asked["ts"].as_str().unwrap()),
+    ));
+    s.wait_post(&thread, |p| p == "second answer").await;
+    s.push(dm(USER, "hello"));
+    s.wait_post(DM, |p| p == "dm answer").await;
+    running.stop().await;
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    let second = texts(&requests[1]);
+    assert!(
+        second.iter().any(|t| t.contains("remember the word kiwi"))
+            && second.iter().any(|t| t == "assistant: first answer"),
+        "{second:#?}"
+    );
+    // Each conversation has its own history.
+    assert!(
+        !texts(&requests[2]).iter().any(|t| t.contains("kiwi")),
+        "{:#?}",
+        texts(&requests[2])
+    );
 }
 
 #[tokio::test]

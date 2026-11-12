@@ -19,7 +19,7 @@
 //!   (`message` and `app_mention`): each `event_id` and each message
 //!   (channel and `ts`) is handled once.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +33,9 @@ use crate::gateway::channels::{Channels, Shared};
 
 /// Event ids and messages remembered against repeats.
 const RECENT: usize = 4096;
+
+/// Channel threads remembered as the bot's (the most recently used).
+const THREADS: usize = 4096;
 
 /// Subtypes that still carry what a user wrote.
 const USER_SUBTYPES: [&str; 2] = ["file_share", "thread_broadcast"];
@@ -94,8 +97,37 @@ pub struct Router {
     messages: VecDeque<String>,
     /// Channel threads the bot was mentioned in: their replies need no
     /// mention. Threads with a saved session count too (after a
-    /// restart).
-    threads: HashSet<String>,
+    /// restart, or once a thread left this list).
+    threads: Threads,
+}
+
+/// The [`THREADS`] most recently used thread keys.
+#[derive(Default)]
+struct Threads {
+    used: HashMap<String, u64>,
+    clock: u64,
+}
+
+impl Threads {
+    fn contains(&self, key: &str) -> bool {
+        self.used.contains_key(key)
+    }
+
+    /// Remembers `key` as used now, forgetting the least recently used
+    /// thread past the limit.
+    fn insert(&mut self, key: String) {
+        self.clock += 1;
+        self.used.insert(key, self.clock);
+        if self.used.len() > THREADS
+            && let Some(oldest) = self
+                .used
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(key, _)| key.clone())
+        {
+            self.used.remove(&oldest);
+        }
+    }
 }
 
 impl Router {
@@ -107,7 +139,20 @@ impl Router {
             strangers: HashSet::new(),
             events: VecDeque::new(),
             messages: VecDeque::new(),
-            threads: HashSet::new(),
+            threads: Threads::default(),
+        }
+    }
+
+    /// Closes the conversations idle for `idle` (see
+    /// [`Channels::close_idle`]).
+    pub fn close_idle(&mut self, idle: Duration) {
+        let closed = self.channels.close_idle(idle);
+        if closed > 0 {
+            (self.channels.shared().log)(&format!(
+                "slack: closed {closed} idle conversation(s), {} open; a new message opens \
+                 its saved session again",
+                self.channels.open_count()
+            ));
         }
     }
 
@@ -236,6 +281,21 @@ mod tests {
         assert_eq!(strip_mention("한글 <@UBOT> !stop", "UBOT"), "한글  !stop");
         assert!(mentions("x <@UBOT|j> y", "UBOT"));
         assert!(!mentions("x <@UBOT2> y", "UBOT"));
+    }
+
+    #[test]
+    fn keeps_the_most_recently_used_threads() {
+        let mut threads = Threads::default();
+        for n in 0..THREADS {
+            threads.insert(format!("C1:{n}"));
+        }
+        // Used again: now the newest.
+        threads.insert("C1:0".into());
+        threads.insert("C1:new".into());
+        assert_eq!(threads.used.len(), THREADS);
+        assert!(threads.contains("C1:0") && threads.contains("C1:new"));
+        assert!(!threads.contains("C1:1"));
+        assert!(threads.contains("C1:2"));
     }
 
     #[test]
