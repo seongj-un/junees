@@ -17,7 +17,10 @@
 //! - never write in Junees's data folders (memory, skills, cron, ...)
 //!   or the saved sessions;
 //! - in an unattended run, not read the credentials in the home folder
-//!   either ([`unattended_credentials`]);
+//!   either ([`unattended_credentials`]), nor change the files there that
+//!   run later (shell startup files, user services, git's settings, ssh's
+//!   authorized keys, program folders on PATH: [`unattended_no_write`]),
+//!   even when the working folder is the home folder;
 //! - with `sandbox_network = 0` and a kernel of Landlock ABI 4 or later,
 //!   neither connect nor bind TCP sockets.
 //!
@@ -303,6 +306,10 @@ impl Sandbox {
         }
         if settings.unattended {
             hidden.extend(unattended_credentials(tools, &settings));
+            read_only.extend(unattended_no_write(
+                tools,
+                std::env::var_os("PATH").as_deref(),
+            ));
         }
         let mut sandbox = Self::new(settings, hidden, read_only);
         sandbox.state = state;
@@ -409,10 +416,10 @@ impl Sandbox {
         match self.build(abi, work) {
             Ok((confinement, holds)) => {
                 if holds && !self.told_holds.swap(true, Ordering::Relaxed) {
-                    let line = "[sandbox: the working folder holds Junees's state folder, so \
-                                commands cannot create or remove entries directly in the \
-                                working folder or the folders between it and the protected \
-                                files; work in a subfolder]";
+                    let line = "[sandbox: the working folder holds Junees's state folder or \
+                                other protected paths, so commands cannot create or remove \
+                                entries directly in the working folder or the folders between \
+                                it and the protected files; work in a subfolder]";
                     note = Some(match note {
                         Some(note) => format!("{note}\n{line}"),
                         None => line.to_string(),
@@ -559,6 +566,45 @@ fn unattended_credentials(tools: &crate::tools::ToolSettings, settings: &Setting
         }));
     }
     out
+}
+
+/// The paths in the home folder an unattended run's commands may read
+/// but not change ([`crate::tools::unattended_no_write`], the same list
+/// the file tools refuse to write, with `path_var` the PATH): what they
+/// hold runs later, outside the run and its sandbox. Landlock rules only
+/// allow, and a path in a folder that does not exist gets no exception
+/// ([`Sandbox::build`]), so a path whose folder is missing counts from
+/// its first missing folder below the home folder instead: with no
+/// `~/.config`, a command may not make `~/.config` (and in it
+/// `systemd/user/x.service`) at all.
+fn unattended_no_write(
+    tools: &crate::tools::ToolSettings,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    let Some(home) = tools.settings_file.as_ref().and_then(|file| file.home()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = crate::tools::unattended_no_write(home, path_var)
+        .into_iter()
+        .map(|path| first_missing(&path, home))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// `path` itself when its folder exists, else the first folder on the way
+/// from `home` to it that does not (never `home` itself).
+fn first_missing(path: &Path, home: &Path) -> PathBuf {
+    let mut path = path;
+    while let Some(parent) = path.parent()
+        && !parent.is_dir()
+        && parent != home
+        && parent.starts_with(home)
+    {
+        path = parent;
+    }
+    path.to_path_buf()
 }
 
 /// The entries of the ssh folder `dir` that are not in [`SSH_PUBLIC`] or

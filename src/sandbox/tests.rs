@@ -512,6 +512,148 @@ async fn unattended_runs_cannot_read_home_credentials() {
 }
 
 #[tokio::test]
+async fn unattended_runs_in_the_home_folder_cannot_change_what_runs_later() {
+    // A scheduled job or webhook run working in the home folder: the
+    // files the next shell, login, ssh or git runs stay as they are, and
+    // ordinary files there stay writable. Without `~/.local` at all, the
+    // command cannot make it (and so not `~/.local/bin` either).
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    for (path, text) in [
+        (".bashrc", "# rc"),
+        (".profile", "# profile"),
+        (".gitconfig", "[user]"),
+        (".ssh/authorized_keys", "ssh-ed25519 mine"),
+        (".ssh/known_hosts", "host"),
+        (".config/other/settings", "other"),
+    ] {
+        std::fs::create_dir_all(home.join(path).parent().unwrap()).unwrap();
+        std::fs::write(home.join(path), format!("{text}\n")).unwrap();
+    }
+    let refused = [
+        ("echo x >> .bashrc", "bashrc"),
+        ("echo x > .profile", "profile"),
+        ("mv .bashrc moved", "move"),
+        ("echo x > .zshrc", "zshrc"),
+        ("echo x >> .gitconfig", "gitconfig"),
+        ("mkdir -p .config/git", "config-git"),
+        ("echo k >> .ssh/authorized_keys", "authorized-keys"),
+        ("echo k > .ssh/authorized_keys2", "authorized-keys2"),
+        (
+            "mkdir -p .config/systemd/user && echo u > .config/systemd/user/evil.service",
+            "systemd",
+        ),
+        ("mkdir -p .config/autostart", "autostart"),
+        ("mkdir -p .local/share/systemd/user", "local-systemd"),
+        ("mkdir -p .local/bin && echo x > .local/bin/ls", "local-bin"),
+        ("mkdir bin", "bin"),
+    ];
+    let mut command = String::from(
+        "echo a > sub/made && echo sub-ok; \
+         echo a >> notes.txt && echo notes-ok; \
+         echo a > .config/other/settings && echo other-ok; \
+         echo a > .config/other/new && echo other-new-ok; ",
+    );
+    for (attempt, name) in refused {
+        command.push_str(&format!(
+            "{{ {attempt}; }} 2>/dev/null || echo {name}-refused; "
+        ));
+    }
+    // The state folder elsewhere, so only these paths keep the home
+    // folder from getting one rule as a whole.
+    let tools = |unattended| ToolSettings {
+        settings_file: Some(SettingsFile::new(
+            layout.path("outside/.junees/config.toml"),
+            Some(home.clone()),
+        )),
+        sandbox: Some(Settings {
+            unattended,
+            ..settings()
+        }),
+        ..ToolSettings::default()
+    };
+    let cron = run(&home, Sandbox::for_tools(&tools(true)).unwrap(), &command).await;
+    let text = &cron.content;
+    for line in ["sub-ok", "notes-ok", "other-ok", "other-new-ok"] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    for (_, name) in refused {
+        assert!(text.contains(&format!("{name}-refused")), "{name}: {text}");
+    }
+    for (path, text) in [
+        (".bashrc", "# rc\n"),
+        (".profile", "# profile\n"),
+        (".gitconfig", "[user]\n"),
+        (".ssh/authorized_keys", "ssh-ed25519 mine\n"),
+    ] {
+        assert_eq!(std::fs::read_to_string(home.join(path)).unwrap(), text);
+    }
+    for path in [
+        "moved",
+        ".zshrc",
+        ".config/git",
+        ".config/systemd",
+        ".config/autostart",
+        ".ssh/authorized_keys2",
+        ".local",
+        "bin",
+    ] {
+        assert!(!home.join(path).exists(), "{path}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join("sub/made")).unwrap(),
+        "a\n"
+    );
+    // A folder on PATH inside the home folder (the daemon's PATH).
+    std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+    let path = std::env::join_paths([home.join(".cargo/bin"), PathBuf::from("/usr/bin")]).unwrap();
+    let sandbox = Sandbox::new(
+        Settings {
+            unattended: true,
+            ..settings()
+        },
+        Vec::new(),
+        unattended_no_write(&tools(true), Some(&path)),
+    );
+    let on_path = run(
+        &home,
+        sandbox,
+        "echo x > .cargo/bin/git || echo path-refused; echo a > sub/also && echo also-ok",
+    )
+    .await;
+    for line in ["path-refused", "also-ok"] {
+        assert!(
+            on_path.content.contains(line),
+            "{line}: {}",
+            on_path.content
+        );
+    }
+    assert!(!home.join(".cargo/bin/git").exists());
+    // Interactive runs are as before: the same command changes them all.
+    let attended = run(&home, Sandbox::for_tools(&tools(false)).unwrap(), &command).await;
+    for (_, name) in refused {
+        assert!(
+            !attended.content.contains(&format!("{name}-refused")),
+            "{name}: {}",
+            attended.content
+        );
+    }
+    for path in [
+        "moved",
+        ".zshrc",
+        ".config/systemd/user/evil.service",
+        ".ssh/authorized_keys2",
+        ".local/bin/ls",
+        "bin",
+    ] {
+        assert!(home.join(path).exists(), "{path}");
+    }
+}
+
+#[tokio::test]
 async fn reads_can_be_narrowed() {
     if !landlock() {
         return;
