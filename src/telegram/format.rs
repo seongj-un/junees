@@ -273,11 +273,17 @@ impl Inline<'_> {
                 && !self.in_link
                 && let Some((text_end, url, after)) = link(chars, at, end)
             {
+                // Without the tag (the plain fallback) the address
+                // follows the text, unless the text is the address.
+                let written: String = chars[at + 1..text_end].iter().collect();
+                let address = (written != url).then(|| format!(" ({url})"));
                 self.out.push(Atom::Open(Tag::Link(url)));
                 self.in_link = true;
                 self.run(at + 1, text_end);
                 self.in_link = false;
                 self.out.push(Atom::Close);
+                self.out
+                    .extend(address.iter().flat_map(|a| a.chars()).map(Atom::PlainOnly));
                 at = after;
                 continue;
             }
@@ -604,6 +610,33 @@ fn defuse_mentions(atoms: Vec<Atom>) -> Vec<Atom> {
     }
     let starts: Vec<usize> = shown.char_indices().map(|(at, _)| at).collect();
     let mut after = vec![None; atoms.len()];
+    // A link's address in the plain text (plain-only characters before
+    // any breaking) is checked on its own.
+    let mut index = 0;
+    while index < atoms.len() {
+        let run = atoms[index..]
+            .iter()
+            .take_while(|atom| matches!(atom, Atom::PlainOnly(_)))
+            .count();
+        if run == 0 {
+            index += 1;
+            continue;
+        }
+        let text: String = atoms[index..index + run]
+            .iter()
+            .filter_map(|atom| match atom {
+                Atom::PlainOnly(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
+        let offsets: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+        for at in mention_points(&text) {
+            if let Ok(nth) = offsets.binary_search(&at) {
+                after[index + nth] = Some(Atom::PlainOnly(NO_MENTION));
+            }
+        }
+        index += run;
+    }
     for at in mention_points(&shown) {
         let Ok(nth) = starts.binary_search(&at) else {
             continue;
@@ -1102,7 +1135,8 @@ mod tests {
         assert_eq!(
             part.plain,
             format!(
-                "ask {broken}alice, {broken}dataclass and\n{broken}decorator\n{broken}bob a@b.com"
+                "ask {broken}alice, {broken}dataclass and\n{broken}decorator\n{broken}bob \
+                 (https://a.b) a@b.com"
             )
         );
         // Names in a web address stay whole, as before.
@@ -1114,6 +1148,36 @@ mod tests {
         // Private chats are left alone.
         let parts = render("ask @alice", false, LIMIT);
         assert_eq!(parts[0].html, "ask @alice");
+    }
+
+    #[test]
+    fn the_plain_text_keeps_link_addresses() {
+        let parts = render("[docs](https://x.com/a) and **b**", false, LIMIT);
+        assert_eq!(
+            parts[0].html,
+            "<a href=\"https://x.com/a\">docs</a> and <b>b</b>"
+        );
+        assert_eq!(parts[0].plain, "docs (https://x.com/a) and b");
+        // The text is the address: not twice.
+        let parts = render("[https://x.com](https://x.com)", false, LIMIT);
+        assert_eq!(parts[0].plain, "https://x.com");
+        // A link cut in two: the address follows where the text ends.
+        let text = format!("[{}](https://example.com/x)", "word ".repeat(40).trim_end());
+        let parts = render(&text, false, 100);
+        assert!(parts.len() > 1);
+        assert!(
+            parts
+                .last()
+                .unwrap()
+                .plain
+                .ends_with("word (https://example.com/x)")
+        );
+        // Names in the address are broken in group chats like any text.
+        let parts = render("[a](https://x.com/?to=@alice)", true, LIMIT);
+        assert_eq!(
+            parts[0].plain,
+            super::super::platform::defuse_mentions("a (https://x.com/?to=@alice)")
+        );
     }
 
     #[test]
