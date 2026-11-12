@@ -69,6 +69,8 @@ struct BotState {
     files: Mutex<HashMap<String, (String, Vec<u8>)>>,
     /// The `message_id` of the last message sent.
     last_message: Mutex<i64>,
+    /// Refuse every message with buttons (400).
+    refuse_buttons: AtomicBool,
 }
 
 struct FakeBot {
@@ -368,6 +370,12 @@ async fn serve(mut socket: TcpStream, state: Arc<BotState>) {
                     "Bad Request: can't parse entities: Unsupported start tag \"x\" at byte offset 0",
                     None,
                 )
+            }
+            "sendMessage"
+                if state.refuse_buttons.load(Ordering::SeqCst)
+                    && body.get("reply_markup").is_some() =>
+            {
+                refused(400, "Bad Request: BUTTON_TYPE_INVALID", None)
             }
             "sendMessage" => {
                 let limited = {
@@ -1588,6 +1596,53 @@ async fn an_answer_word_right_after_a_press_starts_no_turn() {
             .iter()
             .any(|request| texts(request).iter().any(|text| text == "user: y")),
         "{requests:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_question_whose_buttons_are_refused_is_posted_without_them() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    bot.state.refuse_buttons.store(true, Ordering::SeqCst);
+    let file = cwd.path().join("note.txt");
+    let (api, _served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(TELEGRAM_NOTE),
+    );
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let me = USER.to_string();
+    bot.push(private(USER, "write a note"));
+    let posts = bot
+        .wait_post(&me, |p| p.contains("Reply y to run it"))
+        .await;
+    let questions: Vec<&String> = posts
+        .iter()
+        .filter(|p| p.contains("Approve this tool call?"))
+        .collect();
+    assert_eq!(questions.len(), 1, "{posts:#?}");
+    assert!(
+        !posts.iter().any(|p| p.contains("Press a button")),
+        "{posts:#?}"
+    );
+    bot.push(private(USER, "y"));
+    bot.wait_post(&me, |p| p == "wrote it").await;
+    assert!(file.exists());
+    let log = running.stop().await;
+    assert!(
+        log.iter()
+            .any(|line| line.contains("posted it without buttons")),
+        "{log:#?}"
     );
 }
 

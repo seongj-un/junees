@@ -67,6 +67,8 @@ struct RestState {
     gateway_url: Mutex<String>,
     /// The id of the last message created.
     last_message: Mutex<u64>,
+    /// Refuse every message post with buttons (400).
+    refuse_buttons: AtomicBool,
 }
 
 struct FakeRest {
@@ -252,7 +254,10 @@ async fn serve_rest(mut socket: TcpStream, state: Arc<RestState>) {
             *left = left.saturating_sub(1);
             failed
         };
-        if failed {
+        if state.refuse_buttons.load(Ordering::SeqCst) && request.body.get("components").is_some() {
+            request.headers.insert("x-fake-status".into(), "400".into());
+            (400, json!({"message": "Invalid Form Body", "code": 50035}))
+        } else if failed {
             request.headers.insert("x-fake-status".into(), "500".into());
             (
                 500,
@@ -1931,6 +1936,86 @@ async fn an_answer_word_right_after_a_press_starts_no_turn() {
             .iter()
             .any(|request| texts(request).iter().any(|text| text == "user: y")),
         "{requests:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_question_whose_buttons_are_refused_is_posted_once_without_them() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    rest.state.refuse_buttons.store(true, Ordering::SeqCst);
+    let marker = cwd.path().join("marker");
+    // Long enough for the question to take two messages.
+    let command = format!(
+        "rm -f {}/nothing-here\n{}touch {}",
+        cwd.path().display(),
+        "echo a line to make the question longer than one message\n".repeat(50),
+        marker.display()
+    );
+    let (api, _served) = common::fake_api(vec![
+        (200, tool_call(&command)),
+        (200, common::text_reply("ran it")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "risky"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        discord(&rest.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "clean up", false, &[]),
+    )
+    .await;
+    let posts = rest
+        .wait_post("505", |p| p.contains("Reply `y` to run it"))
+        .await;
+    // The first part once, then the rest without the words about buttons.
+    let question: Vec<&String> = posts
+        .iter()
+        .skip_while(|p| !p.contains("Approve this tool call?"))
+        .collect();
+    assert_eq!(question.len(), 2, "{posts:#?}");
+    assert!(question[1].contains("Reply `y` to run it"), "{posts:#?}");
+    assert!(
+        !posts.iter().any(|p| p.contains("Press a button")),
+        "{posts:#?}"
+    );
+    // The refused post was the last part with its buttons.
+    let refused: Vec<Received> = rest
+        .requests()
+        .into_iter()
+        .filter(|r| r.body.get("components").is_some())
+        .collect();
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    assert!(
+        refused[0].body["content"]
+            .as_str()
+            .unwrap()
+            .contains("Press a button, or reply `y`")
+    );
+    // A text answer still works.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "y", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "ran it").await;
+    assert!(marker.exists());
+    let log = running.stop().await;
+    assert!(
+        log.iter().any(
+            |line| line.contains("cannot post the question with buttons")
+                && line.contains("posted it without buttons")
+        ),
+        "{log:#?}"
     );
 }
 

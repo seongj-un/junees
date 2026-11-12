@@ -33,11 +33,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::ask::{Choice, Press, Question, button_data, fence_safe, human, parse_button};
+use super::ask::{
+    Choice, Press, Question, button_data, fence_safe, human, parse_button, without_buttons,
+};
 use super::channels::{Channels, Shared};
 use super::config::DiscordConfig;
 use super::platform::Platform;
@@ -130,6 +132,25 @@ impl Discord {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// After posting a question with buttons failed with `err`: posts
+    /// `parts` and then `last`, the parts not shown yet, without buttons;
+    /// the error to report.
+    async fn post_without_buttons(
+        &self,
+        channel: &str,
+        parts: &[String],
+        last: &str,
+        err: anyhow::Error,
+    ) -> anyhow::Error {
+        let last = without_buttons(last);
+        for part in parts.iter().map(String::as_str).chain([last.as_str()]) {
+            if let Err(again) = self.rest.create_message(channel, part).await {
+                return anyhow!("{err:#}; posting it without buttons failed too: {again:#}");
+            }
+        }
+        anyhow!("{err:#}; posted it without buttons")
+    }
 }
 
 /// The buttons of `question`: one action row.
@@ -209,13 +230,21 @@ impl Platform for Discord {
     async fn post_question(&self, channel: &str, question: &Question) -> Result<Option<String>> {
         let mut parts = split_message(&question.text, MESSAGE_LIMIT);
         let last = parts.pop().unwrap_or_default();
-        for part in &parts {
-            self.rest.create_message(channel, part).await?;
+        for (at, part) in parts.iter().enumerate() {
+            if let Err(err) = self.rest.create_message(channel, part).await {
+                return Err(self
+                    .post_without_buttons(channel, &parts[at..], &last, err)
+                    .await);
+            }
         }
-        let message = self
+        let message = match self
             .rest
             .create_message_with(channel, &last, components(question))
-            .await?;
+            .await
+        {
+            Ok(message) => message,
+            Err(err) => return Err(self.post_without_buttons(channel, &[], &last, err).await),
+        };
         self.questions().insert(
             question.id.clone(),
             Posted {

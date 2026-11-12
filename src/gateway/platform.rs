@@ -78,7 +78,11 @@ pub trait Platform: Send + Sync + 'static {
     /// each carrying [`super::ask::button_data`]); the id of the message
     /// that holds them, which a press must come from. `None` when the
     /// platform has no buttons: the engine posts the text instead, and
-    /// text answers work either way.
+    /// text answers work either way. When posting with buttons fails, the
+    /// platform posts the part of the question not shown yet without them
+    /// (and without the words about them, [`super::ask::without_buttons`])
+    /// before it returns the error, so the question can still be answered
+    /// in text.
     async fn post_question(&self, _channel: &str, _question: &Question) -> Result<Option<String>> {
         Ok(None)
     }

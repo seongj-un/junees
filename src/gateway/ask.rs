@@ -397,6 +397,18 @@ fn outcome(reply: &Reply, always: bool) -> String {
     }
 }
 
+/// How the instructions of a question with buttons begin.
+pub const WITH_BUTTONS: &str = "Press a button, or reply";
+
+/// `text`, a question, as it reads without buttons: the instructions
+/// (after the request, which may hold any words) begin with "Reply".
+pub fn without_buttons(text: &str) -> String {
+    match text.rfind(WITH_BUTTONS) {
+        Some(at) => format!("{}Reply{}", &text[..at], &text[at + WITH_BUTTONS.len()..]),
+        None => text.to_string(),
+    }
+}
+
 /// The question as posted: what the call does in a code block, then the
 /// choices.
 pub fn question(request: &Request, timeout: Duration) -> String {
@@ -406,7 +418,7 @@ pub fn question(request: &Request, timeout: Duration) -> String {
         request.kinds.join(", ")
     ));
     format!(
-        "**Approve this tool call?**\n```text\n{}```\nPress a button, or reply `y` to run it, `n` to \
+        "**Approve this tool call?**\n```text\n{}```\n{WITH_BUTTONS} `y` to run it, `n` to \
          decline (`n <reason>` tells the model why), `a` to allow this kind for the rest of this \
          channel's conversation. Anything else declines with your words as the reason. No \
          answer within {} declines.",
@@ -494,6 +506,7 @@ mod tests {
         assert_eq!(text.matches("```").count(), 2, "{text}");
         assert!(text.contains("approve bash: rm -r build"), "{text}");
         assert!(text.contains("within 5m"), "{text}");
+        assert!(text.contains("Press a button, or reply `y`"), "{text}");
         assert_eq!(human(Duration::from_secs(5400)), "1h30m");
         assert_eq!(human(Duration::from_secs(0)), "0s");
     }
@@ -664,6 +677,19 @@ mod tests {
             })
         );
         assert!(!slot.press(press(&question.id, Choice::Allow, None)));
+    }
+
+    #[test]
+    fn without_buttons_rewrites_only_the_instructions() {
+        let mut request = request();
+        // The request may hold the same words; they stay as they are.
+        request.target = "echo Press a button, or reply".into();
+        let text = question(&request, Duration::from_secs(300));
+        let plain = without_buttons(&text);
+        assert!(plain.contains("echo Press a button, or reply"), "{plain}");
+        assert!(plain.contains("\nReply `y` to run it"), "{plain}");
+        assert_eq!(plain.matches("Press a button").count(), 1, "{plain}");
+        assert_eq!(without_buttons("no instructions"), "no instructions");
     }
 
     #[tokio::test]

@@ -17,7 +17,9 @@ use super::api::{Api, Target};
 use super::config::Format;
 use super::format;
 use crate::approval::{Request, render};
-use crate::gateway::ask::{Choice, Question, button_data, fence_safe, human};
+use crate::gateway::ask::{
+    Choice, Question, WITH_BUTTONS, button_data, fence_safe, human, without_buttons,
+};
 use crate::gateway::platform::Platform;
 use crate::gateway::split::{length, split_plain};
 use crate::images::{Image, MAX_IMAGE_BYTES, too_large};
@@ -219,6 +221,15 @@ pub struct Telegram {
     questions: Mutex<HashMap<String, Sent>>,
 }
 
+/// One message of a post, as it goes to `sendMessage`.
+#[derive(Clone)]
+struct Piece {
+    text: String,
+    html: bool,
+    /// What goes instead when Telegram cannot parse the HTML.
+    plain: String,
+}
+
 /// The last message of a post: where the buttons of a question sit.
 struct Sent {
     chat: i64,
@@ -273,45 +284,79 @@ impl Telegram {
         keyboard: Option<&Value>,
     ) -> Result<Option<Sent>> {
         let target = Self::target(channel)?;
+        let pieces = self.pieces(target, text);
+        self.send_pieces(target, &pieces, keyboard)
+            .await
+            .map_err(|(_, err)| err)
+    }
+
+    /// The messages that post `text` to `target`: HTML converted from
+    /// Markdown, or plain text, with mentions broken in groups.
+    fn pieces(&self, target: Target, text: &str) -> Vec<Piece> {
         let group = target.chat < 0;
-        let mut last = None;
         if self.format == Format::Plain {
             let text = if group {
                 defuse_mentions(text)
             } else {
                 text.to_string()
             };
-            let parts = split_plain(&text, MESSAGE_LIMIT);
-            let count = parts.len();
-            for (at, part) in parts.into_iter().enumerate() {
-                let markup = keyboard.filter(|_| at + 1 == count);
-                let message = self.api.send_with(target, &part, false, markup).await?;
-                last = message.map(|message| Sent::new(target, message, part, false));
-            }
-            return Ok(last);
+            return split_plain(&text, MESSAGE_LIMIT)
+                .into_iter()
+                .map(|part| Piece {
+                    plain: part.clone(),
+                    text: part,
+                    html: false,
+                })
+                .collect();
         }
-        let parts = format::render(text, group, MESSAGE_LIMIT);
-        let count = parts.len();
-        for (at, part) in parts.into_iter().enumerate() {
-            let final_part = at + 1 == count;
-            let markup = keyboard.filter(|_| final_part);
-            match self.api.send_with(target, &part.html, true, markup).await {
+        format::render(text, group, MESSAGE_LIMIT)
+            .into_iter()
+            .map(|part| Piece {
+                text: part.html,
+                html: true,
+                plain: part.plain,
+            })
+            .collect()
+    }
+
+    /// Sends `pieces`, the `keyboard` on the last; the last message, if
+    /// the answer named it. On an error, how many pieces went out before.
+    async fn send_pieces(
+        &self,
+        target: Target,
+        pieces: &[Piece],
+        keyboard: Option<&Value>,
+    ) -> Result<Option<Sent>, (usize, anyhow::Error)> {
+        let mut last = None;
+        let count = pieces.len();
+        for (at, piece) in pieces.iter().enumerate() {
+            let final_piece = at + 1 == count;
+            let markup = keyboard.filter(|_| final_piece);
+            match self
+                .api
+                .send_with(target, &piece.text, piece.html, markup)
+                .await
+            {
                 Ok(message) => {
-                    last = message.map(|message| Sent::new(target, message, part.html, true))
+                    last = message
+                        .map(|message| Sent::new(target, message, piece.text.clone(), piece.html))
                 }
-                Err(err) if err.is_unparsable() => {
+                Err(err) if piece.html && err.is_unparsable() => {
                     self.api
                         .note(&format!("{err}; sending that message as plain text"));
-                    let pieces = split_plain(&part.plain, MESSAGE_LIMIT);
-                    let pieces_count = pieces.len();
-                    for (piece_at, piece) in pieces.into_iter().enumerate() {
-                        let markup =
-                            keyboard.filter(|_| final_part && piece_at + 1 == pieces_count);
-                        let message = self.api.send_with(target, &piece, false, markup).await?;
-                        last = message.map(|message| Sent::new(target, message, piece, false));
+                    let parts = split_plain(&piece.plain, MESSAGE_LIMIT);
+                    let parts_count = parts.len();
+                    for (part_at, part) in parts.into_iter().enumerate() {
+                        let markup = keyboard.filter(|_| final_piece && part_at + 1 == parts_count);
+                        let message = self
+                            .api
+                            .send_with(target, &part, false, markup)
+                            .await
+                            .map_err(|err| (at, err.into()))?;
+                        last = message.map(|message| Sent::new(target, message, part, false));
                     }
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => return Err((at, err.into())),
             }
         }
         Ok(last)
@@ -430,8 +475,31 @@ impl Platform for Telegram {
     }
 
     async fn post_question(&self, channel: &str, question: &Question) -> Result<Option<String>> {
-        let keyboard = keyboard(question);
-        let Some(sent) = self.send(channel, &question.text, Some(&keyboard)).await? else {
+        let target = Self::target(channel)?;
+        let pieces = self.pieces(target, &question.text);
+        let sent = match self
+            .send_pieces(target, &pieces, Some(&keyboard(question)))
+            .await
+        {
+            Ok(sent) => sent,
+            Err((at, err)) => {
+                // The pieces not sent yet, without buttons.
+                let mut rest = pieces[at..].to_vec();
+                if let Some(last) = rest.last_mut() {
+                    last.text = without_buttons(&last.text);
+                    last.plain = without_buttons(&last.plain);
+                }
+                return Err(match self.send_pieces(target, &rest, None).await {
+                    Ok(_) => anyhow!("{err:#}; posted it without buttons"),
+                    Err((_, again)) => {
+                        anyhow!("{err:#}; posting it without buttons failed too: {again:#}")
+                    }
+                });
+            }
+        };
+        // The buttons are there, but a press cannot be checked against
+        // their message, nor can they be taken off.
+        let Some(sent) = sent else {
             bail!("Telegram's sendMessage answer names no message_id");
         };
         let message = sent.message.to_string();
@@ -489,7 +557,7 @@ pub fn question(request: &Request, timeout: Duration) -> String {
     let mut details = render(request);
     details.push_str(&format!("     always allows: {}", request.kinds.join(", ")));
     format!(
-        "Approve this tool call?\n```\n{}\n```\nPress a button, or reply y to run it, n to decline \
+        "Approve this tool call?\n```\n{}\n```\n{WITH_BUTTONS} y to run it, n to decline \
          (n <reason> tells the model why), a to allow this kind for the rest of this chat's \
          conversation. Anything else declines with your words as the reason. No answer within \
          {} declines. In a group, reply to this message.",

@@ -845,13 +845,11 @@ async fn show<P: Platform>(
             match shared.platform.post_question(channel, &question).await {
                 Ok(Some(message)) => answers.posted(&question.id, message),
                 Ok(None) => shared.say(channel, &question.text).await,
-                Err(err) => {
-                    // Text answers still work.
-                    (shared.log)(&format!(
-                        "{place} {channel}: cannot post the question with buttons: {err:#}"
-                    ));
-                    shared.say(channel, &question.text).await;
-                }
+                // The platform posted what it could without buttons; text
+                // answers still work.
+                Err(err) => (shared.log)(&format!(
+                    "{place} {channel}: cannot post the question with buttons: {err:#}"
+                )),
             }
         }
         Progress::Answered { id, outcome } => {
