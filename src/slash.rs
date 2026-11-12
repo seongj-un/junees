@@ -52,6 +52,9 @@ pub enum Slash {
     Webhooks,
     /// `/doctor` checks the installation and the settings.
     Doctor,
+    /// `/update` says whether a newer release is out (it installs
+    /// nothing: `junees update` does).
+    Update,
     Help,
     Exit,
     /// A command typed wrong: what to tell the user.
@@ -113,6 +116,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "github" => plain(Slash::Github),
         "webhooks" => plain(Slash::Webhooks),
         "doctor" => plain(Slash::Doctor),
+        "update" => plain(Slash::Update),
         "skill" => match arg {
             None => Slash::Bad("/skill takes a skill name; /skills lists them".into()),
             Some(name) => match crate::skills::check_name(&name) {
@@ -279,6 +283,7 @@ mod tests {
             ("/github", Slash::Github),
             ("/webhooks", Slash::Webhooks),
             ("/doctor", Slash::Doctor),
+            ("/update", Slash::Update),
             ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),
             ("/exit", Slash::Exit),

@@ -130,6 +130,12 @@ async fn run() -> Result<ExitCode> {
             print!("{}", junees::usage::args::HELP);
             return Ok(ExitCode::SUCCESS);
         }
+        Command::UpdateHelp => {
+            print!("{}", junees::update::HELP);
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Needs no API key and no settings.
+        Command::Update(options) => return update(&options).await,
         // Reads the journals and the settings only; needs no API key.
         Command::Usage(args) => {
             print!("{}", usage_report(&args)?);
@@ -197,7 +203,9 @@ async fn run() -> Result<ExitCode> {
         | Command::Doctor(_)
         | Command::DoctorHelp
         | Command::Usage(_)
-        | Command::UsageHelp => {
+        | Command::UsageHelp
+        | Command::Update(_)
+        | Command::UpdateHelp => {
             unreachable!("handled above")
         }
     }
@@ -222,6 +230,31 @@ async fn mcp_command(command: &junees::mcp::oauth::cli::McpCommand) -> Result<Ex
             }
         },
     )
+}
+
+/// `junees update`: replaces this program with the latest release (or
+/// only says whether one is out).
+async fn update(options: &junees::update::Options) -> Result<ExitCode> {
+    let lookup = |key: &str| std::env::var(key).ok();
+    let client = junees::update::Client::new(junees::update::Source::from_lookup(&lookup)?)?;
+    let place = junees::update::Place::current(&lookup)?;
+    let out =
+        junees::update::run(options, &client, &place, &mut |line| eprintln!("{line}")).await?;
+    println!("{out}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `/update`: whether a newer release is out, in one line.
+async fn update_check() -> String {
+    let lookup = |key: &str| std::env::var(key).ok();
+    let checked = async {
+        let client = junees::update::Client::new(junees::update::Source::from_lookup(&lookup)?)?;
+        junees::update::check(&client, &junees::update::this_version()).await
+    };
+    match checked.await {
+        Ok(line) => format!("{line}\n"),
+        Err(err) => format!("cannot check for a newer release: {err:#}\n"),
+    }
 }
 
 /// `junees doctor`: prints the report; exit code 1 when a check failed.
@@ -1322,6 +1355,7 @@ impl Repl {
                         .text()
                 );
             }
+            Slash::Update => print!("{}", update_check().await),
             Slash::Github => {
                 print!(
                     "{}",
