@@ -8,7 +8,7 @@ Junees를 채팅 봇으로 띄운다. 디스코드와 텔레그램은 같은 엔
 
 ### 봇 만들기
 
-1. [개발자 포털](https://discord.com/developers/applications)에서 New Application을 만들고, Bot 페이지에서 Reset Token으로 토큰을 받는다. 토큰은 비밀번호와 같다(아래 설정 파일이나 환경 변수에만 둔다).
+1. [개발자 포털](https://discord.com/developers/applications)에서 New Application을 만들고, Bot 페이지에서 Reset Token으로 토큰을 받는다. 토큰은 비밀번호와 같다([설정](#설정)의 설정 파일이나 환경 변수에만 둔다).
 2. 같은 Bot 페이지의 Privileged Gateway Intents에서 **MESSAGE CONTENT INTENT를 켠다.** 메시지 내용은 특권 인텐트라서 꺼져 있으면 디스코드가 연결을 `4014 Disallowed intent(s)`로 닫고, Junees는 이 스위치를 켜라는 안내와 함께 끝난다([Gateway: Privileged Intents](https://docs.discord.com/developers/events/gateway#privileged-intents)). 봇이 쓰는 인텐트는 `GUILDS`(스레드 이벤트), `GUILD_MESSAGES`, `DIRECT_MESSAGES`, `MESSAGE_CONTENT`다.
 3. 서버에 초대한다. OAuth2 페이지의 URL Generator에서 scope `bot`, 권한 View Channels, Send Messages, Send Messages in Threads, Read Message History를 고르거나, 아래 URL의 `client_id`를 자기 애플리케이션 id로 바꿔 연다([OAuth2: Bot Authorization Flow](https://docs.discord.com/developers/topics/oauth2#bot-authorization-flow)). 권한 값 274877975552는 `VIEW_CHANNEL`(1<<10), `SEND_MESSAGES`(1<<11), `READ_MESSAGE_HISTORY`(1<<16), `SEND_MESSAGES_IN_THREADS`(1<<38)의 합이다.
    ```
@@ -83,13 +83,13 @@ loginctl enable-linger "$USER"             # 로그아웃해도 계속 돌게
 - 같은 채널의 메시지는 받은 순서대로 하나씩 처리한다(턴 중에 온 메시지는 대기열). 다른 채널은 동시에 돌고, 동시에 턴을 돌리는 채널은 `discord_parallel`(기본 2)까지다. 자리가 없으면 `(waiting for a free slot: ...)`을 알리고 기다린다(이때 `!stop`이면 시작하지 않는다). 모든 채널의 대화는 한 스레드에서 비동기로 돈다(에이전트의 future가 `Send`가 아니라서 `LocalSet`).
 - 출력: 턴 중에는 타이핑 표시(8초마다 갱신, 승인 질문을 기다리는 동안은 멈춤). 응답은 메시지 편집으로 스트리밍하지 않고 **완성된 텍스트 블록마다** 보낸다(편집은 레이트 리밋을 빨리 쓰고, 끊긴 응답의 재시도 처리가 복잡해진다). 다음 텍스트 전까지의 도구 호출은 `-> bash ls -la` 같은 한 줄 요약(명령, 경로, 검색어 120자)을 코드 블록 하나로 묶어 보낸다. 2000자가 넘는 블록은 줄 단위로 나누고, 코드 블록이 잘리면 앞 메시지에서 닫고 다음 메시지에서 같은 언어로 다시 연다(다시 여는 줄은 펜스와 32자 이하의 언어만이고, ```` ```rm -rf build``` ````처럼 같은 줄에서 닫히는 펜스는 코드 블록으로 보지 않는다. 길이는 UTF-16 단위로 세어 어느 방식으로 세도 2000자를 넘지 않게 한다). 잘리거나 압축된 응답 같은 안내도 채널에 나온다. 오류는 `error: ...`와 터미널과 같은 힌트로 보낸다.
 - 시스템 프롬프트에 "디스코드로 대화 중이니 짧게, 표 없는 Markdown"이라는 한 문단을 더한다.
-- 이미지 첨부: 허용된 사용자의 메시지에 붙은 첨부 중 `content_type`이 `image/*`인 것(없으면 확장자)을 그 턴이 시작할 때 내려받아 메시지 글 앞에 이미지 블록으로 넣는다(api 백엔드, 위 이미지 입력). 글 없이 이미지만 보내도 된다. 디스코드 CDN(`https://cdn.discordapp.com`, `https://media.discordapp.net`)에서만, 리다이렉트는 그 호스트로 3번까지, 30초 안에, 5 MB까지 받고, 받은 바이트가 PNG/JPEG/GIF/WebP가 아니면 버린다. 한 메시지에 10개까지. 이미지가 아닌 파일, 큰 파일, CDN 밖 주소, 받지 못한 것은 `(attachments left out: ...)`로 채널에 알리고 같은 줄을 모델에게도 붙인다(못 받은 그림에 대해 지어내지 않게). 오류 문구와 로그에는 서명된 첨부 URL을 쓰지 않고, 로그에는 형식과 크기만 남긴다. 테스트용 다른 주소는 환경 변수 `JUNEES_DISCORD_CDN_URL`(https, http는 이 컴퓨터만)로만 준다.
+- 이미지 첨부: 허용된 사용자의 메시지에 붙은 첨부 중 `content_type`이 `image/*`인 것(없으면 확장자)을 그 턴이 시작할 때 내려받아 메시지 글 앞에 이미지 블록으로 넣는다(api 백엔드, [이미지 입력](usage.md#이미지-입력)). 글 없이 이미지만 보내도 된다. 디스코드 CDN(`https://cdn.discordapp.com`, `https://media.discordapp.net`)에서만, 리다이렉트는 그 호스트로 3번까지, 30초 안에, 5 MB까지 받고, 받은 바이트가 PNG/JPEG/GIF/WebP가 아니면 버린다. 한 메시지에 10개까지. 이미지가 아닌 파일, 큰 파일, CDN 밖 주소, 받지 못한 것은 `(attachments left out: ...)`로 채널에 알리고 같은 줄을 모델에게도 붙인다(못 받은 그림에 대해 지어내지 않게). 오류 문구와 로그에는 서명된 첨부 URL을 쓰지 않고, 로그에는 형식과 크기만 남긴다. 테스트용 다른 주소는 환경 변수 `JUNEES_DISCORD_CDN_URL`(https, http는 이 컴퓨터만)로만 준다.
 - 명령(슬래시 명령 등록 없이 텍스트로):
   - `!new`: 새 대화(새 세션, 메모리와 스킬 다시 읽음). 대기열 순서대로 처리된다.
   - `!stop`: 진행 중인 턴을 취소하고(도구의 프로세스 그룹까지, 기록은 터미널의 Ctrl-C와 같다) 대기열의 메시지를 버린다. 자리를 기다리던 턴과 첨부 이미지를 내려받던 턴도 시작하지 않고 멈춘다(`!status`에는 "a turn downloads its attachments").
   - `!status`: 백엔드와 모델, 동시 실행 중인 턴 수, 승인 방식, 이 채널의 세션과 상태(실행 중/대기열/승인 대기), 토큰 사용량.
-  - `!memory`: 영구 메모리 보기. DM에서는 터미널의 `/memory`와 같다. 서버 채널에서는 답이 그 채널을 보는 모두에게 보이므로 저장소마다 항목 수와 글자 수만 보여 주고, 내용은 DM에서 보라고 안내한다. `!skills`: 스킬 목록. `!cron`: 예약 작업 목록(서버 채널에서는 프롬프트와 폴더 없이, 아래 예약 작업 절). `!help`: 명령 목록.
-  - `!task`: 아직 지원하지 않는다는 안내(아래 범위 밖).
+  - `!memory`: 영구 메모리 보기. DM에서는 터미널의 `/memory`와 같다. 서버 채널에서는 답이 그 채널을 보는 모두에게 보이므로 저장소마다 항목 수와 글자 수만 보여 주고, 내용은 DM에서 보라고 안내한다. `!skills`: 스킬 목록. `!cron`: 예약 작업 목록(서버 채널에서는 프롬프트와 폴더 없이, [예약 작업](automation.md#예약-작업) 절). `!help`: 명령 목록.
+  - `!task`: 아직 지원하지 않는다는 안내([범위 밖](#범위-밖-한계)).
 - 승인(`JUNEES_APPROVAL`, 기본 `risky`): 위험한 도구 호출이면 채널에 `Approve this tool call?`과 명령(코드 블록, 터미널 질문과 같은 내용)을 보내고, 그 채널에서 허용 사용자의 다음 메시지로 정한다. `y`는 실행, `n`은 거절, `n <이유>`는 이유와 함께 거절(모델이 읽는다), `a`는 이 채널의 대화가 끝날 때까지 같은 종류 허용, 그 밖의 말은 그 말을 이유로 거절한다. `discord_approval_timeout`(기본 5분) 안에 답이 없으면 `(no answer within 5m: declined)`와 함께 거절한다. `!stop`은 질문을 취소하고 턴을 끝낸다. claude-code 백엔드는 터미널처럼 승인 질문 없이 Claude Code의 거절 규칙만 적용된다(`!status`에 나온다).
 
 ### 연결과 레이트 리밋
@@ -137,7 +137,7 @@ junees gateway telegram
 ### 누구의 어떤 메시지에 답하나
 
 - `telegram_allowed_users`의 사용자만. 다른 사용자의 메시지는 무시하고 로그에 사용자 id를 한 번만 남긴다(사진도 내려받지 않는다). 봇의 메시지와 채널 게시물, 수정된 메시지는 받지 않는다(`allowed_updates: ["message"]`).
-- 개인 채팅은 늘 답한다. 그룹과 슈퍼그룹에서는 봇을 멘션했을 때(`@봇이름`, mention 엔티티나 text_mention. 멘션 글자는 빼고 넘긴다), 봇 메시지에 답장했을 때, 그 채팅에서 승인 질문이 답을 기다릴 때만 답한다. 그렇게 받아들인 앨범의 나머지 사진은 캡션(멘션)이 없어도 받는다(아래 이미지).
+- 개인 채팅은 늘 답한다. 그룹과 슈퍼그룹에서는 봇을 멘션했을 때(`@봇이름`, mention 엔티티나 text_mention. 멘션 글자는 빼고 넘긴다), 봇 메시지에 답장했을 때, 그 채팅에서 승인 질문이 답을 기다릴 때만 답한다. 그렇게 받아들인 앨범의 나머지 사진은 캡션(멘션)이 없어도 받는다([대화와 출력](#대화와-출력)의 이미지).
 - 전달(forward)된 메시지는 허용 사용자가 보냈어도 다른 사람이 쓴 글이다. 앞에 `(forwarded message from <이름>; they wrote it, not the user)` 한 줄을 붙여 모델에 넘기고(이름은 `forward_origin`의 사용자 이름, 채팅/채널 제목, 숨긴 사용자 이름. 숨은 문자는 이스케이프하고 64자에서 자른다), 명령으로 읽지 않는다. 승인 질문이 기다리는 동안 전달된 글은 이 줄이 붙은 채로 답이 되므로 거절이 된다.
 - 포럼 슈퍼그룹의 토픽은 토픽마다 대화 하나(채널 키 `<chat id>:<topic id>`, 답도 그 토픽에). 일반 그룹의 답장 줄기는 따로 나누지 않는다.
 
@@ -164,5 +164,5 @@ junees gateway telegram
 ### 범위 밖, 한계
 
 - 웹훅 방식 수신, 인라인 키보드(승인 버튼), 메시지 편집 스트리밍, MarkdownV2/HTML 서식, 음성과 문서 내용 읽기, 그룹 관리 명령, `/task`, setup 마법사의 텔레그램 질문, `junees doctor --online`의 `getMe`(토큰을 외부로 보내야 해서)는 하지 않는다.
-- 여러 응답에 나뉘어 온 앨범은 따로따로 입력이 된다(그룹에서도 받기는 한다, 위 이미지). 그룹이 슈퍼그룹으로 바뀌면(`migrate_to_chat_id`) 새 채팅으로 보고 새 대화를 시작한다.
+- 여러 응답에 나뉘어 온 앨범은 따로따로 입력이 된다(그룹에서도 받기는 한다, [대화와 출력](#대화와-출력)의 이미지). 그룹이 슈퍼그룹으로 바뀌면(`migrate_to_chat_id`) 새 채팅으로 보고 새 대화를 시작한다.
 - 테스트는 테스트 안에서 띄운 가짜 Bot API(루프백)로만 했다(`tests/telegram_gateway.rs`). 실제 텔레그램에는 연결해 보지 않았다.

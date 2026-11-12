@@ -1,6 +1,6 @@
 # MCP 서버
 
-[MCP](https://modelcontextprotocol.io/specification/2026-07-28) 서버의 도구를 모델에게 줄 수 있다(api 백엔드). 전송은 두 가지다: `command` 서버는 Junees가 자식 프로세스로 띄우고 표준 입출력으로 JSON-RPC 메시지를 한 줄씩 주고받고(stdio), `url` 서버는 이미 떠 있는 서버에 메시지마다 HTTP POST를 보낸다(Streamable HTTP, 아래 "HTTP 서버").
+[MCP](https://modelcontextprotocol.io/specification/2026-07-28) 서버의 도구를 모델에게 줄 수 있다(api 백엔드). 전송은 두 가지다: `command` 서버는 Junees가 자식 프로세스로 띄우고 표준 입출력으로 JSON-RPC 메시지를 한 줄씩 주고받고(stdio), `url` 서버는 이미 떠 있는 서버에 메시지마다 HTTP POST를 보낸다(Streamable HTTP, [HTTP 서버](#http-서버)).
 
 `$JUNEES_HOME/mcp.json`(기본 `~/.junees/mcp.json`, 권한 0600):
 
@@ -37,7 +37,9 @@
 - 서버가 죽으면 그 서버의 도구는 이유(종료 코드 포함)를 담은 오류 결과를 돌려준다. 대화의 `/new`가 멈춘 서버를 다시 띄운다(도구 이름은 그대로. 처음에 실패했던 서버의 도구는 다음 실행부터 모델에게 보인다). 게이트웨이는 다음 시작 때 다시 띄운다.
 - 종료: Junees가 끝날 때 각 서버의 표준 입력을 닫고 2초, SIGTERM 뒤 2초를 기다린 다음 SIGKILL을 그 프로세스 그룹에 보낸다. 서버가 스스로 끝나도 그룹에 남은 자식은 정리한다. 두 번째 Ctrl-C로 바로 끝내면 정리하지 못하지만 서버의 입력이 닫히므로 명세를 따르는 서버는 스스로 끝난다.
 - 서버가 보내는 요청 가운데 `ping`에만 답하고 나머지(sampling, roots, elicitation)는 `-32601`로 거절한다. 알림(진행, 로그, 목록 변경)은 쓰지 않는다.
-- `/mcp`: 서버마다 상태(실행 중이면 명세 버전과 도구 수, 아니면 이유), 전송(`stdio`면 명령 이름과 `env` 변수 이름, `Streamable HTTP`면 URL의 `scheme://호스트:포트`와 헤더 이름, 그 값을 읽는 변수 이름, OAuth 로그인 상태(발급자와 만료까지 남은 시간)), trust, 시간 한도. 값, `args`, URL의 경로와 쿼리, 토큰은 보여 주지 않는다. `/mcp login <서버>`, `/mcp logout <서버>`는 아래 OAuth 로그인.
+- `/mcp`: 서버마다 상태(실행 중이면 명세 버전과 도구 수, 아니면 이유), 전송(`stdio`면 명령 이름과 `env` 변수 이름, `Streamable HTTP`면 URL의 `scheme://호스트:포트`와 헤더 이름, 그 값을 읽는 변수 이름, OAuth 로그인 상태(발급자와 만료까지 남은 시간)), trust, 시간 한도. 값, `args`, URL의 경로와 쿼리, 토큰은 보여 주지 않는다. `/mcp login <서버>`, `/mcp logout <서버>`는 [OAuth 로그인](#oauth-로그인).
+
+## HTTP 서버
 
 HTTP 서버(`url`, MCP Streamable HTTP 전송):
 
@@ -49,6 +51,8 @@ HTTP 서버(`url`, MCP Streamable HTTP 전송):
 - 응답: 요청마다 JSON 하나(`application/json`) 또는 그 요청의 SSE 스트림(`text/event-stream`)을 받는다. 스트림에서는 그 요청의 답이 올 때까지 읽고 진행/로그 알림은 넘긴다. 답 없이 스트림이 끝나면 그 호출은 실패다(`Last-Event-ID`로 이어 받지 않는다). 응답은 64 MiB까지 읽고 넘으면 그 호출을 실패로 끝낸다. 리다이렉트(3xx)는 따라가지 않고 실패로 적는다(`url`에 최종 주소를 쓰라는 안내). 연결은 10초까지 기다린다.
 - 시간 초과와 취소: `timeout_secs`를 넘거나 턴이 취소되면 연결을 닫는다. 2026-07-28에서는 그것이 취소이고, 이전 명세에서는 연결 끊김이 취소가 아니므로 `notifications/cancelled`를 따로 POST한다.
 - 오류 문장: URL은 경로와 쿼리에 토큰을 담을 수 있어 넣지 않고(연결 실패는 `cannot connect: ...`처럼 원인만), 헤더 값과 세션 id도 넣지 않는다. HTTP 서버는 Junees의 자식이 아니므로 서버 프로세스 환경을 통한 노출(위 stdio의 한계)은 없다.
+
+## OAuth 로그인
 
 OAuth 로그인(`url` 서버, [MCP 2026-07-28 Authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)):
 
@@ -70,6 +74,10 @@ junees mcp logout docs    # 저장한 로그인을 지운다
 - 보안: 인가 서버의 모든 주소와 리다이렉트 URI는 https(루프백만 http). 루프백 http는 MCP 서버의 `url`도 이 컴퓨터일 때만 받는다. 원격 서버의 메타데이터가 `http://127.0.0.1:<포트>/...`를 적어 이 컴퓨터의 다른 서비스로 요청을 보내게 하지 못한다. 동적 등록이 `token_endpoint_auth_method: none`이라고 답하면 함께 준 secret은 쓰지 않는다(공개 클라이언트). 토큰, 코드, 리프레시 토큰, 클라이언트 secret은 모델, 도구 결과, 세션 기록, 오류 문장, `/mcp`, doctor에 나오지 않는다.
 
 
-승인(`JUNEES_APPROVAL`, 아래 실행 전 승인 절): `risky`(기본)에서는 `trust`가 없는 서버의 도구를 부를 때마다 "외부 도구"로 묻는다. 질문에는 서버와 원래 도구 이름, 인자 JSON 앞부분(8줄)이 나오고, `a`는 그 도구 하나를 이번 실행 동안 허용한다. `all`은 trust 서버의 도구도 묻고, `off`는 묻지 않는다. 게이트웨이는 같은 질문을 채널에서 묻는다. `-p`는 사람이 없으므로 묻지 않는다(기존 정책 그대로).
+## 승인
+
+승인(`JUNEES_APPROVAL`, [실행 전 승인](safety.md#실행-전-승인) 절): `risky`(기본)에서는 `trust`가 없는 서버의 도구를 부를 때마다 "외부 도구"로 묻는다. 질문에는 서버와 원래 도구 이름, 인자 JSON 앞부분(8줄)이 나오고, `a`는 그 도구 하나를 이번 실행 동안 허용한다. `all`은 trust 서버의 도구도 묻고, `off`는 묻지 않는다. 게이트웨이는 같은 질문을 채널에서 묻는다. `-p`는 사람이 없으므로 묻지 않는다(기존 정책 그대로).
+
+## MCP 범위 밖
 
 범위 밖: OAuth의 Client ID Metadata Document 호스팅, 토큰 철회(RFC 7009)와 `private_key_jwt`/DPoP, 게이트웨이 채널의 로그인 명령, 이전 명세의 서버 알림 GET 스트림과 끊긴 스트림 이어 받기(`Last-Event-ID`), 2024-11-05 HTTP+SSE 전송, resources/prompts, 목록 변경 구독(`subscriptions/listen`), sampling/elicitation(MRTR), 작업 모드(`junees task`)와 claude-code 백엔드의 MCP. claude-code 백엔드는 지금처럼 `--strict-mcp-config`로 MCP 서버 없이 돈다. `--mcp-config`로 같은 목록을 넘기는 것은 문서상 가능하지만([CLI reference](https://code.claude.com/docs/en/cli-reference)) 간단하지 않아 미뤘다: `-p`는 `--permission-prompts none`이라 `--allowedTools`에 없는 MCP 도구는 모두 거절되므로 trust 서버만 쓸 수 있고, `env` 값이 인자나 임시 파일로 Claude Code에 넘어가야 하며, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 서버 환경에서 무엇을 지우는지와 서버 연결 대기(`MCP_TIMEOUT`)도 맞춰야 한다.
