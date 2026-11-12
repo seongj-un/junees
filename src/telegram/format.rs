@@ -28,7 +28,8 @@
 //! bold (`**`, `__`), italic (`*`, `_`), strikethrough (`~~`), links to
 //! http(s) addresses, and `>` quotes. Lists, headings and tables stay as
 //! written. A marker without its partner stays as typed, and so does a
-//! code block without its closing fence.
+//! code block without its closing fence. Bare web addresses are copied
+//! as written. The plain text follows each link's text with its address.
 //!
 //! [`render`] measures the HTML (tags and entities included), so each
 //! message fits `sendMessage`'s 4096 characters however Telegram counts
