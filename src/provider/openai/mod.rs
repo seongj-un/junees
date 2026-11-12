@@ -16,7 +16,7 @@ use reqwest::StatusCode;
 
 use super::http::{
     Failure, MAX_ATTEMPTS, REQUEST_TIMEOUT, STREAM_IDLE_TIMEOUT, backoff, body_failure,
-    idle_failure, is_retryable, is_retryable_error, retry_after, send_failure,
+    idle_failure, is_retryable, retry_after, send_failure,
 };
 use super::stream::SseParser;
 use super::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamSender};
@@ -265,13 +265,7 @@ impl OpenAiProvider {
             })?;
             for event in parsed {
                 deadline = tokio::time::Instant::now() + idle;
-                let done = chunks
-                    .apply(&event.data, &mut report)
-                    .map_err(|error| Failure {
-                        retryable: is_retryable_error(&error),
-                        retry_after: None,
-                        error,
-                    })?;
+                let done = chunks.apply(&event.data, &mut report)?;
                 if done {
                     return Ok(chunks.finish(&mut report));
                 }
@@ -302,7 +296,8 @@ fn error_failure(status: StatusCode, retry_after: Option<u64>, body: &[u8]) -> F
     api_failure(status.as_u16(), retry_after, ApiError::parse(body))
 }
 
-/// An error the server described, with the status it has or names.
+/// An error the server described, with the status it has or names: in an
+/// error response, in a 200 body or in a stream chunk alike.
 fn api_failure(status: u16, retry_after: Option<u64>, error: ApiError) -> Failure {
     Failure {
         retryable: StatusCode::from_u16(status).is_ok_and(is_retryable) && !error.is_quota(),

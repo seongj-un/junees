@@ -396,6 +396,34 @@ async fn a_stream_cut_off_is_retried_and_a_whole_answer_is_taken() {
     assert_eq!(served(server).await.len(), 1);
 }
 
+#[tokio::test]
+async fn a_quota_error_inside_a_stream_is_not_retried() {
+    let messages = [Message::user_text("hi")];
+    for error in [
+        json!({"message": "You exceeded your current quota", "type": "insufficient_quota",
+               "param": null, "code": "insufficient_quota"}),
+        // OpenRouter's shape: the status as a number.
+        json!({"code": 429, "type": "insufficient_quota", "message": "Insufficient credits"}),
+    ] {
+        let body = sse(&[delta(json!({"content": "Hal"})), json!({"error": error})]);
+        // A second answer the client must not ask for.
+        let (url, server) = fake_stream_api(vec![
+            Served::Stream { body, chunk: 64 },
+            Served::Json(200, answer("Hello")),
+        ])
+        .await;
+        let (response, events) = stream_call(&streaming(&url), &messages).await;
+        assert!(
+            matches!(&response, Err(ProviderError::Api { status: 429, .. })),
+            "{error}: {response:?}"
+        );
+        assert!(!events.contains(&StreamEvent::Retrying), "{events:?}");
+        // The fake still waits for the second request: none came.
+        server.abort();
+        let _ = server.await;
+    }
+}
+
 /// A PNG header Junees takes for a 2x2 picture.
 fn png() -> Vec<u8> {
     let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();

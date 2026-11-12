@@ -482,18 +482,22 @@ impl ApiError {
     }
 
     /// A 429 that waiting does not fix: the account is out of credit or
-    /// over a spend limit (the API's error code guide).
+    /// over a spend limit. The error code guide
+    /// (developers.openai.com/api/docs/guides/error-codes) names the
+    /// codes, says `type` can still be `insufficient_quota` for any of
+    /// them, and that retrying them won't restore access.
     pub fn is_quota(&self) -> bool {
-        matches!(
-            self.code.as_deref(),
-            Some(
-                "insufficient_quota"
-                    | "credit_balance_exhausted"
-                    | "organization_spend_limit_exceeded"
-                    | "project_spend_limit_exceeded"
-                    | "organization_usage_limit_exceeded"
+        self.kind.as_deref() == Some("insufficient_quota")
+            || matches!(
+                self.code.as_deref(),
+                Some(
+                    "insufficient_quota"
+                        | "credit_balance_exhausted"
+                        | "organization_spend_limit_exceeded"
+                        | "project_spend_limit_exceeded"
+                        | "organization_usage_limit_exceeded"
+                )
             )
-        )
     }
 
     /// The error Junees reacts to. `kind` is the error's `type`, or
