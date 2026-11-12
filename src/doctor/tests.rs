@@ -423,6 +423,43 @@ async fn secrets_never_show() {
 }
 
 #[tokio::test]
+async fn telegram_needs_a_token_and_allowed_users() {
+    let fixture = Fixture::new();
+    let report = fixture.run(false).await;
+    expect(&report, "telegram", "gateway", Status::Skip, "not set up");
+    // Built in pieces so no token-looking literal sits in the source.
+    let token = ["4242", "doctor-telegram-secret_5"].join(":");
+    fixture.config(&format!("telegram_token = \"{token}\"\n"));
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "telegram",
+        "gateway",
+        Status::Fail,
+        "no allowed Telegram users",
+    );
+    // The token pasted as the allowed users: the error quotes it.
+    fixture.config(&format!(
+        "telegram_token = \"{token}\"\ntelegram_allowed_users = \"{token}\"\n"
+    ));
+    let report = fixture.run(false).await;
+    assert_hidden(&report, "doctor-telegram-secret");
+    expect(&report, "telegram", "gateway", Status::Fail, "not shown");
+    fixture.config(&format!(
+        "telegram_token = \"{token}\"\ntelegram_allowed_users = \"12, 34\"\n"
+    ));
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "telegram",
+        "gateway",
+        Status::Ok,
+        "token set (config.toml), 2 allowed users",
+    );
+    assert_hidden(&report, "doctor-telegram-secret");
+}
+
+#[tokio::test]
 async fn discord_needs_a_token_and_allowed_users() {
     let fixture = Fixture::new();
     let report = fixture.run(false).await;
