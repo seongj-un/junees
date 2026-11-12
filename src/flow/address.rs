@@ -24,6 +24,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use crate::github::{Repo, parse_remote};
+use crate::sandbox::{Prepared, Sandbox};
 use crate::task::git::{self, git as run_git};
 
 /// The folder of the worktrees, inside the route's folder.
@@ -396,6 +397,21 @@ fn test_command(
     child
 }
 
+/// The sandbox of the test command: the one a webhook run's bash gets
+/// from `tools` (`require` unless `sandbox` is set; the settings file,
+/// secrets and git and GitHub CLI credentials out of reach, the data
+/// folders read-only), so the pull request's code it runs gets no more
+/// than the model's commands. `None` with `sandbox = off`.
+pub fn test_sandbox(tools: &crate::tools::ToolSettings, gh_config: &Path) -> Option<Sandbox> {
+    let trigger = crate::cron::run::Trigger::Webhook {
+        route: "",
+        github_allow: &[],
+        gh_config,
+        context_dir: Path::new("/"),
+    };
+    Sandbox::for_tools(&trigger.tool_settings(tools))
+}
+
 /// How the test command went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tested {
@@ -407,14 +423,16 @@ pub struct Tested {
     pub tail: String,
 }
 
-/// Runs the [`test_command`] with its output to `log`; kills its group
-/// after `limit`.
+/// Runs the [`test_command`] with its output to `log`, confined by
+/// `sandbox` ([`test_sandbox`]); kills its group after `limit`. Fails
+/// without running it when the sandbox refuses.
 pub async fn test(
     worktree: &Path,
     command: &str,
     log: &Path,
     hidden: &[String],
     gh_config: &Path,
+    sandbox: Option<&Sandbox>,
     limit: Duration,
 ) -> Result<Tested> {
     if let Some(dir) = log.parent() {
@@ -429,6 +447,19 @@ pub async fn test(
         .open(log)
         .with_context(|| format!("cannot write {}", log.display()))?;
     let mut child = test_command(worktree, command, hidden, gh_config);
+    // The confinement is kept until the child is spawned.
+    let (confinement, note) = match sandbox.map(|sandbox| sandbox.prepare(worktree)) {
+        None => (None, None),
+        Some(Prepared::Confined(confinement, note)) => (Some(confinement), note),
+        Some(Prepared::Unconfined(note)) => (None, note),
+        Some(Prepared::Refused(reason)) => bail!("the test command was not run: {reason}"),
+    };
+    if let Some(confinement) = &confinement {
+        confinement.apply(&mut child);
+    }
+    if let Some(note) = note {
+        writeln!(out, "{note}")?;
+    }
     child.stdout(out.try_clone()?).stderr(out.try_clone()?);
     let mut child = child.spawn().context("cannot start the test command")?;
     let pid = child.id().map(|pid| pid as i32);
@@ -818,6 +849,7 @@ pub(crate) mod tests {
             &log,
             &[],
             gh.path(),
+            None,
             Duration::from_secs(30),
         )
         .await
@@ -843,6 +875,7 @@ pub(crate) mod tests {
             &log,
             &hidden,
             gh,
+            None,
             Duration::from_secs(30),
         )
         .await
@@ -859,6 +892,7 @@ pub(crate) mod tests {
             &log,
             &[],
             gh,
+            None,
             Duration::from_secs(30),
         )
         .await
@@ -873,6 +907,7 @@ pub(crate) mod tests {
             &log,
             &[],
             gh,
+            None,
             Duration::from_millis(300),
         )
         .await
@@ -880,5 +915,116 @@ pub(crate) mod tests {
         assert!(!slow.passed);
         assert!(slow.how.starts_with("timed out"), "{slow:?}");
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// Tool settings with a state folder in `home` holding a settings
+    /// file and a secret, the sandbox mode unset and no temporary
+    /// folders writable (the test folder is in one).
+    fn sandboxed_tools(home: &Path) -> crate::tools::ToolSettings {
+        let junees = home.join(".junees");
+        std::fs::create_dir_all(junees.join("secrets")).unwrap();
+        std::fs::write(junees.join("config.toml"), "api_key = \"fake-key\"\n").unwrap();
+        std::fs::write(junees.join("secrets/token"), "fake-secret\n").unwrap();
+        crate::tools::ToolSettings {
+            settings_file: Some(crate::tools::SettingsFile::new(
+                junees.join("config.toml"),
+                Some(home.to_path_buf()),
+            )),
+            sandbox: Some(crate::sandbox::Settings {
+                mode: None,
+                write: Vec::new(),
+                read: None,
+                network: true,
+                temp: Vec::new(),
+                unattended: false,
+            }),
+            ..crate::tools::ToolSettings::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_test_command_runs_in_the_webhook_runs_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (home, tree) = (root.join("home"), root.join("tree"));
+        std::fs::create_dir_all(&tree).unwrap();
+        let tools = sandboxed_tools(&home);
+        let gh = Path::new("/nonexistent/gh");
+        let sandbox = test_sandbox(&tools, gh).unwrap();
+        // Unattended: `require` when the mode is not set.
+        assert_eq!(sandbox.settings().mode(), crate::sandbox::Mode::Require);
+        if let crate::sandbox::Support::Unavailable(why) = sandbox.support() {
+            eprintln!("skipped: {why}");
+            return;
+        }
+        let command = format!(
+            "cat {j}/config.toml || echo config-refused; \
+             cat {j}/secrets/token || echo secret-refused; \
+             echo x > {r}/outside || echo outside-refused; \
+             echo y > made && echo tree-ok",
+            j = home.join(".junees").display(),
+            r = root.display(),
+        );
+        let log = root.join("logs/t.log");
+        let tested = test(
+            &tree,
+            &command,
+            &log,
+            &[],
+            gh,
+            Some(&sandbox),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        assert!(tested.passed, "{tested:?}");
+        for line in [
+            "config-refused",
+            "secret-refused",
+            "outside-refused",
+            "tree-ok",
+        ] {
+            assert!(tested.tail.contains(line), "{line}: {tested:?}");
+        }
+        assert!(!tested.tail.contains("fake-"), "{tested:?}");
+        assert!(!root.join("outside").exists());
+        assert!(tree.join("made").exists());
+    }
+
+    #[tokio::test]
+    async fn a_test_command_the_sandbox_refuses_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let tree = root.join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        let tools = sandboxed_tools(&root.join("home"));
+        let gh = Path::new("/nonexistent/gh");
+        let sandbox =
+            test_sandbox(&tools, gh)
+                .unwrap()
+                .with_support(crate::sandbox::Support::Unavailable(
+                    "the kernel has no Landlock (fake)".into(),
+                ));
+        let error = test(
+            &tree,
+            "echo y > ran",
+            &root.join("t.log"),
+            &[],
+            gh,
+            Some(&sandbox),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the test command was not run: the sandbox is required (sandbox = require) but \
+             the kernel has no Landlock (fake)"
+        );
+        assert!(!tree.join("ran").exists());
+        // `sandbox = off`: no sandbox at all.
+        let mut off = tools.clone();
+        off.sandbox.as_mut().unwrap().mode = Some(crate::sandbox::Mode::Off);
+        assert!(test_sandbox(&off, gh).is_none());
     }
 }

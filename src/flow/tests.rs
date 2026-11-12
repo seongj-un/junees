@@ -281,6 +281,7 @@ async fn run(setup: &Setup<'_>, incoming: &Incoming, now: i64) -> Report {
         merge_setting: setup.merge,
         unattended: setup.unattended,
         hidden: &[],
+        sandbox: None,
         gh_config: gh.path(),
         now,
     };
