@@ -34,6 +34,9 @@ Usage:
   junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
                           plugin install <folder> [--name <n>], enable <name> [--trust],
                           disable <name>, remove <name>
+  junees mcp login <server>
+                          log in to an MCP server of mcp.json that asks for OAuth
+                          (also mcp logout <server>; see `junees mcp --help`)
 
 In the conversation, /help lists the commands (/task, /status, /sessions,
 /new, /model, /backend, ...). Settings are in $JUNEES_HOME/config.toml
@@ -149,6 +152,9 @@ pub const REPL_HELP: &str = "\
 /skills            list the skills ($JUNEES_HOME/skills)
 /skill <name>      show a skill
 /mcp               show the MCP servers ($JUNEES_HOME/mcp.json) and their tools
+/mcp login <server>
+                   log in to a server that asks for OAuth (prints an address to
+                   open in a browser); /mcp logout <server> removes the login
 /plugins           show the plugins this session uses and the installed ones
 /cron              list the scheduled jobs (`junees cron` manages them)
 /github            show the GitHub token state, repositories and rate limit
@@ -172,6 +178,8 @@ pub enum Command {
     Webhook(crate::webhook::cli::WebhookCommand),
     /// `junees plugin ...` (or `junees plugins`).
     Plugin(crate::plugins::manage::PluginCommand),
+    /// `junees mcp login|logout <server>`.
+    Mcp(crate::mcp::oauth::cli::McpCommand),
     /// `junees sessions search ...`.
     SessionsSearch(crate::search::args::HumanSearch),
     /// `junees sessions --help`.
@@ -316,6 +324,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                     None => Command::UsageHelp,
                 },
             );
+        }
+        Some("mcp") => {
+            args.next();
+            return crate::mcp::oauth::cli::parse(args).map(Command::Mcp);
         }
         Some("plugin" | "plugins") => {
             args.next();
@@ -640,6 +652,10 @@ mod tests {
             })
         );
         assert_eq!(parse(&["doctor", "--help"]).unwrap(), Command::DoctorHelp);
+        assert_eq!(
+            parse(&["mcp", "login", "docs"]).unwrap(),
+            Command::Mcp(crate::mcp::oauth::cli::McpCommand::Login("docs".into()))
+        );
         assert!(parse(&["doctor", "now"]).is_err());
         assert_eq!(parse(&["discord"]).unwrap(), Command::Gateway);
         assert_eq!(parse(&["gateway", "--help"]).unwrap(), Command::Help);

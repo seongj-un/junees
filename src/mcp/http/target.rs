@@ -39,6 +39,8 @@ pub struct HttpConfig {
     pub url: Url,
     /// In name order.
     pub headers: Vec<HeaderRef>,
+    /// The `oauth` entry, if the file has one ([`crate::mcp::oauth`]).
+    pub oauth: Option<crate::mcp::oauth::OAuthConfig>,
 }
 
 /// A header whose value comes from an environment variable.
@@ -82,7 +84,19 @@ impl HttpConfig {
             .iter()
             .map(|(name, value)| header_ref(name, value))
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self { url, headers })
+        Ok(Self {
+            url,
+            headers,
+            oauth: None,
+        })
+    }
+
+    /// Whether `headers` sets `Authorization`: it then wins over an OAuth
+    /// login.
+    pub fn has_authorization_header(&self) -> bool {
+        self.headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("authorization"))
     }
 
     /// `https://host:port`: what may be shown of the URL. Its path and

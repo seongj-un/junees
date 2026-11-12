@@ -107,6 +107,8 @@ pub struct Server {
     workdir: PathBuf,
     timeouts: Timeouts,
     env: EnvLookup,
+    /// The state folder whose saved OAuth logins a `url` server may use.
+    oauth_home: Option<PathBuf>,
     state: Mutex<State>,
 }
 
@@ -143,8 +145,16 @@ impl Server {
             workdir,
             timeouts,
             env: Arc::new(|name: &str| std::env::var(name).ok()),
+            oauth_home: None,
             state: Mutex::default(),
         }
+    }
+
+    /// Lets a `url` server use its saved OAuth login in `home`
+    /// ([`super::oauth`]).
+    pub fn with_oauth_home(mut self, home: Option<PathBuf>) -> Self {
+        self.oauth_home = home;
+        self
     }
 
     /// Reads the values of HTTP header references through `env` instead of
@@ -270,7 +280,17 @@ impl Server {
     }
 
     async fn connect_http(&self, http: &HttpConfig) -> Result<(Link, Era, Value), String> {
-        let connection = HttpConnection::new(http, &*self.env, super::conn::MAX_MESSAGE_BYTES)?;
+        let auth = match &self.oauth_home {
+            Some(home) => super::oauth::Auth::load(home, &self.config)?.map(Arc::new),
+            None => None,
+        };
+        let connection = HttpConnection::with_auth(
+            http,
+            &*self.env,
+            super::conn::MAX_MESSAGE_BYTES,
+            &self.config.name,
+            auth,
+        )?;
         let (era, capabilities) = connection.handshake().await?;
         Ok((Link::Http(connection), era, capabilities))
     }

@@ -195,6 +195,7 @@ pub(super) fn mcp(
             continue;
         }
         if let Some(http) = &server.http {
+            mcp_login(report, home, &server);
             let missing = http.missing(env);
             let place = format!("Streamable HTTP `{}`", http.origin());
             if missing.is_empty() {
@@ -244,6 +245,144 @@ pub(super) fn mcp(
                 &name,
                 format!("`{command}` is not an executable file or on PATH; it was not started"),
                 "install it, give `command` as an absolute path, or set `\"enabled\": false`",
+            ),
+        }
+    }
+}
+
+/// The saved OAuth login of a `url` server, offline: there, private, for
+/// this address, and when it expires. No value is shown.
+fn mcp_login(report: &mut Report, home: &Path, server: &crate::mcp::ServerConfig) {
+    use crate::mcp::oauth::{LoginState, login, store};
+    const AREA: &str = "mcp";
+    let name = format!("login {}", server.name);
+    let again = format!("run `junees mcp login {}`", server.name);
+    match crate::mcp::oauth::state(home, server) {
+        LoginState::NotUsed => {}
+        LoginState::None => report.skip(
+            AREA,
+            &name,
+            format!(
+                "no saved OAuth login (`junees mcp login {}` if the server asks for one)",
+                server.name
+            ),
+        ),
+        LoginState::Saved(saved) => {
+            for secret in [
+                Some(&saved.access_token),
+                saved.refresh_token.as_ref(),
+                saved.client_secret.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                report.hide(secret);
+            }
+            let now = store::now();
+            let detail = format!(
+                "saved, from {}. {}",
+                crate::mcp::oauth::fetch::short(&saved.issuer, 200),
+                login::describe(&saved, now)
+            );
+            if saved.refresh_token.is_none() && saved.expires_at.is_some_and(|at| at <= now) {
+                report.warn(AREA, &name, detail, again);
+            } else {
+                report.ok(AREA, &name, detail);
+            }
+        }
+        LoginState::Unusable(reason) => report.fail(AREA, &name, reason, again),
+    }
+}
+
+/// `--online`: the authorization server discovery of each enabled `url`
+/// server that may use OAuth (an unauthenticated probe and the metadata
+/// documents; no login, no token sent).
+pub(super) async fn mcp_online(
+    report: &mut Report,
+    home: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) {
+    use crate::mcp::oauth::{LoginState, discovery};
+    const AREA: &str = "mcp";
+    let Ok(servers) = crate::mcp::config::load(&home.join(crate::mcp::config::FILE_NAME)) else {
+        return;
+    };
+    for server in servers.iter().filter(|server| server.enabled) {
+        let Some(http) = &server.http else {
+            continue;
+        };
+        let state = crate::mcp::oauth::state(home, server);
+        if matches!(state, LoginState::NotUsed) {
+            continue;
+        }
+        let name = format!("login {} (online)", server.name);
+        let expected = http.oauth.is_some() || !matches!(state, LoginState::None);
+        let probed = match discovery::probe(http, env).await {
+            Ok(probed) => probed,
+            Err(reason) => {
+                report.warn(
+                    AREA,
+                    &name,
+                    reason,
+                    "check the network and the server's `url`",
+                );
+                continue;
+            }
+        };
+        if let discovery::Probe::Other(status) = &probed
+            && !expected
+        {
+            report.skip(
+                AREA,
+                &name,
+                format!("it answered HTTP {status} without asking for an OAuth login"),
+            );
+            continue;
+        }
+        let issuer = http
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.issuer.as_deref());
+        match discovery::follow(http, probed, issuer).await {
+            Ok(found) => {
+                let client = match (
+                    http.oauth
+                        .as_ref()
+                        .and_then(|oauth| oauth.client_id.as_ref()),
+                    &found.server.registration_endpoint,
+                ) {
+                    (Some(_), _) => "the client of `oauth.client_id`",
+                    (None, Some(_)) => "a client registered at login",
+                    (None, None) => {
+                        "no client: it offers no registration, so set `oauth.client_id`"
+                    }
+                };
+                let detail = format!(
+                    "authorization server {} (PKCE S256), {client}",
+                    crate::mcp::oauth::fetch::short(&found.server.issuer, 200)
+                );
+                if found.server.registration_endpoint.is_none()
+                    && http
+                        .oauth
+                        .as_ref()
+                        .is_none_or(|oauth| oauth.client_id.is_none())
+                {
+                    report.warn(
+                        AREA,
+                        &name,
+                        detail,
+                        "register a client at the authorization server and set `oauth.client_id` in \
+                         mcp.json",
+                    );
+                } else {
+                    report.ok(AREA, &name, detail);
+                }
+            }
+            Err(reason) => report.warn(
+                AREA,
+                &name,
+                format!("the login could not start: {reason}"),
+                "check the server's `url` and `oauth` in mcp.json",
             ),
         }
     }

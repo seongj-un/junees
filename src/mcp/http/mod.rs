@@ -18,9 +18,13 @@
 //!   on a response stream get `ping` answered and the rest refused.
 //!
 //! Not done: the standalone GET stream of server messages (legacy),
-//! resuming a broken stream with `Last-Event-ID`, `subscriptions/listen`,
-//! the deprecated HTTP+SSE transport of 2024-11-05, and OAuth (tokens go
-//! in headers from the environment, [`target`]).
+//! resuming a broken stream with `Last-Event-ID`, `subscriptions/listen`
+//! and the deprecated HTTP+SSE transport of 2024-11-05.
+//!
+//! Authorization: headers from the environment ([`target`]), or a saved
+//! OAuth login ([`crate::mcp::oauth`]) whose token goes in
+//! `Authorization: Bearer` on every request and is renewed once when the
+//! server answers 401.
 //!
 //! Redirects are not followed, a response is read up to a size limit, and
 //! error texts never carry the URL (its path or query may hold a token),
@@ -38,11 +42,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{Value, json};
 
 use super::conn::{CallError, RpcError};
+use super::oauth::Auth;
+use super::oauth::challenge::Bearer;
 use super::server::{self, Era, MODERN_VERSION};
 pub use target::HttpConfig;
 
@@ -71,6 +77,9 @@ enum HttpError {
     },
     /// An error status without a JSON-RPC error in its body.
     Status(StatusCode),
+    /// The server wants (another) authorization: 401, or 403 with
+    /// `insufficient_scope`. Never a reason to try the legacy handshake.
+    Auth(String),
     /// Anything else, described without the URL or header values.
     Other(String),
 }
@@ -80,7 +89,7 @@ impl HttpError {
         match self {
             HttpError::Rpc { error, .. } => CallError::Rpc(error),
             HttpError::Status(status) => CallError::Failed(status_text(status)),
-            HttpError::Other(reason) => CallError::Failed(reason),
+            HttpError::Auth(reason) | HttpError::Other(reason) => CallError::Failed(reason),
         }
     }
 
@@ -89,7 +98,7 @@ impl HttpError {
         match self {
             HttpError::Rpc { status, .. } => *status,
             HttpError::Status(status) => Some(*status),
-            HttpError::Other(_) => None,
+            HttpError::Auth(_) | HttpError::Other(_) => None,
         }
     }
 }
@@ -121,6 +130,14 @@ struct Inner {
     url: Url,
     /// The configured headers, values from the environment.
     headers: HeaderMap,
+    /// The server's name in mcp.json, for messages.
+    name: String,
+    /// The saved OAuth login, if one is used.
+    auth: Option<Arc<Auth>>,
+    /// Whether mcp.json sets `oauth.scope`, which a login asks for alone.
+    configured_scope: bool,
+    /// Whether `headers` holds `Authorization`.
+    own_authorization: bool,
     max_bytes: usize,
     next_id: AtomicU64,
     session: Mutex<Session>,
@@ -137,6 +154,18 @@ impl HttpConnection {
         env: &dyn Fn(&str) -> Option<String>,
         max_bytes: usize,
     ) -> Result<Self, String> {
+        Self::with_auth(config, env, max_bytes, "<server>", None)
+    }
+
+    /// [`HttpConnection::new`] for the server `name`, sending the token of
+    /// `auth` when given.
+    pub fn with_auth(
+        config: &HttpConfig,
+        env: &dyn Fn(&str) -> Option<String>,
+        max_bytes: usize,
+        name: &str,
+        auth: Option<Arc<Auth>>,
+    ) -> Result<Self, String> {
         let headers = config.resolve(env)?;
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -152,6 +181,13 @@ impl HttpConnection {
                 client,
                 url: config.url.clone(),
                 headers,
+                name: name.to_string(),
+                auth,
+                configured_scope: config
+                    .oauth
+                    .as_ref()
+                    .is_some_and(|oauth| oauth.scope.is_some()),
+                own_authorization: config.has_authorization_header(),
                 max_bytes,
                 next_id: AtomicU64::new(1),
                 session: Mutex::default(),
@@ -191,6 +227,7 @@ impl HttpConnection {
                 self.inner.session.lock().unwrap().era = Some(era.clone());
                 return Ok((era, capabilities));
             }
+            Err(HttpError::Auth(reason)) => return Err(reason),
             Err(HttpError::Rpc { error, .. }) if error.code == UNSUPPORTED_VERSION => {
                 return Err(server::unsupported(&error));
             }
@@ -248,12 +285,16 @@ impl HttpConnection {
         if session.id.is_none() {
             return;
         }
+        let mut headers = session_headers(&session);
+        if let Some(auth) = &self.inner.auth {
+            headers.insert(AUTHORIZATION, auth.header());
+        }
         let request = self
             .inner
             .client
             .request(Method::DELETE, self.inner.url.clone())
             .headers(self.inner.headers.clone())
-            .headers(session_headers(&session));
+            .headers(headers);
         let _ = tokio::time::timeout(SHORT_TIMEOUT, request.send()).await;
     }
 }
@@ -362,6 +403,7 @@ impl Inner {
                      the deprecated HTTP+SSE transport of 2024-11-05 are not supported",
                     status_text(status)
                 ),
+                HttpError::Auth(reason) => reason,
                 err => format!(
                     "`initialize` failed: {}",
                     server::describe(err.into_call_error())
@@ -390,7 +432,8 @@ impl Inner {
         session: &Session,
         message: &Value,
     ) -> Result<(), HttpError> {
-        let request = self.post(session, message, None, &[]);
+        let bearer = self.bearer().await;
+        let request = self.post(session, message, None, &[], bearer.as_ref());
         let response = tokio::time::timeout(SHORT_TIMEOUT, request.send())
             .await
             .map_err(|_| HttpError::Other("no answer within 10 s".into()))?
@@ -415,16 +458,103 @@ impl Inner {
         .await
     }
 
+    /// The `Authorization` header of the saved login, renewed first when
+    /// it is about to expire.
+    async fn bearer(&self) -> Option<HeaderValue> {
+        match &self.auth {
+            Some(auth) => Some(auth.ready().await),
+            None => None,
+        }
+    }
+
+    /// The error for a 401 answer, or a 403 one asking for more scope,
+    /// after renewing the saved login once (`renewed` says whether that
+    /// was tried): `Ok(true)` means send the request again.
+    async fn authorization(
+        &self,
+        response: &reqwest::Response,
+        sent: Option<&HeaderValue>,
+        renewed: &mut bool,
+    ) -> Result<bool, HttpError> {
+        let name = &self.name;
+        let login = format!(
+            "run `junees mcp login {name}` in a terminal (or `/mcp login {name}`); scheduled \
+             and webhook runs only use a saved login"
+        );
+        match response.status() {
+            StatusCode::UNAUTHORIZED => {
+                if let (Some(auth), Some(sent), false) = (&self.auth, sent, *renewed) {
+                    *renewed = true;
+                    return match auth.renew(sent).await {
+                        Ok(()) => Ok(true),
+                        Err(reason) => Err(HttpError::Auth(format!(
+                            "it refused the saved OAuth login (HTTP 401), and renewing it \
+                             failed: {reason}; {login}"
+                        ))),
+                    };
+                }
+                Err(HttpError::Auth(if self.auth.is_some() {
+                    format!(
+                        "it refused the saved OAuth login (HTTP 401) even after renewing it; \
+                         {login}"
+                    )
+                } else if self.own_authorization {
+                    "it refused the `Authorization` header from mcp.json (HTTP 401)".into()
+                } else {
+                    format!("it asks for an OAuth login (HTTP 401); {login}")
+                }))
+            }
+            StatusCode::FORBIDDEN => match Bearer::from_headers(response.headers()) {
+                Some(challenge) if challenge.error.as_deref() == Some("insufficient_scope") => {
+                    if let (Some(auth), Some(scope)) = (&self.auth, &challenge.scope) {
+                        // Best effort: the message says what to do anyway.
+                        let _ = auth.want_scope(scope).await;
+                    }
+                    let scope = challenge
+                        .scope
+                        .map(|scope| format!("`{}`", super::oauth::fetch::short(&scope, 200)));
+                    Err(HttpError::Auth(format!(
+                        "it needs more permissions (HTTP 403, insufficient scope{}); {}",
+                        scope
+                            .as_ref()
+                            .map(|scope| format!(" {scope}"))
+                            .unwrap_or_default(),
+                        if self.own_authorization {
+                            "the `Authorization` header from mcp.json does not grant them"
+                                .to_string()
+                        } else if self.configured_scope {
+                            // A login asks for `oauth.scope` only, so logging
+                            // in again alone would not grant them.
+                            format!(
+                                "add {} to `oauth.scope` of `{name}` in mcp.json, then log in \
+                                 again: {login}",
+                                scope.as_deref().unwrap_or("what the server needs")
+                            )
+                        } else {
+                            format!("log in again to grant them: {login}")
+                        }
+                    )))
+                }
+                _ => Ok(false),
+            },
+            _ => Ok(false),
+        }
+    }
+
     /// A POST of `body` with the headers of `session` (and of the request,
-    /// for a modern one).
+    /// for a modern one) and `bearer` as `Authorization`.
     fn post(
         &self,
         session: &Session,
         body: &Value,
         request: Option<(&str, &Value)>,
         extra: &[(String, String)],
+        bearer: Option<&HeaderValue>,
     ) -> reqwest::RequestBuilder {
         let mut headers = session_headers(session);
+        if let Some(bearer) = bearer {
+            headers.insert(AUTHORIZATION, bearer.clone());
+        }
         if let (Some(Era::Modern(_)), Some((method, params))) = (&session.era, request) {
             add(&mut headers, "mcp-method", method);
             if let Some(name) = meta::name_header(method, params) {
@@ -457,11 +587,27 @@ impl Inner {
         extra: &[(String, String)],
     ) -> Result<Answer, HttpError> {
         let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let response = self
-            .post(session, &body, Some((method, &params)), extra)
-            .send()
-            .await
-            .map_err(|err| HttpError::Other(describe(&err)))?;
+        let mut renewed = false;
+        let response = loop {
+            let bearer = self.bearer().await;
+            let response = self
+                .post(
+                    session,
+                    &body,
+                    Some((method, &params)),
+                    extra,
+                    bearer.as_ref(),
+                )
+                .send()
+                .await
+                .map_err(|err| HttpError::Other(describe(&err)))?;
+            if !self
+                .authorization(&response, bearer.as_ref(), &mut renewed)
+                .await?
+            {
+                break response;
+            }
+        };
         let status = response.status();
         if status.is_redirection() {
             return Err(HttpError::Other(format!(
@@ -703,7 +849,7 @@ fn rpc_error(message: &Value) -> Option<RpcError> {
 }
 
 /// A request error and its causes, without the URL.
-fn describe(err: &reqwest::Error) -> String {
+pub(crate) fn describe(err: &reqwest::Error) -> String {
     let mut parts = Vec::new();
     if err.is_timeout() {
         parts.push("timed out".to_string());
