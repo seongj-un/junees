@@ -512,6 +512,329 @@ async fn unattended_runs_cannot_read_home_credentials() {
 }
 
 #[tokio::test]
+async fn unattended_runs_in_the_home_folder_cannot_change_what_runs_later() {
+    // A scheduled job or webhook run working in the home folder: the
+    // files the next shell, login, ssh or git runs stay as they are, and
+    // ordinary files there stay writable. Without `~/.local` at all, the
+    // command cannot make it (and so not `~/.local/bin` either).
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    for (path, text) in [
+        (".bashrc", "# rc"),
+        (".profile", "# profile"),
+        (".gitconfig", "[user]"),
+        (".ssh/authorized_keys", "ssh-ed25519 mine"),
+        (".ssh/known_hosts", "host"),
+        (".config/other/settings", "other"),
+    ] {
+        std::fs::create_dir_all(home.join(path).parent().unwrap()).unwrap();
+        std::fs::write(home.join(path), format!("{text}\n")).unwrap();
+    }
+    let refused = [
+        ("echo x >> .bashrc", "bashrc"),
+        ("echo x > .profile", "profile"),
+        ("mv .bashrc moved", "move"),
+        ("echo x > .zshrc", "zshrc"),
+        ("echo x >> .gitconfig", "gitconfig"),
+        ("mkdir -p .config/git", "config-git"),
+        ("echo k >> .ssh/authorized_keys", "authorized-keys"),
+        ("echo k > .ssh/authorized_keys2", "authorized-keys2"),
+        (
+            "mkdir -p .config/systemd/user && echo u > .config/systemd/user/evil.service",
+            "systemd",
+        ),
+        ("mkdir -p .config/autostart", "autostart"),
+        ("mkdir -p .local/share/systemd/user", "local-systemd"),
+        ("mkdir -p .local/bin && echo x > .local/bin/ls", "local-bin"),
+        ("mkdir bin", "bin"),
+    ];
+    let mut command = String::from(
+        "echo a > sub/made && echo sub-ok; \
+         echo a >> notes.txt && echo notes-ok; \
+         echo a > .config/other/settings && echo other-ok; \
+         echo a > .config/other/new && echo other-new-ok; ",
+    );
+    for (attempt, name) in refused {
+        command.push_str(&format!(
+            "{{ {attempt}; }} 2>/dev/null || echo {name}-refused; "
+        ));
+    }
+    // The state folder elsewhere, so only these paths keep the home
+    // folder from getting one rule as a whole.
+    let tools = |unattended| ToolSettings {
+        settings_file: Some(SettingsFile::new(
+            layout.path("outside/.junees/config.toml"),
+            Some(home.clone()),
+        )),
+        sandbox: Some(Settings {
+            unattended,
+            ..settings()
+        }),
+        ..ToolSettings::default()
+    };
+    let cron = run(&home, Sandbox::for_tools(&tools(true)).unwrap(), &command).await;
+    let text = &cron.content;
+    for line in ["sub-ok", "notes-ok", "other-ok", "other-new-ok"] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    for (_, name) in refused {
+        assert!(text.contains(&format!("{name}-refused")), "{name}: {text}");
+    }
+    for (path, text) in [
+        (".bashrc", "# rc\n"),
+        (".profile", "# profile\n"),
+        (".gitconfig", "[user]\n"),
+        (".ssh/authorized_keys", "ssh-ed25519 mine\n"),
+    ] {
+        assert_eq!(std::fs::read_to_string(home.join(path)).unwrap(), text);
+    }
+    for path in [
+        "moved",
+        ".zshrc",
+        ".config/git",
+        ".config/systemd",
+        ".config/autostart",
+        ".ssh/authorized_keys2",
+        ".local",
+        "bin",
+    ] {
+        assert!(!home.join(path).exists(), "{path}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join("sub/made")).unwrap(),
+        "a\n"
+    );
+    // A folder on PATH inside the home folder (the daemon's PATH).
+    std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+    let path = std::env::join_paths([home.join(".cargo/bin"), PathBuf::from("/usr/bin")]).unwrap();
+    let sandbox = Sandbox::new(
+        Settings {
+            unattended: true,
+            ..settings()
+        },
+        Vec::new(),
+        unattended_no_write(&tools(true)),
+    )
+    .with_programs(program_folders(&tools(true), Some(&path)));
+    let on_path = run(
+        &home,
+        sandbox,
+        "echo x > .cargo/bin/git || echo path-refused; echo a > sub/also && echo also-ok",
+    )
+    .await;
+    for line in ["path-refused", "also-ok"] {
+        assert!(
+            on_path.content.contains(line),
+            "{line}: {}",
+            on_path.content
+        );
+    }
+    assert!(!home.join(".cargo/bin/git").exists());
+    // Interactive runs are as before: the same command changes them all.
+    let attended = run(&home, Sandbox::for_tools(&tools(false)).unwrap(), &command).await;
+    for (_, name) in refused {
+        assert!(
+            !attended.content.contains(&format!("{name}-refused")),
+            "{name}: {}",
+            attended.content
+        );
+    }
+    for path in [
+        "moved",
+        ".zshrc",
+        ".config/systemd/user/evil.service",
+        ".ssh/authorized_keys2",
+        ".local/bin/ls",
+        "bin",
+    ] {
+        assert!(home.join(path).exists(), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn unattended_jobs_in_the_home_folder_cannot_change_ssh_or_cargo_settings() {
+    // What ssh runs (`ProxyCommand`, `Match exec`, an `Include`d file, a
+    // script in ~/.ssh, `rc` for sshd) and cargo's settings stay as they
+    // are, even through a link to a dotfiles folder; ssh may still add a
+    // host to `known_hosts`, the job still reads `config`, and cargo's
+    // caches stay writable.
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    for (path, text) in [
+        (".ssh/known_hosts", "host"),
+        (".ssh/id_ed25519", "PRIVATE KEY"),
+        (".ssh/proxy.sh", "#!/bin/sh"),
+        (".ssh/config.d/extra", "Host extra"),
+        ("dotfiles/ssh_config", "Host *"),
+        (".cargo/config.toml", "[build]"),
+        (".cargo/registry/cache/crate", "crate"),
+    ] {
+        std::fs::create_dir_all(home.join(path).parent().unwrap()).unwrap();
+        std::fs::write(home.join(path), format!("{text}\n")).unwrap();
+    }
+    std::os::unix::fs::symlink(home.join("dotfiles/ssh_config"), home.join(".ssh/config")).unwrap();
+    let refused = [
+        ("echo 'ProxyCommand sh -c evil' >> .ssh/config", "config"),
+        ("echo x >> dotfiles/ssh_config", "config-target"),
+        ("echo evil > .ssh/rc", "rc"),
+        ("echo A=b > .ssh/environment", "environment"),
+        ("echo evil >> .ssh/proxy.sh", "proxy"),
+        ("echo 'Match exec evil' >> .ssh/config.d/extra", "include"),
+        ("echo x > .ssh/new", "new"),
+        ("echo k > .ssh/authorized_keys", "authorized-keys"),
+        ("echo x >> .cargo/config.toml", "cargo-config"),
+        ("echo x > .cargo/config", "cargo-config-old"),
+    ];
+    let mut command = String::from(
+        "echo other.host ssh-ed25519 k >> .ssh/known_hosts && echo known-ok; \
+         grep -q 'Host [*]' .ssh/config && echo read-ok; \
+         echo b > .cargo/registry/cache/crate && echo cargo-cache-ok; ",
+    );
+    for (attempt, name) in refused {
+        command.push_str(&format!(
+            "{{ {attempt}; }} 2>/dev/null || echo {name}-refused; "
+        ));
+    }
+    let tools = |unattended| ToolSettings {
+        settings_file: Some(SettingsFile::new(
+            layout.path("outside/.junees/config.toml"),
+            Some(home.clone()),
+        )),
+        sandbox: Some(Settings {
+            unattended,
+            ..settings()
+        }),
+        ..ToolSettings::default()
+    };
+    let cron = run(&home, Sandbox::for_tools(&tools(true)).unwrap(), &command).await;
+    let text = &cron.content;
+    for line in ["known-ok", "read-ok", "cargo-cache-ok"] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    for (_, name) in refused {
+        assert!(text.contains(&format!("{name}-refused")), "{name}: {text}");
+    }
+    for (path, text) in [
+        ("dotfiles/ssh_config", "Host *\n"),
+        (".ssh/proxy.sh", "#!/bin/sh\n"),
+        (".ssh/config.d/extra", "Host extra\n"),
+        (".cargo/config.toml", "[build]\n"),
+    ] {
+        assert_eq!(std::fs::read_to_string(home.join(path)).unwrap(), text);
+    }
+    for path in [".ssh/rc", ".ssh/environment", ".ssh/new", ".cargo/config"] {
+        assert!(!home.join(path).exists(), "{path}");
+    }
+    assert!(
+        std::fs::read_to_string(home.join(".ssh/known_hosts"))
+            .unwrap()
+            .contains("other.host")
+    );
+    // Interactive runs are as before.
+    let attended = run(&home, Sandbox::for_tools(&tools(false)).unwrap(), &command).await;
+    for (_, name) in refused {
+        assert!(
+            !attended.content.contains(&format!("{name}-refused")),
+            "{name}: {}",
+            attended.content
+        );
+    }
+}
+
+#[tokio::test]
+async fn unattended_runs_in_a_program_folder_on_path_still_write_there() {
+    // A scheduled job working in (or in a folder inside) a folder on the
+    // daemon's PATH: its working folder stays writable. Only the working
+    // folder's rules leave the program folder out, so a `sandbox_write`
+    // folder around it still does not reach the programs.
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let scripts = home.join("scripts");
+    std::fs::create_dir_all(scripts.join("job")).unwrap();
+    std::fs::write(scripts.join("job/old.txt"), "old\n").unwrap();
+    std::fs::write(scripts.join("tool"), "#!/bin/sh\n").unwrap();
+    let tools = ToolSettings {
+        settings_file: Some(SettingsFile::new(
+            layout.path("outside/.junees/config.toml"),
+            Some(home.clone()),
+        )),
+        sandbox: Some(Settings {
+            unattended: true,
+            ..settings()
+        }),
+        ..ToolSettings::default()
+    };
+    let path = std::env::join_paths([scripts.clone(), PathBuf::from("/usr/bin")]).unwrap();
+    let sandbox = |write: Vec<PathBuf>| {
+        Sandbox::new(
+            Settings {
+                unattended: true,
+                write,
+                ..settings()
+            },
+            Vec::new(),
+            unattended_no_write(&tools),
+        )
+        .with_programs(program_folders(&tools, Some(&path)))
+    };
+    let command = "echo a > made && echo made-ok; echo b >> old.txt && echo old-ok; \
+                   mkdir d && echo mkdir-ok; \
+                   { echo x > ../git; } 2>/dev/null || echo git-refused; \
+                   { echo x >> ../tool; } 2>/dev/null || echo tool-refused";
+    let inside = run(
+        &scripts.join("job"),
+        sandbox(vec![scripts.clone()]),
+        command,
+    )
+    .await;
+    let text = &inside.content;
+    for line in [
+        "made-ok",
+        "old-ok",
+        "mkdir-ok",
+        "git-refused",
+        "tool-refused",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    assert!(!text.contains("work in a subfolder"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(scripts.join("job/old.txt")).unwrap(),
+        "old\nb\n"
+    );
+    assert!(!scripts.join("git").exists());
+    assert_eq!(
+        std::fs::read_to_string(scripts.join("tool")).unwrap(),
+        "#!/bin/sh\n"
+    );
+    // The program folder itself as the working folder: it is the job's
+    // folder, so it stays writable (the cron run warns about it,
+    // `unattended_folder_warning`).
+    let itself = run(&scripts, sandbox(Vec::new()), "echo a > own && echo own-ok").await;
+    assert!(itself.content.contains("own-ok"), "{}", itself.content);
+    // Another program folder is still protected from a job inside the
+    // first one.
+    std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+    let other = run(
+        &scripts.join("job"),
+        sandbox(vec![home.join(".local")]),
+        "{ echo x > ../../.local/bin/ls; } 2>/dev/null || echo local-refused",
+    )
+    .await;
+    assert!(other.content.contains("local-refused"), "{}", other.content);
+    assert!(!home.join(".local/bin/ls").exists());
+}
+
+#[tokio::test]
 async fn reads_can_be_narrowed() {
     if !landlock() {
         return;

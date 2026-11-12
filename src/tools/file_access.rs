@@ -23,8 +23,9 @@
 //!   folders in the home folder ([`UNATTENDED_CREDENTIALS`]), the private
 //!   Junees paths or, in a webhook run, the saved sessions, even inside
 //!   those folders. Nor do they change the files that run or configure
-//!   programs later ([`UNATTENDED_NO_WRITE`]: shell startup files, user
-//!   services, git's settings) when the working folder holds them.
+//!   programs later ([`unattended_no_write`]: shell startup files, user
+//!   services, git's settings, program folders on PATH) when the working
+//!   folder holds them.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{File, Metadata};
@@ -72,8 +73,12 @@ pub const UNATTENDED_CREDENTIALS: &[&str] = &[
 /// unattended run do not change (they may read them), even when the
 /// working folder holds them: what they hold runs later, outside the run
 /// and its sandbox. Shell startup files, user services and session
-/// autostart entries, and git's own settings (`core.hooksPath`,
-/// `core.fsmonitor`, aliases).
+/// autostart entries, git's own settings (`core.hooksPath`,
+/// `core.fsmonitor`, aliases), cargo's (`build.rustc-wrapper`,
+/// `target.<triple>.runner` run on the next build), what ssh and sshd run
+/// or read for a login (`config` with `ProxyCommand`/`Match exec`, `rc`,
+/// `environment`, the authorized keys). [`unattended_no_write`] adds
+/// more at run time, and [`program_folders`] lists the program folders.
 pub const UNATTENDED_NO_WRITE: &[&str] = &[
     ".bashrc",
     ".bash_profile",
@@ -96,17 +101,91 @@ pub const UNATTENDED_NO_WRITE: &[&str] = &[
     ".config/autostart",
     ".gitconfig",
     ".config/git",
+    ".cargo/config.toml",
+    ".cargo/config",
+    ".ssh/config",
+    ".ssh/rc",
+    ".ssh/environment",
+    ".ssh/authorized_keys",
+    ".ssh/authorized_keys2",
 ];
 
+/// The user's program folders that a login shell puts on PATH (Debian's
+/// and Ubuntu's `~/.profile` adds both when they exist), besides the ones
+/// on the run's PATH ([`program_folders`]).
+const PROGRAM_FOLDERS: &[&str] = &[".local/bin", "bin"];
+
+/// The entries of `~/.ssh` an unattended run may still change: ssh adds
+/// the hosts it meets to them (`StrictHostKeyChecking accept-new`, a job
+/// pushing over ssh for the first time), and they hold host keys, never
+/// commands or settings.
+const SSH_WRITABLE: &[&str] = &["known_hosts", "known_hosts.old", "known_hosts2"];
+
+/// The paths under `home` an unattended run may not change, as written:
+/// [`UNATTENDED_NO_WRITE`] and every other entry of `~/.ssh` but
+/// [`SSH_WRITABLE`] (ssh's `config` may `Include` a file there or run a
+/// script there as `ProxyCommand`, and sshd reads any
+/// `authorized_keys*` its settings name). The program folders are apart
+/// ([`program_folders`]).
+pub fn unattended_no_write(home: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = UNATTENDED_NO_WRITE
+        .iter()
+        .map(|name| home.join(name))
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(home.join(".ssh")) {
+        out.extend(
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| !SSH_WRITABLE.iter().any(|name| entry.file_name() == *name))
+                .map(|entry| entry.path()),
+        );
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The program folders under `home` an unattended run may not change, as
+/// written: [`PROGRAM_FOLDERS`] and the folders of `path_var` (a PATH
+/// value) inside `home`, since the next shell runs what lands there
+/// instead of the system's program. The home folder itself is left out
+/// when PATH names it: protecting it would leave a run working anywhere
+/// in the home folder unable to write. A run whose working folder is (or
+/// is inside) one of them still writes in its working folder: the sandbox
+/// and the file tools leave that program folder out there, and
+/// [`unattended_folder_warning`] tells when the working folder is a
+/// program folder itself.
+pub fn program_folders(home: &Path, path_var: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = PROGRAM_FOLDERS.iter().map(|name| home.join(name)).collect();
+    let real_home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    for dir in path_var.into_iter().flat_map(std::env::split_paths) {
+        if !dir.is_absolute() || dir.components().any(|c| c == Component::ParentDir) {
+            continue;
+        }
+        let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        let inside = |home: &Path| dir.starts_with(home) || real.starts_with(home);
+        let is_home = |home: &Path| dir == home || real == home;
+        if (inside(home) || inside(&real_home)) && !is_home(home) && !is_home(&real_home) {
+            out.push(dir);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Why the working folder `dir` of an unattended run is a risky choice,
-/// if it is: the home folder itself, or a folder holding Junees's state
-/// folder `state`. The run's tools may write anywhere in the working
-/// folder; the protected paths stay protected, but everything else there
-/// (other projects, dotfiles not listed) does not.
+/// if it is: the home folder itself, a folder holding Junees's state
+/// folder `state`, or a program folder ([`program_folders`] with
+/// `path_var` the PATH). The run's tools may write anywhere in the
+/// working folder; the protected paths stay protected, but everything
+/// else there (other projects, dotfiles not listed) does not, and in a
+/// program folder that includes the programs the next shell runs.
 pub fn unattended_folder_warning(
     dir: &Path,
     home: Option<&Path>,
     state: Option<&Path>,
+    path_var: Option<&OsStr>,
 ) -> Option<String> {
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = real(dir);
@@ -114,6 +193,12 @@ pub fn unattended_folder_warning(
         "the home folder"
     } else if state.is_some_and(|state| real(state).starts_with(&dir)) {
         "a folder holding Junees's state folder"
+    } else if home.is_some_and(|home| {
+        program_folders(home, path_var)
+            .iter()
+            .any(|folder| real(folder) == dir)
+    }) {
+        "a program folder on PATH, so the programs it writes there run in later shells"
     } else {
         return None;
     };
@@ -505,8 +590,11 @@ pub struct Scope {
     /// Never read nor written ([`UNATTENDED_CREDENTIALS`] in the home
     /// folder, the protected Junees paths, a webhook run's sessions).
     denied: Vec<PathBuf>,
-    /// Never written ([`UNATTENDED_NO_WRITE`] in the home folder).
+    /// Never written ([`unattended_no_write`]).
     no_write: Vec<PathBuf>,
+    /// Never written ([`program_folders`]), except a folder that is or
+    /// holds the working folder, for paths in the working folder.
+    programs: Vec<PathBuf>,
 }
 
 impl Scope {
@@ -577,8 +665,19 @@ impl Scope {
             read,
             read_setting: "sandbox_read",
             denied,
-            no_write: under_home(UNATTENDED_NO_WRITE),
+            no_write: home.map(unattended_no_write).unwrap_or_default(),
+            programs: home
+                .map(|home| program_folders(home, std::env::var_os("PATH").as_deref()))
+                .unwrap_or_default(),
         }
+    }
+
+    /// Uses `programs` as the program folders instead of the ones of the
+    /// process's PATH (tests).
+    #[cfg(test)]
+    fn with_programs(mut self, programs: Vec<PathBuf>) -> Self {
+        self.programs = programs;
+        self
     }
 
     fn check(&self, real: &Path, shown: &str, use_: Use) -> Result<(), Refusal> {
@@ -611,14 +710,31 @@ impl Scope {
             .any(|form| real.starts_with(form))
         {
             // Within the allowed folders (a job working in the home
-            // folder), still not the files that run later.
+            // folder), still not the files that run later. A program
+            // folder that is or holds the working folder does not count
+            // in the working folder, like in the sandbox: refusing would
+            // leave the run nothing to write, and below the program folder
+            // itself nothing is on PATH.
+            let in_work = forms(&work).iter().any(|form| real.starts_with(form));
+            let holds_work = |folder: &PathBuf| {
+                forms(folder)
+                    .iter()
+                    .any(|folder| forms(&work).iter().any(|work| work.starts_with(folder)))
+            };
+            let programs: Vec<PathBuf> = self
+                .programs
+                .iter()
+                .filter(|folder| !(in_work && holds_work(folder)))
+                .cloned()
+                .collect();
             if use_ == Use::Write
-                && let Some(startup) = within(&self.no_write)
+                && let Some(startup) = within(&self.no_write).or_else(|| within(&programs))
             {
                 return Err(Refusal::Denied(format!(
-                    "{shown} is a shell startup file, user service, autostart entry or git setting \
-                     ({}): what it holds runs later, outside this run. This run is unattended (a \
-                     scheduled job or a webhook), and its file tools do not change it.",
+                    "{shown} is a shell startup file, user service, autostart entry, git or cargo \
+                     setting, ssh file, or program folder on PATH ({}): what it holds runs later, \
+                     outside this run. This run is unattended (a scheduled job or a webhook), and \
+                     its file tools do not change it.",
                     startup.display()
                 )));
             }

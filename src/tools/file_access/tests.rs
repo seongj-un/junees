@@ -372,6 +372,9 @@ async fn unattended_runs_in_the_home_folder_leave_startup_files_alone() {
         "home/.config/git/config",
         "home/.config/systemd/user/evil.service",
         "home/.config/autostart/evil.desktop",
+        "home/.local/bin/ls",
+        "home/bin/git",
+        "home/.cargo/config.toml",
     ] {
         let output = write(&access, &layout.path(path), "planted\n").await;
         assert!(output.is_error, "{path}: {}", output.content);
@@ -396,17 +399,128 @@ async fn unattended_runs_in_the_home_folder_leave_startup_files_alone() {
 }
 
 #[test]
+fn unattended_no_write_adds_authorized_keys_and_path_folders_in_home() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    std::fs::create_dir_all(home.join(".ssh/config.d")).unwrap();
+    for name in [
+        "authorized_keys.bak",
+        "known_hosts",
+        "known_hosts.old",
+        "proxy.sh",
+    ] {
+        std::fs::write(home.join(".ssh").join(name), "x\n").unwrap();
+    }
+    let path = std::env::join_paths([
+        home.join(".cargo/bin"),
+        home.join("tools/../escape"),
+        home.clone(),
+        layout.path("outside/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("relative/bin"),
+    ])
+    .unwrap();
+    let paths = super::unattended_no_write(&home);
+    let paths: Vec<PathBuf> = paths
+        .into_iter()
+        .chain(super::program_folders(&home, Some(&path)))
+        .collect();
+    for name in [
+        ".bashrc",
+        ".config/systemd",
+        ".local/bin",
+        "bin",
+        ".ssh/authorized_keys",
+        ".ssh/authorized_keys2",
+        ".ssh/authorized_keys.bak",
+        ".ssh/config",
+        ".ssh/rc",
+        ".ssh/environment",
+        ".ssh/config.d",
+        ".ssh/proxy.sh",
+        ".ssh/id_ed25519",
+        ".cargo/config.toml",
+        ".cargo/bin",
+    ] {
+        assert!(paths.contains(&home.join(name)), "{name}: {paths:?}");
+    }
+    // ssh keeps adding the hosts it meets.
+    for name in [".ssh/known_hosts", ".ssh/known_hosts.old", ".ssh"] {
+        assert!(!paths.contains(&home.join(name)), "{name}: {paths:?}");
+    }
+    // Not the home folder itself, nor folders outside it or not plainly
+    // named.
+    for path in [
+        home.clone(),
+        layout.path("outside/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("relative/bin"),
+        home.join("tools/../escape"),
+    ] {
+        assert!(!paths.contains(&path), "{}: {paths:?}", path.display());
+    }
+}
+
+#[tokio::test]
+async fn unattended_runs_in_a_program_folder_on_path_still_write_there() {
+    // Like the sandbox: a program folder that is or holds the working
+    // folder does not count in the working folder, and still counts from
+    // another writable folder.
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let scripts = home.join("scripts");
+    std::fs::create_dir_all(scripts.join("job")).unwrap();
+    let scope = |work: &Path, write: Vec<PathBuf>| {
+        FileAccess::default().with_scope(
+            Scope::new(
+                Some(work.to_path_buf()),
+                write,
+                Vec::new(),
+                Some(&home),
+                None,
+            )
+            .with_programs(vec![scripts.clone()]),
+        )
+    };
+    let inside = scope(&scripts.join("job"), vec![scripts.clone()]);
+    let output = write(&inside, &scripts.join("job/made"), "a\n").await;
+    assert!(!output.is_error, "{}", output.content);
+    let output = write(&inside, &scripts.join("git"), "x\n").await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("program folder on PATH"),
+        "{}",
+        output.content
+    );
+    assert!(!scripts.join("git").exists());
+    let itself = scope(&scripts, Vec::new());
+    let output = write(&itself, &scripts.join("own"), "a\n").await;
+    assert!(!output.is_error, "{}", output.content);
+    // The home folder as the working folder: the program folder counts.
+    let output = write(&scope(&home, Vec::new()), &scripts.join("git"), "x\n").await;
+    assert!(output.is_error, "{}", output.content);
+}
+
+#[test]
 fn unattended_runs_in_the_home_or_state_folder_are_warned_about() {
     let layout = Layout::new();
     let home = layout.path("home");
     let state = home.join(".junees");
-    let warn = |dir: &Path| super::unattended_folder_warning(dir, Some(&home), Some(&state));
+    std::fs::create_dir_all(home.join("scripts/job")).unwrap();
+    let path = std::env::join_paths([home.join("scripts"), PathBuf::from("/usr/bin")]).unwrap();
+    let warn = |dir: &Path| {
+        super::unattended_folder_warning(dir, Some(&home), Some(&state), Some(path.as_os_str()))
+    };
     let warning = warn(&home).unwrap();
     assert!(warning.contains("the home folder"), "{warning}");
     let warning = warn(&layout.root).unwrap();
     assert!(warning.contains("state folder"), "{warning}");
+    let warning = warn(&home.join("scripts")).unwrap();
+    assert!(warning.contains("program folder on PATH"), "{warning}");
     assert_eq!(warn(&layout.path("work")), None);
     assert_eq!(warn(&layout.path("home/.ssh")), None);
+    // Inside a program folder, what the run writes is not on PATH.
+    assert_eq!(warn(&home.join("scripts/job")), None);
 }
 
 #[tokio::test]

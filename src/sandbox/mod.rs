@@ -17,7 +17,11 @@
 //! - never write in Junees's data folders (memory, skills, cron, ...)
 //!   or the saved sessions;
 //! - in an unattended run, not read the credentials in the home folder
-//!   either ([`unattended_credentials`]);
+//!   either ([`unattended_credentials`]), nor change the files there that
+//!   run later (shell startup files, user services, git's and cargo's
+//!   settings, `~/.ssh` but the known hosts: [`unattended_no_write`];
+//!   program folders on PATH: [`program_folders`]), even when the working
+//!   folder is the home folder;
 //! - with `sandbox_network = 0` and a kernel of Landlock ABI 4 or later,
 //!   neither connect nor bind TCP sockets.
 //!
@@ -261,6 +265,11 @@ pub struct Sandbox {
     /// Paths commands may read but not change.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     read_only: Vec<PathBuf>,
+    /// Program folders commands may read but not change, unless one is or
+    /// holds the working folder: then the working folder stays writable
+    /// ([`program_folders`]).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    programs: Vec<PathBuf>,
     /// The kernel's support; tests put a fake one here.
     support: Option<Support>,
     /// Whether a result already said the commands run unconfined.
@@ -301,10 +310,13 @@ impl Sandbox {
                 read_only.extend(sessions);
             }
         }
+        let mut programs = Vec::new();
         if settings.unattended {
             hidden.extend(unattended_credentials(tools, &settings));
+            read_only.extend(unattended_no_write(tools));
+            programs = program_folders(tools, std::env::var_os("PATH").as_deref());
         }
-        let mut sandbox = Self::new(settings, hidden, read_only);
+        let mut sandbox = Self::new(settings, hidden, read_only).with_programs(programs);
         sandbox.state = state;
         Some(sandbox)
     }
@@ -316,11 +328,21 @@ impl Sandbox {
             settings,
             hidden,
             read_only,
+            programs: Vec::new(),
             support: None,
             told: AtomicBool::new(false),
             told_holds: AtomicBool::new(false),
             state: None,
         }
+    }
+
+    /// Also keeps commands from changing the program folders `programs`,
+    /// except one that is or holds the working folder (a scheduled job in
+    /// `~/scripts`, or in `~/scripts/job`, with `~/scripts` on PATH): that
+    /// would leave the job nothing to write.
+    pub fn with_programs(mut self, programs: Vec<PathBuf>) -> Self {
+        self.programs = programs;
+        self
     }
 
     /// Uses `support` instead of asking the kernel (tests).
@@ -409,10 +431,10 @@ impl Sandbox {
         match self.build(abi, work) {
             Ok((confinement, holds)) => {
                 if holds && !self.told_holds.swap(true, Ordering::Relaxed) {
-                    let line = "[sandbox: the working folder holds Junees's state folder, so \
-                                commands cannot create or remove entries directly in the \
-                                working folder or the folders between it and the protected \
-                                files; work in a subfolder]";
+                    let line = "[sandbox: the working folder holds Junees's state folder or \
+                                other protected paths, so commands cannot create or remove \
+                                entries directly in the working folder or the folders between \
+                                it and the protected files; work in a subfolder]";
                     note = Some(match note {
                         Some(note) => format!("{note}\n{line}"),
                         None => line.to_string(),
@@ -474,20 +496,27 @@ impl Sandbox {
             out
         };
         let hidden = real(&self.hidden);
-        let no_write: Vec<PathBuf> = hidden
+        let work = real_path(work);
+        // A program folder that is or holds the working folder is left out
+        // of the working folder's rules only: the other writable folders
+        // (`sandbox_write`) still may not change it.
+        let (around_work, programs): (Vec<PathBuf>, Vec<PathBuf>) = real(&self.programs)
+            .into_iter()
+            .partition(|path| work.starts_with(path));
+        let work_no_write: Vec<PathBuf> = hidden
             .iter()
             .cloned()
             .chain(real(&self.read_only))
+            .chain(programs)
             .collect();
-        let work = real_path(work);
-        let holds = no_write.iter().any(|path| path.starts_with(&work));
-        let mut writable = vec![work];
+        let no_write: Vec<PathBuf> = work_no_write.iter().cloned().chain(around_work).collect();
+        let holds = work_no_write.iter().any(|path| path.starts_with(&work));
+        ruleset.grant_except(&work, READ, &hidden)?;
+        ruleset.grant_except(&work, WRITE, &work_no_write)?;
         for path in self.settings.temp.iter().chain(&self.settings.write) {
-            writable.push(real_path(path));
-        }
-        for path in &writable {
-            ruleset.grant_except(path, READ, &hidden)?;
-            ruleset.grant_except(path, WRITE, &no_write)?;
+            let path = real_path(path);
+            ruleset.grant_except(&path, READ, &hidden)?;
+            ruleset.grant_except(&path, WRITE, &no_write)?;
         }
         ruleset.grant_except(Path::new("/dev"), WRITE_EXISTING | READ, &hidden)?;
         match &self.settings.read {
@@ -559,6 +588,60 @@ fn unattended_credentials(tools: &crate::tools::ToolSettings, settings: &Setting
         }));
     }
     out
+}
+
+/// The paths in the home folder an unattended run's commands may read
+/// but not change ([`crate::tools::unattended_no_write`], the same list
+/// the file tools refuse to write): what they hold runs later, outside
+/// the run and its sandbox. Landlock rules only allow, and a path in a
+/// folder that does not exist gets no exception ([`Sandbox::build`]), so
+/// a path whose folder is missing counts from its first missing folder
+/// below the home folder instead: with no `~/.config`, a command may not
+/// make `~/.config` (and in it `systemd/user/x.service`) at all.
+fn unattended_no_write(tools: &crate::tools::ToolSettings) -> Vec<PathBuf> {
+    let Some(home) = tools.settings_file.as_ref().and_then(|file| file.home()) else {
+        return Vec::new();
+    };
+    from_first_missing(crate::tools::unattended_no_write(home), home)
+}
+
+/// The program folders in the home folder an unattended run's commands
+/// may not change ([`crate::tools::program_folders`] with `path_var` the
+/// PATH), from their first missing folder like [`unattended_no_write`].
+fn program_folders(
+    tools: &crate::tools::ToolSettings,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    let Some(home) = tools.settings_file.as_ref().and_then(|file| file.home()) else {
+        return Vec::new();
+    };
+    from_first_missing(crate::tools::program_folders(home, path_var), home)
+}
+
+/// `paths` each from its first missing folder below `home`
+/// ([`first_missing`]), sorted and without repeats.
+fn from_first_missing(paths: Vec<PathBuf>, home: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = paths
+        .into_iter()
+        .map(|path| first_missing(&path, home))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// `path` itself when its folder exists, else the first folder on the way
+/// from `home` to it that does not (never `home` itself).
+fn first_missing(path: &Path, home: &Path) -> PathBuf {
+    let mut path = path;
+    while let Some(parent) = path.parent()
+        && !parent.is_dir()
+        && parent != home
+        && parent.starts_with(home)
+    {
+        path = parent;
+    }
+    path.to_path_buf()
 }
 
 /// The entries of the ssh folder `dir` that are not in [`SSH_PUBLIC`] or
