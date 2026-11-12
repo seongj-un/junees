@@ -159,7 +159,8 @@ pub(super) fn provider(report: &mut Report, settings: &Settings, read: &Read) {
                 NAME,
                 format!("openai: {err:#}"),
                 "set openai_base_url to an https:// URL, or http:// on localhost for a server \
-                 on this machine (docs/configuration.md)",
+                 on this machine; check openai_max_tokens_field and openai_reasoning_effort \
+                 (docs/configuration.md)",
             );
             return;
         }

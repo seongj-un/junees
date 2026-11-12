@@ -19,10 +19,7 @@ mod common;
 use common::{Served, body_of, fake_api, fake_stream_api};
 
 fn settings(url: &str, key: Option<&str>) -> Settings {
-    Settings {
-        base_url: format!("{url}/v1"),
-        api_key: key.map(str::to_string),
-    }
+    Settings::new(format!("{url}/v1"), key.map(str::to_string))
 }
 
 fn provider(url: &str) -> OpenAiProvider {

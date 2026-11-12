@@ -21,7 +21,7 @@ use super::http::{
 use super::stream::SseParser;
 use super::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamSender};
 use crate::mcp::http::target::is_loopback;
-use convert::{ApiError, ChatRequest, ChatResponse, stream_status};
+use convert::{ApiError, ChatRequest, ChatResponse, Options, stream_status};
 use stream::Chunks;
 
 mod convert;
@@ -33,6 +33,11 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const BASE_URL_ENV: &str = "OPENAI_BASE_URL";
 /// The setting for the key (`openai_api_key`).
 pub const API_KEY_ENV: &str = "OPENAI_API_KEY";
+/// The setting for the field that carries the output limit
+/// (`openai_max_tokens_field`).
+pub const MAX_TOKENS_FIELD_ENV: &str = "JUNEES_OPENAI_MAX_TOKENS_FIELD";
+/// The setting for `reasoning_effort` (`openai_reasoning_effort`).
+pub const REASONING_EFFORT_ENV: &str = "JUNEES_OPENAI_REASONING_EFFORT";
 
 /// The provider's settings. Deliberately not `Debug`: it holds the key.
 #[derive(Clone, PartialEq)]
@@ -41,19 +46,70 @@ pub struct Settings {
     /// `http://localhost:11434/v1`.
     pub base_url: String,
     pub api_key: Option<String>,
+    /// Which field carries the output limit.
+    pub limit_field: LimitField,
+    /// `reasoning_effort` for every call, sent only when set: `low`,
+    /// `medium`, `high` and so on.
+    pub reasoning_effort: Option<String>,
+}
+
+/// The request field for the output limit (`openai_max_tokens_field`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LimitField {
+    /// `max_completion_tokens` for OpenAI's own API and Azure OpenAI,
+    /// `max_tokens` elsewhere ([`Settings::uses_max_completion_tokens`]).
+    #[default]
+    Auto,
+    MaxTokens,
+    MaxCompletionTokens,
 }
 
 impl Settings {
-    /// Reads `OPENAI_BASE_URL` and `OPENAI_API_KEY` from `get` (which
-    /// trims and drops empty values) and checks the address: https, or
-    /// http on a loopback address only, since the key and the whole
-    /// conversation go there.
+    /// Settings for `base_url` and `api_key`, the rest left at their
+    /// defaults. Nothing is checked.
+    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key,
+            limit_field: LimitField::Auto,
+            reasoning_effort: None,
+        }
+    }
+
+    /// Reads `OPENAI_BASE_URL`, `OPENAI_API_KEY`,
+    /// `JUNEES_OPENAI_MAX_TOKENS_FIELD` and `JUNEES_OPENAI_REASONING_EFFORT`
+    /// from `get` (which trims and drops empty values) and checks the
+    /// address: https, or http on a loopback address only, since the key
+    /// and the whole conversation go there.
     pub fn read(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let base_url = get(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         check_base_url(&base_url)?;
+        let limit_field = match get(MAX_TOKENS_FIELD_ENV).as_deref() {
+            None | Some("auto") => LimitField::Auto,
+            Some("max_tokens") => LimitField::MaxTokens,
+            Some("max_completion_tokens") => LimitField::MaxCompletionTokens,
+            Some(other) => bail!(
+                "{MAX_TOKENS_FIELD_ENV} (`openai_max_tokens_field`) must be auto, max_tokens \
+                 or max_completion_tokens, got `{other}`"
+            ),
+        };
+        let reasoning_effort = get(REASONING_EFFORT_ENV).map(|effort| effort.to_ascii_lowercase());
+        if let Some(effort) = &reasoning_effort {
+            // The values differ by model and grow (none ... xhigh, max), so
+            // only the form is checked; the server refuses one it lacks.
+            let word = effort.len() <= 16 && effort.bytes().all(|byte| byte.is_ascii_lowercase());
+            if !word {
+                bail!(
+                    "{REASONING_EFFORT_ENV} (`openai_reasoning_effort`) must be a reasoning \
+                     effort such as low, medium or high, got `{effort}`"
+                );
+            }
+        }
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: get(API_KEY_ENV),
+            limit_field,
+            reasoning_effort,
         })
     }
 
@@ -63,10 +119,41 @@ impl Settings {
         reqwest::Url::parse(&self.base_url).is_ok_and(|url| is_loopback(&url))
     }
 
-    /// Whether the address is OpenAI's own API.
+    /// The address's host name, lowercase.
+    fn host(&self) -> Option<String> {
+        let url = reqwest::Url::parse(&self.base_url).ok()?;
+        url.host_str().map(str::to_ascii_lowercase)
+    }
+
+    /// Whether the address is OpenAI's own API: `api.openai.com`, or a
+    /// regional domain such as `eu.api.openai.com` (data residency,
+    /// developers.openai.com/api/docs/guides/your-data).
     pub fn is_official(&self) -> bool {
-        reqwest::Url::parse(&self.base_url)
-            .is_ok_and(|url| url.host_str() == Some("api.openai.com"))
+        self.host()
+            .is_some_and(|host| host == "api.openai.com" || host.ends_with(".api.openai.com"))
+    }
+
+    /// Whether the address is Azure OpenAI's v1 API:
+    /// `https://<resource>.openai.azure.com/openai/v1` or
+    /// `https://<resource>.services.ai.azure.com/openai/v1` (Azure
+    /// OpenAI's API version lifecycle page).
+    pub fn is_azure(&self) -> bool {
+        self.host().is_some_and(|host| {
+            host.ends_with(".openai.azure.com") || host.ends_with(".services.ai.azure.com")
+        })
+    }
+
+    /// Whether the output limit goes as `max_completion_tokens`. OpenAI
+    /// deprecated `max_tokens` and its reasoning models refuse it (the
+    /// Chat Completions reference); Azure OpenAI's reasoning models take
+    /// only `max_completion_tokens` (its reasoning models page). Other
+    /// servers (Ollama, vLLM, LM Studio, older proxies) know `max_tokens`.
+    pub fn uses_max_completion_tokens(&self) -> bool {
+        match self.limit_field {
+            LimitField::Auto => self.is_official() || self.is_azure(),
+            LimitField::MaxTokens => false,
+            LimitField::MaxCompletionTokens => true,
+        }
     }
 
     /// The key a request needs: an error when there is none and the
@@ -161,7 +248,11 @@ impl OpenAiProvider {
     }
 
     fn body<'a>(&'a self, request: CompletionRequest<'a>) -> ChatRequest<'a> {
-        ChatRequest::new(&self.model, request, self.settings.is_official())
+        let options = Options {
+            max_completion_tokens: self.settings.uses_max_completion_tokens(),
+            reasoning_effort: self.settings.reasoning_effort.as_deref(),
+        };
+        ChatRequest::new(&self.model, request, options)
     }
 
     fn post(&self, url: &str, body: &ChatRequest<'_>) -> reqwest::RequestBuilder {
@@ -461,5 +552,78 @@ mod tests {
         assert_eq!(body["max_tokens"], 9);
         assert_eq!(local.model(), Some("m"));
         assert!(!local.manual_thinking());
+    }
+
+    #[test]
+    fn openai_and_azure_hosts_get_max_completion_tokens() {
+        let field = |pairs: &[(&str, &str)]| read(pairs).unwrap().uses_max_completion_tokens();
+        for completion in [
+            "https://api.openai.com/v1",
+            "https://eu.api.openai.com/v1",
+            "https://US.API.OPENAI.COM/v1",
+            "https://my-res.openai.azure.com/openai/v1/",
+            "https://my-res.services.ai.azure.com/openai/v1",
+        ] {
+            assert!(field(&[(BASE_URL_ENV, completion)]), "{completion}");
+        }
+        for plain in [
+            "https://openrouter.ai/api/v1",
+            "http://localhost:11434/v1",
+            "https://api.openai.com.example/v1",
+            "https://notapi.openai.com/v1",
+            "https://openai.azure.com.example/v1",
+        ] {
+            assert!(!field(&[(BASE_URL_ENV, plain)]), "{plain}");
+        }
+        assert!(
+            read(&[(BASE_URL_ENV, "https://eu.api.openai.com/v1")])
+                .unwrap()
+                .is_official()
+        );
+        assert!(
+            !read(&[(BASE_URL_ENV, "https://r.openai.azure.com/openai/v1")])
+                .unwrap()
+                .is_official()
+        );
+        // The setting decides when it is not auto.
+        let local = (BASE_URL_ENV, "http://localhost:8000/v1");
+        assert!(field(&[
+            local,
+            (MAX_TOKENS_FIELD_ENV, "max_completion_tokens")
+        ]));
+        assert!(!field(&[(MAX_TOKENS_FIELD_ENV, "max_tokens")]));
+        assert!(field(&[(MAX_TOKENS_FIELD_ENV, "auto")]));
+        let err = read(&[(MAX_TOKENS_FIELD_ENV, "max_output_tokens")])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("openai_max_tokens_field"), "{err}");
+    }
+
+    #[test]
+    fn a_reasoning_effort_is_read_and_sent_only_when_set() {
+        assert_eq!(read(&[]).unwrap().reasoning_effort, None);
+        let settings = read(&[(REASONING_EFFORT_ENV, "High")]).unwrap();
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
+        for bad in ["very high", "low;", "1"] {
+            let err = read(&[(REASONING_EFFORT_ENV, bad)])
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(err.contains("openai_reasoning_effort"), "{bad}: {err}");
+        }
+        let request = CompletionRequest {
+            system: "",
+            messages: &[],
+            tools: &[],
+            max_tokens: 9,
+            cache: false,
+            thinking: true,
+            web_search: false,
+        };
+        let provider = OpenAiProvider::new(settings, "o".into()).unwrap();
+        let body = serde_json::to_value(provider.body(request)).unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["max_completion_tokens"], 9);
     }
 }
