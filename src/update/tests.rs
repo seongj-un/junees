@@ -703,6 +703,28 @@ fn takes_only_a_regular_binary_out_of_the_archive() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("not a regular file"), "{err}");
+    // The binary twice: the second would win on unpacking.
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join(&stem);
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("junees"), "bin").unwrap();
+    let out = dir.path().join("twice.tar.gz");
+    let member = format!("{stem}/junees");
+    assert!(
+        std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(&out)
+            .arg("-C")
+            .arg(dir.path())
+            .args([&member, &member])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let err = install::extract(&std::fs::read(out).unwrap(), &member)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has 2 entries"), "{err}");
 }
 
 #[test]

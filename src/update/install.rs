@@ -1,9 +1,10 @@
 //! Checking a downloaded release and putting its binary in place.
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -15,6 +16,8 @@ pub const MAX_ARCHIVE_BYTES: u64 = 100 << 20;
 pub const MAX_SUMS_BYTES: u64 = 64 << 10;
 /// Largest binary taken out of an archive.
 const MAX_BINARY_BYTES: u64 = 300 << 20;
+/// Largest listing of the binary's entry read from `tar -tv`.
+const MAX_LISTING_BYTES: u64 = 64 << 10;
 
 /// The name of the checksum file of a release.
 pub const SUMS_FILE: &str = "SHA256SUMS";
@@ -86,67 +89,80 @@ pub fn verify(name: &str, bytes: &[u8], expected: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
-/// A private folder under the temporary folder, removed with what is in
-/// it when dropped.
-struct PrivateDir(PathBuf);
-
-impl PrivateDir {
-    fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!(
-            "junees-update-{}",
-            crate::cron::store::random_hex(16)
-        ));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .with_context(|| format!("cannot create {}", path.display()))?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for PrivateDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 /// The file `member` of the gzipped tar `archive`, read with the system's
-/// `tar` (macOS and Linux both have one) in a private temporary folder.
-/// Only that one member is taken out, and it must be a regular file.
+/// `tar` (macOS and Linux both have one) from standard input to standard
+/// output. The archive checked against SHA256SUMS and the binary never
+/// touch the disk before the install: in a temporary folder, a process
+/// of the same user (a confined command a session left running there)
+/// could swap them between the check and the install. Only that one
+/// member is taken out, and it must be the archive's one regular file of
+/// that name.
 pub fn extract(archive: &[u8], member: &str) -> Result<Vec<u8>> {
-    let dir = PrivateDir::new()?;
-    let file = dir.0.join("release.tar.gz");
-    fs::write(&file, archive).with_context(|| format!("cannot write {}", file.display()))?;
-    let out = dir.0.join("out");
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&out)
-        .with_context(|| format!("cannot create {}", out.display()))?;
-    let output = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&file)
-        .arg("-C")
-        .arg(&out)
-        .arg(member)
-        .stdin(std::process::Stdio::null())
-        .output()
+    // `tar -tv` starts each line with the entry's type and mode, as `ls
+    // -l` does: `-` for a regular file (a hard link is `h`).
+    let listing = tar(archive, &["-tvzf", "-", member], member, MAX_LISTING_BYTES)?;
+    let listing = String::from_utf8_lossy(&listing);
+    let lines: Vec<&str> = listing.lines().collect();
+    match lines[..] {
+        [line] if line.starts_with('-') => {}
+        [_] => bail!("{member} in the release archive is not a regular file"),
+        _ => bail!(
+            "the release archive has {} entries for {member}",
+            lines.len()
+        ),
+    }
+    let binary = tar(archive, &["-xzOf", "-", member], member, MAX_BINARY_BYTES)?;
+    if binary.is_empty() {
+        bail!("{member} in the release archive is empty");
+    }
+    Ok(binary)
+}
+
+/// Runs `tar` with `args` on `archive` (its standard input) and returns
+/// its standard output, failing past `limit` bytes.
+fn tar(archive: &[u8], args: &[&str], member: &str, limit: u64) -> Result<Vec<u8>> {
+    let mut child = Command::new("tar")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("cannot run `tar` to unpack the release")?;
-    if !output.status.success() {
+    let (Some(mut stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        bail!("cannot talk to `tar`");
+    };
+    let (read, errors) = std::thread::scope(|scope| {
+        // Written from its own thread so that a full output pipe cannot
+        // stall both sides. tar stopping early is an error of its own.
+        scope.spawn(move || {
+            let _ = stdin.write_all(archive);
+        });
+        let errors = scope.spawn(move || {
+            let mut text = Vec::new();
+            let _ = stderr.take(MAX_LISTING_BYTES).read_to_end(&mut text);
+            text
+        });
+        let mut out = Vec::new();
+        let read = stdout.take(limit + 1).read_to_end(&mut out).map(|_| out);
+        if !matches!(&read, Ok(out) if out.len() as u64 <= limit) {
+            let _ = child.kill();
+        }
+        (read, errors.join().unwrap_or_default())
+    });
+    let status = child.wait().context("cannot wait for `tar`")?;
+    let out = read.context("cannot read what `tar` unpacked")?;
+    if out.len() as u64 > limit {
+        bail!("{member} in the release archive is over {limit} bytes");
+    }
+    if !status.success() {
         bail!(
             "cannot unpack {member} from the release archive: {}",
-            crate::prompt_text::escape_hidden(String::from_utf8_lossy(&output.stderr).trim())
+            crate::prompt_text::escape_hidden(String::from_utf8_lossy(&errors).trim())
         );
     }
-    let path = out.join(member);
-    let meta = fs::symlink_metadata(&path)
-        .with_context(|| format!("the release archive has no {member}"))?;
-    if !meta.is_file() {
-        bail!("{member} in the release archive is not a regular file");
-    }
-    if meta.len() == 0 || meta.len() > MAX_BINARY_BYTES {
-        bail!("{member} in the release archive is {} bytes", meta.len());
-    }
-    fs::read(&path).with_context(|| format!("cannot read {}", path.display()))
+    Ok(out)
 }
 
 /// Removes a file when dropped, unless disarmed.
