@@ -651,6 +651,40 @@ mod tests {
     }
 
     #[test]
+    fn the_openai_settings_follow_the_same_order() {
+        use crate::provider::openai::LimitField;
+        let mut file = ConfigFile::default();
+        file.set("provider", "openai");
+        file.set("model", "file-model");
+        file.set("openai_base_url", "https://openrouter.ai/api/v1");
+        file.set("openai_api_key", "file-key");
+        file.set("openai_reasoning_effort", "low");
+        file.set("openai_max_tokens_field", "max_tokens");
+        let settings = Settings::new(
+            env(&[
+                ("OPENAI_BASE_URL", "https://eu.api.openai.com/v1"),
+                ("OPENAI_API_KEY", " "),
+                ("JUNEES_OPENAI_REASONING_EFFORT", "high"),
+                ("HOME", "/home/u"),
+            ]),
+            file,
+            None,
+            true,
+        );
+        let openai = Config::from_lookup(|key| settings.get(key))
+            .unwrap()
+            .openai
+            .unwrap();
+        // Each variable wins over its key, one by one.
+        assert_eq!(openai.base_url, "https://eu.api.openai.com/v1");
+        assert_eq!(openai.reasoning_effort.as_deref(), Some("high"));
+        // A blank variable does not hide the file.
+        assert_eq!(openai.api_key.as_deref(), Some("file-key"));
+        assert_eq!(openai.limit_field, LimitField::MaxTokens);
+        assert!(!openai.uses_max_completion_tokens());
+    }
+
+    #[test]
     fn the_file_can_turn_on_web_search() {
         let file = ConfigFile::parse(
             "api_key = \"k\"\n\
