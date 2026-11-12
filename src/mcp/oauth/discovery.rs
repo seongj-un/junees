@@ -141,7 +141,7 @@ pub async fn follow(
             })?,
         None => servers
             .iter()
-            .find(|listed| endpoint(listed, "x").is_ok())
+            .find(|listed| endpoint(listed, "x", &http.url).is_ok())
             .copied()
             .ok_or_else(|| {
                 format!(
@@ -150,7 +150,7 @@ pub async fn follow(
                 )
             })?,
     };
-    let server = auth_server(chosen).await?;
+    let server = auth_server(chosen, &http.url).await?;
     Ok(Discovery {
         resource,
         resource_scopes: strings(&metadata, "scopes_supported"),
@@ -189,6 +189,7 @@ async fn resource_metadata(
         Some(url) => vec![endpoint(
             url,
             "the resource metadata address of its challenge",
+            server,
         )?],
         None => well_known_resource(server),
     };
@@ -291,9 +292,10 @@ pub fn resource_allows(resource: &str, server: &Url) -> bool {
     }
 }
 
-/// The metadata of the authorization server `issuer`, validated.
-pub async fn auth_server(issuer: &str) -> Result<AuthServer, String> {
-    let issuer_url = endpoint(issuer, "the authorization server")?;
+/// The metadata of the authorization server `issuer` of the MCP server at
+/// `server`, validated.
+pub async fn auth_server(issuer: &str, server: &Url) -> Result<AuthServer, String> {
+    let issuer_url = endpoint(issuer, "the authorization server", server)?;
     if issuer_url.query().is_some() {
         return Err("the authorization server's issuer has a query".into());
     }
@@ -310,7 +312,7 @@ pub async fn auth_server(issuer: &str) -> Result<AuthServer, String> {
             tried.push(format!("HTTP {}", answer.status.as_u16()));
             continue;
         };
-        return validate(issuer, &metadata);
+        return validate(issuer, &metadata, server);
     }
     Err(format!(
         "no metadata of the authorization server `{}` was found ({})",
@@ -319,8 +321,13 @@ pub async fn auth_server(issuer: &str) -> Result<AuthServer, String> {
     ))
 }
 
-/// Checks a metadata document fetched for `issuer`.
-pub fn validate(issuer: &str, metadata: &Map<String, Value>) -> Result<AuthServer, String> {
+/// Checks a metadata document fetched for `issuer` of the MCP server at
+/// `server`.
+pub fn validate(
+    issuer: &str,
+    metadata: &Map<String, Value>,
+    server: &Url,
+) -> Result<AuthServer, String> {
     let named = metadata.get("issuer").and_then(Value::as_str);
     if named != Some(issuer) {
         return Err(format!(
@@ -334,7 +341,7 @@ pub fn validate(issuer: &str, metadata: &Map<String, Value>) -> Result<AuthServe
         metadata
             .get(key)
             .and_then(Value::as_str)
-            .map(|text| endpoint(text, what))
+            .map(|text| endpoint(text, what, server))
             .transpose()
     };
     let authorization_endpoint = url("authorization_endpoint", "its authorization endpoint")?
@@ -456,23 +463,32 @@ mod tests {
             "authorization_response_iss_parameter_supported": true,
             "scopes_supported": ["a", "offline_access"]
         });
-        let server = validate("https://auth.example.com", &metadata(good.clone())).unwrap();
+        let remote = Url::parse("https://mcp.example.com/mcp").unwrap();
+        let server =
+            validate("https://auth.example.com", &metadata(good.clone()), &remote).unwrap();
         assert!(server.iss_parameter_supported);
         assert!(server.registration_endpoint.is_some());
         assert_eq!(server.scopes_supported, ["a", "offline_access"]);
 
         // The attacker example of the specification.
-        let message = validate("https://attacker.example", &metadata(good.clone()))
+        let message = validate("https://attacker.example", &metadata(good.clone()), &remote)
             .err()
             .unwrap();
         assert!(message.contains("another issuer"), "{message}");
         // A trailing slash is another issuer: simple string comparison.
-        assert!(validate("https://auth.example.com/", &metadata(good.clone())).is_err());
+        assert!(
+            validate(
+                "https://auth.example.com/",
+                &metadata(good.clone()),
+                &remote
+            )
+            .is_err()
+        );
 
         let without = |key: &str| {
             let mut copy = good.clone();
             copy.as_object_mut().unwrap().remove(key);
-            validate("https://auth.example.com", &metadata(copy))
+            validate("https://auth.example.com", &metadata(copy), &remote)
         };
         assert!(
             without("code_challenge_methods_supported")
@@ -485,12 +501,32 @@ mod tests {
         assert!(without("registration_endpoint").is_ok());
         let mut plain_only = good.clone();
         plain_only["code_challenge_methods_supported"] = json!(["plain"]);
-        assert!(validate("https://auth.example.com", &metadata(plain_only)).is_err());
+        assert!(validate("https://auth.example.com", &metadata(plain_only), &remote).is_err());
         let mut insecure = good.clone();
         insecure["token_endpoint"] = json!("http://auth.example.com/token");
-        let message = validate("https://auth.example.com", &metadata(insecure))
+        let message = validate("https://auth.example.com", &metadata(insecure), &remote)
             .err()
             .unwrap();
         assert!(message.contains("not https"), "{message}");
+        // Endpoints on this computer only for an MCP server there too.
+        let mut local = good.clone();
+        local["registration_endpoint"] = json!("http://127.0.0.1:2375/register");
+        let message = validate(
+            "https://auth.example.com",
+            &metadata(local.clone()),
+            &remote,
+        )
+        .err()
+        .unwrap();
+        assert!(message.contains("on this computer"), "{message}");
+        let on_this_computer = Url::parse("http://127.0.0.1:8/mcp").unwrap();
+        assert!(
+            validate(
+                "https://auth.example.com",
+                &metadata(local),
+                &on_this_computer
+            )
+            .is_ok()
+        );
     }
 }

@@ -19,18 +19,25 @@ pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// A larger answer is refused.
 const MAX_BYTES: usize = 1024 * 1024;
 
-/// `text` as the URL of `what`, if it is https (or http to this computer)
-/// without a user name, password or fragment. MCP 2026-07-28,
+/// `text` as the URL of `what`, if it is https without a user name,
+/// password or fragment; http only to this computer, and only for the MCP
+/// server at `server` on this computer too (a remote server's metadata
+/// must not send requests to services on this computer). MCP 2026-07-28,
 /// security-considerations.md, "Communication Security": every
 /// authorization server endpoint MUST be served over HTTPS.
-pub fn endpoint(text: &str, what: &str) -> Result<Url, String> {
+pub fn endpoint(text: &str, what: &str, server: &Url) -> Result<Url, String> {
     let url = Url::parse(text).map_err(|_| format!("{what} is not a valid absolute URL"))?;
-    let secure = url.scheme() == "https" || url.scheme() == "http" && is_loopback(&url);
-    if !secure {
-        return Err(format!(
-            "{what} `{}` is not https (http is allowed only to this computer)",
-            origin(&url)
-        ));
+    if url.scheme() != "https" {
+        let reason = if url.scheme() != "http" || !is_loopback(&url) {
+            "http is allowed only to this computer"
+        } else if !is_loopback(server) {
+            "http to this computer is allowed only for an MCP server on this computer"
+        } else {
+            ""
+        };
+        if !reason.is_empty() {
+            return Err(format!("{what} `{}` is not https ({reason})", origin(&url)));
+        }
     }
     if url.host().is_none() || !url.username().is_empty() || url.password().is_some() {
         return Err(format!("{what} has no host, or a user name or password"));
@@ -213,18 +220,38 @@ pub fn short(text: &str, chars: usize) -> String {
 mod tests {
     use super::*;
 
+    fn remote() -> Url {
+        Url::parse("https://mcp.example.com/mcp").unwrap()
+    }
+
+    fn local() -> Url {
+        Url::parse("http://127.0.0.1:8/mcp").unwrap()
+    }
+
     #[test]
     fn endpoints_are_https_or_loopback() {
-        assert!(endpoint("https://auth.example.com/token", "x").is_ok());
-        assert!(endpoint("http://127.0.0.1:9/token", "x").is_ok());
-        assert!(endpoint("http://localhost/token", "x").is_ok());
-        let message =
-            endpoint("http://auth.example.com/t0ken-path", "the token endpoint").unwrap_err();
+        assert!(endpoint("https://auth.example.com/token", "x", &remote()).is_ok());
+        assert!(endpoint("http://127.0.0.1:9/token", "x", &local()).is_ok());
+        assert!(endpoint("http://localhost/token", "x", &local()).is_ok());
+        let message = endpoint(
+            "http://auth.example.com/t0ken-path",
+            "the token endpoint",
+            &remote(),
+        )
+        .unwrap_err();
         assert!(message.contains("not https"), "{message}");
         assert!(!message.contains("t0ken-path"), "{message}");
-        assert!(endpoint("https://u:p@auth.example.com/", "x").is_err());
-        assert!(endpoint("https://auth.example.com/#f", "x").is_err());
-        assert!(endpoint("auth.example.com", "x").is_err());
+        assert!(endpoint("https://u:p@auth.example.com/", "x", &remote()).is_err());
+        assert!(endpoint("https://auth.example.com/#f", "x", &remote()).is_err());
+        assert!(endpoint("auth.example.com", "x", &remote()).is_err());
+        // A remote server's metadata cannot point at this computer's http
+        // services.
+        let message = endpoint("http://127.0.0.1:2375/x", "x", &remote()).unwrap_err();
+        assert!(
+            message.contains("only for an MCP server on this computer"),
+            "{message}"
+        );
+        assert!(endpoint("http://localhost/x", "x", &remote()).is_err());
     }
 
     #[test]

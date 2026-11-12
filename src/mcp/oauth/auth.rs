@@ -28,6 +28,8 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 pub struct Auth {
     server: String,
+    /// The server's `url`, the only address the token goes to.
+    url: reqwest::Url,
     home: PathBuf,
     saved: Mutex<Saved>,
     /// Held while renewing, so concurrent requests renew once.
@@ -57,9 +59,10 @@ impl Auth {
                 server.name
             ));
         }
-        endpoint(&saved.token_endpoint, "the saved token endpoint")?;
+        endpoint(&saved.token_endpoint, "the saved token endpoint", &http.url)?;
         Ok(Some(Self {
             server: server.name.clone(),
+            url: http.url.clone(),
             home: home.to_path_buf(),
             saved: Mutex::new(saved),
             renewing: tokio::sync::Mutex::new(()),
@@ -138,7 +141,11 @@ impl Auth {
         let Some(refresh_token) = current.refresh_token.clone() else {
             return Err("the saved login has no refresh token to renew it with".into());
         };
-        let token_endpoint = endpoint(&current.token_endpoint, "the saved token endpoint")?;
+        let token_endpoint = endpoint(
+            &current.token_endpoint,
+            "the saved token endpoint",
+            &self.url,
+        )?;
         let client = Client {
             id: current.client_id.clone(),
             secret: current.client_secret.clone(),

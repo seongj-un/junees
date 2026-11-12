@@ -389,9 +389,13 @@ mod tests {
             resource: "https://mcp.example.com/mcp".into(),
             resource_scopes: resource.iter().map(|s| s.to_string()).collect(),
             challenge_scope: challenge.map(str::to_string),
-            server: validate("https://auth.example.com", metadata.as_object().unwrap())
-                .ok()
-                .unwrap(),
+            server: validate(
+                "https://auth.example.com",
+                metadata.as_object().unwrap(),
+                &Url::parse("https://mcp.example.com/mcp").unwrap(),
+            )
+            .ok()
+            .unwrap(),
         }
     }
 
