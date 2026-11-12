@@ -20,8 +20,9 @@ pub const FOLDER: &str = "mcp-oauth";
 pub const FORMAT: u32 = 1;
 /// A larger file is refused unread.
 const MAX_FILE_BYTES: u64 = 256 * 1024;
-/// How long a refresh waits for another process's refresh.
-const LOCK_WAIT: Duration = Duration::from_secs(15);
+/// How long a change waits for another one: longer than a refresh may
+/// take (its token request), since one lock covers every server.
+const LOCK_WAIT: Duration = super::fetch::TIMEOUT.saturating_add(Duration::from_secs(15));
 
 /// One saved login. Deliberately not `Debug`: it holds the tokens.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -314,6 +315,11 @@ mod tests {
         newer["format"] = 99.into();
         std::fs::write(&path, newer.to_string()).unwrap();
         assert!(read(&path).err().unwrap().contains("newer junees"));
+    }
+
+    #[test]
+    fn the_lock_outwaits_a_refresh_in_progress() {
+        assert!(LOCK_WAIT > super::super::fetch::TIMEOUT);
     }
 
     #[test]
