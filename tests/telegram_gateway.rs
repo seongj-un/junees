@@ -131,7 +131,9 @@ impl FakeBot {
     fn posts(&self, chat: &str) -> Vec<String> {
         self.calls("sendMessage")
             .into_iter()
-            .filter(|r| key(&r.body) == chat && !r.path.contains("limited"))
+            .filter(|r| {
+                key(&r.body) == chat && !r.path.contains("limited") && !r.path.contains("refused")
+            })
             .map(|r| r.body["text"].as_str().unwrap_or_default().to_string())
             .collect()
     }
@@ -276,6 +278,19 @@ async fn serve(mut socket: TcpStream, state: Arc<BotState>) {
                     ok(Value::Array(get_updates(&state, &body).await))
                 }
             }
+            // HTML Telegram cannot read (the test's marker words).
+            "sendMessage"
+                if body["parse_mode"] == "HTML"
+                    && body["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("refuse me")) =>
+            {
+                refused(
+                    400,
+                    "Bad Request: can't parse entities: Unsupported start tag \"x\" at byte offset 0",
+                    None,
+                )
+            }
             "sendMessage" => {
                 let limited = {
                     let mut left = state.limit_next.lock().unwrap();
@@ -311,6 +326,9 @@ async fn serve(mut socket: TcpStream, state: Arc<BotState>) {
     let mut path = path;
     if method == "sendMessage" && status == 429 {
         path.push_str("#limited");
+    }
+    if method == "sendMessage" && status == 400 {
+        path.push_str("#refused");
     }
     let head = format!(
         "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
@@ -599,8 +617,8 @@ async fn answers_only_allowed_users_where_it_is_addressed() {
     bot.push(private(STRANGER, "hello again"));
     bot.push(private(USER, "hello"));
     let posts = bot.wait_post(&me, |p| p == "reply 1: hello").await;
-    // The tool line comes as plain text before the reply.
-    assert_eq!(posts, ["-> bash echo hi", "reply 1: hello"]);
+    // The tool line comes as code before the reply.
+    assert_eq!(posts, ["<pre>-&gt; bash echo hi</pre>", "reply 1: hello"]);
     assert!(bot.posts(&STRANGER.to_string()).is_empty());
 
     // In a group: not without a mention or a reply to the bot.
@@ -750,7 +768,8 @@ async fn long_replies_are_split_and_flood_control_is_waited_out() {
 
     // Plain text: a code block cut between messages gets no fences added
     // (Telegram would show them as typed).
-    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    let plain = [("JUNEES_TELEGRAM_FORMAT", "plain")];
+    let running = start(telegram(&bot.url, &plain), fake(), None, dir.path());
     let before = posts.len();
     bot.push(private(USER, "long code"));
     let posts = bot
@@ -760,6 +779,30 @@ async fn long_replies_are_split_and_flood_control_is_waited_out() {
     let code = &posts[before..];
     assert!(code.len() >= 2, "{} posts", code.len());
     assert_eq!(code.join("\n"), long_code());
+
+    // HTML: cut after the conversion, each message closes the code block
+    // and the next opens it again with its language.
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    let before = bot.posts(&me).len();
+    bot.push(private(USER, "long code"));
+    let posts = bot
+        .wait_post(&me, |p| p.ends_with("let x899 = 899;</code></pre>"))
+        .await;
+    running.stop().await;
+    let code = &posts[before..];
+    assert!(code.len() >= 2, "{} posts", code.len());
+    let open = "<pre><code class=\"language-rust\">";
+    let mut lines = Vec::new();
+    for post in code {
+        assert!(post.encode_utf16().count() <= 4096, "{}", post.len());
+        let inner = post
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix("</code></pre>"))
+            .unwrap_or_else(|| panic!("{post}"));
+        lines.push(inner.to_string());
+    }
+    let expected: Vec<String> = (0..900).map(|n| format!("let x{n} = {n};")).collect();
+    assert_eq!(lines.join("\n"), expected.join("\n"));
     // The first post was refused once by flood control, then sent once.
     let limited = bot
         .calls("sendMessage")
@@ -857,6 +900,67 @@ async fn group_replies_mention_no_one() {
     bot.wait_post(&USER.to_string(), |p| p == "reply 1: ask @alice")
         .await;
     running.stop().await;
+}
+
+#[tokio::test]
+async fn replies_are_html_and_fall_back_to_plain_text() {
+    let bot = FakeBot::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    let chat = GROUP.to_string();
+    // The fake engine repeats the input as Markdown. `@name` in code is
+    // no mention to Telegram, so it keeps no word joiner (#63); outside
+    // code it still gets one.
+    bot.push(group(
+        USER,
+        "@junees_bot **hi** `@dataclass` @alice <x> & [doc](https://example.com/a?b=1&c=2)",
+    ));
+    let want = "reply 1: <b>hi</b> <code>@dataclass</code> @\u{2060}alice &lt;x&gt; &amp; \
+                <a href=\"https://example.com/a?b=1&amp;c=2\">doc</a>";
+    bot.wait_post(&chat, |p| p == want).await;
+    // Telegram cannot parse the HTML: the message goes again as plain
+    // text, with every `@name` broken (plain text has no code).
+    bot.push(group(USER, "@junees_bot refuse me **now** `@x`"));
+    let plain = "reply 2: refuse me now @\u{2060}x";
+    bot.wait_post(&chat, |p| p == plain).await;
+    let lines = running.stop().await;
+    assert!(
+        lines.iter().any(|l| l.contains("can't parse entities")
+            && l.contains("sending that message as plain text")),
+        "{lines:#?}"
+    );
+    let sent = bot.calls("sendMessage");
+    let mode = |text: &str| {
+        sent.iter()
+            .filter(|r| r.body["text"] == text && !r.path.contains("refused"))
+            .map(|r| r.body.get("parse_mode").cloned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(mode(want), [Some(json!("HTML"))]);
+    assert_eq!(mode("<pre>-&gt; bash echo hi</pre>").len(), 2);
+    assert_eq!(mode(plain), [None]);
+    let refused: Vec<&Received> = sent.iter().filter(|r| r.path.contains("refused")).collect();
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    assert_eq!(
+        refused[0].body["text"],
+        "reply 2: refuse me <b>now</b> <code>@x</code>"
+    );
+
+    // `telegram_format = plain`: no parse_mode, Markdown as written, and
+    // code in backticks is no code, so its `@name` is broken too.
+    let plain_format = [("JUNEES_TELEGRAM_FORMAT", "plain")];
+    let running = start(telegram(&bot.url, &plain_format), fake(), None, dir.path());
+    bot.push(group(USER, "@junees_bot **hi** `@dataclass` <x>"));
+    let want = "reply 1: **hi** `@\u{2060}dataclass` <x>";
+    bot.wait_post(&chat, |p| p == want).await;
+    running.stop().await;
+    let sent = bot.calls("sendMessage");
+    let mine = sent.iter().find(|r| r.body["text"] == want).unwrap();
+    assert!(mine.body.get("parse_mode").is_none(), "{:?}", mine.body);
+    assert!(
+        sent.iter()
+            .any(|r| r.body["text"] == "-> bash echo hi" && r.body.get("parse_mode").is_none())
+    );
 }
 
 #[tokio::test]

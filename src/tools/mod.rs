@@ -36,14 +36,16 @@ const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Credentials Junees reads that the model's shell commands must not see.
 /// The notification webhook URL carries its own token; the Discord bot
-/// token lets anyone act as the gateway's bot, the GitHub token as the
-/// user on GitHub.
+/// token lets anyone act as the gateway's bot (the Telegram and Slack
+/// tokens likewise), the GitHub token as the user on GitHub.
 pub const SECRET_ENV_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "JUNEES_NOTIFY_WEBHOOK",
     "JUNEES_DISCORD_TOKEN",
     "JUNEES_TELEGRAM_TOKEN",
+    "JUNEES_SLACK_BOT_TOKEN",
+    "JUNEES_SLACK_APP_TOKEN",
     "JUNEES_GITHUB_TOKEN",
 ];
 

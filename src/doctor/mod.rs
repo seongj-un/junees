@@ -9,7 +9,8 @@
 //! that tries the bash sandbox (it writes nothing). The network is used only
 //! with `--online`: one
 //! request that shows whether the API takes the key, one that asks GitHub
-//! for the latest release, and `claude auth status`.
+//! for the latest release, Slack's `auth.test` when the Slack gateway is
+//! set up, and `claude auth status`.
 //!
 //! Secrets never show: checks say whether a key is set and where, never
 //! its value, and before the report is printed every secret Junees knows
@@ -54,7 +55,7 @@ each check, with one line on how to fix it:
                 run the way bash's commands would run (writes nothing)
   browser       the browser program and its `--version`, when the browser
                 tool is on or browser_path is set
-  and the Discord settings, the cron daemon, the webhook routes, their
+  and the Discord, Telegram and Slack settings, the cron daemon, the webhook routes, their
   secrets and server, the size of the saved sessions, the MCP servers'
   commands (not started), HTTP header variables (not contacted) and saved
   OAuth logins (there, private, expiry; never shown), and the enabled
@@ -63,7 +64,8 @@ each check, with one line on how to fix it:
 Nothing is written or started, and the network is not used, unless:
   --online   also ask the API whether it takes the key (GET /v1/models,
              no tokens used), ask GitHub whether a newer release is out
-             (as `junees update --check`), run `claude auth status`, and
+             (as `junees update --check`), run `claude auth status`, ask
+             Slack's auth.test whether it takes the bot token, and
              find the authorization server of each `url` MCP server that
              may use OAuth (metadata only: no login, no token sent)
   --json     print the report as JSON
@@ -346,6 +348,7 @@ pub async fn run_with(
     browser::check(&mut report, settings, path).await;
     settings::discord(&mut report, settings);
     settings::telegram(&mut report, settings);
+    settings::slack(&mut report, settings);
     if let Some(home) = home.as_deref() {
         services::cron(&mut report, home);
         services::webhooks(&mut report, home, settings);
@@ -356,6 +359,9 @@ pub async fn run_with(
     if online {
         online::api_key(&mut report, settings).await;
         online::release(&mut report, settings).await;
+        if has_slack(settings) {
+            online::slack(&mut report, settings).await;
+        }
         if let Some(home) = home.as_deref() {
             services::mcp_online(&mut report, home, &|key| settings.env(key)).await;
         }
@@ -363,6 +369,18 @@ pub async fn run_with(
     report.hidden.add_settings(settings);
     report.redact();
     report
+}
+
+/// Whether any Slack gateway setting is set.
+fn has_slack(settings: &Settings) -> bool {
+    use crate::slack::config as slack;
+    [
+        slack::BOT_TOKEN_ENV,
+        slack::APP_TOKEN_ENV,
+        slack::ALLOWED_USERS_ENV,
+    ]
+    .iter()
+    .any(|key| settings.get(key).is_some())
 }
 
 /// This process's user id.

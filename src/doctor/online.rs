@@ -51,6 +51,61 @@ pub(super) async fn release(report: &mut Report, settings: &Settings) {
     }
 }
 
+/// `auth.test` with the Slack bot token, when the Slack gateway is set
+/// up: whether Slack takes it, and which bot it is. The app-level token
+/// is not tried: `apps.connections.open` would open a connection.
+pub(super) async fn slack(report: &mut Report, settings: &Settings) {
+    use crate::slack::api::Api;
+    use crate::slack::config::SlackConfig;
+    const NAME: &str = "Slack bot token";
+    let Ok(config) = SlackConfig::from_lookup(|key| settings.get(key)) else {
+        report.skip(AREA, NAME, "the Slack gateway is not set up");
+        return;
+    };
+    let quiet: crate::gateway::Log = std::sync::Arc::new(|_: &str| {});
+    let api = match Api::new(&config, quiet) {
+        Ok(api) => api,
+        Err(err) => {
+            report.warn(AREA, NAME, format!("{err:#}"), "try again");
+            return;
+        }
+    };
+    match tokio::time::timeout(TIMEOUT * 3, api.auth_test()).await {
+        Ok(Ok(me)) => report.ok(
+            AREA,
+            NAME,
+            format!(
+                "Slack takes it: bot {} ({}){}",
+                crate::prompt_text::escape_hidden(&me.name),
+                me.user_id,
+                if me.team.is_empty() {
+                    String::new()
+                } else {
+                    format!(" in {}", crate::prompt_text::escape_hidden(&me.team))
+                }
+            ),
+        ),
+        Ok(Err(err)) if err.is_fatal() => report.fail(
+            AREA,
+            NAME,
+            format!("{err}"),
+            "copy the Bot User OAuth Token (xoxb-) from the app's OAuth & Permissions page again",
+        ),
+        Ok(Err(err)) => report.warn(
+            AREA,
+            NAME,
+            format!("{err}"),
+            "check the network; try again later",
+        ),
+        Err(_) => report.warn(
+            AREA,
+            NAME,
+            "Slack did not answer auth.test in time",
+            "check the network; try again later",
+        ),
+    }
+}
+
 /// `GET /v1/models?limit=1` with the key: no tokens are used.
 pub(super) async fn api_key(report: &mut Report, settings: &Settings) {
     let Some(key) = settings.get("ANTHROPIC_API_KEY") else {

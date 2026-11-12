@@ -22,6 +22,7 @@ const PREFIXES: &[(&str, &str)] = &[
     ("xoxp-", "a Slack token"),
     ("xoxr-", "a Slack token"),
     ("xoxs-", "a Slack token"),
+    ("xapp-", "a Slack token"),
 ];
 
 /// Key characters that must follow a [`PREFIXES`] entry. Every real
@@ -457,6 +458,10 @@ mod tests {
             (format!("token=ghp_{filler}"), "a GitHub token"),
             (format!("github_pat_{filler}"), "a GitHub token"),
             (format!("slack xoxb-1234-{filler}"), "a Slack token"),
+            (
+                format!("SLACK_APP_TOKEN=xapp-1-A1-{filler}"),
+                "a Slack token",
+            ),
             (
                 format!("AKIA{}", "ABCD1234EFGH5678"),
                 "an AWS access key id",

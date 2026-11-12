@@ -220,7 +220,7 @@ fn channel_sessions_only_when_asked() {
         ids(&search(home, &some).unwrap()),
         [&cron, &discord, &terminal]
     );
-    assert!(parse_sources(["slack"]).unwrap_err().contains("unknown"));
+    assert!(parse_sources(["irc"]).unwrap_err().contains("unknown"));
 }
 
 /// Channel sessions from before meta lines named their source (#34): a
@@ -510,8 +510,8 @@ fn the_terminal_list_is_numbered() {
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(
         lines[0],
-        "2 sessions match `needle` in this folder (/w) from terminal, discord, telegram, cron, \
-         webhook, newest first:"
+        "2 sessions match `needle` in this folder (/w) from terminal, discord, telegram, slack, \
+         cron, webhook, newest first:"
     );
     assert!(lines[1].starts_with(&format!("  1  {new}  ")), "{text}");
     assert!(lines[1].ends_with(" UTC  /w  [cron j]"), "{text}");
@@ -693,7 +693,7 @@ async fn the_tool_explains_bad_input() {
             "must be a list",
         ),
         (
-            json!({"query": "x", "sources": ["slack"]}),
+            json!({"query": "x", "sources": ["irc"]}),
             "unknown session source",
         ),
         (json!({"query": "x", "sources": []}), "at least one source"),

@@ -6,7 +6,7 @@ Rust로 만드는 AI 에이전트 하네스. LLM이 도구를 호출하며 일�
 - 단일 바이너리: `junees` 하나로 대화, 한 번 실행, 장기 작업, 채팅 봇, 예약 작업, 웹훅 서버를 모두 돌린다.
 - 두 가지 백엔드: Anthropic API 키로 Junees 자신의 에이전트를 돌리거나(`api`), Claude Pro/Max 구독으로 로그인한 공식 Claude Code CLI에 맡긴다(`claude-code`).
 - 장기 작업: 큰 목표를 검증 가능한 기능 목록으로 쪼개고, 매번 새 컨텍스트로 시작하는 세션들이 기능 하나씩 구현, 검증, 커밋한다. 완료 판정은 모델이 아니라 하네스가 검증 명령의 종료 코드로 한다.
-- 어디서나: 터미널, 디스코드와 텔레그램 봇, 일정에 맞춘 예약 작업, GitHub 웹훅으로 시작하는 PR 리뷰와 merge 흐름.
+- 어디서나: 터미널, 디스코드·텔레그램 봇과 슬랙 앱, 일정에 맞춘 예약 작업, GitHub 웹훅으로 시작하는 PR 리뷰와 merge 흐름.
 - 기억과 확장: 세션 기록과 검색, 영구 메모리, 스킬, 프로젝트 지침 파일, 서브에이전트, MCP 서버, 플러그인.
 - 안전장치: 명령 정책, Linux Landlock 실행 격리(작업 폴더 밖 쓰기와 설정, 비밀 파일 읽기를 커널이 막는다), 대화 모드의 실행 전 승인, 도구 환경에서 비밀 값 숨기기([명령 정책, 실행 격리, 실행 전 승인](docs/safety.md)).
 
@@ -41,6 +41,7 @@ junees task "할 일 관리 웹 앱을 만들어"   # 장기 작업: 계획하�
 junees setup                        # 설정 다시
 junees gateway                      # 디스코드 봇으로 띄우기
 junees gateway telegram             # 텔레그램 봇으로 띄우기
+junees gateway slack                # 슬랙 앱으로 띄우기 (Socket Mode)
 junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작업
 junees doctor                       # 설치와 설정 점검
 ```
@@ -98,7 +99,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees [-p] "<질문>"`, `-c`, `--resume <id>`, `--no-session`, `--image <경로>`: 한 번 실행과 세션([고급 사용법](docs/usage.md))
 - `junees task ["<목표>"]`, `junees task init|run|status`, `junees status`: 장기 작업([장기 작업 모드](docs/usage.md#장기-작업-모드))
 - `junees setup`: 설정 마법사
-- `junees gateway`(`junees discord`), `junees gateway telegram`(`junees telegram`): 채팅 봇([게이트웨이](docs/gateways.md))
+- `junees gateway`(`junees discord`), `junees gateway telegram`(`junees telegram`), `junees gateway slack`(`junees slack`): 채팅 봇([게이트웨이](docs/gateways.md))
 - `junees cron add|list|remove|pause|resume|run|daemon`: 예약 작업([예약 작업](docs/automation.md#예약-작업))
 - `junees webhook serve|add|add-github|list|remove|pause|resume|test`: 웹훅과 GitHub PR 흐름([웹훅](docs/automation.md#웹훅))
 - `junees sessions search <낱말>`: 세션 검색([세션 검색](docs/usage.md#세션-검색))
@@ -128,6 +129,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [구독 모드](docs/subscription.md): 대화와 장기 작업을 Claude 구독으로 로그인한 Claude Code가 실행한다.
 - [디스코드 게이트웨이](docs/gateways.md#디스코드-게이트웨이): 채널(스레드, DM)마다 대화 하나를 두는 디스코드 봇.
 - [텔레그램 게이트웨이](docs/gateways.md#텔레그램-게이트웨이): 같은 엔진으로 도는 텔레그램 봇.
+- [슬랙 게이트웨이](docs/gateways.md#슬랙-게이트웨이): Socket Mode로 받는 슬랙 앱(DM과 채널 스레드마다 대화 하나, mrkdwn 서식).
 - [MCP 서버](docs/mcp.md): stdio와 Streamable HTTP MCP 서버의 도구, OAuth 로그인.
 - [예약 작업](docs/automation.md#예약-작업): 프롬프트를 일정에 맞춰 무인 실행하고 결과를 파일, 디스코드, 웹훅으로 보낸다.
 - [웹훅](docs/automation.md#웹훅): HTTP 요청(GitHub 웹훅 등)이 무인 실행을 시작하고, `add-github`는 PR 리뷰, 리뷰 반영, merge를 맡는다.
@@ -149,7 +151,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [docs/usage.md](docs/usage.md): 대화 안 명령, 고급 사용법, 세션 기록과 검색, 사용량과 비용, 장기 작업 모드, 스트리밍, 확장 사고, 웹 검색, 이미지 입력
 - [docs/memory-and-skills.md](docs/memory-and-skills.md): 메모리, 프로젝트 지침 파일, 스킬, 서브에이전트
 - [docs/subscription.md](docs/subscription.md): 구독 모드(claude-code 백엔드)
-- [docs/gateways.md](docs/gateways.md): 디스코드, 텔레그램 게이트웨이
+- [docs/gateways.md](docs/gateways.md): 디스코드, 텔레그램, 슬랙 게이트웨이
 - [docs/mcp.md](docs/mcp.md): MCP 서버(stdio, Streamable HTTP, OAuth)
 - [docs/automation.md](docs/automation.md): 예약 작업, 웹훅(GitHub PR 흐름 포함), GitHub 도구
 - [docs/plugins.md](docs/plugins.md): 플러그인
@@ -174,6 +176,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 9. 연결과 입력 넓히기: 원격 MCP 서버(Streamable HTTP, OAuth 로그인 `junees mcp login`), 이미지 입력(`read_file`, `/image`, `--image`, 디스코드·텔레그램 첨부), 텔레그램 게이트웨이(`junees gateway telegram`) (완료)
 10. 도구와 안전: 브라우저 도구(헤드리스 Chromium, [docs/browser.md](docs/browser.md)), bash 실행 격리(Landlock, [docs/safety.md](docs/safety.md)) (완료)
 11. 릴리스와 설치: `v*` 태그의 릴리스 워크플로(Linux musl, macOS, SHA256SUMS, 출처 증명), `install.sh`, `junees update` ([docs/install.md](docs/install.md)), 첫 릴리스 v0.1.0 (완료)
+12. 게이트웨이 확장: Slack(Socket Mode), 텔레그램 HTML 서식 ([docs/gateways.md](docs/gateways.md)) (완료)
 
 ## 개발
 

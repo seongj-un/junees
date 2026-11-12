@@ -31,6 +31,7 @@ pub mod secrets;
 pub mod session;
 pub mod setup;
 pub mod skills;
+pub mod slack;
 pub mod slash;
 pub mod subagent;
 pub mod task;

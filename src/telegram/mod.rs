@@ -17,6 +17,7 @@
 pub mod api;
 pub mod bot;
 pub mod config;
+pub mod format;
 pub mod platform;
 
 use std::collections::VecDeque;
@@ -48,11 +49,27 @@ pub const LOCK_FILE: &str = "gateway/telegram.lock";
 /// Chat key to session id, inside the state folder.
 pub const INDEX_FILE: &str = "gateway/telegram-sessions.json";
 
-/// Added to the system prompt of every Telegram conversation.
+/// Added to the system prompt of every Telegram conversation
+/// (`telegram_format = html`, the default).
 pub const TELEGRAM_NOTE: &str = "\n\nYou are talking with the user through Telegram, not a \
-    terminal: each reply is posted as Telegram messages in plain text (Markdown is not \
+    terminal: each reply is posted as Telegram messages (Markdown code blocks, inline code, \
+    bold, italic, strikethrough, links and > quotes are shown formatted; headings and tables \
+    are not, so prefer plain sentences and short lists; long replies are cut into messages of \
+    4096 characters). Keep replies short.";
+
+/// [`TELEGRAM_NOTE`] for `telegram_format = plain`.
+pub const TELEGRAM_PLAIN_NOTE: &str = "\n\nYou are talking with the user through Telegram, \
+    not a terminal: each reply is posted as Telegram messages in plain text (Markdown is not \
     rendered, so prefer plain sentences and short lists; long replies are cut into messages of \
     4096 characters). Keep replies short.";
+
+/// The system prompt note for replies sent as `format`.
+pub fn telegram_note(format: config::Format) -> &'static str {
+    match format {
+        config::Format::Html => TELEGRAM_NOTE,
+        config::Format::Plain => TELEGRAM_PLAIN_NOTE,
+    }
+}
 
 /// How long the chats get to stop when the gateway does.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
@@ -156,6 +173,7 @@ impl TelegramGateway {
             platform: Telegram {
                 api: Arc::clone(&api),
                 username: me.username.clone(),
+                format: self.config.format,
             },
             engines: self.engines,
             parallel: self.config.parallel,

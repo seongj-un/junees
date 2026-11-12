@@ -475,6 +475,135 @@ async fn telegram_needs_a_token_and_allowed_users() {
     assert_hidden(&report, "doctor-telegram-secret");
 }
 
+/// Slack tokens for the doctor tests, built in pieces so no token-looking
+/// literal sits in the source.
+fn slack_tokens() -> (String, String) {
+    (
+        ["xoxb", "1-2-doctor-slack-secret"].join("-"),
+        ["xapp", "1-A1-doctor-slack-secret"].join("-"),
+    )
+}
+
+#[tokio::test]
+async fn slack_needs_both_tokens_and_allowed_users() {
+    let mut fixture = Fixture::new();
+    let report = fixture.run(false).await;
+    expect(&report, "slack", "gateway", Status::Skip, "not set up");
+    assert!(!has(&fixture.run(true).await, "online", "Slack bot token"));
+    let (bot, app) = slack_tokens();
+    fixture.config(&format!("slack_bot_token = \"{bot}\"\n"));
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "slack",
+        "gateway",
+        Status::Fail,
+        "no Slack app-level token",
+    );
+    // The tokens swapped: named, never shown.
+    fixture.config(&format!(
+        "slack_bot_token = \"{app}\"\nslack_app_token = \"{bot}\"\nslack_allowed_users = \"U1\"\n"
+    ));
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "slack",
+        "gateway",
+        Status::Fail,
+        "put it in slack_app_token",
+    );
+    assert_hidden(&report, "doctor-slack-secret");
+    fixture.config(&format!(
+        "slack_bot_token = \"{bot}\"\nslack_app_token = \"{app}\"\n\
+         slack_allowed_users = \"U1A, U2B\"\n"
+    ));
+    fixture.set("JUNEES_SLACK_APP_TOKEN", &app);
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "slack",
+        "gateway",
+        Status::Ok,
+        "bot token set (config.toml), app-level token set (environment), 2 allowed users",
+    );
+    assert_hidden(&report, "doctor-slack-secret");
+    // Offline, Slack is not asked.
+    assert!(!has(&report, "online", "Slack bot token"));
+}
+
+#[tokio::test]
+async fn online_asks_slack_whether_it_takes_the_bot_token() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/api", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut heads = Vec::new();
+        for body in [
+            r#"{"ok":true,"user":"junees","user_id":"UBOT","team":"Team"}"#,
+            r#"{"ok":false,"error":"invalid_auth"}"#,
+        ] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            heads.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        }
+        heads
+    });
+    let mut fixture = Fixture::new();
+    let (bot, app) = slack_tokens();
+    fixture.config(&format!(
+        "slack_bot_token = \"{bot}\"\nslack_app_token = \"{app}\"\nslack_allowed_users = \"U1A\"\n"
+    ));
+    fixture.set("JUNEES_SLACK_API_URL", &base);
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "online",
+        "Slack bot token",
+        Status::Ok,
+        "Slack takes it: bot junees (UBOT) in Team",
+    );
+    expect(
+        &report,
+        "slack",
+        "gateway",
+        Status::Ok,
+        "Web API at http://127.0.0.1",
+    );
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "online",
+        "Slack bot token",
+        Status::Fail,
+        "auth.test: invalid_auth",
+    );
+    assert_hidden(&report, "doctor-slack-secret");
+    let heads = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .expect("the fake Slack got fewer requests")
+        .unwrap();
+    for head in &heads {
+        assert!(
+            head.starts_with("POST /api/auth.test HTTP/1.1\r\n"),
+            "{head}"
+        );
+        assert!(
+            head.to_lowercase()
+                .contains(&format!("authorization: bearer {bot}")),
+            "{head}"
+        );
+        assert!(!head.contains(&app), "{head}");
+    }
+}
+
 #[tokio::test]
 async fn discord_needs_a_token_and_allowed_users() {
     let fixture = Fixture::new();

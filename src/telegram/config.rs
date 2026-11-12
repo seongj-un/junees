@@ -20,6 +20,9 @@ pub const PARALLEL_ENV: &str = "JUNEES_TELEGRAM_PARALLEL";
 /// How long an approval question waits for its answer
 /// (`telegram_approval_timeout`).
 pub const APPROVAL_TIMEOUT_ENV: &str = "JUNEES_TELEGRAM_APPROVAL_TIMEOUT";
+/// How replies are written (`telegram_format`): `html` (the default) or
+/// `plain`.
+pub const FORMAT_ENV: &str = "JUNEES_TELEGRAM_FORMAT";
 /// The Bot API base URL. Only for tests: it must be on this machine, and
 /// it is not a key of the settings file.
 pub const API_URL_ENV: &str = "JUNEES_TELEGRAM_API_URL";
@@ -79,6 +82,17 @@ impl std::fmt::Debug for Token {
     }
 }
 
+/// How replies are sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Format {
+    /// `parse_mode` HTML: the model's Markdown becomes Telegram's
+    /// formatting ([`super::format`]).
+    #[default]
+    Html,
+    /// No `parse_mode`: the text shows as written.
+    Plain,
+}
+
 /// The gateway's settings. Not `Debug` as a whole, like [`crate::config::Config`].
 #[derive(Clone)]
 pub struct TelegramConfig {
@@ -87,6 +101,7 @@ pub struct TelegramConfig {
     pub allowed_users: HashSet<i64>,
     pub parallel: usize,
     pub approval_timeout: Duration,
+    pub format: Format,
     /// Bot API base URL without a trailing slash: [`DEFAULT_API_URL`], or
     /// a URL on this machine.
     pub api_url: String,
@@ -125,6 +140,14 @@ impl TelegramConfig {
             None => DEFAULT_APPROVAL_TIMEOUT,
             Some(raw) => parse_duration(&raw).context(APPROVAL_TIMEOUT_ENV)?,
         };
+        let format = match get(FORMAT_ENV)
+            .map(|raw| raw.to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("html") => Format::Html,
+            Some("plain") => Format::Plain,
+            Some(_) => bail!("{FORMAT_ENV} (telegram_format) must be `html` or `plain`"),
+        };
         let api_url = match get(API_URL_ENV) {
             None => DEFAULT_API_URL.to_string(),
             Some(url) => check_api_url(&url).context(API_URL_ENV)?,
@@ -134,6 +157,7 @@ impl TelegramConfig {
             allowed_users,
             parallel,
             approval_timeout,
+            format,
             api_url,
         })
     }
@@ -226,6 +250,29 @@ mod tests {
         assert_eq!(config.parallel, DEFAULT_PARALLEL);
         assert_eq!(config.approval_timeout, DEFAULT_APPROVAL_TIMEOUT);
         assert_eq!(config.api_url, DEFAULT_API_URL);
+        assert_eq!(config.format, Format::Html);
+    }
+
+    #[test]
+    fn reads_the_reply_format() {
+        let base = [(TOKEN_ENV, TOKEN), (ALLOWED_USERS_ENV, "1")];
+        for (raw, format) in [
+            ("html", Format::Html),
+            (" HTML ", Format::Html),
+            ("plain", Format::Plain),
+            ("Plain", Format::Plain),
+        ] {
+            let mut pairs = base.to_vec();
+            pairs.push((FORMAT_ENV, raw));
+            assert_eq!(read(&pairs).unwrap().format, format, "{raw}");
+        }
+        let mut pairs = base.to_vec();
+        pairs.push((FORMAT_ENV, "markdown"));
+        let err = read(&pairs).err().unwrap();
+        assert!(
+            format!("{err:#}").contains("must be `html` or `plain`"),
+            "{err:#}"
+        );
     }
 
     #[test]
