@@ -268,6 +268,16 @@ impl Engines for ApiEngines {
         self.mcp.register(&mut tools);
         self.plugins.register(&mut tools);
         crate::github::register(&mut tools, &config.github, &self.cwd, self.asks());
+        let browser = crate::browser::register(
+            &mut tools,
+            &config.browser,
+            &config.tools.hidden_env,
+            if self.asks() {
+                crate::browser::Run::Asked
+            } else {
+                crate::browser::Run::NotAsked
+            },
+        );
         let mut agent = Agent::new(
             (self.provider)()?,
             tools,
@@ -291,6 +301,7 @@ impl Engines for ApiEngines {
             )
             .with_external_tools(self.mcp.external_tools())
             .with_external_tools(self.plugins.external_tools())
+            .with_questions(crate::browser::TOOL_NAME, browser)
             .asking(ask);
             agent = agent.with_gate(Box::new(gate));
         }
