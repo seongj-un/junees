@@ -101,6 +101,15 @@ pub trait Ask: Send {
     async fn ask(&mut self, request: &Request) -> Answer;
 }
 
+/// A tool that decides itself which of its calls need a question
+/// ([`Approval::with_questions`]), from what it knows at the time (the
+/// browser: the fields of the page it shows).
+pub trait ToolQuestions: Send + Sync {
+    /// The question's parts for a call; empty reasons and kinds when only
+    /// `all` asks about it, `None` when nothing is asked.
+    fn question(&self, input: &Value) -> Option<crate::github::Question>;
+}
+
 /// Kinds ending in this are asked about every time (a GitHub merge): an
 /// "always" answer runs the call but does not cover the next one.
 pub const ASKED_EVERY_TIME: &str = "(asked every time)";
@@ -131,6 +140,8 @@ pub struct Approval {
     always: std::sync::Mutex<HashSet<String>>,
     /// Tools of MCP servers, by the name the model calls them.
     external: HashMap<String, ExternalTool>,
+    /// Tools that decide their questions themselves, by name.
+    questions: HashMap<String, Arc<dyn ToolQuestions>>,
 }
 
 /// A tool an MCP server runs ([`crate::mcp`]). `risky` asks before each
@@ -156,7 +167,16 @@ impl Approval {
             asker: None,
             always: std::sync::Mutex::default(),
             external: HashMap::new(),
+            questions: HashMap::new(),
         }
+    }
+
+    /// Asks `questions` which calls of the tool `name` need a question.
+    pub fn with_questions(mut self, name: &str, questions: Option<Arc<dyn ToolQuestions>>) -> Self {
+        if let Some(questions) = questions {
+            self.questions.insert(name.to_string(), questions);
+        }
+        self
     }
 
     /// Asks about these external tools too.
@@ -216,6 +236,7 @@ impl Approval {
                 }
             }
             crate::github::TOOL_NAME => crate::github::question(input)?,
+            name if self.questions.contains_key(name) => self.questions[name].question(input)?,
             name => {
                 let external = self.external.get(name)?;
                 let target = format!(

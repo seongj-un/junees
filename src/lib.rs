@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod approval;
+pub mod browser;
 pub mod cancel;
 pub mod claude_code;
 pub mod cli;

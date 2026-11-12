@@ -72,6 +72,8 @@ pub struct Config {
     pub subagents: Option<subagent::Settings>,
     /// The `github` tool's settings (`JUNEES_GITHUB_*`).
     pub github: crate::github::Settings,
+    /// The `browser` tool's settings (`JUNEES_BROWSER*`).
+    pub browser: crate::browser::Settings,
     /// The project instruction files a session reads
     /// (`JUNEES_CONTEXT_FILES`).
     pub context_files: crate::context_files::Setting,
@@ -221,6 +223,7 @@ impl Config {
         let memory = Limits::read(get)?;
         let subagents = subagent::Settings::read(get)?;
         let github = crate::github::Settings::read(get)?;
+        let browser = crate::browser::Settings::read(get)?;
 
         Ok(Self {
             api_key,
@@ -242,6 +245,7 @@ impl Config {
             memory,
             subagents,
             github,
+            browser,
             context_files,
         })
     }

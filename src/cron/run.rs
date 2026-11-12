@@ -329,6 +329,13 @@ impl ApiEngine {
                 github_allow,
             ),
         }
+        // Only with browser_unattended, and nobody is asked.
+        crate::browser::register(
+            &mut tools,
+            &config.browser,
+            &settings.hidden_env,
+            crate::browser::Run::Unattended,
+        );
         let system = prompt::system_prompt(dir)
             + spec.note
             + crate::subagent::prompt_note(config.subagents)
