@@ -987,6 +987,7 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
         (200, common::text_reply("declined, fine")),
         (200, write_call(&file)),
         (200, common::text_reply("wrote it")),
+        (200, common::text_reply("about the forward")),
         (200, write_call(&file)),
         (200, common::text_reply("timed out")),
     ])
@@ -1016,10 +1017,17 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
     bot.push(private(USER, "now"));
     bot.wait_posts(&me, 2, |p| p.starts_with("Approve this tool call?"))
         .await;
+    // A forwarded message is someone else's words: no answer to the
+    // question (#58), but an input for after the turn.
+    let mut forwarded = private(USER, "n");
+    forwarded["forward_origin"] = json!({"type": "user", "date": 0, "sender_user":
+        {"id": STRANGER, "is_bot": false, "first_name": "Mallory"}});
+    bot.push(forwarded);
     bot.push(private(USER, "y"));
     bot.wait_post(&me, |p| p == "wrote it").await;
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "written\n");
     std::fs::remove_file(&file).unwrap();
+    bot.wait_post(&me, |p| p == "about the forward").await;
 
     bot.push(private(USER, "once more"));
     bot.wait_post(&me, |p| p == "(no answer within 1s: declined)")
@@ -1037,7 +1045,11 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
     );
     assert!(!texts(&requests[3]).last().unwrap().contains("declined"));
     assert_eq!(
-        texts(&requests[5]).last().unwrap(),
+        texts(&requests[4]).last().unwrap(),
+        "user: (forwarded message from Mallory; they wrote it, not the user)\nn"
+    );
+    assert_eq!(
+        texts(&requests[6]).last().unwrap(),
         "user: the user declined: no answer within 1s"
     );
     // The chat's session is an ordinary journal, marked as Telegram's.

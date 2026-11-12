@@ -302,7 +302,9 @@ impl Router {
             .pointer("/reply_to_message/from/id")
             .and_then(Value::as_i64)
             == Some(self.me.id);
-        let answering = self.channels.answering(&channel);
+        // A waiting question takes any message of the chat as its answer,
+        // but a forwarded one is no answer of the user's.
+        let answering = forwarded.is_none() && self.channels.answering(&channel);
         let album = message
             .get("media_group_id")
             .and_then(Value::as_str)
@@ -349,13 +351,17 @@ impl Router {
         if content.is_empty() && files.is_empty() && notes.is_empty() {
             return;
         }
-        if let Some(who) = forwarded {
-            content =
-                format!("(forwarded message from {who}; they wrote it, not the user)\n{content}")
-                    .trim_end()
-                    .to_string();
+        match forwarded {
+            Some(who) => {
+                let content = format!(
+                    "(forwarded message from {who}; they wrote it, not the user)\n{content}"
+                )
+                .trim_end()
+                .to_string();
+                self.channels.queue(&channel, content, files, notes);
+            }
+            None => self.channels.input(&channel, content, files, notes),
         }
-        self.channels.input(&channel, content, files, notes);
     }
 
     /// Whether `message` mentions the bot: `@username` as a mention
