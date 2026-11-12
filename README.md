@@ -160,6 +160,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 7. 웹훅과 GitHub: 웹훅 수신 서버(`junees webhook`), GitHub 도구(PR, 리뷰, merge), 웹훅으로 PR 리뷰·리뷰 반영·merge를 맡기는 흐름(`junees webhook add-github`) (완료)
 8. 일상 사용 다듬기: 프로젝트 지침 파일(AGENTS.md, JUNEES.md, CLAUDE.md), 세션 검색(`session_search`, `/search`), 사용량과 비용(`/usage`, `junees usage`), 점검(`junees doctor`) (완료)
 9. 연결과 입력 넓히기: 원격 MCP 서버(Streamable HTTP, OAuth 로그인 `junees mcp login`), 이미지 입력(`read_file`, `/image`, `--image`, 디스코드·텔레그램 첨부), 텔레그램 게이트웨이(`junees gateway telegram`) (완료)
+10. 도구와 안전: 브라우저 도구(헤드리스 Chromium, [docs/browser.md](docs/browser.md)), bash 실행 격리(Landlock, [docs/safety.md](docs/safety.md)) (완료)
 
 ## 개발
 
