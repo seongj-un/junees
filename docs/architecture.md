@@ -34,6 +34,10 @@ src/
   notify.rs          디스코드 웹훅 알림 (정지, 세션마다)
   provider/          LLM 제공자 트레이트와 Anthropic 클라이언트 (프롬프트 캐싱 표시, 확장 사고 설정, 스트리밍 재시도와 대기 제한)
     stream.rs          SSE 이벤트 분리와 응답 조립 (스트리밍하지 않은 응답과 같은 값)
+  sandbox/           bash 명령의 Landlock 실행 격리
+    mod.rs             설정(sandbox, sandbox_write/read/network, 무인 실행은 require), 커널 지원(ABI) 확인, 명령마다 규칙 만들기와 auto/require 판단, 자식에 걸기, doctor용 시험 자식
+    landlock.rs        Landlock 시스템 호출(libc 직접), 접근 권리와 ABI별 처리, 보호 경로를 뺀 하위 항목별 규칙(grant_except), no_new_privs + restrict_self
+    tests.rs           실제 커널 Landlock으로 쓰기/읽기/비밀/네트워크 제한과 가짜 ABI의 auto/require
   tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks, flows)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 웹훅 실행의 지침 파일 이름 쓰기 거절(instruction_files.rs), 도구 호출 전 훅 PreTool, 테스트 전용: 테스트 bash의 sandbox(bash.rs의 `testing::confine`, 환경 변수 수준이라 절대 경로와 프록시를 무시하는 프로그램은 막지 못함)와 테스트 코드가 홈 삭제나 origin push를 실제 셸로 돌리지 않는지, sandbox 밖(바이너리 테스트, 모델 응답으로 부르는 bash)에서는 원격과 상관없는 모든 `git push`, `.`/`..`/`/`/`*`의 재귀 삭제, `git reset --hard`, `git clean -f`도 돌리지 않는지, `Command::new("git")` 인자에 `push`가 있으면 임시 폴더의 bare 저장소로만 미는 헬퍼(SAFE_PUSH)를 거치는지, sandbox 밖 실제 bash 테스트가 허용 목록(파일과 모듈 경로까지 맞춘 테스트, 무해한 명령 또는 명령 없음)만 쓰는지 보는 소스 스캔(test_scan.rs)
   mcp/               MCP 클라이언트 (stdio, Streamable HTTP)
     config.rs          $JUNEES_HOME/mcp.json 읽기와 검사 (0600, 자기 소유, 값을 되풀이하지 않는 오류, command와 url 중 하나, 숨길 헤더 변수 목록)
@@ -164,6 +168,7 @@ src/
     files.rs           상태 폴더와 비공개 파일 권한, secrets/, 세션 폴더 크기
     settings.rs        설정 파일 읽기와 모든 값, 키가 있는지(값 없이), 디스코드, 텔레그램, 알림 웹훅
     claude.rs          claude --version, --online의 auth status, 환경 정리와 bubblewrap, user namespace 제한(/proc/sys)
+    sandbox.rs         Landlock ABI와 sandbox 설정, bash와 같은 규칙으로 묶은 시험 sh(설정 파일 읽기 실패 확인)
     services.rs        git/gh, cron 데몬과 웹훅 서버(잠금으로 판단), 웹훅 시크릿, MCP 명령 찾기(실행 안 함), 켜진 플러그인
     online.rs          --online: 키 확인 요청 GET /v1/models
     tests.rs           임시 상태 폴더, 가짜 PATH와 /proc/sys, 가짜 claude, 가짜 API로 각 점검의 ok/경고/실패
@@ -173,6 +178,7 @@ tests/
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행, 이어 간 세션의 thinking 블록 보존 검증
   secret_env.rs        기본 bash에서 API 키, 웹훅 URL, 디스코드 토큰, GitHub 토큰, Claude Code 토큰이 보이지 않는지 검증
+  sandbox.rs           실제 바이너리와 가짜 API로 모델의 bash 명령이 Landlock 안에서 도는지(실행 중에 만든 경로로도 설정 파일, secrets 읽기와 memory 쓰기 실패, 작업 폴더 쓰기 성공)
   hidden_env.rs        JUNEES_HIDDEN_ENV로 지정한 변수가 bash에서 보이지 않는지 검증
   proc_environ.rs      실제 바이너리의 bash 손자 프로세스가 조상들의 /proc/<pid>/environ에서 API 키와 웹훅 URL을 읽지 못하는지 검증
   context_management.rs 가짜 API 서버로 도구 결과 비우기, 압축, 캐시 표시, 기록 재생 검증

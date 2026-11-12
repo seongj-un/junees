@@ -317,6 +317,17 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 변이 검사(origin 없는 별도 clone, 자기 target, 테스트 하나씩): 중복 거르기, 끝날 때 확인, 허용 사용자, 그룹 조건, 다른 봇 명령, 토큰 지우기, sendMessage 재전송 금지, 429 대기, 파일 경로 검사, 길이 없는 다운로드 상한, 토픽 thread id, 앨범 묶기, 4096 상한, API 주소 루프백 제한, 토큰 모양, `SECRET_ENV_VARS`를 하나씩 되돌린 16개 모두 해당 테스트가 실패했다. 처음에는 다섯 개(다른 봇 명령, 토큰 지우기, 재전송 금지, 길이 없는 상한, 비밀 변수)가 겹치는 검사 때문에 살아남아 테스트를 보강했다(502 뒤 재전송 없음, Content-Length 없는 본문, 개인 채팅의 `/cmd@other_bot` 뒤 순서 확인, 비밀 변수 목록)
 - 남은 위험: 실제 텔레그램에는 연결해 보지 않았다(가짜 Bot API만). 평문이라 코드 블록이 서식 없이 보인다. 모델 출력의 `@사용자이름`은 그룹 구성원에게 알림을 보낸다(끄는 방법이 없다). `/tmp is full`처럼 한 단어 경로로 시작하는 글은 모르는 명령이 된다. 그룹의 개인 정보 모드를 끄면 봇이 모든 메시지를 받지만 답하는 조건은 같다. 게이트웨이가 꺼진 동안 온 메시지(24시간 보관)는 다음 실행 때 처리된다. 업데이트를 넘긴 직후 다음 폴링 전에 죽으면 그 배치는 다시 오지만, 프로세스가 바뀌면 최근 id 기억이 없어 이미 시작한 턴의 메시지가 다시 돌 수 있다. 반대로 확인된 뒤 대기열에서 기다리던 메시지는 프로세스가 죽으면 잃는다(디스코드와 같다)
 
+### bash 실행 격리 (로드맵 10단계 B)
+- 문서: kernel.org Landlock 사용자 API 문서(https://docs.kernel.org/userspace-api/landlock.html, 2026-11-12 `curl`). 이 서버 커널 6.8은 ABI 4(파일과 TCP).
+- 새 모듈 `src/sandbox/`(`mod.rs` 설정과 판단, `landlock.rs` 시스템 호출과 규칙, `tests.rs`). 공유 파일은 연결만: `lib.rs`, `ToolSettings.sandbox`, `Config`의 설정 읽기와 `config_file::KEYS`, `Bash::with_settings`/`run`, `cron::run::Trigger::tool_settings`(무인 실행), `SettingsFile`의 보호 경로와 데이터 폴더 목록, doctor 연결.
+- 결정: `landlock` 크레이트 대신 libc `syscall`로 직접(호출 셋, 구조체 둘). 규칙은 부모에서 만들고(O_PATH 열기, 폴더 읽기) 자식은 `pre_exec`에서 `prctl(PR_SET_NO_NEW_PRIVS)`와 `landlock_restrict_self`만 한다(fork 뒤에 안전한 시스템 호출 둘). 규칙 fd는 close-on-exec라 bash에 남지 않는다.
+- 결정: Landlock 규칙은 허용만 하고 아래로 상속되므로, 보호 경로(설정 파일, `mcp.json`, `secrets/`, 웹훅 실행의 git/gh 자격 증명)를 품은 폴더는 자기 대신 안의 항목마다 규칙을 받는다(`grant_except`, 심볼릭 링크 항목은 건너뛴다). 읽기 권리는 `EXECUTE | READ_FILE`, 폴더 목록(`READ_DIR`)은 다루지 않는다(빼고 나열할 방법이 없다). 데이터 폴더는 쓰기에서만 뺀다. 쓰기는 작업 폴더, 임시 폴더, `sandbox_write`, 그리고 `/dev`의 기존 파일 쓰기만. ABI 2의 `REFER`로 비밀 파일을 읽을 수 있는 폴더로 옮기거나 링크하는 것도 커널이 막는다(테스트로 확인).
+- 결정: `sandbox = auto|require|off`. 지정하지 않으면 대화, `-p`, 작업 모드는 `auto`, 예약 작업과 웹훅 실행은 `require`. `auto`는 지원하지 않는 커널에서(또는 `sandbox_network = 0`인데 ABI < 4) 첫 결과에 한 줄로 알리고 실행, `require`는 거절. 지원하는 커널에서 규칙을 만들지 못하면 모드와 상관없이 거절. 거부 목록 정책은 그대로 먼저 돈다.
+- 결정: 플러그인 명령과 stdio MCP 서버는 묶지 않는다(사용자가 설치하고 켠 프로그램, 자기 상태와 네트워크 필요). claude-code 백엔드는 대상 아님. 네트워크 기본은 허용(`cargo`, `git fetch`가 깨지지 않게), 막을 때는 TCP connect/bind 전체.
+- 스펙에서 더한 것: `sandbox_write`/`sandbox_read`의 `~/` 펼치기, bash 도구 설명에 `Permission denied`의 뜻 한 줄, 웹훅 실행의 자격 증명 읽기 금지, doctor의 두 번째 시험(설정 파일 열기가 실패해야 ok).
+- 테스트: 단위(`src/sandbox/tests.rs`: 실제 커널로 작업 폴더 안 쓰기 성공과 밖 쓰기/덧붙이기/mkdir/옮기기 실패, 설정한 쓰기 폴더, 설정 파일·`mcp.json`·secrets 읽기 실패(`/proc/self/root` 경유와 하드 링크 포함), 홈이 작업 폴더일 때도 보호 유지, 웹훅 실행의 gh 자격 증명, 읽기 좁히기, `NoNewPrivs: 1`, 루프백 리스너 connect 실패/성공, 가짜 ABI 3과 가짜 미지원의 auto/require, 설정 읽기), doctor(실제 커널 시험, 가짜 미지원의 경고/실패/off, ABI 3 네트워크 경고, 잘못된 값), 바이너리(`tests/sandbox.rs`). 실제 커널 테스트는 Landlock이 없으면 이유를 찍고 건너뛴다. 확인: bash에서 규칙 적용을 빼면 실제 커널 테스트 8개가 모두 실패, 바이너리 테스트는 `JUNEES_SANDBOX=off`로 실패.
+- 남은 위험: bind mount와 기존 하드 링크는 경로 기준인 Landlock이 막지 못한다. 보호 경로를 품은 폴더 바로 아래에는 새 파일을 만들 수 없고 실행 중 새로 생긴 항목은 읽지 못한다. 기본 설정에서는 작업 폴더 밖 캐시(`~/.cargo`, `~/.cache`)에 쓰는 명령이 실패하므로 `sandbox_write`가 필요할 수 있다. CI 러너 커널의 Landlock 지원은 확인하지 않았다(없으면 건너뛴다).
+
 ## 상태
 
 - [x] 1단계 에이전트 루프 (PR #1)
