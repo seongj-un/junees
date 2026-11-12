@@ -49,8 +49,21 @@ pub async fn main(command: CronCommand, settings: Settings) -> Result<ExitCode> 
             name,
             dir,
             deliver,
+            allow_home,
         } => {
-            let job = new_job(&store, &tz, &lookup, schedule, prompt, name, dir, deliver)?;
+            let job = new_job(
+                &store,
+                &tz,
+                &lookup,
+                NewJob {
+                    schedule,
+                    prompt,
+                    name,
+                    dir,
+                    deliver,
+                    allow_home,
+                },
+            )?;
             println!(
                 "added job {} ({}), next run {}",
                 job.id,
@@ -136,18 +149,26 @@ pub async fn main(command: CronCommand, settings: Settings) -> Result<ExitCode> 
     Ok(ExitCode::SUCCESS)
 }
 
-/// Checks and saves a new job.
-#[allow(clippy::too_many_arguments)]
-fn new_job(
-    store: &Store,
-    tz: &TimeZone,
-    lookup: &Lookup,
-    schedule_text: String,
+/// What `junees cron add` was given.
+struct NewJob {
+    schedule: String,
     prompt: String,
     name: Option<String>,
     dir: Option<std::path::PathBuf>,
     deliver: Option<String>,
-) -> Result<Job> {
+    allow_home: bool,
+}
+
+/// Checks and saves a new job.
+fn new_job(store: &Store, tz: &TimeZone, lookup: &Lookup, new: NewJob) -> Result<Job> {
+    let NewJob {
+        schedule: schedule_text,
+        prompt,
+        name,
+        dir,
+        deliver,
+        allow_home,
+    } = new;
     let now = unix_now();
     let schedule = Schedule::parse(&schedule_text, now, tz)?;
     check_prompt(&prompt)?;
@@ -162,6 +183,7 @@ fn new_job(
         .ok()
         .filter(|dir| dir.is_dir())
         .with_context(|| format!("{} is not a folder", dir.display()))?;
+    check_home_folder(lookup, &dir, allow_home, None)?;
     let deliver = match deliver {
         Some(text) => Delivery::parse(&text)?,
         None => Delivery::Local,
@@ -202,6 +224,7 @@ fn new_job(
         text: schedule_text.trim().to_string(),
         prompt,
         dir,
+        allow_home,
         deliver,
         paused: false,
         created_at: now,
@@ -313,20 +336,60 @@ async fn run_now(
 }
 
 /// The engine of the `backend` setting and the limits, in the job's
-/// folder.
+/// folder, unless that folder is refused ([`check_home_folder`]).
 async fn prepare(lookup: &Lookup, job: &Job) -> Result<(Box<dyn Engine>, super::run::Limits)> {
+    check_home_folder(lookup, &job.dir, job.allow_home, Some("job"))?;
     let limits = super::limits(&**lookup)?;
     Ok((engine_in(lookup, &job.dir).await?, limits))
 }
 
+/// The user's home folder (HOME).
+fn user_home(lookup: &Lookup) -> Option<std::path::PathBuf> {
+    lookup("HOME")
+        .filter(|home| !home.trim().is_empty())
+        .map(|home| std::path::PathBuf::from(home.trim()))
+}
+
+/// Refuses `dir` as the working folder of an unattended run when it is
+/// the home folder or a folder holding it ([`crate::tools::holds_home`])
+/// and the job or route was not added with `--allow-home` (`allow_home`):
+/// its tools could change everything in the home folder but the
+/// protected paths, and the files there that run code later cannot all
+/// be protected. `existing` names what holds `dir` (`job`, `route`) when
+/// it was added before (a run), `None` while it is being added.
+pub fn check_home_folder(
+    lookup: &Lookup,
+    dir: &Path,
+    allow_home: bool,
+    existing: Option<&str>,
+) -> Result<()> {
+    if allow_home || !crate::tools::holds_home(dir, user_home(lookup).as_deref()) {
+        return Ok(());
+    }
+    let fix = match existing {
+        None => {
+            "give it a project folder with --dir, or add --allow-home to accept this".to_string()
+        }
+        Some(what) => format!(
+            "remove the {what} and add it again with a project folder (--dir), or with \
+             --allow-home to accept this"
+        ),
+    };
+    bail!(
+        "{} is the home folder (or a folder holding it): an unattended run's tools could change \
+         everything there but the protected paths, and not every file that runs code later is \
+         protected (python's .pth files, editor settings, other repositories' git hooks); {fix}",
+        escape_hidden(&dir.display().to_string())
+    )
+}
+
 /// Moves to `dir` (the tools work in the current folder) and makes the
 /// engine of the `backend` setting there. The claude-code backend runs only
-/// when [`crate::claude_code::check_unattended`] allows it.
+/// when [`crate::claude_code::check_unattended`] allows it. The caller has
+/// checked `dir` with [`check_home_folder`].
 pub async fn engine_in(lookup: &Lookup, dir: &Path) -> Result<Box<dyn Engine>> {
     std::env::set_current_dir(dir).with_context(|| format!("cannot work in {}", dir.display()))?;
-    let home = lookup("HOME")
-        .filter(|home| !home.trim().is_empty())
-        .map(|home| std::path::PathBuf::from(home.trim()));
+    let home = user_home(lookup);
     let state = config_file::home_dir(|key| lookup(key));
     let path_var = lookup("PATH").map(std::ffi::OsString::from);
     if let Some(warning) = crate::tools::unattended_folder_warning(
@@ -388,11 +451,14 @@ mod tests {
                 &store,
                 &tz,
                 &settings,
-                schedule.into(),
-                prompt.into(),
-                name.map(str::to_string),
-                Some(home.path().to_path_buf()),
-                deliver.map(str::to_string),
+                NewJob {
+                    schedule: schedule.into(),
+                    prompt: prompt.into(),
+                    name: name.map(str::to_string),
+                    dir: Some(home.path().to_path_buf()),
+                    deliver: deliver.map(str::to_string),
+                    allow_home: false,
+                },
             )
         };
         let job = add(
@@ -421,18 +487,40 @@ mod tests {
                 .to_string();
             assert!(err.contains(wanted), "{schedule} {prompt}: {err}");
         }
+        let new = |dir: &Path, allow_home: bool| NewJob {
+            schedule: "every 2h".into(),
+            prompt: "x".into(),
+            name: None,
+            dir: Some(dir.to_path_buf()),
+            deliver: None,
+            allow_home,
+        };
         let err = new_job(
             &store,
             &tz,
             &settings,
-            "every 2h".into(),
-            "x".into(),
-            None,
-            Some(home.path().join("missing")),
-            None,
+            new(&home.path().join("missing"), false),
         )
         .unwrap_err();
         assert!(err.to_string().contains("is not a folder"), "{err}");
         assert_eq!(store.jobs().unwrap().len(), 1);
+
+        // The home folder and the folders holding it only with --allow-home.
+        let user = home.path().join("user");
+        std::fs::create_dir_all(user.join("project")).unwrap();
+        let settings = lookup(&[("HOME", user.to_str().unwrap())]);
+        for dir in [user.as_path(), home.path(), Path::new("/")] {
+            let err = new_job(&store, &tz, &settings, new(dir, false)).unwrap_err();
+            assert!(
+                err.to_string().contains("home folder") && err.to_string().contains("--allow-home"),
+                "{err}"
+            );
+        }
+        assert_eq!(store.jobs().unwrap().len(), 1);
+        let job = new_job(&store, &tz, &settings, new(&user.join("project"), false)).unwrap();
+        assert!(!job.allow_home);
+        let job = new_job(&store, &tz, &settings, new(&user, true)).unwrap();
+        assert!(job.allow_home);
+        assert_eq!(store.jobs().unwrap().len(), 3);
     }
 }

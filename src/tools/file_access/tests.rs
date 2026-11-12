@@ -540,12 +540,43 @@ fn unattended_runs_in_the_home_or_state_folder_are_warned_about() {
     assert!(warning.contains("the home folder"), "{warning}");
     let warning = warn(&layout.root).unwrap();
     assert!(warning.contains("state folder"), "{warning}");
+    let warning = super::unattended_folder_warning(&layout.root, Some(&home), None, None).unwrap();
+    assert!(warning.contains("holding the home folder"), "{warning}");
     let warning = warn(&home.join("scripts")).unwrap();
     assert!(warning.contains("program folder on PATH"), "{warning}");
     assert_eq!(warn(&layout.path("work")), None);
     assert_eq!(warn(&layout.path("home/.ssh")), None);
     // Inside a program folder, what the run writes is not on PATH.
     assert_eq!(warn(&home.join("scripts/job")), None);
+}
+
+#[test]
+fn the_home_folder_and_the_folders_holding_it_are_told_apart() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    std::fs::create_dir_all(home.join("project")).unwrap();
+    let link = layout.path("link-to-home");
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+    for dir in [
+        home.clone(),
+        layout.root.clone(),
+        PathBuf::from("/"),
+        link.clone(),
+    ] {
+        assert!(super::holds_home(&dir, Some(&home)), "{}", dir.display());
+    }
+    // Through the link to the home folder too.
+    assert!(super::holds_home(&home, Some(&link)));
+    for dir in [
+        home.join("project"),
+        layout.path("work"),
+        link.join("project"),
+    ] {
+        assert!(!super::holds_home(&dir, Some(&home)), "{}", dir.display());
+    }
+    // Without a home folder only `/` counts.
+    assert!(super::holds_home(Path::new("/"), None));
+    assert!(!super::holds_home(&home, None));
 }
 
 #[tokio::test]

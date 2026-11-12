@@ -196,10 +196,32 @@ fn within_home(path: &Path, home: &Path) -> bool {
         .any(|path| path.starts_with(home) || path.starts_with(&real_home))
 }
 
+/// Whether `dir` is the home folder `home` or a folder holding it (`/`,
+/// `/home`), as written or with links resolved; `/` also when the home
+/// folder is not known. An unattended run working there may change
+/// everything in the home folder but the protected paths, and the files
+/// that run code later cannot all be listed (python's `.pth` files,
+/// editor settings, other repositories' git hooks), so scheduled jobs and
+/// webhook routes refuse such a folder unless added with `--allow-home`.
+pub fn holds_home(dir: &Path, home: Option<&Path>) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let real_dir = real(dir);
+    if dir.parent().is_none() || real_dir.parent().is_none() {
+        return true;
+    }
+    home.is_some_and(|home| {
+        let real_home = real(home);
+        [dir, real_dir.as_path()]
+            .iter()
+            .any(|dir| home.starts_with(dir) || real_home.starts_with(dir))
+    })
+}
+
 /// Why the working folder `dir` of an unattended run is a risky choice,
 /// if it is: the home folder itself, a folder holding Junees's state
-/// folder `state`, or a program folder ([`program_folders`] with
-/// `path_var` the PATH). The run's tools may write anywhere in the
+/// folder `state` or the home folder ([`holds_home`]; refused unless the
+/// job or route allows it), or a program folder ([`program_folders`]
+/// with `path_var` the PATH). The run's tools may write anywhere in the
 /// working folder; the protected paths stay protected, but everything
 /// else there (other projects, dotfiles not listed) does not, and in a
 /// program folder that includes the programs the next shell runs.
@@ -210,11 +232,14 @@ pub fn unattended_folder_warning(
     path_var: Option<&OsStr>,
 ) -> Option<String> {
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let written = dir;
     let dir = real(dir);
     let what = if home.is_some_and(|home| real(home) == dir) {
         "the home folder"
     } else if state.is_some_and(|state| real(state).starts_with(&dir)) {
         "a folder holding Junees's state folder"
+    } else if holds_home(written, home) {
+        "a folder holding the home folder"
     } else if home.is_some_and(|home| {
         program_folders(home, path_var)
             .iter()
