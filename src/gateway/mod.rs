@@ -161,7 +161,7 @@ impl Gateway {
         ));
         let fetcher = crate::images::discord::Fetcher::new(self.config.cdn_url.as_deref())?;
         let shared = Arc::new(Shared {
-            platform: Discord { rest, fetcher },
+            platform: Discord::new(rest, fetcher),
             engines: self.engines,
             permits: Arc::new(Semaphore::new(self.config.parallel)),
             parallel: self.config.parallel,

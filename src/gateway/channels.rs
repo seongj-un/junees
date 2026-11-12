@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use super::Log;
-use super::ask::{AnswerSlot, DiscordAsk, fence_safe};
+use super::ask::{AnswerSlot, DiscordAsk, Press, fence_safe};
 use super::engine::{Conversation, Engines, Progress};
 use super::platform::Platform;
 use super::sessions::{self, SessionIndex};
@@ -29,6 +29,10 @@ use crate::memory::Memory;
 use crate::prompt_text::escape_hidden;
 use crate::provider::ProviderError;
 use crate::skills;
+
+/// What a late answer to an answered approval question gets back.
+pub const LATE_NOTE: &str = "(that approval question was already answered; this reply was not \
+                             passed on. Send it again to pass it on.)";
 
 /// What the gateway shares with every channel's worker.
 pub struct Shared<P: Platform> {
@@ -184,12 +188,25 @@ impl<P: Platform> Channels<P> {
             .is_some_and(|known| known.state.answers.waiting())
     }
 
-    /// A message for the bot that is no command: the answer to a waiting
-    /// approval question, or an input queued for the channel's worker.
-    /// `notes` say which attachments were left out.
+    /// A press on an approval question's button in `channel` (the router
+    /// checked that the user may answer); false when it answers nothing:
+    /// no question waits there, or another one does
+    /// ([`AnswerSlot::press`]).
+    pub fn press(&self, channel: &str, press: Press) -> bool {
+        self.channels
+            .get(channel)
+            .is_some_and(|known| known.state.answers.press(press))
+    }
+
+    /// A message of `user` for the bot that is no command: the answer to
+    /// a waiting approval question, a late answer to the one `user` just
+    /// answered ([`AnswerSlot::late`], told so and dropped), or an input
+    /// queued for the channel's worker. `notes` say which attachments were
+    /// left out.
     pub fn input(
         &mut self,
         channel: &str,
+        user: &str,
         content: String,
         attachments: Vec<P::Attachment>,
         notes: Vec<String>,
@@ -197,9 +214,17 @@ impl<P: Platform> Channels<P> {
         if attachments.is_empty()
             && !content.is_empty()
             && let Some(known) = self.channels.get(channel)
-            && known.state.answers.answer(content.clone())
         {
-            return;
+            let answers = &known.state.answers;
+            if answers.answer(user, content.clone()) {
+                return;
+            }
+            if answers.late(user, &content) {
+                let shared = Arc::clone(&self.shared);
+                let channel = channel.to_string();
+                tokio::spawn(async move { shared.say(&channel, LATE_NOTE).await });
+                return;
+            }
         }
         self.queue(channel, content, attachments, notes);
     }
@@ -740,7 +765,9 @@ async fn turn<P: Platform>(
         loop {
             tokio::select! {
                 biased;
-                Some(item) = progress.recv() => show(shared, channel, &mut tools, item).await,
+                Some(item) = progress.recv() => {
+                    show(shared, channel, &state.answers, &mut tools, item).await
+                }
                 result = &mut run => break result,
                 _ = typing.tick() => {
                     if !state.answers.waiting()
@@ -753,7 +780,7 @@ async fn turn<P: Platform>(
         }
     };
     while let Ok(item) = progress.try_recv() {
-        show(shared, channel, &mut tools, item).await;
+        show(shared, channel, &state.answers, &mut tools, item).await;
     }
     flush_tools(shared, channel, &mut tools).await;
     store(&state.usage, conversation.usage());
@@ -802,14 +829,35 @@ fn error_text(err: &anyhow::Error, new: &str) -> String {
 async fn show<P: Platform>(
     shared: &Shared<P>,
     channel: &str,
+    answers: &AnswerSlot,
     tools: &mut Vec<String>,
     item: Progress,
 ) {
+    let place = shared.platform.place();
     match item {
         Progress::Tool(line) => tools.push(line),
-        Progress::Text(text) | Progress::Note(text) | Progress::Question(text) => {
+        Progress::Text(text) | Progress::Note(text) => {
             flush_tools(shared, channel, tools).await;
             shared.say(channel, &text).await;
+        }
+        Progress::Question(question) => {
+            flush_tools(shared, channel, tools).await;
+            match shared.platform.post_question(channel, &question).await {
+                Ok(Some(message)) => answers.posted(&question.id, message),
+                Ok(None) => shared.say(channel, &question.text).await,
+                // The platform posted what it could without buttons; text
+                // answers still work.
+                Err(err) => (shared.log)(&format!(
+                    "{place} {channel}: cannot post the question with buttons: {err:#}"
+                )),
+            }
+        }
+        Progress::Answered { id, outcome } => {
+            if let Err(err) = shared.platform.close_question(channel, &id, &outcome).await {
+                (shared.log)(&format!(
+                    "{place} {channel}: cannot take the buttons off a question: {err:#}"
+                ));
+            }
         }
     }
 }

@@ -65,6 +65,10 @@ struct RestState {
     /// Answer every request with 401.
     unauthorized: AtomicBool,
     gateway_url: Mutex<String>,
+    /// The id of the last message created.
+    last_message: Mutex<u64>,
+    /// Refuse every message post with buttons (400).
+    refuse_buttons: AtomicBool,
 }
 
 struct FakeRest {
@@ -132,6 +136,73 @@ impl FakeRest {
         }
     }
 
+    /// Waits until a request satisfies `want`; returns the first that does.
+    async fn wait_request(&self, want: impl Fn(&Received) -> bool) -> Received {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let notified = self.state.notify.notified();
+            if let Some(found) = self.requests().into_iter().find(|r| want(r)) {
+                return found;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                panic!("no such request; requests: {:#?}", self.requests());
+            }
+        }
+    }
+
+    /// The `count`th question with buttons posted to `channel` (from 1):
+    /// its message id and the `custom_id` of each button by label.
+    async fn question(&self, channel: &str, count: usize) -> (String, HashMap<String, String>) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let post = loop {
+            let notified = self.state.notify.notified();
+            let found: Vec<Received> = self
+                .requests()
+                .into_iter()
+                .filter(|r| {
+                    r.method == "POST"
+                        && r.path.ends_with(&format!("/channels/{channel}/messages"))
+                        && r.body.get("components").is_some()
+                })
+                .collect();
+            if found.len() >= count {
+                break found[count - 1].clone();
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                panic!("no question {count} in channel {channel}");
+            }
+        };
+        let buttons = post.body["components"][0]["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|button| {
+                (
+                    button["label"].as_str().unwrap().to_string(),
+                    button["custom_id"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        (post.body["_sent_id"].as_str().unwrap().to_string(), buttons)
+    }
+
+    /// The response to interaction `id` ([`interaction`]), once it came.
+    async fn response(&self, id: &str) -> Value {
+        let id = interaction(id);
+        let path = format!("/interactions/{id}/token-{id}-of-the-press/callback");
+        self.wait_request(|r| r.method == "POST" && r.path.ends_with(&path))
+            .await
+            .body
+    }
+
+    /// The edit of message `message` in `channel`, once it came.
+    async fn edit(&self, channel: &str, message: &str) -> Value {
+        let path = format!("/channels/{channel}/messages/{message}");
+        self.wait_request(|r| r.method == "PATCH" && r.path.ends_with(&path))
+            .await
+            .body
+    }
+
     fn typing(&self, channel: &str) -> usize {
         self.requests()
             .iter()
@@ -164,8 +235,12 @@ async fn serve_rest(mut socket: TcpStream, state: Arc<RestState>) {
     } else if request.path.ends_with("/gateway/bot") {
         let url = state.gateway_url.lock().unwrap().clone();
         (200, json!({"url": url, "shards": 1}))
-    } else if request.path.ends_with("/typing") {
+    } else if request.path.ends_with("/typing")
+        || (request.path.contains("/interactions/") && request.path.ends_with("/callback"))
+    {
         (204, Value::Null)
+    } else if request.method == "PATCH" && request.path.contains("/messages/") {
+        (200, json!({"id": request.path.rsplit('/').next()}))
     } else if request.path.ends_with("/messages") {
         let limited = {
             let mut left = state.limit_next.lock().unwrap();
@@ -179,7 +254,10 @@ async fn serve_rest(mut socket: TcpStream, state: Arc<RestState>) {
             *left = left.saturating_sub(1);
             failed
         };
-        if failed {
+        if state.refuse_buttons.load(Ordering::SeqCst) && request.body.get("components").is_some() {
+            request.headers.insert("x-fake-status".into(), "400".into());
+            (400, json!({"message": "Invalid Form Body", "code": 50035}))
+        } else if failed {
             request.headers.insert("x-fake-status".into(), "500".into());
             (
                 500,
@@ -192,7 +270,13 @@ async fn serve_rest(mut socket: TcpStream, state: Arc<RestState>) {
                 json!({"message": "You are being rate limited.", "retry_after": 0.2, "global": false}),
             )
         } else {
-            (200, json!({"id": "1"}))
+            let id = {
+                let mut last = state.last_message.lock().unwrap();
+                *last += 1;
+                (1000 + *last).to_string()
+            };
+            request.body["_sent_id"] = json!(id);
+            (200, json!({"id": id}))
         }
     } else {
         (404, json!({"message": "404: Not Found", "code": 0}))
@@ -1550,7 +1634,392 @@ async fn risky_calls_wait_for_an_answer_in_the_channel() {
     );
 }
 
+/// The id of interaction `n` (a number): a snowflake made when the test
+/// binary first asked, plus `n`, so presses are fresh.
+fn interaction(n: &str) -> String {
+    static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let base = *BASE.get_or_init(|| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        (u64::try_from(now).unwrap() - 1_420_070_400_000) << 22
+    });
+    (base + n.parse::<u64>().unwrap()).to_string()
+}
+
+/// A press on the button `custom_id` of message `message` in `channel`
+/// (a DM) by `user`, as interaction `id` ([`interaction`]).
+fn press(id: &str, channel: &str, user: &str, message: &str, custom_id: &str) -> Value {
+    let id = interaction(id);
+    json!({
+        "id": id,
+        "application_id": "1",
+        "type": 3,
+        "token": format!("token-{id}-of-the-press"),
+        "version": 1,
+        "channel_id": channel,
+        "user": {"id": user, "username": "someone"},
+        "message": {"id": message, "channel_id": channel},
+        "data": {"custom_id": custom_id, "component_type": 2},
+    })
+}
+
+/// A response that only the presser sees, saying `what`.
+fn ephemeral(response: &Value, what: &str) {
+    assert_eq!(response["type"], 4, "{response}");
+    assert_eq!(response["data"]["flags"], 64, "{response}");
+    assert!(
+        response["data"]["content"].as_str().unwrap().contains(what),
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn buttons_answer_questions_of_allowed_users_only() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    // Absolute paths: bash runs in the test process's folder.
+    let marker = cwd.path().join("marker");
+    let command = format!(
+        "rm -f {}/nothing-here; touch {}",
+        cwd.path().display(),
+        marker.display()
+    );
+    let command = command.as_str();
+    let (api, served) = common::fake_api(vec![
+        (200, tool_call(command)),
+        (200, common::text_reply("declined, fine")),
+        (200, tool_call(command)),
+        (200, common::text_reply("ran it")),
+        (200, tool_call(command)),
+        (200, common::text_reply("timed out")),
+        (200, tool_call(command)),
+        (200, common::text_reply("ran it again")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "risky"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        discord(&rest.url, &[("JUNEES_DISCORD_APPROVAL_TIMEOUT", "2s")]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "clean up", false, &[]),
+    )
+    .await;
+    let (first, buttons) = rest.question("505", 1).await;
+    let mut labels: Vec<&String> = buttons.keys().collect();
+    labels.sort();
+    assert_eq!(labels, ["Allow", "Always allow", "Decline"]);
+    let (allow, decline) = (&buttons["Allow"], &buttons["Decline"]);
+    assert!(
+        allow.len() <= 100 && allow.starts_with("junees:"),
+        "{allow}"
+    );
+    // Someone not allowed: told so, nothing runs.
+    conn.dispatch(
+        "INTERACTION_CREATE",
+        press("1", "505", STRANGER, &first, allow),
+    )
+    .await;
+    ephemeral(&rest.response("1").await, "discord_allowed_users");
+    // A button of no question that waits (a guessed id).
+    let guessed = format!("junees:{}:y", "0".repeat(32));
+    conn.dispatch(
+        "INTERACTION_CREATE",
+        press("2", "505", USER, &first, &guessed),
+    )
+    .await;
+    ephemeral(&rest.response("2").await, "already answered");
+    assert!(!marker.exists());
+    // Decline: acknowledged, then the message loses its buttons.
+    conn.dispatch(
+        "INTERACTION_CREATE",
+        press("3", "505", USER, &first, decline),
+    )
+    .await;
+    assert_eq!(rest.response("3").await, json!({"type": 6}));
+    let edit = rest.edit("505", &first).await;
+    assert_eq!(edit["components"], json!([]));
+    let content = edit["content"].as_str().unwrap();
+    assert!(content.contains("Approve this tool call?"), "{content}");
+    assert!(
+        content.ends_with(&format!("\n\n**Declined by <@{USER}>.**")),
+        "{content}"
+    );
+    assert_eq!(edit["allowed_mentions"], json!({"parse": []}));
+    // SUPPRESS_EMBEDS, as in a post.
+    assert_eq!(edit["flags"], 4);
+    rest.wait_post("505", |p| p == "declined, fine").await;
+    assert!(!marker.exists());
+
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "now", false, &[]))
+        .await;
+    let (second, buttons) = rest.question("505", 2).await;
+    // The first question's button, and this one's from another channel.
+    conn.dispatch("INTERACTION_CREATE", press("4", "505", USER, &first, allow))
+        .await;
+    ephemeral(&rest.response("4").await, "already answered");
+    conn.dispatch(
+        "INTERACTION_CREATE",
+        press("5", "506", USER, &second, &buttons["Allow"]),
+    )
+    .await;
+    ephemeral(&rest.response("5").await, "already answered");
+    assert!(!marker.exists());
+    conn.dispatch(
+        "INTERACTION_CREATE",
+        press("6", "505", USER, &second, &buttons["Allow"]),
+    )
+    .await;
+    assert_eq!(rest.response("6").await, json!({"type": 6}));
+    let edit = rest.edit("505", &second).await;
+    assert!(
+        edit["content"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("**Allowed by <@{USER}>.**")),
+        "{edit}"
+    );
+    rest.wait_post("505", |p| p == "ran it").await;
+    assert!(marker.exists());
+    std::fs::remove_file(&marker).unwrap();
+
+    // No answer: the message says so, and a later press does nothing.
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "once more", false, &[]),
+    )
+    .await;
+    let (third, buttons) = rest.question("505", 3).await;
+    let edit = rest.edit("505", &third).await;
+    assert!(
+        edit["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("**No answer within 2s: declined.**"),
+        "{edit}"
+    );
+    rest.wait_post("505", |p| p == "timed out").await;
+    conn.dispatch(
+        "INTERACTION_CREATE",
+        press("7", "505", USER, &third, &buttons["Allow"]),
+    )
+    .await;
+    ephemeral(&rest.response("7").await, "already answered");
+    assert!(!marker.exists());
+
+    // A text answer still works, and the buttons go too.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "last", false, &[]))
+        .await;
+    let (fourth, _) = rest.question("505", 4).await;
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "y", false, &[]))
+        .await;
+    let edit = rest.edit("505", &fourth).await;
+    assert!(
+        edit["content"].as_str().unwrap().ends_with("**Allowed.**"),
+        "{edit}"
+    );
+    rest.wait_post("505", |p| p == "ran it again").await;
+    assert!(marker.exists());
+    let log = running.stop().await;
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(
+        texts(&requests[1]).last().unwrap(),
+        "user: the user declined: no reason given"
+    );
+    // The interaction tokens stay out of the log.
+    assert!(
+        !log.iter().any(|line| line.contains("of-the-press")),
+        "{log:#?}"
+    );
+    assert!(
+        log.iter()
+            .any(|line| line.contains(&format!("button presses of user {STRANGER}"))),
+        "{log:#?}"
+    );
+}
+
 // --------------------------------------------------------------- Images
+
+#[tokio::test]
+async fn an_answer_word_right_after_a_press_starts_no_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let marker = cwd.path().join("marker");
+    let command = format!(
+        "rm -f {}/nothing-here; touch {}",
+        cwd.path().display(),
+        marker.display()
+    );
+    let (api, served) = common::fake_api(vec![
+        (200, tool_call(&command)),
+        (200, common::text_reply("ran it")),
+        (200, common::text_reply("next one")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "risky"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        discord(&rest.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "clean up", false, &[]),
+    )
+    .await;
+    let (question, buttons) = rest.question("505", 1).await;
+    // A press from 2015 (an event sent again much later): its token has
+    // expired, so it is neither answered nor applied.
+    let mut stale = press("10", "505", USER, &question, &buttons["Allow"]);
+    stale["id"] = json!("1");
+    stale["token"] = json!("token-1-of-the-press");
+    conn.dispatch("INTERACTION_CREATE", stale).await;
+    // Still waiting: this press answers it.
+    conn.dispatch(
+        "INTERACTION_CREATE",
+        press("11", "505", USER, &question, &buttons["Allow"]),
+    )
+    .await;
+    assert_eq!(rest.response("11").await, json!({"type": 6}));
+    // To be sure, the user types y too: told it was answered, no new turn.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "y", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p.contains("already answered"))
+        .await;
+    rest.wait_post("505", |p| p == "ran it").await;
+    assert!(marker.exists());
+    // The next message is an input as always.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "next", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "next one").await;
+    let log = running.stop().await;
+    assert!(
+        !rest
+            .requests()
+            .iter()
+            .any(|r| r.path.contains("/interactions/1/")),
+        "{:#?}",
+        rest.requests()
+    );
+    assert!(
+        log.iter()
+            .any(|line| line.contains("ignoring a button press made")),
+        "{log:#?}"
+    );
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(texts(&requests[2]).last().unwrap(), "user: next");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| texts(request).iter().any(|text| text == "user: y")),
+        "{requests:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_question_whose_buttons_are_refused_is_posted_once_without_them() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    rest.state.refuse_buttons.store(true, Ordering::SeqCst);
+    let marker = cwd.path().join("marker");
+    // Long enough for the question to take two messages.
+    let command = format!(
+        "rm -f {}/nothing-here\n{}touch {}",
+        cwd.path().display(),
+        "echo a line to make the question longer than one message\n".repeat(50),
+        marker.display()
+    );
+    let (api, _served) = common::fake_api(vec![
+        (200, tool_call(&command)),
+        (200, common::text_reply("ran it")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "risky"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        discord(&rest.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "clean up", false, &[]),
+    )
+    .await;
+    let posts = rest
+        .wait_post("505", |p| p.contains("Reply `y` to run it"))
+        .await;
+    // The first part once, then the rest without the words about buttons.
+    let question: Vec<&String> = posts
+        .iter()
+        .skip_while(|p| !p.contains("Approve this tool call?"))
+        .collect();
+    assert_eq!(question.len(), 2, "{posts:#?}");
+    assert!(question[1].contains("Reply `y` to run it"), "{posts:#?}");
+    assert!(
+        !posts.iter().any(|p| p.contains("Press a button")),
+        "{posts:#?}"
+    );
+    // The refused post was the last part with its buttons.
+    let refused: Vec<Received> = rest
+        .requests()
+        .into_iter()
+        .filter(|r| r.body.get("components").is_some())
+        .collect();
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    assert!(
+        refused[0].body["content"]
+            .as_str()
+            .unwrap()
+            .contains("Press a button, or reply `y`")
+    );
+    // A text answer still works.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "y", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "ran it").await;
+    assert!(marker.exists());
+    let log = running.stop().await;
+    assert!(
+        log.iter().any(
+            |line| line.contains("cannot post the question with buttons")
+                && line.contains("posted it without buttons")
+        ),
+        "{log:#?}"
+    );
+}
 
 /// A PNG header of `width` x `height`: enough for Junees, which never
 /// decodes the pixels.

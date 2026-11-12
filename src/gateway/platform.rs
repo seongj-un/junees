@@ -5,12 +5,20 @@
 //! ([`crate::telegram::platform::Telegram`]) implement it; the engine
 //! (channels, queues, sessions, approvals, `stop`/`status`/`new`) is the
 //! same for both.
+//!
+//! Approval questions may come with buttons ([`Platform::post_question`]):
+//! the platform's router hands a press to
+//! [`super::channels::Channels::press`] and answers the platform's own
+//! callback; the engine takes the buttons off when the question ends
+//! ([`Platform::close_question`]). A platform without buttons keeps the
+//! defaults, and its questions are posted as text.
 
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
+use super::ask::Question;
 use crate::approval::Request;
 use crate::images::Image;
 
@@ -65,4 +73,23 @@ pub trait Platform: Send + Sync + 'static {
     fn question(request: &Request, timeout: Duration) -> String
     where
         Self: Sized;
+
+    /// Posts `question` with its buttons ([`super::ask::Choice::offered`],
+    /// each carrying [`super::ask::button_data`]); the id of the message
+    /// that holds them, which a press must come from. `None` when the
+    /// platform has no buttons: the engine posts the text instead, and
+    /// text answers work either way. When posting with buttons fails, the
+    /// platform posts the part of the question not shown yet without them
+    /// (and without the words about them, [`super::ask::without_buttons`])
+    /// before it returns the error, so the question can still be answered
+    /// in text.
+    async fn post_question(&self, _channel: &str, _question: &Question) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Edits the message of question `id` once it ended: buttons off,
+    /// `outcome` shown. Does nothing for a question it did not post.
+    async fn close_question(&self, _channel: &str, _id: &str, _outcome: &str) -> Result<()> {
+        Ok(())
+    }
 }

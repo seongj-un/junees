@@ -243,7 +243,7 @@ impl Router {
         if content.is_empty() && files.is_empty() && notes.is_empty() {
             return;
         }
-        self.channels.input(&key, content, files, notes);
+        self.channels.input(&key, user, content, files, notes);
     }
 
     /// Whether `key` has a saved session.

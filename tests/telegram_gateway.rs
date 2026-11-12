@@ -1,7 +1,7 @@
 //! The Telegram gateway against a fake Bot API on loopback: long polling
 //! and offsets, who is answered where, commands, long replies, flood
-//! control, approval questions, images, sessions, a refused token, and
-//! the binary.
+//! control, approval questions and their buttons, images, sessions, a
+//! refused token, and the binary.
 
 mod common;
 
@@ -67,6 +67,10 @@ struct BotState {
     conflict_next: Mutex<usize>,
     /// file_id to (file_path, bytes).
     files: Mutex<HashMap<String, (String, Vec<u8>)>>,
+    /// The `message_id` of the last message sent.
+    last_message: Mutex<i64>,
+    /// Refuse every message with buttons (400).
+    refuse_buttons: AtomicBool,
 }
 
 struct FakeBot {
@@ -106,6 +110,82 @@ impl FakeBot {
             .push(json!({"update_id": id, "message": message}));
         self.state.notify.notify_waiters();
         id
+    }
+
+    /// Queues an update holding the button press `query`.
+    fn press(&self, query: Value) {
+        let id = {
+            let mut next = self.state.next_id.lock().unwrap();
+            *next += 1;
+            *next
+        };
+        self.state
+            .updates
+            .lock()
+            .unwrap()
+            .push(json!({"update_id": id, "callback_query": query}));
+        self.state.notify.notify_waiters();
+    }
+
+    /// Waits until a call of `method` satisfies `want`; returns its body.
+    async fn wait_call(&self, method: &str, want: impl Fn(&Value) -> bool) -> Value {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let notified = self.state.notify.notified();
+            if let Some(found) = self.calls(method).into_iter().find(|r| want(&r.body)) {
+                return found.body;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                panic!("no such {method}; requests: {:#?}", self.requests());
+            }
+        }
+    }
+
+    /// The `count`th question with buttons sent to `chat` (from 1): its
+    /// message id and the `callback_data` of each button by label.
+    async fn question(&self, chat: &str, count: usize) -> (i64, HashMap<String, String>) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let body = loop {
+            let notified = self.state.notify.notified();
+            let found: Vec<Value> = self
+                .calls("sendMessage")
+                .into_iter()
+                .filter(|r| key(&r.body) == chat && r.body.get("reply_markup").is_some())
+                .map(|r| r.body)
+                .collect();
+            if found.len() >= count {
+                break found[count - 1].clone();
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                panic!("no question {count} in chat {chat}");
+            }
+        };
+        let buttons = body["reply_markup"]["inline_keyboard"][0]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|button| {
+                (
+                    button["text"].as_str().unwrap().to_string(),
+                    button["callback_data"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        (body["_sent_id"].as_i64().unwrap(), buttons)
+    }
+
+    /// The answer to the press `query`, once it came.
+    async fn answered(&self, query: &str) -> Value {
+        self.wait_call("answerCallbackQuery", |body| {
+            body["callback_query_id"] == query
+        })
+        .await
+    }
+
+    /// The edit of message `message`, once it came.
+    async fn edited(&self, message: i64) -> Value {
+        self.wait_call("editMessageText", |body| body["message_id"] == message)
+            .await
     }
 
     fn file(&self, id: &str, path: &str, bytes: Vec<u8>) {
@@ -226,7 +306,7 @@ fn refused(code: u16, description: &str, parameters: Option<Value>) -> (u16, Vec
 }
 
 async fn serve(mut socket: TcpStream, state: Arc<BotState>) {
-    let Some((path, body)) = read_http(&mut socket).await else {
+    let Some((path, mut body)) = read_http(&mut socket).await else {
         return;
     };
     let file_prefix = format!("/tg/file/bot{TOKEN}/");
@@ -291,6 +371,12 @@ async fn serve(mut socket: TcpStream, state: Arc<BotState>) {
                     None,
                 )
             }
+            "sendMessage"
+                if state.refuse_buttons.load(Ordering::SeqCst)
+                    && body.get("reply_markup").is_some() =>
+            {
+                refused(400, "Bad Request: BUTTON_TYPE_INVALID", None)
+            }
             "sendMessage" => {
                 let limited = {
                     let mut left = state.limit_next.lock().unwrap();
@@ -305,9 +391,18 @@ async fn serve(mut socket: TcpStream, state: Arc<BotState>) {
                         Some(json!({"retry_after": 1})),
                     )
                 } else {
-                    ok(json!({"message_id": 1, "date": 0, "chat": {"id": body["chat_id"]}}))
+                    let id = {
+                        let mut last = state.last_message.lock().unwrap();
+                        *last += 1;
+                        1000 + *last
+                    };
+                    body["_sent_id"] = json!(id);
+                    ok(json!({"message_id": id, "date": 0, "chat": {"id": body["chat_id"]}}))
                 }
             }
+            "editMessageText" => ok(json!({"message_id": body["message_id"], "date": 0,
+                                           "chat": {"id": body["chat_id"]}})),
+            "answerCallbackQuery" => ok(json!(true)),
             "sendChatAction" => ok(json!(true)),
             "getFile" => {
                 let id = body["file_id"].as_str().unwrap_or_default();
@@ -719,7 +814,7 @@ async fn updates_are_confirmed_and_never_run_twice() {
     assert!(
         polls
             .iter()
-            .all(|r| r.body["allowed_updates"] == json!(["message"]))
+            .all(|r| r.body["allowed_updates"] == json!(["message", "callback_query"]))
     );
     let posts = bot.posts(&me);
     assert_eq!(posts.iter().filter(|p| p.ends_with(": two")).count(), 1);
@@ -1227,6 +1322,328 @@ async fn another_bots_command_is_no_answer_to_a_question_in_a_group() {
     assert_eq!(requests.len(), 2);
     let texts = texts(&requests[1]);
     assert!(!texts.iter().any(|t| t.contains("roll")), "{texts:?}");
+}
+
+/// A press by `from` on the button `data` of message `message` in `chat`
+/// (a Chat object), as query `id`.
+fn press(id: &str, from: i64, chat: Value, message: i64, data: &str) -> Value {
+    json!({
+        "id": id, "from": user(from), "chat_instance": "1", "data": data,
+        "message": {"message_id": message, "date": 0, "chat": chat},
+    })
+}
+
+fn private_chat() -> Value {
+    json!({"id": USER, "type": "private", "first_name": "Someone"})
+}
+
+#[tokio::test]
+async fn buttons_answer_questions_of_allowed_users_only() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let file = cwd.path().join("note.txt");
+    let (api, served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("declined, fine")),
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+        (200, write_call(&file)),
+        (200, common::text_reply("timed out")),
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it again")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(TELEGRAM_NOTE),
+    );
+    let running = start(
+        telegram(&bot.url, &[("JUNEES_TELEGRAM_APPROVAL_TIMEOUT", "2s")]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let me = USER.to_string();
+    bot.push(private(USER, "write a note"));
+    let (first, buttons) = bot.question(&me, 1).await;
+    assert_eq!(buttons.len(), 3, "{buttons:?}");
+    let (allow, decline) = (&buttons["Allow"], &buttons["Decline"]);
+    assert!(allow.len() <= 64 && allow.starts_with("junees:"), "{allow}");
+    // Someone not allowed: told so, nothing runs.
+    bot.press(press("q1", STRANGER, private_chat(), first, allow));
+    let answer = bot.answered("q1").await;
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("telegram_allowed_users"),
+        "{answer}"
+    );
+    // A guessed question id, and the right one from another message.
+    let guessed = format!("junees:{}:y", "0".repeat(32));
+    bot.press(press("q2", USER, private_chat(), first, &guessed));
+    bot.press(press("q3", USER, private_chat(), first + 7, allow));
+    for query in ["q2", "q3"] {
+        let answer = bot.answered(query).await;
+        assert!(
+            answer["text"]
+                .as_str()
+                .unwrap()
+                .contains("already answered"),
+            "{answer}"
+        );
+    }
+    assert!(!file.exists());
+    // Decline: the press is answered without a note, and the message
+    // loses its buttons.
+    bot.press(press("q4", USER, private_chat(), first, decline));
+    assert_eq!(bot.answered("q4").await.get("text"), None);
+    let edit = bot.edited(first).await;
+    assert_eq!(edit["reply_markup"], json!({"inline_keyboard": []}));
+    let text = edit["text"].as_str().unwrap();
+    assert!(text.starts_with("Approve this tool call?"), "{text}");
+    assert!(text.ends_with("\n\n<b>Declined by Someone.</b>"), "{text}");
+    assert_eq!(edit["parse_mode"], "HTML");
+    bot.wait_post(&me, |p| p == "declined, fine").await;
+    assert!(!file.exists());
+
+    bot.push(private(USER, "now"));
+    let (second, buttons) = bot.question(&me, 2).await;
+    // The first question's button does nothing now.
+    bot.press(press("q5", USER, private_chat(), first, allow));
+    let answer = bot.answered("q5").await;
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("already answered"),
+        "{answer}"
+    );
+    bot.press(press("q6", USER, private_chat(), second, &buttons["Allow"]));
+    assert_eq!(bot.answered("q6").await.get("text"), None);
+    let edit = bot.edited(second).await;
+    assert!(
+        edit["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("<b>Allowed by Someone.</b>"),
+        "{edit}"
+    );
+    bot.wait_post(&me, |p| p == "wrote it").await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "written\n");
+    std::fs::remove_file(&file).unwrap();
+
+    // No answer: the message says so, and a later press does nothing.
+    bot.push(private(USER, "once more"));
+    let (third, buttons) = bot.question(&me, 3).await;
+    let edit = bot.edited(third).await;
+    assert!(
+        edit["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("<b>No answer within 2s: declined.</b>"),
+        "{edit}"
+    );
+    bot.wait_post(&me, |p| p == "timed out").await;
+    bot.press(press("q7", USER, private_chat(), third, &buttons["Allow"]));
+    let answer = bot.answered("q7").await;
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("already answered"),
+        "{answer}"
+    );
+    assert!(!file.exists());
+
+    // A text answer still works, and the buttons go too.
+    bot.push(private(USER, "last"));
+    let (fourth, _) = bot.question(&me, 4).await;
+    bot.push(private(USER, "y"));
+    let edit = bot.edited(fourth).await;
+    assert!(
+        edit["text"].as_str().unwrap().ends_with("<b>Allowed.</b>"),
+        "{edit}"
+    );
+    bot.wait_post(&me, |p| p == "wrote it again").await;
+    assert!(file.exists());
+    let log = running.stop().await;
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(
+        texts(&requests[1]).last().unwrap(),
+        "user: the user declined: no reason given"
+    );
+    assert!(
+        log.iter()
+            .any(|line| line.contains(&format!("button presses of user {STRANGER}"))),
+        "{log:#?}"
+    );
+    // getUpdates asks for the presses.
+    assert_eq!(
+        bot.calls("getUpdates")[0].body["allowed_updates"],
+        json!(["message", "callback_query"])
+    );
+}
+
+#[tokio::test]
+async fn a_button_answers_only_in_its_forum_topic() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let file = cwd.path().join("note.txt");
+    let (api, _served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(TELEGRAM_NOTE),
+    );
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut asked = group(USER, "@junees_bot write a note");
+    asked["is_topic_message"] = json!(true);
+    asked["message_thread_id"] = json!(7);
+    bot.push(asked);
+    let topic = format!("{GROUP}:7");
+    let (question, buttons) = bot.question(&topic, 1).await;
+    let chat = json!({"id": GROUP, "type": "supergroup", "title": "Team", "is_forum": true});
+    // The same button seen from the group's general topic: no answer.
+    bot.press(press("g1", USER, chat.clone(), question, &buttons["Allow"]));
+    let answer = bot.answered("g1").await;
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("already answered"),
+        "{answer}"
+    );
+    assert!(!file.exists());
+    let mut in_topic = press("g2", USER, chat, question, &buttons["Allow"]);
+    in_topic["message"]["is_topic_message"] = json!(true);
+    in_topic["message"]["message_thread_id"] = json!(7);
+    bot.press(in_topic);
+    assert_eq!(bot.answered("g2").await.get("text"), None);
+    bot.wait_post(&topic, |p| p == "wrote it").await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "written\n");
+    let edit = bot.edited(question).await;
+    assert_eq!(edit["chat_id"], GROUP);
+    assert!(
+        edit["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("<b>Allowed by Someone.</b>"),
+        "{edit}"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn an_answer_word_right_after_a_press_starts_no_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let file = cwd.path().join("note.txt");
+    let (api, served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+        (200, common::text_reply("next one")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(TELEGRAM_NOTE),
+    );
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let me = USER.to_string();
+    bot.push(private(USER, "write a note"));
+    let (question, buttons) = bot.question(&me, 1).await;
+    bot.press(press(
+        "q1",
+        USER,
+        private_chat(),
+        question,
+        &buttons["Allow"],
+    ));
+    assert_eq!(bot.answered("q1").await.get("text"), None);
+    // To be sure, the user types y too: told it was answered, no new turn.
+    bot.push(private(USER, "y"));
+    bot.wait_post(&me, |p| p.contains("already answered")).await;
+    bot.wait_post(&me, |p| p == "wrote it").await;
+    assert!(file.exists());
+    // The next message is an input as always.
+    bot.push(private(USER, "next"));
+    bot.wait_post(&me, |p| p == "next one").await;
+    running.stop().await;
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(texts(&requests[2]).last().unwrap(), "user: next");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| texts(request).iter().any(|text| text == "user: y")),
+        "{requests:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_question_whose_buttons_are_refused_is_posted_without_them() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    bot.state.refuse_buttons.store(true, Ordering::SeqCst);
+    let file = cwd.path().join("note.txt");
+    let (api, _served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(TELEGRAM_NOTE),
+    );
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let me = USER.to_string();
+    bot.push(private(USER, "write a note"));
+    let posts = bot
+        .wait_post(&me, |p| p.contains("Reply y to run it"))
+        .await;
+    let questions: Vec<&String> = posts
+        .iter()
+        .filter(|p| p.contains("Approve this tool call?"))
+        .collect();
+    assert_eq!(questions.len(), 1, "{posts:#?}");
+    assert!(
+        !posts.iter().any(|p| p.contains("Press a button")),
+        "{posts:#?}"
+    );
+    bot.push(private(USER, "y"));
+    bot.wait_post(&me, |p| p == "wrote it").await;
+    assert!(file.exists());
+    let log = running.stop().await;
+    assert!(
+        log.iter()
+            .any(|line| line.contains("posted it without buttons")),
+        "{log:#?}"
+    );
 }
 
 /// A PNG header of `width` x `height`: enough for Junees, which never

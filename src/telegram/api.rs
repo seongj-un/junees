@@ -11,6 +11,14 @@
 //!   `link_preview_options`); `sendChatAction` shows "typing" ("for 5
 //!   seconds or less"); `getFile` gives a `file_path` that downloads from
 //!   `<base>/file/bot<token>/<file_path>` (up to 20 MB for bots).
+//! - Approval buttons: `sendMessage` with `reply_markup` (an
+//!   InlineKeyboardMarkup of InlineKeyboardButtons with `callback_data`,
+//!   "1-64 bytes", and `style` "danger", "success" or "primary"); a press
+//!   arrives as a `callback_query` update (asked for in `allowed_updates`),
+//!   which needs `answerCallbackQuery` ("Telegram clients will display a
+//!   progress bar until you call answerCallbackQuery"; its `text` of 0-200
+//!   characters shows as a notification); `editMessageText` with an empty
+//!   inline keyboard takes the buttons off.
 //!
 //! The token sits in the URL path of every request, so no error, log line
 //! or answer ever holds a request URL: transport errors are described
@@ -231,8 +239,8 @@ impl Api {
     }
 
     /// `getUpdates` from `offset` (confirming every update below it),
-    /// waiting up to `wait` for one (long polling). Only messages are
-    /// asked for (`allowed_updates`).
+    /// waiting up to `wait` for one (long polling). Only messages and
+    /// button presses are asked for (`allowed_updates`).
     pub async fn get_updates(
         &self,
         offset: Option<i64>,
@@ -242,7 +250,7 @@ impl Api {
         let mut body = json!({
             "timeout": wait.as_secs(),
             "limit": limit,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
         });
         if let Some(offset) = offset {
             body["offset"] = json!(offset);
@@ -281,15 +289,80 @@ impl Api {
         text: &str,
         parse_mode: Option<&str>,
     ) -> Result<(), ApiError> {
+        self.post(target, text, parse_mode == Some("HTML"), None)
+            .await
+            .map(drop)
+    }
+
+    /// `sendMessage` of `text` (HTML when `html`, else plain), with the
+    /// inline `keyboard` when given; the new message's `message_id`, if
+    /// the answer names it.
+    pub async fn send_with(
+        &self,
+        target: Target,
+        text: &str,
+        html: bool,
+        keyboard: Option<&Value>,
+    ) -> Result<Option<i64>, ApiError> {
+        let message = self.post(target, text, html, keyboard).await?;
+        Ok(message.get("message_id").and_then(Value::as_i64))
+    }
+
+    async fn post(
+        &self,
+        target: Target,
+        text: &str,
+        html: bool,
+        keyboard: Option<&Value>,
+    ) -> Result<Value, ApiError> {
         let mut body = json!({
             "text": text,
             "link_preview_options": {"is_disabled": true},
         });
-        if let Some(mode) = parse_mode {
-            body["parse_mode"] = json!(mode);
+        if html {
+            body["parse_mode"] = json!("HTML");
+        }
+        if let Some(keyboard) = keyboard {
+            body["reply_markup"] = keyboard.clone();
         }
         target.fields(&mut body);
         self.call("sendMessage", body, CALL_TIMEOUT, Retry::Once)
+            .await
+    }
+
+    /// `editMessageText` of message `message` in `chat` to `text` (HTML
+    /// when `html`), with an empty inline keyboard: its buttons go.
+    pub async fn edit_text(
+        &self,
+        chat: i64,
+        message: i64,
+        text: &str,
+        html: bool,
+    ) -> Result<(), ApiError> {
+        let mut body = json!({
+            "chat_id": chat,
+            "message_id": message,
+            "text": text,
+            "link_preview_options": {"is_disabled": true},
+            "reply_markup": {"inline_keyboard": []},
+        });
+        if html {
+            body["parse_mode"] = json!("HTML");
+        }
+        // Editing twice to the same text changes nothing.
+        self.call("editMessageText", body, CALL_TIMEOUT, Retry::Safe)
+            .await
+            .map(drop)
+    }
+
+    /// `answerCallbackQuery` for the press `query`, with `text` as a
+    /// notification when given.
+    pub async fn answer_callback(&self, query: &str, text: Option<&str>) -> Result<(), ApiError> {
+        let mut body = json!({"callback_query_id": query});
+        if let Some(text) = text {
+            body["text"] = json!(text);
+        }
+        self.call("answerCallbackQuery", body, CALL_TIMEOUT, Retry::Safe)
             .await
             .map(drop)
     }
@@ -693,7 +766,10 @@ mod tests {
         assert_eq!(seen[0].0, format!("POST /bot{TOKEN}/getMe HTTP/1.1"));
         let body: Value = serde_json::from_str(&seen[1].1).unwrap();
         assert_eq!(body["offset"], 3);
-        assert_eq!(body["allowed_updates"], json!(["message"]));
+        assert_eq!(
+            body["allowed_updates"],
+            json!(["message", "callback_query"])
+        );
 
         // Nobody listening: the error names no URL.
         drop(api);

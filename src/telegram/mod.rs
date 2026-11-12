@@ -170,11 +170,7 @@ impl TelegramGateway {
             self.config.parallel
         ));
         let shared = Arc::new(Shared {
-            platform: Telegram {
-                api: Arc::clone(&api),
-                username: me.username.clone(),
-                format: self.config.format,
-            },
+            platform: Telegram::new(Arc::clone(&api), me.username.clone(), self.config.format),
             engines: self.engines,
             parallel: self.config.parallel,
             approval_timeout: self.config.approval_timeout,

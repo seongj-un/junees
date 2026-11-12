@@ -13,6 +13,8 @@ Junees를 채팅 봇으로 띄운다. 디스코드, 텔레그램, 슬랙은 같�
 3. 서버에 초대한다. OAuth2 페이지의 URL Generator에서 scope `bot`, 권한 View Channels, Send Messages, Send Messages in Threads, Read Message History를 고르거나, 아래 URL의 `client_id`를 자기 애플리케이션 id로 바꿔 연다([OAuth2: Bot Authorization Flow](https://docs.discord.com/developers/topics/oauth2#bot-authorization-flow)). 권한 값 274877975552는 `VIEW_CHANNEL`(1<<10), `SEND_MESSAGES`(1<<11), `READ_MESSAGE_HISTORY`(1<<16), `SEND_MESSAGES_IN_THREADS`(1<<38)의 합이다.
    ```
    https://discord.com/oauth2/authorize?client_id=<애플리케이션 id>&scope=bot&permissions=274877975552
+
+   승인 버튼에는 따로 켤 인텐트나 권한이 없다(`INTERACTION_CREATE`는 인텐트 없이 오고, 버튼이 달린 메시지도 Send Messages로 보낸다). 다만 General Information 페이지의 **Interactions Endpoint URL은 비워 둔다.** 이 주소를 넣으면 디스코드가 버튼 누름을 Gateway가 아니라 그 HTTP 주소로 보내서("you can *only* receive Interactions one of the two ways", [Receiving and Responding](https://docs.discord.com/developers/interactions/receiving-and-responding)), 버튼이 "상호작용 실패"로 끝나고 글 답장만 된다.
    ```
 4. 디스코드 설정의 고급에서 개발자 모드를 켜면 사용자와 채널을 우클릭해 id를 복사할 수 있다(Copy User ID, Copy Channel ID).
 
@@ -25,7 +27,7 @@ discord_token = "..."                 # JUNEES_DISCORD_TOKEN (필수)
 discord_allowed_users = "123456789012345678"   # JUNEES_DISCORD_ALLOWED_USERS (필수, 쉼표 목록)
 discord_channels = "234567890123456789"        # JUNEES_DISCORD_CHANNELS (선택, 쉼표 목록)
 discord_parallel = 2                  # JUNEES_DISCORD_PARALLEL (동시에 턴을 돌릴 채널 수, 기본 2)
-discord_approval_timeout = "5m"       # JUNEES_DISCORD_APPROVAL_TIMEOUT (승인 답장 대기, 기본 5m)
+discord_approval_timeout = "5m"       # JUNEES_DISCORD_APPROVAL_TIMEOUT (승인 버튼/답장 대기, 기본 5m)
 ```
 
 - `discord_allowed_users`가 비어 있으면 시작하지 않는다(`no allowed Discord users ...`). 목록이 없으면 봇에게 말을 걸 수 있는 누구나 이 컴퓨터에서 명령을 실행할 수 있기 때문이다. id는 숫자만 받는다.
@@ -90,7 +92,9 @@ loginctl enable-linger "$USER"             # 로그아웃해도 계속 돌게
   - `!status`: 백엔드와 모델, 동시 실행 중인 턴 수, 승인 방식, 이 채널의 세션과 상태(실행 중/대기열/승인 대기), 토큰 사용량.
   - `!memory`: 영구 메모리 보기. DM에서는 터미널의 `/memory`와 같다. 서버 채널에서는 답이 그 채널을 보는 모두에게 보이므로 저장소마다 항목 수와 글자 수만 보여 주고, 내용은 DM에서 보라고 안내한다. `!skills`: 스킬 목록. `!cron`: 예약 작업 목록(서버 채널에서는 프롬프트와 폴더 없이, [예약 작업](automation.md#예약-작업) 절). `!help`: 명령 목록.
   - `!task`: 아직 지원하지 않는다는 안내([범위 밖](#범위-밖-한계)).
-- 승인(`JUNEES_APPROVAL`, 기본 `risky`): 위험한 도구 호출이면 채널에 `Approve this tool call?`과 명령(코드 블록, 터미널 질문과 같은 내용)을 보내고, 그 채널에서 허용 사용자의 다음 메시지로 정한다. `y`는 실행, `n`은 거절, `n <이유>`는 이유와 함께 거절(모델이 읽는다), `a`는 이 채널의 대화가 끝날 때까지 같은 종류 허용, 그 밖의 말은 그 말을 이유로 거절한다. `discord_approval_timeout`(기본 5분) 안에 답이 없으면 `(no answer within 5m: declined)`와 함께 거절한다. `!stop`은 질문을 취소하고 턴을 끝낸다. claude-code 백엔드는 터미널처럼 승인 질문 없이 Claude Code의 거절 규칙만 적용된다(`!status`에 나온다).
+- 승인(`JUNEES_APPROVAL`, 기본 `risky`): 위험한 도구 호출이면 채널에 `Approve this tool call?`과 명령(코드 블록, 터미널 질문과 같은 내용)을 버튼과 함께 보내고, 허용 사용자가 버튼을 누르거나 그 채널에 다음 메시지를 쓰면 정한다. 버튼은 Allow(실행), Always allow(이 채널의 대화가 끝날 때까지 같은 종류 허용. 매번 묻는 종류뿐이면 없다), Decline(거절)이다. 글 답장도 그대로 된다: `y`는 실행, `n`은 거절, `n <이유>`는 이유와 함께 거절(모델이 읽는다), `a`는 같은 종류 허용, 그 밖의 말은 그 말을 이유로 거절한다. `discord_approval_timeout`(기본 5분) 안에 답이 없으면 `(no answer within 5m: declined)`와 함께 거절한다. `!stop`은 질문을 취소하고 턴을 끝낸다. 질문에 답한(버튼이나 글 답장) 사용자가 30초 안에 답 낱말 하나만(`y`, `yes`, `a`, `always`, `n`, `no`, 대소문자 무관) 다시 보내면, 버튼을 누르고 확인 삼아 한 번 더 친 답으로 보고 새 턴의 입력으로 넘기지 않는다. 대신 `(that approval question was already answered; this reply was not passed on. Send it again to pass it on.)`로 알린다. 이렇게 걸러지는 것은 답한 뒤 그 사용자의 첫 메시지뿐이라, 같은 말을 다시 보내거나 다른 말을 보내면 평소처럼 입력이 된다(슬랙과 텔레그램도 같다). 질문이 끝나면(버튼, 글 답장, 시간 초과, `!stop`) 질문 메시지를 고쳐 버튼을 없애고 아래에 결과를 굵게 적는다(`Allowed by @사용자.`, `Declined.`, `No answer within 5m: declined.`, `Not answered: the turn stopped.`. Always allow나 `a`는 `Allowed, and this kind from now on.`이지만, 매번 묻는 종류뿐이라 기억하지 않을 때는 `Allowed.`). claude-code 백엔드는 터미널처럼 승인 질문 없이 Claude Code의 거절 규칙만 적용된다(`!status`에 나온다).
+- 승인 버튼의 동작([Message Components](https://docs.discord.com/developers/components/reference), [Receiving and Responding](https://docs.discord.com/developers/interactions/receiving-and-responding)): 버튼은 질문 메시지(길어서 나뉘면 마지막 메시지)의 액션 행에 달리고, 각 버튼의 `custom_id`는 `junees:<질문 id>:<y|a|n>`이다. 질문 id는 질문마다 새로 뽑은 128비트 난수(시스템 난수, 16진 32자리)라 짐작할 수 없다. 누르면 디스코드가 Gateway로 `INTERACTION_CREATE`(type 3, MESSAGE_COMPONENT)를 보내고, 3초 안에 HTTP로 응답해야 한다. Junees는 받는 즉시 판단해 응답을 따로 보낸다(전역 레이트 리밋 대기 없이: 문서상 상호작용 응답은 전역 한도에 묶이지 않는다). 누름이 받아들여지는 것은 누른 사람이 `discord_allowed_users`에 있고, 그 채널에서 지금 기다리는 질문의 id이며, 그 질문 메시지에서 눌렸고, 그 질문에 있는 버튼일 때뿐이다. 그때는 type 6(DEFERRED_UPDATE_MESSAGE)으로 응답하고 메시지 편집(`PATCH /channels/{id}/messages/{id}`)으로 버튼을 없앤다. 그 밖의 누름(허용 목록 밖 사람, 끝난 질문이나 시간 초과·`!stop` 뒤의 버튼, 다른 채널, 재시작 전의 버튼)은 아무것도 바꾸지 않고, 누른 사람에게만 보이는 type 4 `EPHEMERAL` 메시지로 알린다(`This question was already answered, timed out or stopped; ...`, 허용 목록 밖이면 `Only the users in discord_allowed_users can answer Junees.`, 허용 목록 밖 사용자는 로그에 한 번 남긴다). 상호작용 토큰은 로그와 오류에 나오지 않는다.
+- 누름은 받는 즉시 적용하고 디스코드에 보내는 응답은 그 뒤에 따로 간다. 그래서 응답이 3초를 넘기면(429나 5xx로 재시도하다 늦거나, 연결이 끊겼다가 RESUME 뒤에 다시 온 이벤트) 디스코드 화면에는 "This interaction failed"(상호작용 실패)가 보이지만 누른 답은 적용된다. 결과는 질문 메시지 아래의 결과 줄(`Allowed by ...`)로 확인한다. 다만 상호작용 id(snowflake)에 든 시각으로 15분이 지난 누름은 응답도 적용도 하지 않고 로그에만 남긴다(`ignoring a button press made ... ago`). 상호작용 토큰이 15분 동안만 유효해서 그 뒤에는 응답할 수 없고(디스코드는 어차피 실패로 보여 준다), 그렇게 늦게 오는 것은 다시 보낸 오래된 이벤트뿐이기 때문이다. 3초 같은 짧은 한도는 쓰지 않았다. 이 컴퓨터의 시계가 디스코드와 몇 초만 어긋나도 모든 누름이 버려지기 때문이다.
 
 ### 연결과 레이트 리밋
 
@@ -102,6 +106,7 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
 
 - `!task <목표>`(게이트웨이에서 장기 작업 시작)는 후속으로 미뤘다. 작업 모드는 프로세스의 현재 폴더를 저장소 루트로 옮기고 한 저장소에 하나만 돌기 때문에, 여러 채널이 동시에 도는 게이트웨이 안에서는 따로 설계해야 한다. 지금은 컴퓨터에서 `junees task`를 돌리고 진행 알림은 웹훅(`notify_webhook`)으로 받는다.
 - 디스코드 애플리케이션(슬래시) 명령 등록, 이미지가 아닌 첨부 파일 읽기, 메시지 편집 스트리밍, 반응 이모지, 봇이 스스로 스레드를 만드는 것은 하지 않는다.
+- 재시작하면 기다리던 질문은 사라지므로(턴도 끝난다) 그 전 질문 메시지에는 버튼이 남는다. 누르면 "already answered" 안내만 받는다. 버튼이 달린 질문 메시지를 올리다 실패하면 아직 올라가지 않은 부분만 버튼 없이 올리고(긴 질문의 앞부분이 이미 올라갔으면 그 뒤만), 안내도 `Press a button, or reply`를 뺀 `Reply `y` to run it, ...`으로 바꾼다. 답은 글 답장으로 받는다.
 - 테스트는 테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST 서버로만 했다(`tests/discord_gateway.rs`). 실제 디스코드에는 연결해 보지 않았다.
 
 ## 텔레그램 게이트웨이
@@ -120,7 +125,7 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
 telegram_token = "..."                  # JUNEES_TELEGRAM_TOKEN (필수)
 telegram_allowed_users = "123456789"    # JUNEES_TELEGRAM_ALLOWED_USERS (필수, 숫자 id 쉼표 목록)
 telegram_parallel = 2                   # JUNEES_TELEGRAM_PARALLEL (동시에 턴을 돌릴 채팅 수, 기본 2)
-telegram_approval_timeout = "5m"        # JUNEES_TELEGRAM_APPROVAL_TIMEOUT (승인 답장 대기, 기본 5m)
+telegram_approval_timeout = "5m"        # JUNEES_TELEGRAM_APPROVAL_TIMEOUT (승인 버튼/답장 대기, 기본 5m)
 telegram_format = "html"                # JUNEES_TELEGRAM_FORMAT (답의 서식: html 기본, plain은 평문)
 ```
 
@@ -164,7 +169,8 @@ junees gateway telegram
   - 링크 미리보기는 두 방식 모두 끈다. 시스템 프롬프트에는 "텔레그램이니 짧게" 문단이 들어가고, `html`이면 어떤 Markdown이 서식으로 보이는지, `plain`이면 Markdown이 보이지 않는다는 것을 알린다.
 - 그룹에 보내는 답의 `@사용자이름`은 `@` 바로 뒤에 보이지 않는 문자(U+2060 WORD JOINER)를 넣어 멘션이 되지 않게 한다(#58). 텔레그램에는 디스코드의 `allowed_mentions` 같은 끄는 방법이 없어서, 그대로 두면 모델 출력에 섞여 들어온 글(웹 페이지, 파일 내용)로도 그룹 구성원에게 알림이 간다. 글자, 숫자, `_` 바로 뒤의 `@`(메일 주소)와 영문자로 시작하지 않는 것, 그리고 웹 주소의 경로 안(`https://medium.com/@alice/글`, 텔레그램은 링크의 일부로 본다)은 그대로 둔다. `html`에서는 코드(`<code>`, `<pre>`) 안의 `@이름`도 그대로 둔다(#63): Bot API 문서의 중첩 규칙상 멘션 엔티티는 code나 pre 엔티티 안에 있을 수 없어 알림이 가지 않는다. 링크 글자 안의 `@이름`은 바꾼다. 텔레그램이 HTML을 거절해 서식 없이 다시 보내는 메시지와 `plain`에서는 백틱이 코드가 아니므로 코드였던 자리의 `@이름`도 바꾼다. 화면에는 똑같이 보이지만 복사하면 그 문자가 함께 복사된다. 개인 채팅의 답은 바꾸지 않는다(다른 사람에게 갈 알림이 없다). 그룹 여부는 채팅 id의 부호로 판단한다(텔레그램의 그룹과 슈퍼그룹 id는 음수).
 - 타이핑: 턴 중 `sendChatAction typing`을 4초마다(텔레그램은 5초 동안 보여 준다). 승인 질문을 기다리는 동안은 멈춘다.
-- 승인 질문은 `Approve this tool call?` + 코드 블록 안의 터미널과 같은 내용 + 답하는 법이고 `y`/`n`/`n <이유>`/`a`로 답한다. 그룹에서는 질문 메시지에 답장하면 된다.
+- 승인 질문은 `Approve this tool call?` + 코드 블록 안의 터미널과 같은 내용 + 답하는 법이고, 질문 메시지에 인라인 키보드 버튼(Allow, Always allow, Decline. Always allow는 매번 묻는 종류뿐이면 없다)이 달린다. 글 답장 `y`/`n`/`n <이유>`/`a`도 그대로 된다. 답한 직후(30초 안) 같은 사용자의 답 낱말 하나는 디스코드처럼 새 입력으로 넘기지 않고 이미 답했다고 알린다. 그룹에서 글로 답할 때는 질문 메시지에 답장한다(개인 정보 모드에서도 봇에 오도록). 버튼 누름은 개인 정보 모드와 상관없이 봇에 온다.
+- 승인 버튼의 동작([Bot API](https://core.telegram.org/bots/api): InlineKeyboardButton, CallbackQuery, answerCallbackQuery, editMessageText): 버튼의 `callback_data`는 `junees:<질문 id>:<y|a|n>`(41바이트, 한도 64바이트)이고, 질문 id는 질문마다 새로 뽑은 128비트 난수다. `getUpdates`의 `allowed_updates`에 `callback_query`를 더해 누름을 받는다. 누름이 받아들여지는 것은 누른 사람이 `telegram_allowed_users`에 있고, 그 채팅(포럼이면 같은 토픽)에서 지금 기다리는 질문의 id이며, 그 질문 메시지에서 눌렸고, 그 질문에 있는 버튼일 때뿐이다. 모든 누름에 `answerCallbackQuery`로 답한다(답하지 않으면 텔레그램 앱이 진행 표시를 계속 보여 준다): 받아들인 누름은 알림 없이, 그 밖의 누름(허용 목록 밖, 끝났거나 시간이 지난 질문, 다른 채팅이나 토픽)은 아무것도 바꾸지 않고 `This question was already answered, timed out or stopped.`(허용 목록 밖이면 `Only the users in telegram_allowed_users can answer Junees.`) 알림으로. 질문이 끝나면(버튼, 글 답장, 시간 초과, `/stop`) `editMessageText`로 질문 메시지에 결과 한 줄(`Allowed by <이름>.` 등, HTML이면 굵게)을 더하고 빈 인라인 키보드로 버튼을 없앤다. 더한 글이 4096자를 넘으면 버튼만 없애고 결과는 따로 보낸다. 재시작 전 질문의 버튼은 남지만 눌러도 안내만 받는다. 버튼이 달린 질문을 보내다 실패하면 디스코드처럼 보내지 못한 부분만 버튼과 버튼 안내 없이 보내고 글 답장으로 받는다.
 - 이미지: 사진(`photo`, 크기 목록 중 5 MB 이하에서 가장 큰 것)과 이미지 문서(`document`, MIME `image/png|jpeg|gif|webp`, 없으면 확장자)를 그 턴이 시작할 때 `getFile`과 파일 URL로 30초 안에 5 MB까지 스트리밍으로 받는다(봇이 받을 수 있는 최대는 20 MB). 받은 바이트가 네 형식이 아니면 버린다. 앨범(같은 채팅, 보낸 사람, `media_group_id`)은 한 입력으로 묶는다(10장까지). 텔레그램은 앨범 사진을 하나씩 보내고 롱 폴링은 첫 업데이트가 오자마자 돌아오므로, 나머지는 다음 응답들로 올 수 있다. 그래서 앨범 사진은 받는 대로 모아 두었다가 1초 동안 다음 사진이 오지 않으면 한 입력으로 넘긴다(#58). 그 사이 같은 채팅에 다른 메시지가 오면 모아 둔 앨범을 먼저 넘겨 순서를 지킨다. 그보다 늦게 온 사진은 따로 입력이 되고, 그룹에서는 받아들인 앨범(최근 64개)을 기억해 그런 늦은 사진도 캡션 없이 받는다. 개인 정보 모드에서는 그룹의 캡션 없는 앨범 사진이 아예 오지 않을 수 있다(아래 개인 정보 모드). 이미지가 아닌 문서, 동영상, 음성, 스티커는 `(attachments left out: ...)`로 알린다. claude-code 백엔드는 디스코드처럼 이미지를 거절한다.
 
 ### 폴링, 오프셋, 레이트 리밋
@@ -175,7 +181,7 @@ junees gateway telegram
 
 ### 범위 밖, 한계
 
-- 웹훅 방식 수신, 인라인 키보드(승인 버튼), 메시지 편집 스트리밍, MarkdownV2 서식, 밑줄·스포일러·펼치는 인용(Markdown에 표기가 없다), 음성과 문서 내용 읽기, 그룹 관리 명령, `/task`, setup 마법사의 텔레그램 질문, `junees doctor --online`의 `getMe`(토큰을 외부로 보내야 해서)는 하지 않는다.
+- 웹훅 방식 수신, 메시지 편집 스트리밍, MarkdownV2 서식, 밑줄·스포일러·펼치는 인용(Markdown에 표기가 없다), 음성과 문서 내용 읽기, 그룹 관리 명령, `/task`, setup 마법사의 텔레그램 질문, `junees doctor --online`의 `getMe`(토큰을 외부로 보내야 해서)는 하지 않는다.
 - 여러 응답에 나뉘어 온 앨범은 따로따로 입력이 된다(그룹에서도 받기는 한다, [대화와 출력](#대화와-출력)의 이미지). 그룹이 슈퍼그룹으로 바뀌면(`migrate_to_chat_id`) 새 채팅으로 보고 새 대화를 시작한다.
 - 테스트는 테스트 안에서 띄운 가짜 Bot API(루프백)로만 했다(`tests/telegram_gateway.rs`). 실제 텔레그램에는 연결해 보지 않았다.
 
