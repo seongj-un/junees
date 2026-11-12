@@ -273,6 +273,8 @@ mod tests {
         }
         let token = Token::new(TOKEN).unwrap();
         assert_eq!(format!("{token:?}"), "Token(hidden)");
+        // bash, MCP servers and doctor hide it like the other secrets.
+        assert!(crate::tools::SECRET_ENV_VARS.contains(&TOKEN_ENV));
         for bad in [(PARALLEL_ENV, "0"), (APPROVAL_TIMEOUT_ENV, "soon")] {
             let err = read(&[(TOKEN_ENV, TOKEN), (ALLOWED_USERS_ENV, "1"), bad])
                 .err()

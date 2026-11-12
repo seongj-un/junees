@@ -562,9 +562,14 @@ mod tests {
                 if status == 0 {
                     continue;
                 }
+                // `NOLEN:` leaves the length out: the body ends when the
+                // connection closes.
+                let (length, body) = match body.strip_prefix("NOLEN:") {
+                    Some(body) => (String::new(), body.to_string()),
+                    None => (format!("content-length: {}\r\n", body.len()), body),
+                };
                 let reply = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{length}connection: close\r\n\r\n{body}"
                 );
                 let _ = socket.write_all(reply.as_bytes()).await;
             }
@@ -672,8 +677,14 @@ mod tests {
                 r#"{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}"#.into(),
             ),
             (200, r#"{"ok":true,"result":{"message_id":1}}"#.into()),
+            // A 5xx may come after the message was posted.
+            (
+                502,
+                r#"{"ok":false,"error_code":502,"description":"Bad Gateway"}"#.into(),
+            ),
             // Read, then the connection closes without an answer.
             (0, String::new()),
+            // Never asked for: nothing is sent twice.
             (200, r#"{"ok":true,"result":{"message_id":2}}"#.into()),
         ])
         .await;
@@ -685,9 +696,14 @@ mod tests {
         let started = std::time::Instant::now();
         api.send_message(target, "hello").await.unwrap();
         assert!(started.elapsed() >= Duration::from_secs(1));
+        let err = api.send_message(target, "maybe").await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Telegram sendMessage: error 502 (Bad Gateway)"
+        );
         assert!(api.send_message(target, "lost").await.is_err());
         let seen = seen.lock().unwrap().clone();
-        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(seen.len(), 4, "{seen:?}");
         let body: Value = serde_json::from_str(&seen[1].1).unwrap();
         assert_eq!(
             body,
@@ -701,7 +717,8 @@ mod tests {
         let big = "x".repeat(2000);
         let (base, seen) = serve(vec![
             (200, "small".into()),
-            (200, big),
+            (200, big.clone()),
+            (200, format!("NOLEN:{big}")),
             (302, String::new()),
         ])
         .await;
@@ -715,6 +732,12 @@ mod tests {
             api.download("photos/b.jpg", 1000, timeout).await,
             Err(Ok(2000))
         );
+        // Without a length the reading stops past the limit too.
+        let no_length = api.download("photos/u.jpg", 1000, timeout).await;
+        assert!(
+            matches!(no_length, Err(Ok(read)) if read > 1000),
+            "{no_length:?}"
+        );
         let err = api.download("photos/c.jpg", 1000, timeout).await;
         assert_eq!(err, Err(Err("HTTP 302 Found".to_string())));
         assert_eq!(
@@ -722,7 +745,7 @@ mod tests {
             Err(Err("the server gave an unusable file path".to_string()))
         );
         let seen = seen.lock().unwrap().clone();
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), 4);
         assert_eq!(
             seen[0].0,
             format!("GET /file/bot{TOKEN}/photos/a.jpg HTTP/1.1")

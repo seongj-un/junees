@@ -600,10 +600,22 @@ async fn answers_only_allowed_users_where_it_is_addressed() {
         "{posts:#?}"
     );
     assert_eq!(posts.iter().filter(|p| p.contains("this chat:")).count(), 1);
-    // In private an unknown command is answered, and /start is the help.
+    // In private an unknown command is answered, and /start is the help;
+    // a command naming another bot is not run (nor sent to the model).
+    bot.push(private(USER, "/new@other_bot"));
     bot.push(private(USER, "/model opus"));
     bot.wait_post(&me, |p| p == "unknown command /model; /help lists them")
         .await;
+    // Inputs run in order: once this one is answered, an input made of
+    // the other bot's command would have been too.
+    bot.push(private(USER, "ping"));
+    let posts = bot.wait_post(&me, |p| p.ends_with(": ping")).await;
+    assert!(
+        !posts
+            .iter()
+            .any(|p| p.contains("other_bot") || p.contains("new conversation")),
+        "{posts:#?}"
+    );
     bot.push(private(USER, "/start"));
     bot.wait_post(&me, |p| p.starts_with("/new start a new conversation"))
         .await;
