@@ -74,9 +74,13 @@ pub const UNATTENDED_CREDENTIALS: &[&str] = &[
 /// working folder holds them: what they hold runs later, outside the run
 /// and its sandbox. Shell startup files, user services and session
 /// autostart entries, git's own settings (`core.hooksPath`,
-/// `core.fsmonitor`, aliases), and the user's program folders that a
-/// login shell puts on PATH (Debian's and Ubuntu's `~/.profile` adds both
-/// when they exist). [`unattended_no_write`] adds more at run time.
+/// `core.fsmonitor`, aliases), cargo's (`build.rustc-wrapper`,
+/// `target.<triple>.runner` run on the next build), what ssh and sshd run
+/// or read for a login (`config` with `ProxyCommand`/`Match exec`, `rc`,
+/// `environment`, the authorized keys), and the user's program folders
+/// that a login shell puts on PATH (Debian's and Ubuntu's `~/.profile`
+/// adds both when they exist). [`unattended_no_write`] adds more at run
+/// time.
 pub const UNATTENDED_NO_WRITE: &[&str] = &[
     ".bashrc",
     ".bash_profile",
@@ -99,33 +103,42 @@ pub const UNATTENDED_NO_WRITE: &[&str] = &[
     ".config/autostart",
     ".gitconfig",
     ".config/git",
+    ".cargo/config.toml",
+    ".cargo/config",
+    ".ssh/config",
+    ".ssh/rc",
+    ".ssh/environment",
+    ".ssh/authorized_keys",
+    ".ssh/authorized_keys2",
     ".local/bin",
     "bin",
 ];
 
-/// The files in `~/.ssh` that let someone log in as the user, besides
-/// every `authorized_keys*` entry found there (sshd's default
-/// `AuthorizedKeysFile`).
-const AUTHORIZED_KEYS: &[&str] = &[".ssh/authorized_keys", ".ssh/authorized_keys2"];
+/// The entries of `~/.ssh` an unattended run may still change: ssh adds
+/// the hosts it meets to them (`StrictHostKeyChecking accept-new`, a job
+/// pushing over ssh for the first time), and they hold host keys, never
+/// commands or settings.
+const SSH_WRITABLE: &[&str] = &["known_hosts", "known_hosts.old", "known_hosts2"];
 
 /// The paths under `home` an unattended run may not change, as written:
-/// [`UNATTENDED_NO_WRITE`], ssh's authorized keys files
-/// ([`AUTHORIZED_KEYS`] and any other `~/.ssh/authorized_keys*`), and the
-/// folders of `path_var` (a PATH value) inside `home`, since the next
-/// shell runs what lands there instead of the system's program. The home
-/// folder itself is left out when PATH names it: protecting it would
-/// leave a run working anywhere in the home folder unable to write.
+/// [`UNATTENDED_NO_WRITE`], every other entry of `~/.ssh` but
+/// [`SSH_WRITABLE`] (ssh's `config` may `Include` a file there or run a
+/// script there as `ProxyCommand`, and sshd reads any
+/// `authorized_keys*` its settings name), and the folders of `path_var`
+/// (a PATH value) inside `home`, since the next shell runs what lands
+/// there instead of the system's program. The home folder itself is left
+/// out when PATH names it: protecting it would leave a run working
+/// anywhere in the home folder unable to write.
 pub fn unattended_no_write(home: &Path, path_var: Option<&OsStr>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = UNATTENDED_NO_WRITE
         .iter()
-        .chain(AUTHORIZED_KEYS)
         .map(|name| home.join(name))
         .collect();
     if let Ok(entries) = std::fs::read_dir(home.join(".ssh")) {
         out.extend(
             entries
                 .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().as_bytes().starts_with(b"authorized_keys"))
+                .filter(|entry| !SSH_WRITABLE.iter().any(|name| entry.file_name() == *name))
                 .map(|entry| entry.path()),
         );
     }
@@ -666,8 +679,8 @@ impl Scope {
                 && let Some(startup) = within(&self.no_write)
             {
                 return Err(Refusal::Denied(format!(
-                    "{shown} is a shell startup file, user service, autostart entry, git setting, \
-                     program folder on PATH or ssh login key ({}): what it holds runs later, \
+                    "{shown} is a shell startup file, user service, autostart entry, git or cargo \
+                     setting, ssh file, or program folder on PATH ({}): what it holds runs later, \
                      outside this run. This run is unattended (a scheduled job or a webhook), and \
                      its file tools do not change it.",
                     startup.display()

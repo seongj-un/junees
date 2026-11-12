@@ -654,6 +654,99 @@ async fn unattended_runs_in_the_home_folder_cannot_change_what_runs_later() {
 }
 
 #[tokio::test]
+async fn unattended_jobs_in_the_home_folder_cannot_change_ssh_or_cargo_settings() {
+    // What ssh runs (`ProxyCommand`, `Match exec`, an `Include`d file, a
+    // script in ~/.ssh, `rc` for sshd) and cargo's settings stay as they
+    // are, even through a link to a dotfiles folder; ssh may still add a
+    // host to `known_hosts`, the job still reads `config`, and cargo's
+    // caches stay writable.
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    for (path, text) in [
+        (".ssh/known_hosts", "host"),
+        (".ssh/id_ed25519", "PRIVATE KEY"),
+        (".ssh/proxy.sh", "#!/bin/sh"),
+        (".ssh/config.d/extra", "Host extra"),
+        ("dotfiles/ssh_config", "Host *"),
+        (".cargo/config.toml", "[build]"),
+        (".cargo/registry/cache/crate", "crate"),
+    ] {
+        std::fs::create_dir_all(home.join(path).parent().unwrap()).unwrap();
+        std::fs::write(home.join(path), format!("{text}\n")).unwrap();
+    }
+    std::os::unix::fs::symlink(home.join("dotfiles/ssh_config"), home.join(".ssh/config")).unwrap();
+    let refused = [
+        ("echo 'ProxyCommand sh -c evil' >> .ssh/config", "config"),
+        ("echo x >> dotfiles/ssh_config", "config-target"),
+        ("echo evil > .ssh/rc", "rc"),
+        ("echo A=b > .ssh/environment", "environment"),
+        ("echo evil >> .ssh/proxy.sh", "proxy"),
+        ("echo 'Match exec evil' >> .ssh/config.d/extra", "include"),
+        ("echo x > .ssh/new", "new"),
+        ("echo k > .ssh/authorized_keys", "authorized-keys"),
+        ("echo x >> .cargo/config.toml", "cargo-config"),
+        ("echo x > .cargo/config", "cargo-config-old"),
+    ];
+    let mut command = String::from(
+        "echo other.host ssh-ed25519 k >> .ssh/known_hosts && echo known-ok; \
+         grep -q 'Host [*]' .ssh/config && echo read-ok; \
+         echo b > .cargo/registry/cache/crate && echo cargo-cache-ok; ",
+    );
+    for (attempt, name) in refused {
+        command.push_str(&format!(
+            "{{ {attempt}; }} 2>/dev/null || echo {name}-refused; "
+        ));
+    }
+    let tools = |unattended| ToolSettings {
+        settings_file: Some(SettingsFile::new(
+            layout.path("outside/.junees/config.toml"),
+            Some(home.clone()),
+        )),
+        sandbox: Some(Settings {
+            unattended,
+            ..settings()
+        }),
+        ..ToolSettings::default()
+    };
+    let cron = run(&home, Sandbox::for_tools(&tools(true)).unwrap(), &command).await;
+    let text = &cron.content;
+    for line in ["known-ok", "read-ok", "cargo-cache-ok"] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    for (_, name) in refused {
+        assert!(text.contains(&format!("{name}-refused")), "{name}: {text}");
+    }
+    for (path, text) in [
+        ("dotfiles/ssh_config", "Host *\n"),
+        (".ssh/proxy.sh", "#!/bin/sh\n"),
+        (".ssh/config.d/extra", "Host extra\n"),
+        (".cargo/config.toml", "[build]\n"),
+    ] {
+        assert_eq!(std::fs::read_to_string(home.join(path)).unwrap(), text);
+    }
+    for path in [".ssh/rc", ".ssh/environment", ".ssh/new", ".cargo/config"] {
+        assert!(!home.join(path).exists(), "{path}");
+    }
+    assert!(
+        std::fs::read_to_string(home.join(".ssh/known_hosts"))
+            .unwrap()
+            .contains("other.host")
+    );
+    // Interactive runs are as before.
+    let attended = run(&home, Sandbox::for_tools(&tools(false)).unwrap(), &command).await;
+    for (_, name) in refused {
+        assert!(
+            !attended.content.contains(&format!("{name}-refused")),
+            "{name}: {}",
+            attended.content
+        );
+    }
+}
+
+#[tokio::test]
 async fn reads_can_be_narrowed() {
     if !landlock() {
         return;

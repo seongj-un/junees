@@ -374,6 +374,7 @@ async fn unattended_runs_in_the_home_folder_leave_startup_files_alone() {
         "home/.config/autostart/evil.desktop",
         "home/.local/bin/ls",
         "home/bin/git",
+        "home/.cargo/config.toml",
     ] {
         let output = write(&access, &layout.path(path), "planted\n").await;
         assert!(output.is_error, "{path}: {}", output.content);
@@ -401,8 +402,15 @@ async fn unattended_runs_in_the_home_folder_leave_startup_files_alone() {
 fn unattended_no_write_adds_authorized_keys_and_path_folders_in_home() {
     let layout = Layout::new();
     let home = layout.path("home");
-    std::fs::create_dir_all(home.join(".ssh")).unwrap();
-    std::fs::write(home.join(".ssh/authorized_keys.bak"), "key\n").unwrap();
+    std::fs::create_dir_all(home.join(".ssh/config.d")).unwrap();
+    for name in [
+        "authorized_keys.bak",
+        "known_hosts",
+        "known_hosts.old",
+        "proxy.sh",
+    ] {
+        std::fs::write(home.join(".ssh").join(name), "x\n").unwrap();
+    }
     let path = std::env::join_paths([
         home.join(".cargo/bin"),
         home.join("tools/../escape"),
@@ -421,9 +429,20 @@ fn unattended_no_write_adds_authorized_keys_and_path_folders_in_home() {
         ".ssh/authorized_keys",
         ".ssh/authorized_keys2",
         ".ssh/authorized_keys.bak",
+        ".ssh/config",
+        ".ssh/rc",
+        ".ssh/environment",
+        ".ssh/config.d",
+        ".ssh/proxy.sh",
+        ".ssh/id_ed25519",
+        ".cargo/config.toml",
         ".cargo/bin",
     ] {
         assert!(paths.contains(&home.join(name)), "{name}: {paths:?}");
+    }
+    // ssh keeps adding the hosts it meets.
+    for name in [".ssh/known_hosts", ".ssh/known_hosts.old", ".ssh"] {
+        assert!(!paths.contains(&home.join(name)), "{name}: {paths:?}");
     }
     // Not the home folder itself, nor folders outside it or not plainly
     // named.
