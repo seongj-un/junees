@@ -46,7 +46,8 @@ Checks the installation and the settings and prints ok, warn or FAIL for
 each check, with one line on how to fix it:
   state folder  $JUNEES_HOME is yours and 0700; config.toml, mcp.json,
                 cron/jobs.json, webhooks/routes.json and secrets/* are 0600
-  settings      config.toml reads (every key known) and every value reads
+  settings      config.toml reads (every key known) and every value reads;
+                the provider of the api backend and its address
   keys          which keys and tokens are set (never their values)
   claude-code   `claude --version`, and bubblewrap and user namespaces for
                 Claude Code's environment scrub
@@ -62,8 +63,9 @@ each check, with one line on how to fix it:
   plugins' manifests.
 
 Nothing is written or started, and the network is not used, unless:
-  --online   also ask the API whether it takes the key (GET /v1/models,
-             no tokens used), ask GitHub whether a newer release is out
+  --online   also ask the API whether it takes the key (GET /v1/models;
+             with provider = openai GET <openai_base_url>/models, which
+             also says whether it lists the model; no tokens used), ask GitHub whether a newer release is out
              (as `junees update --check`), run `claude auth status`, ask
              Slack's auth.test whether it takes the bot token, and
              find the authorization server of each `url` MCP server that
@@ -335,6 +337,7 @@ pub async fn run_with(
     let path = path.as_deref().map(std::ffi::OsStr::new);
     files::state_folder(&mut report, home.as_deref());
     let read = settings::settings(&mut report, settings, broken);
+    settings::provider(&mut report, settings, &read);
     settings::keys(&mut report, settings, read.backend);
     claude::check(&mut report, settings, &read, path, probe, online).await;
     services::programs(&mut report, path);
@@ -358,6 +361,7 @@ pub async fn run_with(
     }
     if online {
         online::api_key(&mut report, settings).await;
+        online::openai_models(&mut report, settings).await;
         online::release(&mut report, settings).await;
         if has_slack(settings) {
             online::slack(&mut report, settings).await;
