@@ -8,7 +8,10 @@
 //!   `{ok: false, error}`.
 //! - `auth.test` names the bot (`user_id`, `bot_id`); `apps.connections.open`
 //!   takes the app-level token and gives a Socket Mode WebSocket URL;
-//!   `chat.postMessage` posts (`channel`, `text`, `thread_ts`).
+//!   `chat.postMessage` posts (`channel`, `text`, `thread_ts`, and
+//!   `blocks` for the approval buttons), `chat.update` edits the bot's
+//!   message (`channel`, `ts`), `chat.postEphemeral` posts what only one
+//!   user sees (`user`). All three need only `chat:write`.
 //! - Rate limits ("Rate limits"): "HTTP 429 Too Many Requests ... and a
 //!   `Retry-After` HTTP header containing the number of seconds until you
 //!   can retry". A 429 was not run, so it is waited out and sent again.
@@ -200,6 +203,33 @@ impl Api {
         thread_ts: Option<&str>,
         text: &str,
     ) -> Result<(), ApiError> {
+        self.post(channel, thread_ts, text, None).await.map(drop)
+    }
+
+    /// Like [`Self::post_message`], with Block Kit `blocks` (Slack shows
+    /// those, and `text` only in notifications); the new message's `ts`.
+    pub async fn post_blocks(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        text: &str,
+        blocks: Value,
+    ) -> Result<String, ApiError> {
+        let answer = self.post(channel, thread_ts, text, Some(blocks)).await?;
+        answer
+            .get("ts")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| self.transport("chat.postMessage", "the answer has no ts"))
+    }
+
+    async fn post(
+        &self,
+        channel: &str,
+        thread_ts: Option<&str>,
+        text: &str,
+        blocks: Option<Value>,
+    ) -> Result<Value, ApiError> {
         let mut body = json!({
             "channel": channel,
             "text": text,
@@ -209,7 +239,53 @@ impl Api {
         if let Some(thread_ts) = thread_ts {
             body["thread_ts"] = json!(thread_ts);
         }
+        if let Some(blocks) = blocks {
+            body["blocks"] = blocks;
+        }
         self.call("chat.postMessage", Auth::Bot, body, Retry::Once)
+            .await
+    }
+
+    /// `chat.update` of the bot's message `ts` in `channel`: `blocks`
+    /// replace the old ones ("To remove previous `blocks`, include an
+    /// empty array"), `text` is for notifications. `parse` is sent as
+    /// `none` because this method "Defaults to `client`, unlike
+    /// `chat.postMessage`"; `link_names` is left out, which means `none`.
+    /// Sending the same edit twice changes nothing, so it is tried again
+    /// like a read.
+    pub async fn update_message(
+        &self,
+        channel: &str,
+        ts: &str,
+        text: &str,
+        blocks: Value,
+    ) -> Result<(), ApiError> {
+        let body = json!({
+            "channel": channel,
+            "ts": ts,
+            "text": text,
+            "blocks": blocks,
+            "parse": "none",
+        });
+        self.call("chat.update", Auth::Bot, body, Retry::Safe)
+            .await
+            .map(drop)
+    }
+
+    /// `chat.postEphemeral`: mrkdwn `text` only `user` sees, in `channel`
+    /// (in the thread `thread_ts`).
+    pub async fn post_ephemeral(
+        &self,
+        channel: &str,
+        user: &str,
+        thread_ts: Option<&str>,
+        text: &str,
+    ) -> Result<(), ApiError> {
+        let mut body = json!({"channel": channel, "user": user, "text": text});
+        if let Some(thread_ts) = thread_ts {
+            body["thread_ts"] = json!(thread_ts);
+        }
+        self.call("chat.postEphemeral", Auth::Bot, body, Retry::Once)
             .await
             .map(drop)
     }
