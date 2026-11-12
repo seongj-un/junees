@@ -177,6 +177,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 10. 도구와 안전: 브라우저 도구(헤드리스 Chromium, [docs/browser.md](docs/browser.md)), bash 실행 격리(Landlock, [docs/safety.md](docs/safety.md)) (완료)
 11. 릴리스와 설치: `v*` 태그의 릴리스 워크플로(Linux musl, macOS, SHA256SUMS, 출처 증명), `install.sh`, `junees update` ([docs/install.md](docs/install.md)), 첫 릴리스 v0.1.0 (완료)
 12. 게이트웨이 확장: Slack(Socket Mode), 텔레그램 HTML 서식 ([docs/gateways.md](docs/gateways.md)) (완료)
+13. 승인 버튼: 디스코드, 텔레그램, Slack 게이트웨이의 승인 질문을 버튼으로 답하기, `junees setup`의 Slack 단계 ([docs/gateways.md](docs/gateways.md)) (완료)
 
 ## 개발
 
