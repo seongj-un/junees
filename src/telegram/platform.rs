@@ -30,7 +30,7 @@ pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// U+2060 WORD JOINER: shows as nothing, and an `@name` with it after the
 /// `@` is no mention to Telegram.
-const NO_MENTION: char = '\u{2060}';
+pub(super) const NO_MENTION: char = '\u{2060}';
 
 /// `text` with each `@name` (an `@` not right after a letter, digit or
 /// `_`, followed by a letter, as usernames start) broken by an invisible
@@ -40,16 +40,30 @@ const NO_MENTION: char = '\u{2060}';
 /// stay as they are, and so do names in the path of a web address
 /// (`https://medium.com/@alice/post`), which Telegram takes as part of
 /// the link, so the hidden character would only spoil a copied link.
-/// Code in backticks is broken too: replies are plain text, where a
-/// backtick is no code to Telegram and `@name` in it still notifies.
+/// In plain text code in backticks is broken too: a backtick is no code
+/// to Telegram there and `@name` in it still notifies. HTML replies leave
+/// code entities alone ([`super::format`]).
 pub fn defuse_mentions(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut from = 0;
+    for at in mention_points(text) {
+        out.push_str(&text[from..=at]);
+        out.push(NO_MENTION);
+        from = at + 1;
+    }
+    out.push_str(&text[from..]);
+    out
+}
+
+/// The byte offsets of the `@`s in `text` that Telegram would take for
+/// mentions, as [`defuse_mentions`] describes.
+pub(super) fn mention_points(text: &str) -> Vec<usize> {
+    let mut points = Vec::new();
     let mut previous: Option<char> = None;
     // Where the current run of non-space characters starts.
     let mut word = 0;
     let mut chars = text.char_indices().peekable();
     while let Some((at, c)) = chars.next() {
-        out.push(c);
         if c.is_whitespace() {
             word = at + c.len_utf8();
         }
@@ -61,11 +75,11 @@ pub fn defuse_mentions(text: &str) -> String {
                 .is_some_and(|(_, next)| next.is_ascii_alphabetic())
             && !in_url_path(&text[word..at])
         {
-            out.push(NO_MENTION);
+            points.push(at);
         }
         previous = Some(c);
     }
-    out
+    points
 }
 
 /// Whether what comes right after `before` (a run without spaces) is in
@@ -371,7 +385,7 @@ mod tests {
             assert_eq!(defuse_mentions(kept), kept, "{kept}");
         }
         // Not in a path: the host part, no host, a host without a dot, a
-        // name after the address, and code (plain text to Telegram).
+        // name after the address, and code (plain text has no code).
         for (text, name) in [
             ("https://@alice", "alice"),
             ("https:///@alice", "alice"),
