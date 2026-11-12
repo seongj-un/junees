@@ -93,6 +93,7 @@ struct RawServer {
     trust: bool,
     timeout_secs: Option<u64>,
     cwd: Option<String>,
+    oauth: Option<super::oauth::config::RawOAuth>,
 }
 
 fn enabled_by_default() -> bool {
@@ -178,6 +179,17 @@ fn server_config(name: String, raw: RawServer) -> Result<ServerConfig> {
             if !raw.args.is_empty() || !raw.env.is_empty() || raw.cwd.is_some() {
                 bail!("`args`, `env` and `cwd` are for `command` servers, not `url` ones");
             }
+            let mut http = HttpConfig::parse(url, &raw.headers)?;
+            http.oauth = raw
+                .oauth
+                .map(super::oauth::OAuthConfig::parse)
+                .transpose()?;
+            if http.oauth.is_some() && http.has_authorization_header() {
+                bail!(
+                    "give either an `Authorization` header or `oauth`, not both: the header \
+                     would win over the login"
+                );
+            }
             return Ok(ServerConfig {
                 name,
                 command: String::new(),
@@ -187,12 +199,12 @@ fn server_config(name: String, raw: RawServer) -> Result<ServerConfig> {
                 trust: raw.trust,
                 call_timeout,
                 cwd: None,
-                http: Some(HttpConfig::parse(url, &raw.headers)?),
+                http: Some(http),
             });
         }
     };
-    if !raw.headers.is_empty() {
-        bail!("`headers` are for `url` servers");
+    if !raw.headers.is_empty() || raw.oauth.is_some() {
+        bail!("`headers` and `oauth` are for `url` servers");
     }
     if command.trim().is_empty() {
         bail!("`command` is empty");
@@ -505,6 +517,30 @@ mod tests {
             err(r#"{"servers": {"a": {"command": "x", "headers": {"A": "env:B"}}}}"#)
                 .contains("are for `url` servers")
         );
+        assert!(
+            err(r#"{"servers": {"a": {"command": "x", "oauth": {}}}}"#)
+                .contains("are for `url` servers")
+        );
+        assert!(
+            err(r#"{"servers": {"a": {"url": "https://x.dev/", "oauth": {},
+                "headers": {"authorization": "Bearer env:T"}}}}"#)
+            .contains("not both")
+        );
+        let message = err(
+            r#"{"servers": {"a": {"url": "https://x.dev/", "oauth": {"client_id": "c",
+                "client_secret": "s3cret"}}}}"#,
+        );
+        assert!(message.contains("server `a`"), "{message}");
+        assert!(!message.contains("s3cret"), "{message}");
+        let oauth = parse(
+            r#"{"servers": {"a": {"url": "https://x.dev/", "headers": {"X-Team": "env:T"},
+                "oauth": {"client_id": "c", "scope": "s"}}}}"#,
+        )
+        .unwrap()
+        .remove(0)
+        .http
+        .unwrap();
+        assert_eq!(oauth.oauth.unwrap().client_id.as_deref(), Some("c"));
         let message =
             err(r#"{"servers": {"a": {"url": "https://x.dev/", "headers": {"A": "s3cret"}}}}"#);
         assert!(message.contains("server `a`"), "{message}");

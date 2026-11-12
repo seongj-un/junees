@@ -13,6 +13,7 @@ pub mod config;
 pub mod conn;
 pub mod http;
 pub mod link;
+pub mod oauth;
 pub mod server;
 pub mod tool;
 
