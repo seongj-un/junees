@@ -883,6 +883,280 @@ async fn the_page_cannot_steer_typing_or_hide_form_fields() {
 }
 
 #[tokio::test]
+async fn the_page_cannot_change_the_target_after_the_check() {
+    let Some(program) = chromium("the_page_cannot_change_the_target_after_the_check") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    // A frame from another site (127.0.0.2 is another site than 127.0.0.1).
+    let (other, _) = serve(
+        "127.0.0.2",
+        HashMap::from([(
+            "/chat",
+            (
+                200,
+                "",
+                "<title>Chat</title><input aria-label=\"Message\">".to_string(),
+            ),
+        )]),
+    )
+    .await;
+    let pay = r#"<button id="pay" style="position:fixed;left:900px;top:600px"
+  onmouseup="fetch('/paid-up')" onclick="fetch('/paid')">Pay now</button>"#;
+    let form = r#"<form action="/login"><input aria-label="User" id="user" name="user">
+<input type="password" aria-label="Password" name="pw"><button>Sign in</button></form>"#;
+    let (address, seen) = serve(
+        "127.0.0.1",
+        HashMap::from([
+            (
+                "/move",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Move</title>{pay}
+<button id="next" onclick="fetch('/next')" onmousemove="const r = this.getBoundingClientRect();
+  const p = document.getElementById('pay'); p.style.left = r.left + 'px'; p.style.top = r.top + 'px';
+  p.style.width = r.width + 'px'; p.style.height = r.height + 'px'">Next</button>"#
+                    ),
+                ),
+            ),
+            (
+                "/down",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Down</title>{pay}
+<button id="next" onclick="fetch('/next')" onmousedown="const r = this.getBoundingClientRect();
+  const p = document.getElementById('pay'); p.style.left = r.left + 'px'; p.style.top = r.top + 'px';
+  p.style.width = r.width + 'px'; p.style.height = r.height + 'px'">Next</button>"#
+                    ),
+                ),
+            ),
+            (
+                "/key",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Key</title>{form}
+<input aria-label="Search" onkeydown="document.getElementById('user').focus()">"#
+                    ),
+                ),
+            ),
+            (
+                "/frame",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Frame</title><p>outer</p>
+<iframe id="chat" src="http://{other}/chat"></iframe>"#
+                    ),
+                ),
+            ),
+            (
+                "/frame-focus",
+                (
+                    200,
+                    "",
+                    format!(
+                        r#"<title>Frame</title><p>outer</p>
+<iframe id="chat" src="http://{other}/chat" onload="this.focus()"></iframe>"#
+                    ),
+                ),
+            ),
+            ("/login", (200, "", "<p>logged in</p>".to_string())),
+        ]),
+    )
+    .await;
+    let base = format!("http://{address}");
+    let got = |prefix: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.starts_with(prefix))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let tool = BrowserTool::new(settings(&program), Vec::new(), false);
+
+    // A mousemove handler puts a payment button under the pointer after
+    // the check: the click is not sent.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/move")}),
+    )
+    .await
+    .content;
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "button", "Next")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("not clicked") && output.content.contains("Pay now"),
+        "{}",
+        output.content
+    );
+
+    // A mousedown handler does it: the guard stops the release on the
+    // payment button.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/down")}),
+    )
+    .await
+    .content;
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "button", "Next")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("the click was stopped")
+            && output.content.contains("payment or purchase button"),
+        "{}",
+        output.content
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(got("/paid"), Vec::<String>::new());
+
+    // A keydown handler moves the focus into a password form: the guard
+    // stops the rest of the key press, so the form is not sent.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/key")}),
+    )
+    .await
+    .content;
+    let output = run(
+        &tool,
+        json!({"action": "press", "ref": number(&page, "textbox", "Search"), "key": "Enter"}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("the key press was stopped")
+            && output
+                .content
+                .contains("submits a form with a password field"),
+        "{}",
+        output.content
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(got("/login"), Vec::<String>::new());
+    // Other keys still go through.
+    let output = run(
+        &tool,
+        json!({"action": "press", "ref": number(&page, "textbox", "Search"), "key": "Tab"}),
+    )
+    .await;
+    assert!(!output.is_error, "{}", output.content);
+
+    // The focus in a frame of another site: Enter there is risky.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/frame")}),
+    )
+    .await
+    .content;
+    assert!(
+        page.contains("[frame from another site: not shown]"),
+        "{page}"
+    );
+    run(&tool, json!({"action": "close"})).await;
+    let tool = BrowserTool::new(settings(&program), Vec::new(), true);
+    let gate = Approval::new(
+        ApprovalMode::Risky,
+        &ToolSettings::default(),
+        Workspace::new(&std::env::temp_dir()),
+    )
+    .with_questions(TOOL_NAME, Some(tool.questions()));
+    let kinds = |input: Value| gate.request(TOOL_NAME, &input).map(|request| request.kinds);
+    // Approved actions on the element asked about go through the guard.
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/down")}),
+    )
+    .await
+    .content;
+    let click = json!({"action": "click", "ref": number(&page, "button", "Pay now")});
+    assert_eq!(kinds(click.clone()), Some(vec![KIND_SUBMIT.to_string()]));
+    let output = run(&tool, click).await;
+    assert!(!output.is_error, "{}", output.content);
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/key")}),
+    )
+    .await
+    .content;
+    let press = json!({"action": "press", "ref": number(&page, "textbox", "User"), "key": "Enter"});
+    assert_eq!(kinds(press.clone()), Some(vec![KIND_SUBMIT.to_string()]));
+    let output = run(&tool, press).await;
+    assert!(output.content.contains("logged in"), "{}", output.content);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(got("/paid"), ["/paid-up", "/paid"]);
+    assert_eq!(got("/login").len(), 1);
+
+    run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/frame")}),
+    )
+    .await;
+    assert_eq!(kinds(json!({"action": "press", "key": "Enter"})), None);
+    // The page moves the focus into the frame after the snapshot: the
+    // key press is refused with a hint to take a snapshot.
+    run(
+        &tool,
+        json!({"action": "evaluate", "expression": "document.getElementById('chat').focus()"}),
+    )
+    .await;
+    let output = run(&tool, json!({"action": "press", "key": "Enter"})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("frame from another site")
+            && output.content.contains("take a snapshot"),
+        "{}",
+        output.content
+    );
+    // After a snapshot the approval question names it, and the approved
+    // key press goes into the frame.
+    run(&tool, json!({"action": "snapshot"})).await;
+    let request = gate
+        .request(TOOL_NAME, &json!({"action": "press", "key": "Enter"}))
+        .unwrap();
+    assert_eq!(request.kinds, [KIND_SUBMIT]);
+    assert!(
+        format!("{request:?}").contains("frame from another site"),
+        "{request:?}"
+    );
+    let output = run(&tool, json!({"action": "press", "key": "Enter"})).await;
+    assert!(!output.is_error, "{}", output.content);
+    run(&tool, json!({"action": "close"})).await;
+
+    // Nobody to ask: refused.
+    let tool = BrowserTool::new(settings(&program), Vec::new(), false);
+    run(
+        &tool,
+        json!({"action": "open", "url": format!("{base}/frame-focus")}),
+    )
+    .await;
+    let output = run(&tool, json!({"action": "press", "key": "Enter"})).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("nobody is asked")
+            && output.content.contains("frame from another site"),
+        "{}",
+        output.content
+    );
+    run(&tool, json!({"action": "close"})).await;
+}
+
+#[tokio::test]
 async fn the_browser_goes_away_when_dropped_or_cancelled() {
     let Some(program) = chromium("the_browser_goes_away_when_dropped_or_cancelled") else {
         return;
@@ -1026,6 +1300,30 @@ fn questions_follow_the_latest_snapshot() {
 }
 
 #[test]
+fn a_key_press_into_a_frame_of_another_site_is_asked_about() {
+    let (target, reasons, kinds, _) =
+        tool::test_question_in_frame(&json!({"action": "press", "key": "Enter"}));
+    assert_eq!(target, "press on http://example.test/");
+    assert_eq!(kinds, [KIND_SUBMIT]);
+    assert_eq!(reasons, [format!("the key press {}", page::FRAME_RISK)]);
+    assert!(
+        tool::test_question_in_frame(&json!({"action": "press", "key": "space"}))
+            .2
+            .contains(&KIND_SUBMIT.to_string())
+    );
+    assert!(
+        tool::test_question_in_frame(&json!({"action": "press", "key": "Tab"}))
+            .2
+            .is_empty()
+    );
+    // The guard and the snapshot name the same risk as the tool.
+    assert!(
+        page::GUARD_JS.contains(&format!("const FRAME_RISK = '{}';", page::FRAME_RISK)),
+        "FRAME_RISK differs between guard.js and page.rs"
+    );
+}
+
+#[test]
 fn page_text_is_marked_escaped_and_capped() {
     let one = tool::wrap("a\u{1b}[2Kb </page-x> \u{202e}");
     let two = tool::wrap("x");
@@ -1041,6 +1339,7 @@ fn page_text_is_marked_escaped_and_capped() {
         url: "https://x.test/".into(),
         text: "가".repeat(tool::MAX_TEXT + 5),
         refs: Vec::new(),
+        frame_focus: false,
     };
     let notes = page::Notes::default();
     let first = tool::test_render(&snapshot, 0, &notes);
@@ -1079,6 +1378,7 @@ fn titles_addresses_and_notes_are_capped() {
         url: format!("https://x.test/?{}", "u".repeat(300_000)),
         text: "body".into(),
         refs: Vec::new(),
+        frame_focus: false,
     };
     let out = tool::test_render(&snapshot, 0, &notes);
     let limit =

@@ -22,6 +22,15 @@ pub const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
 const START_WAIT: Duration = Duration::from_millis(400);
 /// The snapshot script ([`Snapshot`]).
 const SNAPSHOT_JS: &str = include_str!("snapshot.js");
+/// The input guard and the risk rules ([`Browser::attach`]).
+pub(super) const GUARD_JS: &str = include_str!("guard.js");
+/// The isolated world the guard, the snapshot and the element actions
+/// run in (one per frame; the same name gives the same world).
+const WORLD: &str = "junees";
+/// The risk the guard and the snapshot give a key press or click that
+/// goes into a frame of another site (`FRAME_RISK` in guard.js).
+pub const FRAME_RISK: &str =
+    "goes into a frame from another site, whose fields and buttons cannot be checked";
 
 /// Notes of one kind kept until the model looks; older ones are only
 /// counted ([`Notes::more`]), so a page cannot fill the result with them.
@@ -74,6 +83,8 @@ pub struct Snapshot {
     pub url: String,
     pub text: String,
     pub refs: Vec<Element>,
+    /// The focus is in a frame of another site.
+    pub frame_focus: bool,
 }
 
 /// What a snapshot says about one numbered element.
@@ -216,6 +227,13 @@ impl Browser {
         self.session = session;
         self.world = None;
         self.call_page("Page.enable", json!({})).await?;
+        // The input guard runs in every frame of every document before
+        // the page's own scripts, so its listeners come first.
+        self.call_page(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": GUARD_JS, "worldName": WORLD, "runImmediately": true}),
+        )
+        .await?;
         // The window holds some browser frame even headless: lay the page
         // out at exactly the size screenshots and scrolling assume.
         let (width, height) = process::WINDOW;
@@ -369,7 +387,11 @@ impl Browser {
     /// actions then use.
     pub async fn snapshot(&mut self) -> Result<Snapshot> {
         let world = self.new_world().await?;
-        let value = self.evaluate_in(world, SNAPSHOT_JS).await?;
+        // The guard is already there unless this document came without
+        // it; then it starts here, late but still before the actions.
+        let value = self
+            .evaluate_in(world, &format!("{GUARD_JS}\n;{SNAPSHOT_JS}"))
+            .await?;
         self.world = Some(world);
         let refs = value["refs"]
             .as_array()
@@ -389,6 +411,7 @@ impl Browser {
             url: text(&value["url"]),
             text: text(&value["text"]),
             refs,
+            frame_focus: value["frame_focus"].as_bool().unwrap_or(false),
         })
     }
 
@@ -405,7 +428,7 @@ impl Browser {
         let world = self
             .call_page(
                 "Page.createIsolatedWorld",
-                json!({"frameId": self.target, "worldName": "junees"}),
+                json!({"frameId": self.target, "worldName": WORLD}),
             )
             .await?;
         world["executionContextId"]
@@ -476,20 +499,66 @@ impl Browser {
         }))
     }
 
-    /// Clicks at `(x, y)` like a mouse, then waits for what it started.
+    /// Moves the mouse to `(x, y)` (the page's mousemove handlers run
+    /// before this returns).
+    pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
+        self.call_page(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseMoved", "x": x, "y": y}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Presses and releases the left button at `(x, y)` (after
+    /// [`Self::move_mouse`] there), then waits for what it started.
     pub async fn click_at(&mut self, x: f64, y: f64) -> Result<()> {
         let mut events = self.events.subscribe();
-        for (kind, buttons) in [("mouseMoved", 0), ("mousePressed", 1), ("mouseReleased", 0)] {
-            let mut params = json!({"type": kind, "x": x, "y": y});
-            if kind != "mouseMoved" {
-                params["button"] = json!("left");
-                params["clickCount"] = json!(1);
-                params["buttons"] = json!(buttons);
-            }
+        for (kind, buttons) in [("mousePressed", 1), ("mouseReleased", 0)] {
+            let params = json!({"type": kind, "x": x, "y": y, "button": "left",
+                                "clickCount": 1, "buttons": buttons});
             self.call_page("Input.dispatchMouseEvent", params).await?;
         }
         self.wait_for_load(&mut events, false).await;
         Ok(())
+    }
+
+    /// Arms the input guard of every frame below the top one with `arm`
+    /// (`null` disarms it): an approved action on an element in a frame,
+    /// which the top frame's call cannot hand to that frame's guard.
+    /// Frames of other sites run elsewhere and are skipped.
+    pub async fn arm_frames(&self, arm: &Value) {
+        let Ok(tree) = self.call_page("Page.getFrameTree", json!({})).await else {
+            return;
+        };
+        let mut frames = Vec::new();
+        let mut todo: Vec<&Value> = tree["frameTree"]["childFrames"]
+            .as_array()
+            .map(|children| children.iter().collect())
+            .unwrap_or_default();
+        while let Some(node) = todo.pop() {
+            if let Some(id) = node["frame"]["id"].as_str() {
+                frames.push(id.to_string());
+            }
+            if let Some(children) = node["childFrames"].as_array() {
+                todo.extend(children);
+            }
+        }
+        let call = format!("globalThis.__juneesGuard && globalThis.__juneesGuard.arm({arm})");
+        for frame in frames {
+            let Ok(world) = self
+                .call_page(
+                    "Page.createIsolatedWorld",
+                    json!({"frameId": frame, "worldName": WORLD}),
+                )
+                .await
+            else {
+                continue;
+            };
+            if let Some(context) = world["executionContextId"].as_i64() {
+                let _ = self.evaluate_in(context, &call).await;
+            }
+        }
     }
 
     /// Presses `key` and waits for what it started.

@@ -2,24 +2,21 @@
 // (Page.createIsolatedWorld): it shares the page's DOM but not its
 // JavaScript, so the page cannot change what these functions see or do
 // by replacing built-in methods. Evaluates to the snapshot; the element
-// list stays in this world for the actions below.
+// list stays in this world for the actions below. The tool runs guard.js
+// in front of it (the world is the one the guard runs in at document
+// start).
 (() => {
-  const LABEL = 80;
   const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'META', 'LINK', 'svg', 'SVG']);
   const BLOCK = new Set(['ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'BR', 'DD', 'DETAILS', 'DIALOG',
     'DIV', 'DL', 'DT', 'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM', 'H1', 'H2', 'H3', 'H4',
     'H5', 'H6', 'HEADER', 'HR', 'LI', 'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TD', 'TH',
     'TR', 'UL', 'LEGEND', 'CAPTION']);
-  const ROLES = new Set(['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'menuitemcheckbox',
-    'menuitemradio', 'option', 'switch', 'textbox', 'combobox', 'searchbox', 'slider', 'spinbutton', 'treeitem']);
-  const PAYMENT_NAME = /(card.?num|cc.?(num|no)|cvc|cvv|csc|security.?code|expir|exp.?(date|month|year)|iban|account.?num|routing)/i;
-  const PAYMENT_LABEL = /\b(pay|payment|purchase|buy|checkout|check out|place order|order now|subscribe|donate|transfer|send money)\b|결제|구매|주문|송금|이체|후원/i;
-
-  const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
-  const short = (text, max) => {
-    const t = clean(text);
-    return t.length > max ? t.slice(0, max) + '...' : t;
-  };
+  // The risk rules, shared with the input guard (guard.js, which runs
+  // in front of this script).
+  const {
+    clean, short, kind, label, typeRisk, clickRisk, enterRisk, pointRisk, closedFrame, FRAME_RISK,
+  } = globalThis.__juneesLib;
+  const LABEL = 80;
 
   function visible(el) {
     if (el.hidden) return false;
@@ -27,112 +24,6 @@
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
     if (style.display === 'contents') return true;
     return el.getClientRects().length > 0;
-  }
-
-  function kind(el) {
-    const tag = el.tagName;
-    if (tag === 'A' && el.hasAttribute('href')) return 'link';
-    if (tag === 'BUTTON') return 'button';
-    if (tag === 'SELECT') return 'select';
-    if (tag === 'TEXTAREA') return 'textbox';
-    if (tag === 'SUMMARY') return 'button';
-    if (tag === 'INPUT') {
-      const type = (el.type || 'text').toLowerCase();
-      if (type === 'hidden') return null;
-      if (['submit', 'button', 'reset', 'image'].includes(type)) return 'button';
-      if (['checkbox', 'radio', 'file', 'range', 'color'].includes(type)) return type;
-      if (type === 'password') return 'password';
-      return 'textbox';
-    }
-    if (el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable)) return 'textbox';
-    const role = (el.getAttribute('role') || '').toLowerCase();
-    if (ROLES.has(role)) return role;
-    if (el.hasAttribute('onclick')) return 'clickable';
-    return null;
-  }
-
-  function label(el) {
-    const aria = el.getAttribute('aria-label');
-    if (aria) return short(aria, LABEL);
-    const by = el.getAttribute('aria-labelledby');
-    if (by) {
-      const text = by.split(/\s+/).map((id) => {
-        const target = el.ownerDocument.getElementById(id);
-        return target ? target.innerText || target.textContent : '';
-      }).join(' ');
-      if (clean(text)) return short(text, LABEL);
-    }
-    if (el.labels && el.labels.length) {
-      const text = Array.from(el.labels).map((l) => l.innerText).join(' ');
-      if (clean(text)) return short(text, LABEL);
-    }
-    if (el.tagName === 'INPUT' && ['submit', 'button', 'reset'].includes((el.type || '').toLowerCase())) {
-      return short(el.value || el.type, LABEL);
-    }
-    const text = el.tagName === 'SELECT' ? '' : clean(el.innerText);
-    if (text) return short(text, LABEL);
-    for (const name of ['placeholder', 'title', 'alt', 'name']) {
-      const value = el.getAttribute(name);
-      if (value) return short(value, LABEL);
-    }
-    const img = el.querySelector && el.querySelector('img[alt]');
-    if (img) return short(img.getAttribute('alt'), LABEL);
-    return '';
-  }
-
-  function payment(el) {
-    if (el.tagName !== 'INPUT' && el.tagName !== 'SELECT') return false;
-    const auto = (el.getAttribute('autocomplete') || '').toLowerCase();
-    if (/(^|\s)cc-/.test(auto)) return true;
-    return PAYMENT_NAME.test((el.name || '') + ' ' + (el.id || ''));
-  }
-
-  // Why typing into `el` needs the user's approval, or ''.
-  function typeRisk(el) {
-    if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'password') return 'a password field';
-    if (payment(el)) return 'a payment card or bank account field';
-    return '';
-  }
-
-  // What submitting the form `el` belongs to would send, or ''.
-  function formRisk(el) {
-    const form = el.form || (el.closest && el.closest('form'));
-    if (!form) return '';
-    // `form.elements` also holds fields outside the form tied to it by a
-    // `form=` attribute.
-    const fields = Array.from(form.elements).filter((f) => f.tagName === 'INPUT' || f.tagName === 'SELECT');
-    if (fields.some((f) => f.tagName === 'INPUT' && (f.type || '').toLowerCase() === 'password')) {
-      return 'submits a form with a password field';
-    }
-    if (fields.some(payment)) return 'submits a form with payment fields';
-    return '';
-  }
-
-  function submits(el) {
-    if (el.tagName === 'BUTTON') return (el.getAttribute('type') || 'submit').toLowerCase() === 'submit';
-    if (el.tagName === 'INPUT') return ['submit', 'image'].includes((el.type || '').toLowerCase());
-    return false;
-  }
-
-  // Why clicking `el` needs the user's approval, or ''.
-  function clickRisk(el) {
-    const k = kind(el);
-    if (!k || ['textbox', 'password', 'select', 'checkbox', 'radio', 'range', 'color', 'file'].includes(k)) return '';
-    if (submits(el)) {
-      const risk = formRisk(el);
-      if (risk) return risk;
-    }
-    const text = label(el);
-    if (PAYMENT_LABEL.test(text)) return 'looks like a payment or purchase button ("' + text + '")';
-    return '';
-  }
-
-  // Why pressing Enter in `el` needs the user's approval, or ''.
-  function enterRisk(el) {
-    if (!el) return '';
-    const k = kind(el);
-    if (k === 'textbox' || k === 'password' || k === 'checkbox' || k === 'radio' || k === 'select') return formRisk(el);
-    return clickRisk(el);
   }
 
   function describe(el) {
@@ -223,9 +114,22 @@
     return el;
   }
 
+  // Whether a click at `hit` lands on `el` (or a label of it).
+  function onElement(el, hit) {
+    if (!hit || hit === el || el.contains(hit) || hit.contains(el)) return true;
+    return !!(el.labels && Array.from(el.labels).some((l) => l.contains(hit)));
+  }
+
+  function name(el) {
+    return el.tagName.toLowerCase() + (label(el) ? ' "' + label(el) + '"' : '');
+  }
+
   // Where to click element `n`: the middle of it after scrolling it into
   // view, in the top page's coordinates; what covers it; and its risk now.
-  function point(n) {
+  // Arms the input guard in the same call: from here on a mouse event
+  // whose target needs approval goes through only when it is `el` and
+  // `approved` (the question named this element).
+  function point(n, approved) {
     const el = element(n);
     if (!el) return { error: 'gone' };
     el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -241,15 +145,52 @@
       y += frame.top + win.frameElement.clientTop;
       win = win.frameElement.ownerDocument.defaultView;
     }
-    const inLabel = el.labels && Array.from(el.labels).some((l) => l.contains(hit));
-    const fine = !hit || hit === el || el.contains(hit) || hit.contains(el) || inLabel;
     let covered = '';
-    if (!fine) {
-      covered = hit.tagName.toLowerCase() + (label(hit) ? ' "' + label(hit) + '"' : '');
-      const risk = clickRisk(hit.closest('a, button, input, [role]') || hit);
+    if (!onElement(el, hit)) {
+      covered = name(hit);
+      const risk = pointRisk(hit);
       if (risk) return { error: 'covered', covered, risk };
     }
-    return { x, y, covered, click_risk: clickRisk(el), kind: kind(el) };
+    globalThis.__juneesGuard.arm({ el, approved: !!approved });
+    return {
+      x, y, covered, click_risk: clickRisk(el), kind: kind(el), in_frame: el.ownerDocument !== document,
+    };
+  }
+
+  // The element at (`x`, `y`) of the top page, inside frames of this site
+  // and open shadow roots too.
+  function hitAt(x, y) {
+    let doc = document;
+    let hit = doc.elementFromPoint(x, y);
+    for (;;) {
+      if (hit && hit.shadowRoot) {
+        const inner = hit.shadowRoot.elementFromPoint(x, y);
+        if (inner && inner !== hit) { hit = inner; continue; }
+      }
+      if (hit && (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') && !closedFrame(hit)) {
+        const frame = hit.getBoundingClientRect();
+        x -= frame.left + hit.clientLeft;
+        y -= frame.top + hit.clientTop;
+        doc = hit.contentDocument;
+        const inner = doc.elementFromPoint(x, y);
+        if (!inner) return hit;
+        hit = inner;
+        continue;
+      }
+      return hit;
+    }
+  }
+
+  // What is under the pointer at (`x`, `y`) now that it moved there for
+  // element `n` (a mousemove handler may have put something else there).
+  function recheck(n, x, y) {
+    const el = element(n);
+    if (!el) return { error: 'gone' };
+    const hit = hitAt(x, y);
+    if (onElement(el, hit)) return {};
+    const risk = pointRisk(hit);
+    if (risk) return { error: 'covered', covered: name(hit), risk };
+    return {};
   }
 
   // Types `text` into element `n` (replacing what it holds when `clear`).
@@ -286,13 +227,25 @@
     return {};
   }
 
-  // Focuses element `n` before a key press.
-  function focusOnly(n) {
-    const el = element(n);
-    if (!el) return { error: 'gone' };
-    el.scrollIntoView({ block: 'center', behavior: 'instant' });
-    el.focus();
-    return {};
+  // Focuses element `n` (when given) for a key press, then reads the
+  // risk of Enter or Space (`submits`) in the focused element and arms
+  // the input guard, all in this one call: a key event whose target
+  // needs approval then goes through only when it is that element and
+  // `approved`. `in_frame` says the focus is in a frame (approved key
+  // presses there need the guard of that frame armed too).
+  function armKey(n, submits, approved) {
+    if (n) {
+      const el = element(n);
+      if (!el) return { error: 'gone' };
+      el.scrollIntoView({ block: 'center', behavior: 'instant' });
+      el.focus();
+    }
+    const active = deepActive();
+    globalThis.__juneesGuard.arm({ el: active, approved: !!approved, key: true });
+    return {
+      risk: submits ? enterRisk(active) : '',
+      in_frame: !!active && (active.ownerDocument !== document || closedFrame(active)),
+    };
   }
 
   // Chooses the option of select `n` whose text or value is `wanted`.
@@ -332,13 +285,16 @@
   }
 
   globalThis.__junees = {
-    point, typeInto, focusOnly, choose, value,
-    enterRisk: () => enterRisk(deepActive()),
+    point, recheck, typeInto, armKey, choose, value,
+    // The input events the guard stopped since it was armed; disarms it.
+    stopped: () => globalThis.__juneesGuard.take(),
   };
   return {
     title: document.title,
     url: location.href,
     text: lines.join('\n'),
     refs: info,
+    // The focus is in a frame of another site (Enter there is unchecked).
+    frame_focus: closedFrame(deepActive()),
   };
 })()
