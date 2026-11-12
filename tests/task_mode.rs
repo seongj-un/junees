@@ -781,7 +781,11 @@ async fn until(what: &str, mut check: impl FnMut() -> bool) {
 #[tokio::test]
 async fn sigterm_stops_task_run_with_a_checkpoint_and_status_143() {
     let home = tempfile::tempdir().unwrap();
-    let pid_file = home.path().join("pid");
+    // In a folder made beforehand: the state folder is in `home`, which
+    // the bash sandbox then keeps new entries out of.
+    let run_dir = home.path().join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let pid_file = run_dir.join("pid");
     let features = json!([
         {"id": "F1", "description": "done.txt exists", "verify": "test -f done.txt", "passes": false}
     ]);
