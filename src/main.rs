@@ -17,7 +17,7 @@ use junees::config_file::Settings;
 use junees::context_files::ContextFiles;
 use junees::gateway::Gateway;
 use junees::gateway::config::DiscordConfig;
-use junees::gateway::engine::{ApiEngines, ClaudeEngines, Engines};
+use junees::gateway::engine::{ApiEngines, ClaudeEngines, Engines, GATEWAY_NOTE};
 use junees::images::{self, Image};
 use junees::mcp::Mcp;
 use junees::memory::{Memory, MemoryTool, Mode, Target};
@@ -35,6 +35,8 @@ use junees::subagent;
 use junees::task::budget::Budget;
 use junees::task::state::StopReason;
 use junees::task::{self, Report, TaskEnv};
+use junees::telegram::config::TelegramConfig;
+use junees::telegram::{TELEGRAM_NOTE, TelegramGateway};
 use junees::tools::{ToolRegistry, ToolSettings};
 use junees::web_search;
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -179,6 +181,7 @@ async fn run() -> Result<ExitCode> {
         Command::Run(args) => conversation(args, settings, input).await,
         Command::Task(command) => run_task(command, &settings).await,
         Command::Gateway => discord_gateway(&settings).await,
+        Command::Telegram => telegram_gateway(&settings).await,
         Command::Cron(command) => junees::cron::command::main(command, settings).await,
         Command::Webhook(command) => junees::webhook::command::main(command, settings).await,
         Command::Setup
@@ -263,7 +266,7 @@ fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     // The gateway usually runs as a service, with no one to answer.
     if matches!(
         command,
-        Command::Gateway | Command::Cron(_) | Command::Webhook(_)
+        Command::Gateway | Command::Telegram | Command::Cron(_) | Command::Webhook(_)
     ) || settings.file_exists()
         || settings.path().is_none()
         || settings.env("ANTHROPIC_API_KEY").is_some()
@@ -707,8 +710,71 @@ async fn conversation(
 /// turns (recorded in their sessions) and close the connection; a second
 /// one quits at once.
 async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
+    let discord = DiscordConfig::from_lookup(|key| settings.get(key))?;
+    let started = gateway_engines(settings, GATEWAY_NOTE).await?;
+    let cancel = Cancel::new();
+    cancel_on_signals(Signals::install()?, cancel.clone());
+    eprintln!(
+        "junees {VERSION} gateway, working in {}; SIGINT or SIGTERM stops it",
+        started.cwd.display()
+    );
+    let memory = conversation_memory(&started.config, &started.cwd);
+    let result = Gateway::new(
+        discord,
+        started.engines,
+        started.config.home.clone(),
+        started.cwd,
+        memory,
+    )
+    .run(cancel)
+    .await;
+    started.mcp.shutdown().await;
+    result?;
+    eprintln!("gateway stopped");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `junees gateway telegram`: Junees as a Telegram bot, like
+/// [`discord_gateway`].
+async fn telegram_gateway(settings: &Settings) -> Result<ExitCode> {
+    let telegram = TelegramConfig::from_lookup(|key| settings.get(key))?;
+    let started = gateway_engines(settings, TELEGRAM_NOTE).await?;
+    let cancel = Cancel::new();
+    cancel_on_signals(Signals::install()?, cancel.clone());
+    eprintln!(
+        "junees {VERSION} telegram gateway, working in {}; SIGINT or SIGTERM stops it",
+        started.cwd.display()
+    );
+    let memory = conversation_memory(&started.config, &started.cwd);
+    let result = TelegramGateway::new(
+        telegram,
+        started.engines,
+        started.config.home.clone(),
+        started.cwd,
+        memory,
+    )
+    .run(cancel)
+    .await;
+    started.mcp.shutdown().await;
+    result?;
+    eprintln!("telegram gateway stopped");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What a gateway runs its conversations with.
+struct GatewayEngines {
+    engines: Arc<dyn Engines>,
+    config: Config,
+    cwd: PathBuf,
+    /// Shut down when the gateway stops.
+    mcp: Arc<Mcp>,
+}
+
+/// The conversations of a gateway on the backend the settings name,
+/// working in the current folder; `note` tells the model which chat it
+/// talks through.
+async fn gateway_engines(settings: &Settings, note: &'static str) -> Result<GatewayEngines> {
     let lookup = |key: &str| settings.get(key);
-    let discord = DiscordConfig::from_lookup(lookup)?;
     let backend = Backend::from_lookup(lookup)?;
     let config = conversation_config(settings, backend)?;
     let cwd = std::env::current_dir()?;
@@ -720,7 +786,8 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
         Backend::Api => Arc::new(
             ApiEngines::new(config.clone(), cwd.clone())
                 .with_mcp(Arc::clone(&mcp))
-                .with_plugins(load_plugins(&config, &cwd)),
+                .with_plugins(load_plugins(&config, &cwd))
+                .with_note(note),
         ),
         Backend::ClaudeCode => {
             let claude = ClaudeCode::from_lookup(lookup);
@@ -732,23 +799,15 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
                 "Claude Code {version}; it runs commands without approval questions (only the \
                  command policy deny rules apply)"
             );
-            Arc::new(ClaudeEngines::new(claude, config.clone(), cwd.clone()))
+            Arc::new(ClaudeEngines::new(claude, config.clone(), cwd.clone()).with_note(note))
         }
     };
-    let cancel = Cancel::new();
-    cancel_on_signals(Signals::install()?, cancel.clone());
-    eprintln!(
-        "junees {VERSION} gateway, working in {}; SIGINT or SIGTERM stops it",
-        cwd.display()
-    );
-    let memory = conversation_memory(&config, &cwd);
-    let result = Gateway::new(discord, engines, config.home.clone(), cwd, memory)
-        .run(cancel)
-        .await;
-    mcp.shutdown().await;
-    result?;
-    eprintln!("gateway stopped");
-    Ok(ExitCode::SUCCESS)
+    Ok(GatewayEngines {
+        engines,
+        config,
+        cwd,
+        mcp,
+    })
 }
 
 /// `junees status`, for the git repository the current folder is in.
