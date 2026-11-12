@@ -1655,6 +1655,18 @@ async fn the_browser_program_and_its_version() {
         &format!("Chromium 145.0.7632.6 ({})", browser.display()),
     );
     expect(&report, "browser", "program", Status::Ok, "sandbox off");
+    // Chrome's proxy, from the variables it reads.
+    fixture.set("HTTPS_PROXY", "http://user:secret@10.0.0.5:3128/");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "browser",
+        "program",
+        Status::Ok,
+        "through the proxy 10.0.0.5 (pages that come from its address are not checked",
+    );
+    assert!(!report.text().contains("secret"), "{}", report.text());
+    fixture.set("HTTPS_PROXY", "");
 
     // Off, with a path set: still looked at, but only a warning.
     fixture.set("JUNEES_BROWSER", "off");

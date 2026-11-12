@@ -1,6 +1,6 @@
 //! The `browser` tool's program: found, and `--version` (offline: Chrome
-//! prints its version and exits); and a profiles folder too long to hold
-//! Chrome's socket.
+//! prints its version and exits), with the proxy Chrome would use; and a
+//! profiles folder too long to hold Chrome's socket.
 
 use std::ffi::OsStr;
 
@@ -74,6 +74,14 @@ pub(super) async fn check(
             }
             if browser.no_sandbox {
                 detail.push_str("; Chrome's sandbox off (browser_no_sandbox)");
+            }
+            let proxies = process::proxies(|name| settings.env(name), &[]);
+            if !proxies.is_empty() {
+                detail.push_str(&format!(
+                    "; through the proxy {} (pages that come from its address are not checked \
+                     for DNS rebinding: the proxy resolves the names)",
+                    crate::prompt_text::escape_hidden(&proxies.join(", "))
+                ));
             }
             report.ok(AREA, "program", detail);
         }
