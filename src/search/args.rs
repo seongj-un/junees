@@ -6,7 +6,7 @@ use std::time::Duration;
 use super::{DEFAULT_LIMIT, MAX_LIMIT, Options, Query, SOURCES};
 
 pub const USAGE: &str = "usage: junees sessions search [--all] [--limit N] \
-                         [--source terminal|discord|cron|webhook|all] [--session ID] \
+                         [--source terminal|discord|telegram|cron|webhook|all] [--session ID] \
                          <words or \"a phrase\">";
 
 /// A search a person asked for.

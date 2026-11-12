@@ -510,8 +510,8 @@ fn the_terminal_list_is_numbered() {
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(
         lines[0],
-        "2 sessions match `needle` in this folder (/w) from terminal, discord, cron, webhook, \
-         newest first:"
+        "2 sessions match `needle` in this folder (/w) from terminal, discord, telegram, cron, \
+         webhook, newest first:"
     );
     assert!(lines[1].starts_with(&format!("  1  {new}  ")), "{text}");
     assert!(lines[1].ends_with(" UTC  /w  [cron j]"), "{text}");
