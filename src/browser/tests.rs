@@ -121,6 +121,7 @@ const HOME_PAGE: &str = r#"<!doctype html><html><head><title>Test page</title></
 <form action="/login" method="get">
   <label for="user">User</label><input id="user" name="user">
   <label for="pw">Password</label><input id="pw" type="password" name="pw">
+  <input id="keep" type="checkbox" name="keep"><label for="keep">Keep me signed in</label>
   <button type="submit">Sign in</button>
 </form>
 <button>Buy now</button>
@@ -582,6 +583,10 @@ async fn risky_actions_need_an_approval() {
             "password field",
         ),
         (
+            json!({"action": "press", "ref": number(&page, "checkbox", "Keep me signed in"), "key": "Enter"}),
+            "password field",
+        ),
+        (
             json!({"action": "evaluate", "expression": "document.title"}),
             "nobody is asked",
         ),
@@ -595,6 +600,21 @@ async fn risky_actions_need_an_approval() {
         );
         assert!(output.content.contains(risk), "{input}: {}", output.content);
     }
+    // Space toggles a checkbox of the password form, which sends nothing.
+    let keep = number(&page, "checkbox", "Keep me signed in");
+    let output = run(
+        &tool,
+        json!({"action": "press", "ref": keep, "key": "space"}),
+    )
+    .await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output
+            .content
+            .contains(&format!("[{keep} checkbox \"Keep me signed in\" checked]")),
+        "{}",
+        output.content
+    );
     let output = run(&tool, json!({"action": "type", "ref": user, "text": "me"})).await;
     assert!(!output.is_error, "{}", output.content);
     // Enter in the field just typed into still submits the password form.
@@ -1380,6 +1400,7 @@ fn questions_follow_the_latest_snapshot() {
             kind: "button".into(),
             click_risk: "submits a form with a password field".into(),
             enter_risk: "submits a form with a password field".into(),
+            space_risk: "submits a form with a password field".into(),
             ..Element::default()
         },
     ];
@@ -1417,6 +1438,12 @@ fn questions_follow_the_latest_snapshot() {
     assert_eq!(
         q(None, json!({"action": "press", "ref": 3, "key": "space"})).2,
         [KIND_SUBMIT]
+    );
+    // Space in a field of a password form sends nothing: not asked.
+    assert!(
+        q(None, json!({"action": "press", "ref": 2, "key": "space"}))
+            .2
+            .is_empty()
     );
     assert!(
         q(Some(2), json!({"action": "press", "key": "Tab"}))

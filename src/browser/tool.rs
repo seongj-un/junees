@@ -185,7 +185,7 @@ fn question(known: &Known, input: &Value) -> Question {
             _ => return (target, Vec::new(), Vec::new(), None),
         },
         "press" if submit_key(input) => {
-            let risk = enter_risk(known, element);
+            let risk = key_risk(known, element, space_key(input));
             if risk.is_empty() {
                 return (target, Vec::new(), Vec::new(), None);
             }
@@ -207,15 +207,21 @@ fn question(known: &Known, input: &Value) -> Question {
     (target, vec![reason], vec![kind.to_string()], preview)
 }
 
-/// What the latest snapshot says Enter or Space would do: in element
-/// `element`, else in the element the last action focused, else in a
-/// frame of another site holding the focus.
-fn enter_risk(known: &Known, element: Option<usize>) -> String {
+/// What the latest snapshot says Enter (or Space, when `space`) would
+/// do: in element `element`, else in the element the last action
+/// focused, else in a frame of another site holding the focus.
+fn key_risk(known: &Known, element: Option<usize>, space: bool) -> String {
     match element.or(known.focused) {
         Some(n) => known
             .refs
             .get(n.wrapping_sub(1))
-            .map(|element| element.enter_risk.clone())
+            .map(|element| {
+                if space {
+                    element.space_risk.clone()
+                } else {
+                    element.enter_risk.clone()
+                }
+            })
             .unwrap_or_default(),
         None if known.frame_focus => FRAME_RISK.to_string(),
         None => String::new(),
@@ -247,6 +253,12 @@ fn element_number(input: &Value) -> Option<usize> {
 fn submit_key(input: &Value) -> bool {
     let key = input.get("key").and_then(Value::as_str).unwrap_or("");
     page::key(key).is_some_and(|key| key.code == "Enter" || key.code == "Space")
+}
+
+/// The key pressed is Space.
+fn space_key(input: &Value) -> bool {
+    let key = input.get("key").and_then(Value::as_str).unwrap_or("");
+    page::key(key).is_some_and(|key| key.code == "Space")
 }
 
 #[async_trait]
@@ -676,7 +688,7 @@ impl BrowserTool {
         if let Some(n) = element {
             self.meta(n)?;
         }
-        let asked_about = enter_risk(&self.known(), element);
+        let asked_about = key_risk(&self.known(), element, key.code == "Space");
         if element.is_none() && !submits {
             // Only Enter and Space need a check; the guard lets other
             // keys through anywhere.
@@ -687,9 +699,12 @@ impl BrowserTool {
         // the page's input guard in one call (see guard.js): an approval
         // covers the element checked here alone.
         let approved = submits && !asked_about.is_empty();
+        // Only Enter and Space have a risk; other keys arm the guard alone.
+        let key_name =
+            serde_json::to_string(if submits { key.key } else { "" }).unwrap_or_default();
         let armed = browser
             .element_check(&format!(
-                "armKey({}, {submits}, {approved})",
+                "armKey({}, {key_name}, {approved})",
                 element.map_or("null".to_string(), |n| n.to_string())
             ))
             .await?;

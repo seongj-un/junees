@@ -108,6 +108,9 @@ pub struct Element {
     pub click_risk: String,
     /// Why pressing Enter in it needs approval, or empty.
     pub enter_risk: String,
+    /// Why pressing Space in it needs approval, or empty (a click's risk:
+    /// Space sends no form from a field or checkbox).
+    pub space_risk: String,
 }
 
 pub struct Browser {
@@ -413,6 +416,7 @@ impl Browser {
                         type_risk: text(&element["type_risk"]),
                         click_risk: text(&element["click_risk"]),
                         enter_risk: text(&element["enter_risk"]),
+                        space_risk: text(&element["space_risk"]),
                     })
                     .collect()
             })

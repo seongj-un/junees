@@ -14,7 +14,8 @@
   // The risk rules, shared with the input guard (guard.js, which runs
   // in front of this script).
   const {
-    clean, short, kind, label, typeRisk, clickRisk, enterRisk, pointRisk, closedFrame, closedHosts, FRAME_RISK,
+    clean, short, kind, label, typeRisk, clickRisk, enterRisk, spaceRisk, pointRisk, closedFrame, closedHosts,
+    FRAME_RISK,
   } = globalThis.__juneesLib;
   const LABEL = 80;
 
@@ -87,7 +88,10 @@
       if (k) {
         refs.push(el);
         const n = refs.length;
-        info.push({ kind: k, type_risk: typeRisk(el), click_risk: clickRisk(el), enter_risk: enterRisk(el) });
+        info.push({
+          kind: k, type_risk: typeRisk(el), click_risk: clickRisk(el), enter_risk: enterRisk(el),
+          space_risk: spaceRisk(el),
+        });
         line += ' [' + n + ' ' + k + ' "' + label(el) + '"' + describe(el) + '] ';
         // The label already holds the text of buttons, links and fields.
         if (['link', 'button', 'textbox', 'password', 'select', 'option', 'tab', 'menuitem'].includes(k)
@@ -228,13 +232,13 @@
     return {};
   }
 
-  // Focuses element `n` (when given) for a key press, then reads the
-  // risk of Enter or Space (`submits`) in the focused element and arms
-  // the input guard, all in this one call: a key event whose target
-  // needs approval then goes through only when it is that element and
-  // `approved`. `in_frame` says the focus is in a frame (approved key
+  // Focuses element `n` (when given) for pressing `key` (its DOM key
+  // name), then reads the risk of Enter or Space in the focused element
+  // and arms the input guard, all in this one call: a key event whose
+  // target needs approval then goes through only when it is that element
+  // and `approved`. `in_frame` says the focus is in a frame (approved key
   // presses there need the guard of that frame armed too).
-  function armKey(n, submits, approved) {
+  function armKey(n, key, approved) {
     if (n) {
       const el = element(n);
       if (!el) return { error: 'gone' };
@@ -242,9 +246,9 @@
       el.focus();
     }
     const active = deepActive();
-    globalThis.__juneesGuard.arm({ el: active, approved: !!approved, key: true });
+    globalThis.__juneesGuard.arm({ el: active, approved: !!approved, key: key || 'key' });
     return {
-      risk: submits ? enterRisk(active) : '',
+      risk: key === 'Enter' ? enterRisk(active) : key === ' ' ? spaceRisk(active) : '',
       in_frame: !!active && (active.ownerDocument !== document || closedFrame(active)),
     };
   }

@@ -156,13 +156,21 @@
     return '';
   }
 
-  // Why pressing Enter or Space in `el` needs the user's approval, or ''.
+  // Why pressing Enter in `el` needs the user's approval, or ''.
   function enterRisk(el) {
     if (!el) return '';
     if (closedFrame(el)) return FRAME_RISK;
     if (inClosed(el)) return CLOSED_RISK;
     const k = kind(el);
     if (k === 'textbox' || k === 'password' || k === 'checkbox' || k === 'radio' || k === 'select') return formRisk(el);
+    return clickRisk(el);
+  }
+
+  // Why pressing Space in `el` needs the user's approval, or ''. Space
+  // presses a button or toggles a checkbox like a click, and sends no
+  // form from a field (only Enter does).
+  function spaceRisk(el) {
+    if (!el) return '';
     return clickRisk(el);
   }
 
@@ -180,7 +188,8 @@
 
   function risk(event, target) {
     if (MOUSE.has(event.type)) return pointRisk(target);
-    if (event.key === 'Enter' || event.key === ' ') return enterRisk(target);
+    if (event.key === 'Enter') return enterRisk(target);
+    if (event.key === ' ') return spaceRisk(target);
     return '';
   }
 
@@ -190,7 +199,7 @@
       if (target === arm.el) return '';
       // Enter in a field sends its form as a click on the form's submit
       // button.
-      if (arm.key && event.type === 'click' && arm.el.form && target.form === arm.el.form
+      if (arm.key === 'Enter' && event.type === 'click' && arm.el.form && target.form === arm.el.form
           && submits(target)) return '';
       if (!arm.key && MOUSE.has(event.type)) {
         if (arm.el.contains(target)) return '';
@@ -221,13 +230,13 @@
   for (const type of [...MOUSE, ...KEYS]) addEventListener(type, guard, true);
 
   globalThis.__juneesLib = {
-    clean, short, kind, label, typeRisk, formRisk, clickRisk, enterRisk, pointRisk, closedFrame, inClosed,
-    closedHosts, FRAME_RISK, CLOSED_RISK,
+    clean, short, kind, label, typeRisk, formRisk, clickRisk, enterRisk, spaceRisk, pointRisk, closedFrame,
+    inClosed, closedHosts, FRAME_RISK, CLOSED_RISK,
   };
   globalThis.__juneesGuard = {
     // Arms the guard for the next input events in this frame, for 5 s:
     // `el` (approved) is the element the user approved, which then takes
-    // the events whatever its risk (`key`: a key press, whose Enter may
+    // the events whatever its risk (`key`: the key pressed; Enter may
     // also click its form's submit button); `risk` lets events through whose
     // target has exactly that risk (an approved element in a frame,
     // which the top frame's call cannot point at here); `any` lets every
