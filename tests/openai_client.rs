@@ -197,6 +197,39 @@ async fn errors_map_to_the_provider_errors_and_only_some_are_retried() {
     }
 }
 
+#[tokio::test]
+async fn an_error_in_a_200_body_maps_to_its_status_and_is_retried_when_it_may_help() {
+    let messages = [Message::user_text("hi")];
+    // OpenRouter: an error after the model started comes with status 200.
+    let (url, server) = fake_api(vec![
+        (
+            200,
+            json!({"error": {"code": 502, "message": "Provider returned error"}}),
+        ),
+        (200, answer("ok")),
+    ])
+    .await;
+    let response = provider(&url).complete(request(&messages)).await.unwrap();
+    assert_eq!(response.content, vec![ContentBlock::text("ok")]);
+    assert_eq!(served(server).await.len(), 2);
+
+    let (url, server) = fake_api(vec![(
+        200,
+        json!({"error": {"code": 400, "message": "Provider rejected the request"}}),
+    )])
+    .await;
+    let err = provider(&url)
+        .complete(request(&messages))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ProviderError::Api { status: 400, message, .. }
+            if message == "Provider rejected the request"),
+        "{err}"
+    );
+    assert_eq!(served(server).await.len(), 1);
+}
+
 fn streaming(url: &str) -> OpenAiProvider {
     provider(url).with_streaming(true)
 }

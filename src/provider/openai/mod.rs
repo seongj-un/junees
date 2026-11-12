@@ -21,7 +21,7 @@ use super::http::{
 use super::stream::SseParser;
 use super::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamSender};
 use crate::mcp::http::target::is_loopback;
-use convert::{ApiError, ChatRequest, ChatResponse};
+use convert::{ApiError, ChatRequest, ChatResponse, stream_status};
 use stream::Chunks;
 
 mod convert;
@@ -273,17 +273,26 @@ fn decode(bytes: &[u8]) -> Result<CompletionResponse, Failure> {
     };
     let parsed: ChatResponse = serde_json::from_slice(bytes)
         .map_err(|err| decode_failure(ProviderError::Decode(err.to_string())))?;
+    // OpenRouter answers 200 once the model started, and puts an error
+    // that comes after that in the body: it carries its status in `code`.
+    if let Some(error) = parsed.error() {
+        return Err(api_failure(stream_status(&error), None, error));
+    }
     parsed.into_response().map_err(decode_failure)
 }
 
 /// A failed status: retried when waiting may help, which a 429 for an
 /// account out of credit does not.
 fn error_failure(status: StatusCode, retry_after: Option<u64>, body: &[u8]) -> Failure {
-    let error = ApiError::parse(body);
+    api_failure(status.as_u16(), retry_after, ApiError::parse(body))
+}
+
+/// An error the server described, with the status it has or names.
+fn api_failure(status: u16, retry_after: Option<u64>, error: ApiError) -> Failure {
     Failure {
-        retryable: is_retryable(status) && !error.is_quota(),
+        retryable: StatusCode::from_u16(status).is_ok_and(is_retryable) && !error.is_quota(),
         retry_after,
-        error: error.into_error(status.as_u16()),
+        error: error.into_error(status),
     }
 }
 

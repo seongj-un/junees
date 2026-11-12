@@ -246,6 +246,9 @@ pub(super) struct ChatResponse {
     choices: Vec<Choice>,
     #[serde(default)]
     usage: Option<ApiUsage>,
+    /// An error in place of the answer (OpenRouter, with status 200).
+    #[serde(default)]
+    error: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +321,20 @@ impl From<ApiUsage> for Usage {
 }
 
 impl ChatResponse {
+    /// The error the body holds instead of an answer, if it does.
+    pub fn error(&self) -> Option<ApiError> {
+        let error = self.error.as_ref().filter(|_| self.choices.is_empty())?;
+        match error {
+            Value::Object(_) => Some(ApiError::from_value(error)),
+            Value::String(message) => Some(ApiError {
+                kind: None,
+                code: None,
+                message: message.clone(),
+            }),
+            _ => None,
+        }
+    }
+
     pub fn into_response(self) -> Result<CompletionResponse, ProviderError> {
         let usage = self.usage.map(Usage::from).unwrap_or_default();
         let Some(choice) = self.choices.into_iter().next() else {
@@ -849,6 +866,30 @@ mod tests {
         )
         .into_error(400);
         assert!(image.is_image_rejected(), "{image}");
+    }
+
+    #[test]
+    fn an_error_in_place_of_the_answer_is_found() {
+        let parse = |body: Value| serde_json::from_value::<ChatResponse>(body).unwrap();
+        let error = parse(json!({"error": {"code": 502, "message": "Provider returned error"}}))
+            .error()
+            .unwrap();
+        assert_eq!(stream_status(&error), 502);
+        assert_eq!(error.message, "Provider returned error");
+        let error = parse(json!({"error": "model is loading"})).error().unwrap();
+        assert_eq!(error.message, "model is loading");
+        // An answer is taken as one, whatever else the body says.
+        assert!(
+            parse(json!({"choices": [{"message": {"content": "hi"}}], "error": null}))
+                .error()
+                .is_none()
+        );
+        assert!(
+            parse(json!({"choices": [{"message": {"content": "hi"}}], "error": {"code": 1}}))
+                .error()
+                .is_none()
+        );
+        assert!(parse(json!({"choices": []})).error().is_none());
     }
 
     #[test]
