@@ -74,6 +74,7 @@ pub const KEYS: &[(&str, &str)] = &[
         "telegram_approval_timeout",
         "JUNEES_TELEGRAM_APPROVAL_TIMEOUT",
     ),
+    ("telegram_format", "JUNEES_TELEGRAM_FORMAT"),
     ("timezone", "JUNEES_TIMEZONE"),
     ("cron_max_time", "JUNEES_CRON_MAX_TIME"),
     ("cron_max_tokens", "JUNEES_CRON_MAX_TOKENS"),
