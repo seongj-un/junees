@@ -799,6 +799,31 @@ async fn a_command_after_the_mention_is_a_command_in_a_group() {
 }
 
 #[tokio::test]
+async fn forwarded_messages_are_marked_and_never_commands() {
+    let bot = FakeBot::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    let me = USER.to_string();
+    let mut forwarded = private(USER, "/stop");
+    forwarded["forward_origin"] = json!({"type": "user", "date": 0, "sender_user":
+        {"id": STRANGER, "is_bot": false, "first_name": "Mallory"}});
+    bot.push(forwarded);
+    let posts = bot
+        .wait_post(&me, |p| {
+            p == "reply 1: (forwarded message from Mallory; they wrote it, not the user)\n/stop"
+        })
+        .await;
+    assert!(
+        !posts.iter().any(|p| p.contains("nothing is running")),
+        "{posts:#?}"
+    );
+    // The user's own words are not marked.
+    bot.push(private(USER, "my own"));
+    bot.wait_post(&me, |p| p == "reply 2: my own").await;
+    running.stop().await;
+}
+
+#[tokio::test]
 async fn a_refused_token_stops_without_showing_it() {
     let bot = FakeBot::start().await;
     bot.state.unauthorized.store(true, Ordering::SeqCst);

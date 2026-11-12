@@ -19,6 +19,7 @@ use super::api::{Me, Target};
 use super::platform::{MAX_ATTACHMENTS, Telegram, TelegramFile, attachments};
 use crate::gateway::bot::command_word;
 use crate::gateway::channels::{Channels, Command, Shared};
+use crate::prompt_text::escape_hidden;
 
 /// What the start of a message says about commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +98,59 @@ fn entity_text(text: &str, entity: &Value) -> Option<String> {
     let units: Vec<u16> = text.encode_utf16().collect();
     let slice = units.get(offset..offset.checked_add(length)?)?;
     String::from_utf16(slice).ok()
+}
+
+/// The longest sender name a forwarded message's note repeats.
+const MAX_FORWARDED_NAME: usize = 64;
+
+/// Who wrote a forwarded message (`forward_origin`; the older
+/// `forward_from`, `forward_sender_name` and `forward_from_chat` too),
+/// hidden characters escaped; `None` when `message` is not forwarded.
+pub fn forwarded_from(message: &Value) -> Option<String> {
+    let origin = message.get("forward_origin");
+    if origin.is_none() && message.get("forward_date").is_none() {
+        return None;
+    }
+    let text = |value: Option<&Value>, key: &str| {
+        value
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let person = |user: Option<&Value>| {
+        let name = [text(user, "first_name"), text(user, "last_name")]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        match text(user, "username") {
+            Some(username) if name.is_empty() => Some(format!("@{username}")),
+            Some(username) => Some(format!("{name} (@{username})")),
+            None => Some(name),
+        }
+    };
+    let field = |key: &str| origin.and_then(|origin| origin.get(key));
+    let name = match text(origin, "type").as_deref() {
+        Some("user") => person(field("sender_user")),
+        Some("hidden_user") => text(origin, "sender_user_name"),
+        Some("chat") => text(field("sender_chat"), "title"),
+        Some("channel") => text(field("chat"), "title"),
+        _ => message
+            .get("forward_from")
+            .and_then(|user| person(Some(user)))
+            .or_else(|| text(Some(message), "forward_sender_name"))
+            .or_else(|| text(message.get("forward_from_chat"), "title")),
+    };
+    let name = name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "someone".to_string());
+    let mut name = escape_hidden(&name);
+    if let Some((cut, _)) = name.char_indices().nth(MAX_FORWARDED_NAME) {
+        name.truncate(cut);
+        name.push_str("...");
+    }
+    Some(name)
 }
 
 /// A message with the rest of its album (messages of one
@@ -208,7 +262,12 @@ impl Router {
                 .to_string()
         };
         let text = text_of(message);
+        // Someone else's words: never a command, and marked as theirs, so
+        // the model does not take them as the user's.
+        let forwarded = forwarded_from(message);
+        let commands = forwarded.is_none();
         match parse_command(&text, &self.me.username) {
+            _ if !commands => {}
             Parsed::OtherBot => return,
             Parsed::Command { command, named } => {
                 // In a group, a `/word` the gateway does not know is
@@ -246,7 +305,7 @@ impl Router {
         let mut content = strip_mention(&text, &self.me.username);
         // `@bot /stop`: in a group the mention often comes first. A command
         // after it names this bot, as `/stop@bot` does.
-        if content != text.trim() {
+        if commands && content != text.trim() {
             match parse_command(&content, &self.me.username) {
                 Parsed::OtherBot => return,
                 Parsed::Command { command, .. } => {
@@ -272,6 +331,12 @@ impl Router {
         let files = limit(files, &mut notes);
         if content.is_empty() && files.is_empty() && notes.is_empty() {
             return;
+        }
+        if let Some(who) = forwarded {
+            content =
+                format!("(forwarded message from {who}; they wrote it, not the user)\n{content}")
+                    .trim_end()
+                    .to_string();
         }
         self.channels.input(&channel, content, files, notes);
     }
@@ -380,6 +445,50 @@ mod tests {
             strip_mention("@junees_bot2 hi", "junees_bot"),
             "@junees_bot2 hi"
         );
+    }
+
+    #[test]
+    fn names_who_wrote_a_forwarded_message() {
+        let origin = |origin: Value| json!({"text": "hi", "forward_origin": origin});
+        let cases = [
+            (
+                origin(json!({"type": "user", "date": 0, "sender_user":
+                    {"id": 5, "is_bot": false, "first_name": "Mallory", "last_name": "M",
+                     "username": "mal"}})),
+                "Mallory M (@mal)",
+            ),
+            (
+                origin(json!({"type": "hidden_user", "date": 0,
+                    "sender_user_name": "Eve\u{202e}"})),
+                "Eve\\u{202e}",
+            ),
+            (
+                origin(json!({"type": "chat", "date": 0, "sender_chat":
+                    {"id": -1, "type": "group", "title": "Other group"}})),
+                "Other group",
+            ),
+            (
+                origin(
+                    json!({"type": "channel", "date": 0, "message_id": 3, "chat":
+                    {"id": -2, "type": "channel", "title": "News"}}),
+                ),
+                "News",
+            ),
+            (
+                json!({"text": "hi", "forward_date": 0, "forward_sender_name": "Old"}),
+                "Old",
+            ),
+            (origin(json!({"type": "user", "date": 0})), "someone"),
+        ];
+        for (message, want) in cases {
+            assert_eq!(forwarded_from(&message).as_deref(), Some(want), "{message}");
+        }
+        let long = origin(json!({"type": "hidden_user", "sender_user_name": "x".repeat(500)}));
+        assert_eq!(
+            forwarded_from(&long).unwrap(),
+            format!("{}...", "x".repeat(MAX_FORWARDED_NAME))
+        );
+        assert_eq!(forwarded_from(&json!({"text": "hi"})), None);
     }
 
     #[test]
