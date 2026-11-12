@@ -203,8 +203,12 @@ impl Ruleset {
     /// so a folder holding an excepted path gets no rule itself: each of
     /// its entries gets one instead, and the walk goes on into the entry
     /// that holds the excepted path. Symbolic links met on the way get
-    /// none (access through one is checked at its target). `root` and
-    /// `except` must be absolute and resolved ([`real_path`]).
+    /// none (access through one is checked at its target), and the walk
+    /// does not follow one that leads to an excepted path: an excepted
+    /// path as written through a link (`~/.junees/config.toml` with
+    /// `~/.junees` a link) keeps the link entry itself from being renamed
+    /// or replaced, while its resolved form protects the target. `root`
+    /// must be absolute and resolved ([`real_path`]), `except` absolute.
     ///
     /// The folders on the way to an excepted path get no rule of their
     /// own, so entries created there later (by another process) and new
@@ -232,7 +236,9 @@ impl Ruleset {
                 continue;
             }
             if except.iter().any(|excepted| excepted.starts_with(&path)) {
-                self.grant_except(&path, rights, except)?;
+                if !entry.file_type()?.is_symlink() {
+                    self.grant_except(&path, rights, except)?;
+                }
                 continue;
             }
             // Not followed: a link swapped in now is skipped, not granted.

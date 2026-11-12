@@ -229,6 +229,52 @@ async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
 }
 
 #[tokio::test]
+async fn a_linked_state_folder_keeps_its_link_when_the_working_folder_holds_it() {
+    // `~/.junees` a link to the state kept elsewhere (a dotfile manager, a
+    // volume): Junees reads its settings through the link, so a command
+    // in the home folder must not swap the link for a folder of its own.
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    std::fs::rename(home.join(".junees"), layout.path("state")).unwrap();
+    std::os::unix::fs::symlink("../state", home.join(".junees")).unwrap();
+    let command = "mv .junees moved || echo move-refused; \
+         ln -sfn ../outside .junees || echo relink-refused; \
+         mkdir fresh || echo mkdir-refused; \
+         echo x >> .junees/config.toml || echo config-write-refused; \
+         cat .junees/config.toml || echo config-refused; \
+         echo x > .junees/memory/new.md || echo memory-refused; \
+         echo a > sub/made && echo sub-ok";
+    let output = run(&home, layout.sandbox(settings()), command).await;
+    let text = &output.content;
+    for line in [
+        "the working folder holds Junees's state folder",
+        "move-refused",
+        "relink-refused",
+        "mkdir-refused",
+        "config-write-refused",
+        "config-refused",
+        "memory-refused",
+        "sub-ok",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    assert!(!text.contains("fake-key"), "{text}");
+    assert_eq!(
+        std::fs::read_link(home.join(".junees")).unwrap(),
+        Path::new("../state")
+    );
+    assert!(!home.join("moved").exists() && !home.join("fresh").exists());
+    assert!(!layout.path("state/memory/new.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(layout.path("state/config.toml")).unwrap(),
+        "api_key = \"fake-key\"\n"
+    );
+}
+
+#[tokio::test]
 async fn a_webhook_run_cannot_read_git_and_github_credentials() {
     if !landlock() {
         return;

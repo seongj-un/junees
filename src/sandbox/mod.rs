@@ -334,16 +334,27 @@ impl Sandbox {
     #[cfg(target_os = "linux")]
     fn build(&self, abi: u32, work: &Path) -> io::Result<(Confinement, bool)> {
         use landlock::{READ, Ruleset, WRITE, WRITE_EXISTING, real_path};
+        use std::path::Component;
         let ruleset = Ruleset::new(abi, !self.settings.network)?;
         // Paths in a folder that does not exist (no state folder yet) need
         // no exception: leaving them out keeps the folders above them
-        // whole.
+        // whole. Each path counts both resolved and as written (made
+        // absolute): with a link on the way (`~/.junees -> /data/state`)
+        // the resolved path lies elsewhere, but Junees reads through the
+        // link, so the link entry must not be replaceable either.
         let real = |paths: &[PathBuf]| -> Vec<PathBuf> {
-            paths
-                .iter()
-                .map(|path| real_path(path))
-                .filter(|path| path.parent().is_some_and(Path::is_dir))
-                .collect()
+            let mut out = Vec::new();
+            for path in paths {
+                let written = std::path::absolute(path)
+                    .ok()
+                    .filter(|path| !path.components().any(|c| c == Component::ParentDir));
+                for path in std::iter::once(real_path(path)).chain(written) {
+                    if path.parent().is_some_and(Path::is_dir) && !out.contains(&path) {
+                        out.push(path);
+                    }
+                }
+            }
+            out
         };
         let hidden = real(&self.hidden);
         let no_write: Vec<PathBuf> = hidden
