@@ -1,16 +1,14 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::Read as _;
+use std::path::Path;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use super::file_access::FileAccess;
 use super::{
-    MAX_FILE_BYTES, SettingsFile, Tool, ToolOutput, ToolSettings, opt_bool_arg, str_arg,
-    truncate_middle,
+    MAX_FILE_BYTES, Tool, ToolOutput, ToolSettings, opt_bool_arg, str_arg, truncate_middle,
 };
 
 /// Lines of context shown above and below each change.
@@ -29,18 +27,28 @@ const MAX_OUTPUT_CHARS: usize = 20_000;
 /// whole file written out again.
 #[derive(Default)]
 pub struct EditFile {
-    settings_file: Option<SettingsFile>,
+    access: FileAccess,
     /// The instruction file names it refuses ([`ToolSettings::protected_instruction_files`]).
     instruction_files: Vec<String>,
 }
 
 impl EditFile {
-    /// Refuses the settings file of `settings`, and in a webhook run the
-    /// project instruction files.
+    /// Refuses the settings file of `settings`, in a webhook run the
+    /// project instruction files, and in an unattended run paths outside
+    /// its folders ([`FileAccess`]).
     pub fn with_settings(settings: &ToolSettings) -> Self {
         Self {
-            settings_file: settings.settings_file.clone(),
+            access: FileAccess::new(settings),
             instruction_files: settings.protected_instruction_files(),
+        }
+    }
+
+    /// A tool with the rules of `access` (tests).
+    #[cfg(test)]
+    pub(crate) fn with_access(access: FileAccess) -> Self {
+        Self {
+            access,
+            ..Self::default()
         }
     }
 }
@@ -89,14 +97,14 @@ impl Tool for EditFile {
             Ok(replace_all) => replace_all.unwrap_or(false),
             Err(err) => return err,
         };
-        if let Some(file) = &self.settings_file
+        if let Some(file) = self.access.settings_file()
             && file.is(Path::new(path))
         {
             return ToolOutput::error(file.refusal(path));
         }
         if let Some(folder) = self
-            .settings_file
-            .as_ref()
+            .access
+            .settings_file()
             .and_then(|file| file.data_folder(Path::new(path)))
         {
             return ToolOutput::error(folder.refusal(path));
@@ -106,13 +114,29 @@ impl Tool for EditFile {
         {
             return ToolOutput::error(super::instruction_files::refusal(path, name));
         }
-        match edit(path, old, new, replace_all).await {
-            Ok(output) | Err(output) => output,
+        let access = self.access.clone();
+        let names = self.instruction_files.clone();
+        let (owned, old, new) = (path.to_string(), old.to_string(), new.to_string());
+        // One blocking call from the checks to the rename: dropping this
+        // future (a cancelled turn) cannot stop it between creating the
+        // temporary file and renaming or removing it.
+        let edited = tokio::task::spawn_blocking(move || {
+            edit(&access, &names, &owned, &old, &new, replace_all)
+        })
+        .await;
+        match edited {
+            Ok(Ok(output) | Err(output)) => output,
+            Err(err) => ToolOutput::error(format!("cannot edit {path}: {err}")),
         }
     }
 }
 
-async fn edit(
+/// Makes the edit: the file found through its folder, opened and checked
+/// by `access` (a link leads to its target, which is replaced and the link
+/// kept), and the result written to a temporary file renamed over it.
+fn edit(
+    access: &FileAccess,
+    names: &[String],
     path: &str,
     old: &str,
     new: &str,
@@ -129,34 +153,47 @@ async fn edit(
         ));
     }
 
-    // Edit the file a symlink points to, so the rename below replaces the
-    // target and leaves the link in place.
-    let real = tokio::fs::canonicalize(path)
-        .await
-        .map_err(|err| ToolOutput::error(format!("cannot edit {path}: {err}")))?;
-    let meta = tokio::fs::metadata(&real)
-        .await
-        .map_err(|err| ToolOutput::error(format!("cannot edit {path}: {err}")))?;
-    if !meta.is_file() {
-        return Err(ToolOutput::error(format!("{path} is not a regular file")));
-    }
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(ToolOutput::error(format!(
-            "{path} is {} bytes; edit_file edits files up to {} MB. \
-             Use bash (sed, a script) to change it.",
-            meta.len(),
-            MAX_FILE_BYTES / (1024 * 1024)
+    let refused =
+        |refusal: super::file_access::Refusal| ToolOutput::error(refusal.message(path, "edit"));
+    let target = access.open_write(path, false).map_err(refused)?;
+    if let Some(name) = super::instruction_files::path_named(target.real(), names) {
+        return Err(ToolOutput::error(super::instruction_files::refusal(
+            path, name,
         )));
     }
-    let bytes = tokio::fs::read(&real)
-        .await
+    let opened = target.open_existing().map_err(refused)?;
+    let too_large = |len: u64| {
+        ToolOutput::error(format!(
+            "{path} is {len} bytes; edit_file edits files up to {} MB. \
+             Use bash (sed, a script) to change it.",
+            MAX_FILE_BYTES / (1024 * 1024)
+        ))
+    };
+    if opened.meta.len() > MAX_FILE_BYTES {
+        return Err(too_large(opened.meta.len()));
+    }
+    let mut bytes = Vec::new();
+    opened
+        .file
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|err| ToolOutput::error(format!("cannot read {path}: {err}")))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large(bytes.len() as u64));
+    }
+    // Before any hint shows lines of it: such files are not text
+    // (`/proc/<pid>/environ` is NUL-separated).
+    if bytes.contains(&0) {
+        return Err(ToolOutput::error(format!(
+            "{path} looks like a binary file (it holds NUL bytes); edit_file edits text files"
+        )));
+    }
     let text = String::from_utf8(bytes)
         .map_err(|_| ToolOutput::error(format!("{path} is not valid UTF-8 text")))?;
 
-    let mut edit = plan_edit(&text, old, new, replace_all).map_err(ToolOutput::error)?;
-    edit.text = write_atomically(&real, std::mem::take(&mut edit.text), meta.permissions())
-        .await
+    let edit = plan_edit(&text, old, new, replace_all).map_err(ToolOutput::error)?;
+    target
+        .replace(edit.text.as_bytes(), false)
         .map_err(|err| ToolOutput::error(format!("cannot write {path}: {err}")))?;
     Ok(ToolOutput::ok(edit.summary(path)))
 }
@@ -451,115 +488,10 @@ fn preview(text: &str, changes: &[(usize, usize)]) -> String {
     out
 }
 
-/// Writes `text` to a temporary file next to `path` with `path`'s
-/// permissions, then renames it over `path`, so a crash or a full disk never
-/// leaves a half-written file behind.
-///
-/// The whole sequence runs on one blocking thread with `std::fs`: every
-/// error comes back from the call that hit it (tokio's `File::write_all`
-/// returns before the data is written, and its `sync_all` drops a failed
-/// background write), and dropping this future when a turn is cancelled
-/// cannot stop it between creating the temporary file and renaming or
-/// removing it. Returns `text` for the caller's preview.
-async fn write_atomically(
-    path: &Path,
-    text: String,
-    permissions: std::fs::Permissions,
-) -> std::io::Result<String> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        write_and_rename(&path, text.as_bytes(), permissions).map(|()| text)
-    })
-    .await
-    .map_err(std::io::Error::other)?
-}
-
-fn write_and_rename(
-    path: &Path,
-    bytes: &[u8],
-    permissions: std::fs::Permissions,
-) -> std::io::Result<()> {
-    let temp = temp_path(path);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|err| {
-            // The file itself may well be writable: name the directory.
-            let dir = path.parent().unwrap_or(Path::new("/"));
-            let hint = if err.kind() == std::io::ErrorKind::PermissionDenied {
-                " (edit_file replaces the file through a temporary file in its \
-                 directory; write_file can rewrite the file in place)"
-            } else {
-                ""
-            };
-            std::io::Error::new(
-                err.kind(),
-                format!(
-                    "cannot create a temporary file in {}: {err}{hint}",
-                    dir.display()
-                ),
-            )
-        })?;
-    // Created by this call, so it is ours to remove on any error below.
-    let mut guard = RemoveOnDrop {
-        path: &temp,
-        armed: true,
-    };
-    file.write_all(bytes)?;
-    // The creation mode went through the umask; set the original exactly.
-    file.set_permissions(permissions)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&temp, path)?;
-    guard.armed = false;
-    Ok(())
-}
-
-/// Removes the temporary file unless disarmed, so no error path (or panic)
-/// leaves it in the working tree, where a task checkpoint would commit it.
-struct RemoveOnDrop<'a> {
-    path: &'a Path,
-    armed: bool,
-}
-
-impl Drop for RemoveOnDrop<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = std::fs::remove_file(self.path);
-        }
-    }
-}
-
-/// A hidden, recognisable name next to `path` for the temporary file,
-/// `.<name>.junees-edit-<pid>-<n>.tmp`, with `<name>` cut short (on a char
-/// boundary) so the whole stays within the 255-byte limit on file names.
-fn temp_path(path: &Path) -> PathBuf {
-    const NAME_MAX: usize = 255;
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let suffix = format!(
-        ".junees-edit-{}-{}.tmp",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    let room = NAME_MAX - 1 - suffix.len();
-    let cut = name
-        .char_indices()
-        .map(|(i, ch)| i + ch.len_utf8())
-        .take_while(|&end| end <= room)
-        .last()
-        .unwrap_or(0);
-    path.with_file_name(format!(".{}{suffix}", &name[..cut]))
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
     use super::*;
 
@@ -580,10 +512,10 @@ mod tests {
         let (_dir, root, file) = crate::tools::settings_file::testing::home();
         let config = root.join(".junees/config.toml");
         std::os::unix::fs::symlink(&config, root.join("link")).unwrap();
-        let tool = EditFile {
+        let tool = EditFile::with_settings(&ToolSettings {
             settings_file: Some(file),
-            ..EditFile::default()
-        };
+            ..ToolSettings::default()
+        });
         for path in [
             config.clone(),
             root.join(".junees/sessions/../config.toml"),
@@ -613,10 +545,10 @@ mod tests {
         let (_dir, root, file) = crate::tools::settings_file::testing::home();
         let user = root.join(".junees/memory/user.md");
         std::os::unix::fs::symlink(root.join(".junees/memory"), root.join("dirlink")).unwrap();
-        let tool = EditFile {
+        let tool = EditFile::with_settings(&ToolSettings {
             settings_file: Some(file),
-            ..EditFile::default()
-        };
+            ..ToolSettings::default()
+        });
         for path in [
             user.clone(),
             root.join("dirlink/user.md"),
@@ -905,7 +837,11 @@ mod tests {
         assert!(output.is_error);
         assert!(output.content.ends_with("is not a regular file"));
         let output = run(Path::new("/dev/null"), "a", "b").await;
-        assert!(output.content.ends_with("is not a regular file"));
+        assert!(
+            output.content.contains("leads into /dev"),
+            "{}",
+            output.content
+        );
         let output = run(Path::new("/definitely/not/here"), "a", "b").await;
         assert!(output.is_error);
         assert!(
@@ -1132,27 +1068,6 @@ mod tests {
             std::fs::remove_file(&path).unwrap();
         }
         assert!(entries(&dir).is_empty());
-    }
-
-    #[test]
-    fn temporary_names_are_recognisable_and_short_enough() {
-        let name = |path: &Path| {
-            temp_path(path)
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string()
-        };
-        let short = name(Path::new("/w/notes.md"));
-        assert!(short.starts_with(".notes.md.junees-edit-"), "{short}");
-        assert!(short.ends_with(".tmp"), "{short}");
-        for long in ["a".repeat(255), "한".repeat(85)] {
-            let temp = name(&Path::new("/w").join(&long));
-            assert!(temp.len() <= 255, "{}", temp.len());
-            assert!(temp.len() > 250, "{}", temp.len());
-            assert!(temp.contains(".junees-edit-"), "{temp}");
-        }
     }
 
     #[test]

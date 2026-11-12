@@ -2,6 +2,7 @@
 
 mod bash;
 mod edit_file;
+mod file_access;
 pub mod gh_command;
 mod instruction_files;
 mod policy;
