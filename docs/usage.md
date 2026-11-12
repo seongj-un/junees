@@ -103,7 +103,7 @@ junees sessions search --source discord 회의록   # 디스코드 채널 세션
 junees usage                       # 지금 폴더의 세션, 오늘까지 7일, 날짜별
 junees usage --days 30 --by model  # 30일, 모델별
 junees usage --all --by folder     # 모든 폴더, 폴더별
-junees usage --by source           # 터미널, discord, telegram, cron, webhook별
+junees usage --by source           # 터미널, discord, telegram, slack, cron, webhook별
 ```
 
 - 세는 것: 대화의 모델 호출마다 남는 `usage`, 압축 요약 호출의 `summary_usage`, 서브에이전트(`delegate`)의 토큰을 모은 `subagent_usage`, Claude Code 턴(`claude_turn`)의 사용량. 서브에이전트의 기록(`sessions/<id>/sub-<n>.jsonl`)은 부모의 `subagent_usage`가 이미 세므로 보통 읽지 않는다. 호출마다 프롬프트 길이로 가격이 달라지는 모델(Haiku 5.5)의 `subagent_usage`만 예외다: 항목에는 어느 기록의 합인지 적혀 있지 않지만 `delegate`는 서브에이전트 번호를 그때 있는 가장 큰 번호 다음부터 매기므로, 기록을 번호 순으로 읽어 부모의 `subagent_usage` 항목(모든 모델, 차례를 맞추려고)마다 합이 그 항목과 정확히 같은 다음 기록들을 찾고, 찾으면 그 항목 대신 그 기록의 호출들을 센다. 그래서 같은 호출을 두 번 세지 않는다. 부모가 항목을 남기기 전에 끝난 실행의 서브에이전트 기록은 어느 항목에도 들지 않으므로 전처럼 세지 않는다. 열은 입력, 캐시 쓰기, 캐시 읽기, 출력, 웹 검색 횟수, 캐시 적중률(캐시 읽기 / (캐시 읽기 + 캐시 쓰기 + 입력)), 비용이다.

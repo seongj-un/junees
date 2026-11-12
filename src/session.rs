@@ -48,6 +48,11 @@ pub const DISCORD: &str = "discord";
 /// its [`Meta::channel`] is the chat id (`<chat>:<topic>` in a forum).
 pub const TELEGRAM: &str = "telegram";
 
+/// [`Meta::source`] of a conversation of the Slack gateway; its
+/// [`Meta::channel`] is the DM channel id, or `<channel>:<thread_ts>` for
+/// a thread in a channel.
+pub const SLACK: &str = "slack";
+
 /// [`Meta::source`] of a run of a scheduled job (`junees cron`); its
 /// [`Meta::channel`] is the job id.
 pub const CRON: &str = "cron";
