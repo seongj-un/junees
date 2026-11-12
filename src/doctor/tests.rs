@@ -43,6 +43,9 @@ impl Fixture {
         fixture.set("JUNEES_HOME", &fixture.home.display().to_string());
         fixture.set("HOME", &fixture.root.display().to_string());
         fixture.set("PATH", &fixture.bin.display().to_string());
+        // `--online` asks for the latest release: never GitHub in tests
+        // (port 9 refuses the connection).
+        fixture.set(crate::update::BASE_ENV, "http://127.0.0.1:9/releases");
         fixture
     }
 
@@ -1254,6 +1257,62 @@ async fn online_asks_the_api_whether_it_takes_the_key() {
         );
     }
     assert!(!report.text().contains("sk-doctor-online-key"));
+}
+
+#[tokio::test]
+async fn online_says_whether_a_newer_release_is_out() {
+    let mut fixture = Fixture::new();
+    let report = fixture.run(true).await;
+    expect(&report, "online", "release", Status::Warn, "latest release");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut paths = Vec::new();
+        for tag in ["v999.0.0", env!("CARGO_PKG_VERSION")] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = vec![0u8; 4096];
+            let n = socket.read(&mut head).await.unwrap();
+            let head = String::from_utf8_lossy(&head[..n]).into_owned();
+            paths.push(head.split(' ').nth(1).unwrap_or("").to_string());
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: /o/junees/releases/tag/{}{tag}\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n",
+                if tag.starts_with('v') { "" } else { "v" }
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        }
+        paths
+    });
+    fixture.set(crate::update::BASE_ENV, &format!("{base}/releases"));
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "online",
+        "release",
+        Status::Warn,
+        "junees 999.0.0 is out",
+    );
+    assert_eq!(
+        check(&report, "online", "release").fix.as_deref(),
+        Some("run `junees update`")
+    );
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "online",
+        "release",
+        Status::Ok,
+        "is the latest release",
+    );
+    let paths = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .expect("the fake release server got fewer requests")
+        .unwrap();
+    assert_eq!(paths, ["/releases/latest", "/releases/latest"]);
+    // Offline, nothing is asked.
+    assert!(!has(&fixture.run(false).await, "online", "release"));
 }
 
 #[tokio::test]

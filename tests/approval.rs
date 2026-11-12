@@ -193,8 +193,8 @@ fn terminal() -> (std::fs::File, std::os::fd::OwnedFd) {
                 &mut leader,
                 &mut follower,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
             ),
             0
         );

@@ -141,6 +141,11 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
         words: &["mcp", "logout"],
         does: "removes the saved login of an MCP server",
     },
+    // `--check` too: the words after `update` are not looked at.
+    SelfCommand {
+        words: &["update"],
+        does: "replaces the Junees binary with another release",
+    },
 ];
 
 /// The approval kind of these commands ([`super::Caution::kind`]).
@@ -256,6 +261,9 @@ mod tests {
             ("junees plugins remove p", "junees plugins remove"),
             ("junees mcp login docs", "junees mcp login"),
             ("junees mcp logout docs", "junees mcp logout"),
+            ("junees update", "junees update"),
+            ("junees update --version v0.1.0", "junees update"),
+            ("/home/u/.local/bin/junees update", "junees update"),
         ] {
             assert_eq!(
                 find(&words(command)).map(SelfCommand::command).as_deref(),
@@ -276,6 +284,8 @@ mod tests {
             "junees plugin --help",
             "junees mcp",
             "junees mcp --help",
+            "junees updates",
+            "junees -p update",
             "junees status",
             "junees -p cron add",
             "junees add cron",

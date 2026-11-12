@@ -12,7 +12,15 @@ Rust로 만드는 AI 에이전트 하네스. LLM이 도구를 호출하며 일�
 
 ## 설치
 
-Rust 1.88 이상(edition 2024)이 필요하다. Linux에서 개발하고 CI(ubuntu)로 확인한다.
+Linux(x86_64, aarch64)와 macOS(x86_64, Apple silicon)용 릴리스 빌드를 받아 `~/.local/bin`에 둔다(sudo 없이, SHA-256 확인):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/seongj-un/junees/main/install.sh | sh
+```
+
+폴더와 버전은 `JUNEES_INSTALL_DIR`, `JUNEES_VERSION`(예 `v0.1.0`)으로 정한다. 새 릴리스로 바꾸기는 `junees update`(확인만은 `--check`, 대화에서 `/update`). 직접 받기, 출처 증명 확인, 릴리스 만드는 법은 [설치, 업데이트, 릴리스](docs/install.md)에 있다.
+
+소스에서 빌드하려면 Rust 1.88 이상(edition 2024)이 필요하다. Linux에서 개발하고 CI(ubuntu, macOS는 컴파일 확인)로 확인한다.
 
 ```sh
 git clone https://github.com/seongj-un/junees
@@ -76,6 +84,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `/webhooks`: 웹훅 경로 목록
 - `/context`: 컨텍스트 크기와 이 세션이 읽은 지침 파일
 - `/doctor`: 설치와 설정 점검
+- `/update`: 새 릴리스가 있는지(설치는 `junees update`)
 - `/compact`: 앞 대화를 요약으로 바꾸기(api 백엔드)
 - `/usage`: 이 세션의 토큰과 추정 비용
 - `/help`, `/exit`(`/quit`, Ctrl-D)
@@ -97,8 +106,9 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees doctor`: 설치와 설정 점검([점검](docs/doctor.md))
 - `junees plugin list|install|enable|disable|remove`: 플러그인([플러그인](docs/plugins.md))
 - `junees mcp login|logout <서버>`: MCP 서버 OAuth 로그인([OAuth 로그인](docs/mcp.md#oauth-로그인))
+- `junees update [--check] [--version vX.Y.Z]`: 최신 릴리스로 바꾸기([업데이트](docs/install.md#업데이트))
 
-명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `usage`, `plugin`, `plugins`, `mcp`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `usage`, `plugin`, `plugins`, `mcp`, `update`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
 ## 기능
 
@@ -130,9 +140,11 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [실행 격리](docs/safety.md#실행-격리-landlock): `bash` 명령을 Linux Landlock으로 묶어 작업 폴더 밖 쓰기, 설정과 비밀 파일 읽기, (설정하면) TCP를 커널이 막는다.
 - [실행 전 승인](docs/safety.md#실행-전-승인): 대화 모드에서 위험할 수 있는 도구 호출을 먼저 묻는다.
 - [점검](docs/doctor.md): `junees doctor`로 설치와 설정을 점검한다(기본은 네트워크 없이).
+- [설치와 업데이트](docs/install.md): `install.sh`, `junees update`(체크섬 확인, 한 번의 rename으로 교체), 태그로 만드는 릴리스.
 
 ## 문서
 
+- [docs/install.md](docs/install.md): 설치 스크립트, 업데이트(`junees update`), macOS에서 꺼지는 기능, 릴리스 만들기
 - [docs/configuration.md](docs/configuration.md): 설정 파일, 처음 설정 마법사, 환경 변수 표
 - [docs/usage.md](docs/usage.md): 대화 안 명령, 고급 사용법, 세션 기록과 검색, 사용량과 비용, 장기 작업 모드, 스트리밍, 확장 사고, 웹 검색, 이미지 입력
 - [docs/memory-and-skills.md](docs/memory-and-skills.md): 메모리, 프로젝트 지침 파일, 스킬, 서브에이전트
@@ -161,6 +173,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 8. 일상 사용 다듬기: 프로젝트 지침 파일(AGENTS.md, JUNEES.md, CLAUDE.md), 세션 검색(`session_search`, `/search`), 사용량과 비용(`/usage`, `junees usage`), 점검(`junees doctor`) (완료)
 9. 연결과 입력 넓히기: 원격 MCP 서버(Streamable HTTP, OAuth 로그인 `junees mcp login`), 이미지 입력(`read_file`, `/image`, `--image`, 디스코드·텔레그램 첨부), 텔레그램 게이트웨이(`junees gateway telegram`) (완료)
 10. 도구와 안전: 브라우저 도구(헤드리스 Chromium, [docs/browser.md](docs/browser.md)), bash 실행 격리(Landlock, [docs/safety.md](docs/safety.md)) (완료)
+11. 릴리스와 설치: `v*` 태그의 릴리스 워크플로(Linux musl, macOS, SHA256SUMS, 출처 증명), `install.sh`, `junees update` ([docs/install.md](docs/install.md))
 
 ## 개발
 

@@ -356,6 +356,18 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 테스트: `telegram/bot.rs`의 명령 읽기, `slash::is_command`, `platform.rs`의 멘션 끊기, `tests/telegram_gateway.rs`(개인 채팅의 `/tmp is full`, 두 응답으로 나뉜 앨범이 한 입력, 질문 대기 중 전달된 `n`이 거절이 아니고 턴 뒤 입력, 그룹 답의 멘션). 각 수정을 되돌리면 해당 테스트가 실패하는 것을 확인했다.
 - 남은 위험: 실제 텔레그램으로는 돌려 보지 않았다. 앨범 대기 1초만큼 앨범 입력이 늦게 시작한다. U+2060은 복사할 때 따라간다.
 
+### 릴리스와 설치 (로드맵 11단계)
+- 새 코드: `.github/workflows/release.yml`, 저장소 루트의 `install.sh`, `src/update/`(`version.rs` semver, `fetch.rs` 받기, `install.rs` 확인과 교체). 공유 파일은 연결만: `lib.rs`, `cli.rs`(`update` 하위 명령, 도움말), `slash.rs`(`/update`), `main.rs`, `self_command::STATE_CHANGING`, doctor `--online`. 문서는 `docs/install.md`.
+- 결정: Linux aarch64 musl 교차 빌드는 `cargo-zigbuild`(cross 대신). Docker가 필요 없고 x86_64와 aarch64를 같은 러너에서 같은 방법으로 빌드하며, 같은 도구로 이 서버에서 macOS 대상 `cargo check`(ring의 C 코드를 zig가 컴파일)를 돌려 macOS 빌드 오류를 미리 찾았다. CI에서는 venv에 `cargo-zigbuild`와 `ziglang`을 pip 해시로 고정해 설치한다. macOS 두 대상은 macOS 러너(Apple silicon)에서 그대로 `cargo build`.
+- 결정: 출처 증명은 `actions/attest`(v4부터 `attest-build-provenance`가 감싸는 본체)로 압축과 `SHA256SUMS`에. publish일 때만(시험 실행은 증명을 남기지 않는다). 권한은 기본 없음, job마다 필요한 것만(`contents: write`는 release job, `id-token`/`attestations`는 attest job). 액션은 모두 커밋 SHA 고정, 릴리스 빌드는 캐시 없이.
+- 결정: 시험 실행. `workflow_dispatch`(`publish` 끔)는 워크플로가 기본 브랜치에 있어야 쓸 수 있어, `release.yml`을 바꾸는 PR에서도 `pull_request` 트리거로 빌드와 `SHA256SUMS`까지 돈다. `publish`를 켠 수동 실행은 `v*` 태그 위에서만.
+- 결정: 최신 확인은 GitHub API 대신 `releases/latest`의 리다이렉트(`Location`의 `/tag/<태그>`)를 읽는다. 요청 한도(비인증 시간당 60회)와 JSON 해석이 없고, 릴리스가 없으면 `/releases`로 가는 것을 이 저장소에서 `curl`로 확인했다. 설치 스크립트는 `latest/download/SHA256SUMS`를 받아 파일 이름에서 버전을 읽는다(압축 이름에 버전이 있다).
+- 결정: 압축 풀기는 시스템 `tar`(macOS와 Linux 모두 있음)로 비공개 임시 폴더에 멤버 하나만. gzip/tar 크레이트(새 의존성 둘)를 들이지 않았다. 해시는 이미 있는 `ring`.
+- 결정: `update`는 `--check`까지 `STATE_CHANGING`에 넣었다(`find`가 뒤 낱말을 보지 않는다). 모델이 확인만 하려 해도 묻는다.
+- macOS: 라이브러리와 테스트가 macOS에서 컴파일되도록 `pipe2`(Linux 전용)를 `std::io::pipe`로, `openpty`의 포인터 인자를 `null_mut`으로 바꾸고, Linux에서만 읽는 샌드박스 필드에 `cfg_attr` 경고 허용을 달았다. Landlock, `PR_SET_DUMPABLE`은 이미 `cfg(target_os = "linux")`로 갈려 있었다(macOS에서 `sandbox=auto`는 경고, `require`는 거절). CI에 macOS `cargo check --all-targets`(경고는 오류) job, `install.sh`에 shellcheck job을 더했다.
+- 테스트: 단위(`src/update/tests.rs`, `version.rs`): 버전 읽기와 순서, 인자, 타깃 이름, SHA256SUMS 읽기, 허용 호스트와 루프백 테스트 주소, 루프백 가짜 릴리스 서버로 latest 리다이렉트(절대/상대, 릴리스 없음, 404, 500, 태그 아님), `--check`, 교체(링크가 가리키는 파일, 권한 0755, 남은 임시 파일 없음, 요청 경로), 최신/더 새로움/같은 버전은 받지 않음, 버전 지정(더 오래된 것), 체크섬 불일치와 이 타깃이 없는 SHA256SUMS, 다른 호스트(`evil.example`, 같은 서버의 `localhost` 이름)로의 리다이렉트 거절과 같은 서버 안 리다이렉트, 길이 있음/없음의 크기 상한, 압축의 링크 거절, 쓸 수 없는 폴더 안내, cargo와 돌고 있는 게이트웨이 안내, 지금 프로그램의 Place. `install.sh`는 같은 가짜 서버와 bash 도구의 테스트 샌드박스(`Bash::for_test`)로: 최신 설치(PATH 안내, 임시 폴더 비움), 버전 지정 덮어쓰기, 체크섬 불일치, 가짜 `uname`의 riscv64 거절(요청 0), 루프백 아닌 주소와 `@`(사용자 정보)가 든 주소 거절(요청 0), curl 없는 PATH에서 BusyBox처럼 모르는 옵션을 거절하는 가짜 `wget`으로 설치(넘긴 인자 `-q -O`만), 받기 실패 안내(`download failed (curl): <주소>`). doctor(`--online`의 새 버전 경고와 최신 ok, 오프라인은 요청 없음, 다른 doctor 테스트는 닫힌 포트를 가리켜 GitHub에 묻지 않는다). 바이너리(`tests/update.rs`): `update --check`, `--help`와 잘못된 인자, 대화의 `/update`. 실제 `current_exe`나 `~/.local/bin`, `~/.cargo/bin`은 어느 테스트도 바꾸지 않는다(바이너리 테스트는 확인만).
+- 남은 위험: 워크플로 자체(zig 교차 빌드, macOS 러너, 증명, `gh release create`)는 실제 태그나 시험 실행으로만 확인된다. `install.sh`의 wget 경로는 가짜 `wget`(테스트)과 이 서버의 BusyBox 1.36.1 wget(루프백 서버로 손으로 한 번)으로만 돌려 봤고 GNU wget과 실제 GitHub 주소로는 돌려 보지 않았다. macOS의 `shasum`/Rosetta 판단도 이 서버에서 돌려 보지 않았다. 체크섬은 같은 릴리스에서 받으므로 전송 손상과 다른 파일 섞임을 막을 뿐 릴리스 자체를 믿게 해 주지는 않는다(그것은 출처 증명을 `gh attestation verify`로 확인할 때). 업데이트는 새 바이너리를 실행해 보지 않고 바꾼다.
+
 ## 상태
 
 - [x] 1단계 에이전트 루프 (PR #1)

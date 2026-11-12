@@ -40,6 +40,7 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - `/webhooks`: 웹훅 경로 목록(`junees webhook`이 관리한다, [웹훅](automation.md#웹훅)).
 - `/context`: 컨텍스트 크기와 한도(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), 그리고 이 세션이 읽은 프로젝트 지침 파일과 바이트 수(두 백엔드 모두, [프로젝트 지침 파일](memory-and-skills.md#프로젝트-지침-파일)).
 - `/doctor`: 설치와 설정 점검(`junees doctor`와 같은 목록, 네트워크 없이. [점검](doctor.md#점검-junees-doctor)).
+- `/update`: 새 릴리스가 있는지 한 줄로(`junees update --check`와 같다. 설치는 하지 않는다. [업데이트](install.md#업데이트)).
 - `/compact`(api 백엔드만), `/usage`, `/help`, `/exit`(`/quit`도 됨).
 
 ## 중단 (Ctrl-C, SIGTERM)

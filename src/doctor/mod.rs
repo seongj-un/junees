@@ -8,8 +8,8 @@
 //! `claude --version`, the browser's `--version` and a confined `/bin/sh`
 //! that tries the bash sandbox (it writes nothing). The network is used only
 //! with `--online`: one
-//! request that shows whether the API takes the key, and
-//! `claude auth status`.
+//! request that shows whether the API takes the key, one that asks GitHub
+//! for the latest release, and `claude auth status`.
 //!
 //! Secrets never show: checks say whether a key is set and where, never
 //! its value, and before the report is printed every secret Junees knows
@@ -62,9 +62,10 @@ each check, with one line on how to fix it:
 
 Nothing is written or started, and the network is not used, unless:
   --online   also ask the API whether it takes the key (GET /v1/models,
-             no tokens used), run `claude auth status`, and find the
-             authorization server of each `url` MCP server that may use
-             OAuth (metadata only: no login, no token sent)
+             no tokens used), ask GitHub whether a newer release is out
+             (as `junees update --check`), run `claude auth status`, and
+             find the authorization server of each `url` MCP server that
+             may use OAuth (metadata only: no login, no token sent)
   --json     print the report as JSON
 
 Exits with 1 when a check failed.
@@ -354,6 +355,7 @@ pub async fn run_with(
     }
     if online {
         online::api_key(&mut report, settings).await;
+        online::release(&mut report, settings).await;
         if let Some(home) = home.as_deref() {
             services::mcp_online(&mut report, home, &|key| settings.env(key)).await;
         }

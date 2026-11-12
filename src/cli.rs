@@ -38,6 +38,8 @@ Usage:
   junees mcp login <server>
                           log in to an MCP server of mcp.json that asks for OAuth
                           (also mcp logout <server>; see `junees mcp --help`)
+  junees update           replace this binary with the latest release (--check:
+                          only look; see `junees update --help`)
 
 In the conversation, /help lists the commands (/task, /status, /sessions,
 /new, /model, /backend, ...). Settings are in $JUNEES_HOME/config.toml
@@ -150,6 +152,7 @@ pub const REPL_HELP: &str = "\
                    show what runs the conversation and /task, or switch both
                    for this session (a switch starts a new conversation)
 /doctor            check the installation and the settings (`junees doctor`)
+/update            say whether a newer release is out (`junees update` installs it)
 /compact           replace the earlier conversation with a summary (api backend;
                    Claude Code compacts its own)
 /context           show the context size and its limit (api backend) and the
@@ -206,6 +209,10 @@ pub enum Command {
     Usage(crate::usage::args::UsageArgs),
     /// `junees usage --help`.
     UsageHelp,
+    /// `junees update ...`: replace the binary with another release.
+    Update(crate::update::Options),
+    /// `junees update --help`.
+    UpdateHelp,
     Help,
     Version,
 }
@@ -342,6 +349,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Some("mcp") => {
             args.next();
             return crate::mcp::oauth::cli::parse(args).map(Command::Mcp);
+        }
+        Some("update") => {
+            args.next();
+            return Ok(crate::update::parse(args)?.map_or(Command::UpdateHelp, Command::Update));
         }
         Some("plugin" | "plugins") => {
             args.next();
@@ -681,6 +692,15 @@ mod tests {
             })
         );
         assert_eq!(parse(&["doctor", "--help"]).unwrap(), Command::DoctorHelp);
+        assert_eq!(
+            parse(&["update", "--check"]).unwrap(),
+            Command::Update(crate::update::Options {
+                check: true,
+                version: None
+            })
+        );
+        assert_eq!(parse(&["update", "-h"]).unwrap(), Command::UpdateHelp);
+        assert!(parse(&["update", "now"]).is_err());
         assert_eq!(
             parse(&["mcp", "login", "docs"]).unwrap(),
             Command::Mcp(crate::mcp::oauth::cli::McpCommand::Login("docs".into()))

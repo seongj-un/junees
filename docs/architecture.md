@@ -172,6 +172,12 @@ src/
     run.rs             실행 하나: running 기록, 프롬프트, cron 엔진(세션 source webhook), 출력 파일 webhooks/output/<이름>/, 전달, 마지막 실행 기록
     cli.rs, command.rs junees webhook 인자 파싱과 명령(serve/add/add-github/list/remove/pause/resume/test/run), 흐름 경로의 실행 연결
     mod.rs             설정(webhook_max_time, webhook_max_tokens), /webhooks와 !webhooks 목록
+  update/            junees update, /update: 최신 릴리스로 바이너리 바꾸기
+    mod.rs             인자(--check, --version), Place(바꿀 파일, 지금 버전, 타깃, 상태 폴더, cargo 폴더: 테스트가 가짜 바이너리를 넣는 이음새), 비교 문구, 확인과 설치 순서
+    version.rs         semver 버전 읽기와 비교(pre-release 포함), 태그
+    fetch.rs           릴리스 주소(GitHub, 테스트용 루프백 JUNEES_DOWNLOAD_BASE), latest 리다이렉트 읽기, GitHub 파일 호스트로만 가는 리다이렉트, 크기 상한 내려받기
+    install.rs         타깃 이름, SHA256SUMS 읽기와 확인, 시스템 tar로 바이너리 하나 꺼내기(일반 파일만), 같은 폴더 임시 파일 + rename 교체, cargo 설치와 돌고 있는 게이트웨이/cron/웹훅 안내
+    tests.rs           루프백 가짜 릴리스 서버로 최신 확인, 교체(링크 따라가기, 권한 유지, 임시 파일 없음), 체크섬 불일치, 다른 호스트 리다이렉트 거절, 크기 상한, 쓸 수 없는 폴더, install.sh(테스트 샌드박스의 bash로: 최신/버전 지정 설치, 체크섬 불일치, 모르는 CPU, 루프백 아닌 주소)
   doctor/            설치와 설정 점검 (junees doctor, /doctor)
     mod.rs             인자, 점검 결과(ok/warn/fail/skip, 고치는 방법), 텍스트와 JSON 출력, 비밀 값 지우기, 점검 순서
     files.rs           상태 폴더와 비공개 파일 권한, secrets/, 세션 폴더 크기
@@ -179,7 +185,7 @@ src/
     claude.rs          claude --version, --online의 auth status, 환경 정리와 bubblewrap, user namespace 제한(/proc/sys)
     sandbox.rs         Landlock ABI와 sandbox 설정, bash와 같은 규칙으로 묶은 시험 sh(설정 파일 읽기 실패 확인)
     services.rs        git/gh, cron 데몬과 웹훅 서버(잠금으로 판단), 웹훅 시크릿, MCP 명령 찾기(실행 안 함), 켜진 플러그인
-    online.rs          --online: 키 확인 요청 GET /v1/models
+    online.rs          --online: 키 확인 요청 GET /v1/models, 최신 릴리스 확인(update와 같은 요청)
     tests.rs           임시 상태 폴더, 가짜 PATH와 /proc/sys, 가짜 claude, 가짜 API로 각 점검의 ok/경고/실패
 tests/
   common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림), 테스트 환경의 JUNEES_*/ANTHROPIC_*/CLAUDE_CODE_* 변수와 GH_TOKEN/GITHUB_TOKEN/GH_ENTERPRISE_TOKEN/GITHUB_ENTERPRISE_TOKEN/GH_CONFIG_DIR을 지우고, 인자로 받은 임시 cwd와 HOME에서 도는 바이너리 명령(junees_binary(cwd, home), 크레이트 폴더나 그 안, 그 위의 폴더는 거부, 모든 바이너리 테스트가 이것으로 시작)
@@ -215,6 +221,7 @@ tests/
   browser.rs           실제 바이너리 -p와 가짜 API, 실제 Chromium(없으면 건너뜀)으로 루프백 페이지 열기(페이지 글 표시), evaluate 거절, 스크린샷 블록, 긴 JUNEES_HOME과 TMPDIR(프로필은 $JUNEES_HOME/browser, Chrome의 임시 폴더는 /tmp로), 끝난 뒤 브라우저 프로세스와 프로필, 임시 폴더 없음 검증
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
   doctor.rs            실제 바이너리로 junees doctor 출력과 종료 코드(권한 실패면 1), --json 형식, 깨진 설정 파일도 점검 결과로, --help와 잘못된 인자, 대화의 /doctor(대화 중에 깨진 설정 파일을 다시 읽음), 비밀 값이 출력되지 않음 검증
+  update.rs            실제 바이너리로 junees update --check(가짜 릴리스 서버), --help와 잘못된 인자, 루프백 아닌 JUNEES_DOWNLOAD_BASE 거절, 대화의 /update(바이너리는 바꾸지 않는다)
   usage.rs             실제 바이너리와 가짜 API로 대화의 /usage(호출, /model 전환 뒤 다른 가격, 합계), 기록 줄의 모델, junees usage(모델별, 날짜별, prices 덮어쓰기, 폴더 범위와 --all, 도움말과 오류) 검증
   session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
