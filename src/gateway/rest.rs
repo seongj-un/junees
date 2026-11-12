@@ -158,12 +158,15 @@ impl Rest {
     /// Edit Message (docs.discord.com, resources/message, Edit Message:
     /// `PATCH /channels/{channel.id}/messages/{message.id}`) of one of the
     /// bot's messages: `content` replaces its text and an empty
-    /// `components` takes its buttons off. Mentions in it stay silent.
+    /// `components` takes its buttons off. Mentions in it stay silent, and
+    /// links show no previews, as in a post (an edit without `flags` keeps
+    /// the message's, but this does not count on it).
     pub async fn edit_message(&self, channel: &str, message: &str, content: &str) -> Result<()> {
         let body = json!({
             "content": content,
             "components": [],
             "allowed_mentions": {"parse": []},
+            "flags": SUPPRESS_EMBEDS,
         });
         self.request(
             Method::PATCH,

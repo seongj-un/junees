@@ -1759,6 +1759,8 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         "{content}"
     );
     assert_eq!(edit["allowed_mentions"], json!({"parse": []}));
+    // SUPPRESS_EMBEDS, as in a post.
+    assert_eq!(edit["flags"], 4);
     rest.wait_post("505", |p| p == "declined, fine").await;
     assert!(!marker.exists());
 
