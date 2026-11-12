@@ -4,7 +4,7 @@
 
 ## 예약 작업
 
-`junees cron`은 프롬프트를 일정에 맞춰 실행한다. 실행마다 새 세션을 `junees -p`와 같은 무인 경로로 돌리고, 마지막 답을 파일로 남긴 뒤 디스코드 채널이나 웹훅으로 보낸다. 무인 실행의 `read_file`/`write_file`/`edit_file`은 작업 폴더, 임시 폴더, `sandbox_write`(읽기는 `sandbox_read`까지) 밖과 홈의 자격 증명 폴더를 거절한다([파일 도구의 경로 검사](tools.md#파일-도구의-경로-검사)).
+`junees cron`은 프롬프트를 일정에 맞춰 실행한다. 실행마다 새 세션을 `junees -p`와 같은 무인 경로로 돌리고, 마지막 답을 파일로 남긴 뒤 디스코드 채널이나 웹훅으로 보낸다. 무인 실행의 `read_file`/`write_file`/`edit_file`은 작업 폴더, 임시 폴더, `sandbox_write`(읽기는 `sandbox_read`까지. 웹훅 실행은 `sandbox_read` 대신 `webhook_sandbox_read`) 밖과 홈의 자격 증명 폴더를 거절한다([파일 도구의 경로 검사](tools.md#파일-도구의-경로-검사)).
 
 ```sh
 cd ~/work/some-project
