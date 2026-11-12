@@ -230,6 +230,56 @@ async fn an_error_in_a_200_body_maps_to_its_status_and_is_retried_when_it_may_he
     assert_eq!(served(server).await.len(), 1);
 }
 
+fn agent(provider: OpenAiProvider) -> Agent {
+    let mut tools = ToolRegistry::new();
+    tools.register(ReadFile::default());
+    Agent::new(
+        Box::new(provider),
+        tools,
+        AgentOptions {
+            system: "sys".into(),
+            max_tokens: 64,
+            max_turns: 5,
+            context_window: 200_000,
+            compact_threshold: 0.8,
+        },
+    )
+}
+
+#[tokio::test]
+async fn broken_tool_arguments_go_back_as_a_json_object_and_the_tool_refuses_them() {
+    let broken = json!({
+        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": null,
+            "tool_calls": [{"id": "call_x", "type": "function",
+                            "function": {"name": "read_file", "arguments": "{\"path\": \"a.txt\""}}]
+        }}],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 3}
+    });
+    let (url, server) = fake_api(vec![(200, broken), (200, answer("sorry"))]).await;
+    let mut agent = agent(provider(&url));
+    assert_eq!(agent.run("read a.txt", |_| {}).await.unwrap(), "sorry");
+
+    let requests = served(server).await;
+    let second = body_of(&requests[1]);
+    let messages = second["messages"].as_array().unwrap();
+    assert_eq!(
+        messages[2]["tool_calls"][0]["function"],
+        json!({"name": "read_file", "arguments": "{}"}),
+        "{second}"
+    );
+    assert_eq!(messages[3]["role"], "tool");
+    assert_eq!(messages[3]["tool_call_id"], "call_x");
+    assert!(
+        messages[3]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[tool error]"),
+        "{}",
+        messages[3]
+    );
+}
+
 fn streaming(url: &str) -> OpenAiProvider {
     provider(url).with_streaming(true)
 }

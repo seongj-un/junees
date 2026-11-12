@@ -137,12 +137,14 @@ fn assistant(message: &Message) -> Option<Value> {
 }
 
 /// A tool call's `arguments`: its input as JSON text. Arguments that were
-/// not JSON when they came are kept as their text ([`input`]) and go back
-/// as they were.
+/// no JSON object when they came (kept as their text, see [`input`]) go
+/// back as `{}`: servers that parse them (Ollama) refuse the request
+/// otherwise, every later one of the session too. The call's error result
+/// already told the model what was wrong.
 fn arguments(input: &Value) -> String {
     match input {
-        Value::String(raw) => raw.clone(),
-        input => input.to_string(),
+        Value::Object(_) => input.to_string(),
+        _ => "{}".to_string(),
     }
 }
 
@@ -659,8 +661,9 @@ mod tests {
                 json!({"role": "assistant", "content": "Sure.", "tool_calls": [
                     {"id": "call_1", "type": "function",
                      "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}},
+                    // Broken arguments go back as a JSON object.
                     {"id": "call_2", "type": "function",
-                     "function": {"name": "bash", "arguments": "{\"command\": \"wc"}}
+                     "function": {"name": "bash", "arguments": "{}"}}
                 ]}),
                 json!({"role": "tool", "tool_call_id": "call_1", "content": "a\nb"}),
                 json!({"role": "tool", "tool_call_id": "call_2", "content": "[tool error] bad input"}),
@@ -745,7 +748,7 @@ mod tests {
                 input: json!({"command": "ls"})
             }
         );
-        // Broken arguments stay text, and go back as they came.
+        // Broken arguments stay text, so the tool refuses them.
         let ContentBlock::ToolUse { input, .. } = &response.content[2] else {
             panic!("{:?}", response.content);
         };
