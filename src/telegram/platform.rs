@@ -130,7 +130,7 @@ pub fn help(username: &str) -> String {
 /webhooks the webhook routes (in a group without their prompts and folders)
 /help this list
 The commands also work as !new, !stop and so on. In a group, mention the bot (@{username}) or reply \
-to one of its messages; a command there may name it (/stop@{username})."
+to one of its messages; a command there may name it (/stop@{username} or @{username} /stop)."
     )
 }
 

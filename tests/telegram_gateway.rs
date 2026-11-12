@@ -759,6 +759,46 @@ async fn stop_status_and_new() {
 }
 
 #[tokio::test]
+async fn a_command_after_the_mention_is_a_command_in_a_group() {
+    let bot = FakeBot::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    let chat = GROUP.to_string();
+    let before = bot.typing(&chat);
+    bot.push(group(USER, "@junees_bot wait"));
+    bot.wait_typing(&chat, before).await;
+    // The running turn stops; "/stop" never reaches the model.
+    bot.push(group(USER, "@junees_bot /stop"));
+    bot.wait_post(&chat, |p| p == "(stopped)").await;
+    bot.push(group(USER, "@Junees_Bot !new"));
+    bot.wait_post(&chat, |p| p == "(new conversation) session not saved")
+        .await;
+    // Naming the bot, an unknown command is answered as in private; one
+    // for another bot is not run.
+    bot.push(group(USER, "@junees_bot /model opus"));
+    bot.wait_post(&chat, |p| p == "unknown command /model; /help lists them")
+        .await;
+    bot.push(group(USER, "@junees_bot /new@other_bot"));
+    bot.push(group(USER, "@junees_bot after"));
+    let posts = bot.wait_post(&chat, |p| p == "reply 1: after").await;
+    running.stop().await;
+    assert!(
+        !posts
+            .iter()
+            .any(|p| p.contains("/stop") || p.contains("other_bot")),
+        "{posts:#?}"
+    );
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|p| p.starts_with("(new conversation)"))
+            .count(),
+        1,
+        "{posts:#?}"
+    );
+}
+
+#[tokio::test]
 async fn a_refused_token_stops_without_showing_it() {
     let bot = FakeBot::start().await;
     bot.state.unauthorized.store(true, Ordering::SeqCst);

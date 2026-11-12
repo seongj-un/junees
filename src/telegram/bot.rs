@@ -219,6 +219,18 @@ impl Router {
             return;
         }
         let mut content = strip_mention(&text, &self.me.username);
+        // `@bot /stop`: in a group the mention often comes first. A command
+        // after it names this bot, as `/stop@bot` does.
+        if content != text.trim() {
+            match parse_command(&content, &self.me.username) {
+                Parsed::OtherBot => return,
+                Parsed::Command { command, .. } => {
+                    self.channels.command(&channel, command, direct);
+                    return;
+                }
+                Parsed::None => {}
+            }
+        }
         let (mut files, mut notes) = attachments(message);
         for part in &incoming.album {
             let caption = text_of(part);
