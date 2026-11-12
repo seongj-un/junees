@@ -466,7 +466,7 @@ impl ApiError {
             _ => Self {
                 kind: None,
                 code: None,
-                message: String::from_utf8_lossy(body).trim().to_string(),
+                message: plain_error(body),
             },
         }
     }
@@ -511,6 +511,20 @@ impl ApiError {
             kind,
             message: self.message,
         }
+    }
+}
+
+/// How many characters of an error body that is no JSON (a proxy's HTML
+/// error page) the error keeps: it goes to the terminal and to chat
+/// channels.
+const PLAIN_ERROR_CHARS: usize = 300;
+
+fn plain_error(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+    match text.char_indices().nth(PLAIN_ERROR_CHARS) {
+        Some((at, _)) => format!("{}... ({} bytes in all)", &text[..at], body.len()),
+        None => text.to_string(),
     }
 }
 
@@ -863,6 +877,18 @@ mod tests {
         );
         let plain = ApiError::parse(b"Bad Gateway").into_error(502);
         assert_eq!(plain.to_string(), "API error 502: Bad Gateway");
+        // A long page that is no JSON is cut, on a character boundary.
+        let page = format!("<html>{}</html>", "오류".repeat(400));
+        let cut = ApiError::parse(page.as_bytes()).message;
+        assert!(
+            cut.starts_with("<html>오류")
+                && cut.ends_with(&format!("... ({} bytes in all)", page.len())),
+            "{cut}"
+        );
+        assert_eq!(
+            cut.chars().count(),
+            PLAIN_ERROR_CHARS + format!("... ({} bytes in all)", page.len()).len()
+        );
         let image = ApiError::parse(
             br#"{"error": {"message": "Invalid image data", "type": "invalid_request_error",
                 "code": "invalid_image_format"}}"#,
