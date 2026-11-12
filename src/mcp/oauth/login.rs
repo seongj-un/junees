@@ -172,7 +172,11 @@ pub async fn login(
         wanted_scope: None,
         saved_at,
     };
+    // Under the lock: a refresh running in another junees then sees this
+    // login and keeps away from it.
+    let lock = store::lock_async(home).await?;
     store::write(home, name, &saved)?;
+    drop(lock);
     Ok(format!(
         "Logged in to `{name}` (authorization server {}). {}",
         fetch::short(&saved.issuer, 200),
@@ -349,9 +353,14 @@ fn span(secs: u64) -> String {
     }
 }
 
-/// Removes the saved login of the server `name`.
-pub fn logout(home: &Path, name: &str) -> Result<String, String> {
+/// Removes the saved login of the server `name`, under the lock, so a
+/// refresh running meanwhile cannot write it back.
+pub async fn logout(home: &Path, name: &str) -> Result<String, String> {
     crate::mcp::config::check_name(name).map_err(|err| format!("{err:#}"))?;
+    if !store::path(home, name).exists() {
+        return Ok(format!("`{name}` has no saved login."));
+    }
+    let _lock = store::lock_async(home).await?;
     Ok(if store::remove(home, name)? {
         format!(
             "Logged out of `{name}`: its saved login is removed. The authorization server may \

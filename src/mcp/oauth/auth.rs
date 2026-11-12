@@ -104,22 +104,34 @@ impl Auth {
 
     /// Renews the token after the server refused `rejected` (or it
     /// expires). Nothing to do when another request renewed it meanwhile,
-    /// in this process or another one.
+    /// in this process or another one. The saved file decides, under the
+    /// lock: without it (`junees mcp logout`) or with a login for another
+    /// address in it, nothing is renewed or written, so a running junees
+    /// never brings back a removed login or overwrites a newer one.
     pub async fn renew(&self, rejected: &HeaderValue) -> Result<(), String> {
         let _turn = self.renewing.lock().await;
         if self.header() != rejected {
             return Ok(());
         }
-        let home = self.home.clone();
-        let _lock = tokio::task::spawn_blocking(move || store::lock(&home))
-            .await
-            .map_err(|_| "the renewal stopped".to_string())??;
+        let _lock = store::lock_async(&self.home).await?;
         let current = self.saved.lock().unwrap().clone();
-        if let Ok(Some(on_disk)) = store::read(&store::path(&self.home, &self.server))
-            && on_disk.access_token != current.access_token
-            && on_disk.server_url == current.server_url
-            && on_disk.resource == current.resource
-        {
+        let name = &self.server;
+        let on_disk = store::read(&store::path(&self.home, name))
+            .map_err(|reason| format!("{reason}; the login is not renewed"))?
+            .ok_or_else(|| {
+                format!(
+                    "its saved login was removed (`junees mcp logout {name}`), so it is not \
+                     renewed"
+                )
+            })?;
+        if on_disk.server_url != current.server_url || on_disk.resource != current.resource {
+            return Err(format!(
+                "its saved login was replaced by a login for another address, so this junees \
+                 no longer renews the one it started with; start junees again to use the new \
+                 login of `{name}`"
+            ));
+        }
+        if on_disk.access_token != current.access_token {
             *self.saved.lock().unwrap() = on_disk;
             return Ok(());
         }
@@ -164,10 +176,7 @@ impl Auth {
     /// Authorization Flow").
     pub async fn want_scope(&self, scope: &str) -> Result<(), String> {
         let _turn = self.renewing.lock().await;
-        let home = self.home.clone();
-        let _lock = tokio::task::spawn_blocking(move || store::lock(&home))
-            .await
-            .map_err(|_| "the update stopped".to_string())??;
+        let _lock = store::lock_async(&self.home).await?;
         let path = store::path(&self.home, &self.server);
         let mut saved = match store::read(&path)? {
             Some(saved) if saved.server_url == self.saved.lock().unwrap().server_url => saved,

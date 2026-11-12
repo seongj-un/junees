@@ -151,7 +151,8 @@ pub fn write(home: &Path, name: &str, saved: &Saved) -> Result<(), String> {
     Ok(())
 }
 
-/// Removes the saved login of `name`; whether there was one.
+/// Removes the saved login of `name`; whether there was one. Called with
+/// the [`lock`] held, like every other change.
 pub fn remove(home: &Path, name: &str) -> Result<bool, String> {
     let target = path(home, name);
     match std::fs::remove_file(&target) {
@@ -161,10 +162,12 @@ pub fn remove(home: &Path, name: &str) -> Result<bool, String> {
     }
 }
 
-/// Takes the lock that serializes refreshes of every saved login (an
-/// authorization server may rotate the refresh token, so two processes
-/// refreshing at once would lose one): a `flock` on the folder, waited
-/// for up to 15 s. Held while the file lives.
+/// Takes the lock that serializes every change to the saved logins:
+/// refreshes, logins, logouts and remembered scopes (an authorization
+/// server may rotate the refresh token, so two processes refreshing at
+/// once would lose one, and a refresh must see a logout or a newer login
+/// that happened meanwhile): a `flock` on the folder, waited for up to
+/// [`LOCK_WAIT`]. Held while the file lives.
 pub fn lock(home: &Path) -> Result<File, String> {
     let folder = make_folder(home)?;
     let file =
@@ -184,6 +187,15 @@ pub fn lock(home: &Path) -> Result<File, String> {
             Err(err) => return Err(format!("cannot lock {}: {err}", folder.display())),
         }
     }
+}
+
+/// [`lock`], waited for on a blocking thread, so that a refresh holding
+/// the lock in this same process can finish meanwhile.
+pub async fn lock_async(home: &Path) -> Result<File, String> {
+    let home = home.to_path_buf();
+    tokio::task::spawn_blocking(move || lock(&home))
+        .await
+        .map_err(|_| "waiting for the lock of the saved logins stopped".to_string())?
 }
 
 /// Creates the secrets folder and `mcp-oauth` in it (0700) when missing,

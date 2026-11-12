@@ -514,6 +514,14 @@ fn text(output: &ToolOutput) -> String {
     output.content.clone()
 }
 
+/// How many refresh requests the token endpoint got.
+fn refreshes(fake: &Fake) -> usize {
+    fake.seen()
+        .iter()
+        .filter(|seen| seen.field("grant_type").as_deref() == Some("refresh_token"))
+        .count()
+}
+
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
@@ -741,12 +749,6 @@ async fn tokens_are_renewed_before_they_expire_and_after_a_401_once() {
     let server = start_server(config.clone(), home.path());
     server.start().await.unwrap();
     // Renewed before the first request went out.
-    let refreshes = |fake: &Fake| {
-        fake.seen()
-            .iter()
-            .filter(|seen| seen.field("grant_type").as_deref() == Some("refresh_token"))
-            .count()
-    };
     assert_eq!(refreshes(&fake), 1);
     let saved = store::read(&store::path(home.path(), "docs"))
         .unwrap()
@@ -967,13 +969,135 @@ async fn the_wait_for_the_browser_has_a_limit() {
 async fn logout_removes_the_saved_login() {
     let home = tempfile::tempdir().unwrap();
     store::write(home.path(), "docs", &store::sample()).unwrap();
-    let text = super::logout(home.path(), "docs").unwrap();
+    let text = super::logout(home.path(), "docs").await.unwrap();
     assert!(text.contains("Logged out of `docs`"), "{text}");
     assert!(!store::path(home.path(), "docs").exists());
     assert!(
         super::logout(home.path(), "docs")
+            .await
             .unwrap()
             .contains("no saved login")
     );
-    assert!(super::logout(home.path(), "../x").is_err());
+    assert!(super::logout(home.path(), "../x").await.is_err());
+}
+
+#[tokio::test]
+async fn a_running_renewal_does_not_undo_a_logout() {
+    let fake = Fake::start(Knobs::default()).await;
+    let home = tempfile::tempdir().unwrap();
+    let config = server_config(json!({"url": fake.url()}));
+    login_by_browser(home.path(), &fake, &config)
+        .await
+        .0
+        .unwrap();
+    let server = start_server(config.clone(), home.path());
+    server.start().await.unwrap();
+    let path = store::path(home.path(), "docs");
+
+    // `junees mcp logout docs` in another terminal; the server then
+    // refuses the token the running junees still holds.
+    super::logout(home.path(), "docs").await.unwrap();
+    fake.revoke_access();
+    let output = server.call("whoami", json!({})).await;
+    assert!(output.is_error);
+    let message = text(&output);
+    assert!(
+        message.contains("its saved login was removed (`junees mcp logout docs`)"),
+        "{message}"
+    );
+    assert!(message.contains("junees mcp login docs"), "{message}");
+    assert!(!message.contains("s3cret"), "{message}");
+    assert!(!path.exists());
+    assert_eq!(refreshes(&fake), 0);
+
+    // A new login for the same address is taken up by the running junees.
+    login_by_browser(home.path(), &fake, &config)
+        .await
+        .0
+        .unwrap();
+    let output = server.call("whoami", json!({})).await;
+    assert!(!output.is_error, "{}", text(&output));
+    assert_eq!(refreshes(&fake), 0);
+    assert_eq!(
+        fake.seen().last().unwrap().authorization.as_deref(),
+        Some("Bearer at-2-s3cret")
+    );
+}
+
+#[tokio::test]
+async fn a_running_renewal_does_not_overwrite_a_login_for_another_address() {
+    let fake = Fake::start(Knobs::default()).await;
+    let home = tempfile::tempdir().unwrap();
+    let config = server_config(json!({"url": fake.url()}));
+    login_by_browser(home.path(), &fake, &config)
+        .await
+        .0
+        .unwrap();
+    let server = start_server(config.clone(), home.path());
+    server.start().await.unwrap();
+
+    // mcp.json's `url` changed and `docs` was logged in again there,
+    // while this junees still runs with the old address.
+    let path = store::path(home.path(), "docs");
+    let mut newer = store::read(&path).unwrap().unwrap();
+    newer.server_url = format!("{}/other", fake.url());
+    newer.resource = newer.server_url.clone();
+    newer.access_token = "newer-s3cret".into();
+    newer.refresh_token = Some("newer-rt-s3cret".into());
+    store::write(home.path(), "docs", &newer).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    fake.revoke_access();
+    let output = server.call("whoami", json!({})).await;
+    assert!(output.is_error);
+    let message = text(&output);
+    assert!(
+        message.contains("replaced by a login for another address"),
+        "{message}"
+    );
+    assert!(!message.contains("s3cret"), "{message}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(refreshes(&fake), 0);
+}
+
+#[tokio::test]
+async fn logins_and_logouts_wait_for_a_renewal_in_progress() {
+    let fake = Fake::start(Knobs::default()).await;
+    let home = tempfile::tempdir().unwrap();
+    let config = server_config(json!({"url": fake.url()}));
+    let path = store::path(home.path(), "docs");
+
+    // Another junees renews meanwhile: it holds the lock.
+    let held = store::lock(home.path()).unwrap();
+    let login = login_by_browser(home.path(), &fake, &config);
+    tokio::pin!(login);
+    let deadline = std::time::Instant::now() + WAIT;
+    while !fake.paths().contains(&"POST /token".to_string()) {
+        assert!(std::time::Instant::now() < deadline, "{:?}", fake.paths());
+        tokio::select! {
+            _ = &mut login => panic!("the login ended while the lock was held"),
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
+    tokio::select! {
+        _ = &mut login => panic!("the login was saved while the lock was held"),
+        () = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    assert!(!path.exists());
+    drop(held);
+    login.await.0.unwrap();
+    assert!(path.exists());
+
+    let held = store::lock(home.path()).unwrap();
+    let logout = super::logout(home.path(), "docs");
+    tokio::pin!(logout);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), &mut logout)
+            .await
+            .is_err()
+    );
+    assert!(path.exists());
+    drop(held);
+    assert!(logout.await.unwrap().contains("Logged out of `docs`"));
+    assert!(!path.exists());
 }

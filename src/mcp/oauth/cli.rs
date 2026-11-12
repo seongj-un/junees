@@ -69,7 +69,7 @@ pub async fn run(
     };
     match command {
         McpCommand::Help => Ok(HELP.to_string()),
-        McpCommand::Logout(name) => logout(home()?, name),
+        McpCommand::Logout(name) => logout(home()?, name).await,
         McpCommand::Login(name) => {
             let home = home()?;
             let path = home.join(config::FILE_NAME);
