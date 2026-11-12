@@ -23,7 +23,6 @@ use crate::memory::{Memory, MemoryTool, Mode};
 use crate::plugins::Plugins;
 use crate::prompt;
 use crate::provider::Provider;
-use crate::provider::anthropic::AnthropicProvider;
 use crate::session::{self, Journal, Transcript};
 use crate::skills;
 use crate::tools::{ToolRegistry, ToolSettings, Workspace};
@@ -182,22 +181,11 @@ pub struct ApiEngines {
 }
 
 impl ApiEngines {
-    /// The agent on Anthropic's API, as `config` sets it up.
+    /// The agent on the API `config` names, as it sets it up.
     pub fn new(config: Config, cwd: PathBuf) -> Self {
         let config = Arc::new(config);
         let settings = Arc::clone(&config);
-        let provider: ProviderFactory = Arc::new(move || {
-            Ok(Box::new(
-                AnthropicProvider::new(
-                    settings.api_key.clone(),
-                    settings.base_url.clone(),
-                    settings.model.clone(),
-                )?
-                .with_thinking(settings.thinking_budget)
-                .with_streaming(settings.stream)
-                .with_web_search(settings.web_search.clone()),
-            ) as Box<dyn Provider>)
-        });
+        let provider: ProviderFactory = Arc::new(move || crate::provider::from_config(&settings));
         Self {
             config,
             cwd,

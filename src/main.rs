@@ -25,7 +25,6 @@ use junees::notify::Notifier;
 use junees::plugins::{self, Plugins};
 use junees::prompt;
 use junees::prompt_text::escape_hidden;
-use junees::provider::anthropic::AnthropicProvider;
 use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::setup::{self, EchoOff, Prompter};
@@ -487,16 +486,7 @@ fn session_backend(backend: Backend) -> Option<&'static str> {
 }
 
 fn make_provider(config: &Config) -> Result<Box<dyn Provider>> {
-    Ok(Box::new(
-        AnthropicProvider::new(
-            config.api_key.clone(),
-            config.base_url.clone(),
-            config.model.clone(),
-        )?
-        .with_thinking(config.thinking_budget)
-        .with_streaming(config.stream)
-        .with_web_search(config.web_search.clone()),
-    ))
+    junees::provider::from_config(config)
 }
 
 /// Junees's own agent for the conversation. It asks before risky tool
@@ -1615,7 +1605,7 @@ impl Repl {
             println!("model: {}", self.config.model);
             return;
         };
-        if !model.starts_with("claude-") {
+        if self.config.openai.is_none() && !model.starts_with("claude-") {
             eprintln!(
                 "  !! `{model}` does not look like a Claude model name; the next question may fail"
             );
@@ -2025,7 +2015,10 @@ fn report(err: &anyhow::Error) {
                  even after clearing old tool output and compacting. /new starts a new one."
             );
         } else if provider_error.is_auth() {
-            eprintln!("hint: check the API key (`junees setup`, or ANTHROPIC_API_KEY).");
+            eprintln!(
+                "hint: check the API key (`junees setup`, or ANTHROPIC_API_KEY; OPENAI_API_KEY \
+                 with provider = openai)."
+            );
         }
     }
     if err.downcast_ref::<UsageLimit>().is_some() {
