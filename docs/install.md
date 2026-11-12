@@ -111,6 +111,6 @@ junees update --version v0.1.0 # 그 릴리스로(더 오래된 것도)
    - `release`: `gh release create --verify-tag --generate-notes`(직전 태그 이후 merge된 PR 목록). 버전에 `-`가 있으면(`0.2.0-rc.1`) pre-release. `contents: write`는 이 job만.
 4. 끝나면 릴리스 페이지의 파일과 `install.sh`로 설치를 확인한다.
 
-시험 실행(릴리스는 만들지 않음): Actions의 Release 워크플로를 `publish`를 끈 채 실행하면(`gh workflow run release.yml --ref <브랜치>`) 빌드와 `SHA256SUMS`까지 하고 결과를 워크플로 아티팩트로 남긴다. `workflow_dispatch`는 워크플로 파일이 기본 브랜치에 있어야 쓸 수 있으므로, 처음 들어가는 PR이나 `release.yml`을 바꾸는 PR에서는 `pull_request` 트리거가 같은 시험 실행을 한다. `publish`를 켠 수동 실행은 `v*` 태그에서만 된다.
+시험 실행(릴리스는 만들지 않음): Actions의 Release 워크플로를 `publish`를 끈 채 실행하면(`gh workflow run release.yml --ref <브랜치>`) 빌드와 `SHA256SUMS`까지 하고 결과를 워크플로 아티팩트로 남긴다. `workflow_dispatch`는 워크플로 파일이 기본 브랜치에 있어야 쓸 수 있으므로, 처음 들어가는 PR이나 `release.yml`, `Cargo.toml`, `Cargo.lock`을 바꾸는 PR에서는 `pull_request` 트리거가 같은 시험 실행을 한다(의존성이 바뀌어 musl 정적 빌드가 깨지면 태그 전에 드러난다). `publish`를 켠 수동 실행은 `v*` 태그에서만 된다.
 
 워크플로의 모든 액션은 커밋 SHA로 고정했고(주석에 버전), 기본 권한은 없음(`permissions: {}`)에서 job마다 필요한 것만 준다. 릴리스 빌드는 캐시를 쓰지 않는다.

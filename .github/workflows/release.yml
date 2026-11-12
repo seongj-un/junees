@@ -3,7 +3,9 @@ name: Release
 # A `v*` tag builds the release archives, checks them into SHA256SUMS,
 # attests their provenance and publishes the GitHub release. Run by hand
 # (workflow_dispatch) with `publish` off, or in a pull request that changes
-# this file, it only builds and uploads the archives as workflow artifacts.
+# this file or the dependencies (Cargo.toml, Cargo.lock: a new crate can break
+# the static musl build), it only builds and uploads the archives as workflow
+# artifacts.
 
 on:
   push:
@@ -11,6 +13,8 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - Cargo.toml
+      - Cargo.lock
   workflow_dispatch:
     inputs:
       publish:
