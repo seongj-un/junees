@@ -425,6 +425,7 @@ async fn model_run(
             // The route's folder (the base checkout), not a worktree of
             // the pull request: its instruction files are its author's.
             context_dir: &cx.route.dir,
+            approvers: &cx.flow.approvers,
         },
     };
     let outcome = engine.run(&spec, cx.cancel, cx.limits).await;

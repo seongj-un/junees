@@ -488,6 +488,7 @@ pub fn test_sandbox(tools: &crate::tools::ToolSettings, gh_config: &Path) -> Opt
         github_allow: &[],
         gh_config,
         context_dir: Path::new("/"),
+        approvers: &[],
     };
     Sandbox::for_tools(&trigger.tool_settings(tools))
 }

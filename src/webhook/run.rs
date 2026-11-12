@@ -127,6 +127,7 @@ pub async fn execute(
             github_allow: &route.github_allow,
             gh_config,
             context_dir: &route.dir,
+            approvers: &[],
         },
     };
     engine.run(&spec, cancel, limits).await

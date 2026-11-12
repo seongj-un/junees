@@ -58,6 +58,9 @@ pub enum Trigger<'a> {
         github_allow: &'a [crate::github::Write],
         gh_config: &'a Path,
         context_dir: &'a Path,
+        /// Logins whose pull request comments the `github` tool shows
+        /// besides people with write access (a flow's `--approver`).
+        approvers: &'a [String],
     },
 }
 
@@ -341,6 +344,7 @@ impl ApiEngine {
             Trigger::Webhook {
                 route,
                 github_allow,
+                approvers,
                 ..
             } => crate::github::register_webhook(
                 &mut tools,
@@ -348,6 +352,7 @@ impl ApiEngine {
                 dir,
                 route,
                 github_allow,
+                approvers,
             ),
         }
         // Only with browser_unattended, and nobody is asked.
@@ -751,6 +756,7 @@ mod tests {
                 github_allow: allow,
                 gh_config: Path::new("/run/gh-config"),
                 context_dir: home.path(),
+                approvers: &[],
             },
         };
         let (engine, seen) = self::engine(home.path(), replies(), Duration::ZERO);
@@ -776,6 +782,7 @@ mod tests {
             github_allow: allow,
             gh_config: Path::new("/run/gh-config"),
             context_dir: home.path(),
+            approvers: &[],
         }
         .tool_settings(&settings);
         assert!(webhook.webhook);
@@ -819,6 +826,7 @@ mod tests {
                 github_allow: allow,
                 gh_config: Path::new("/run/gh-config"),
                 context_dir: &base,
+                approvers: &[],
             },
         };
         assert_eq!(webhook.trigger.context_dir(&tree), base.as_path());
