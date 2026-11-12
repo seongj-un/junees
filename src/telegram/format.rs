@@ -411,15 +411,55 @@ fn link_address(raw: &str) -> Option<String> {
     .then(|| raw.to_string())
 }
 
+/// Unicode punctuation as CommonMark uses it, near enough: anything that
+/// is no letter, digit or space (symbols included).
+fn is_punctuation(c: char) -> bool {
+    !c.is_alphanumeric() && !c.is_whitespace()
+}
+
+/// Whether a run of markers from `from` to `to` (exclusive) is
+/// left-flanking and right-flanking (CommonMark, "Emphasis and strong
+/// emphasis"): left-flanking runs may open, right-flanking ones close.
+/// The line's start and end count as spaces.
+fn flanking(chars: &[char], from: usize, to: usize) -> (bool, bool) {
+    let before = from.checked_sub(1).map(|at| chars[at]);
+    let after = chars.get(to).copied();
+    let space = |c: Option<char>| c.is_none_or(char::is_whitespace);
+    let punct = |c: Option<char>| c.is_some_and(is_punctuation);
+    let left = !space(after) && (!punct(after) || space(before) || punct(before));
+    let right = !space(before) && (!punct(before) || space(after) || punct(after));
+    (left, right)
+}
+
+/// Whether the marker run from `from` to `to` may open (`opening`) or
+/// close emphasis. `*` and `~` follow the flanking rules alone, so they
+/// work inside words (`**설정 파일**을`, `**PR**s`); `_` does not
+/// (`snake_case`). A `*` between two digits is multiplication (`2*3*4`).
+fn can(chars: &[char], from: usize, to: usize, opening: bool) -> bool {
+    let (left, right) = flanking(chars, from, to);
+    let before = from.checked_sub(1).map(|at| chars[at]);
+    let after = chars.get(to).copied();
+    match chars[from] {
+        '_' if opening => left && (!right || before.is_some_and(is_punctuation)),
+        '_' => right && (!left || after.is_some_and(is_punctuation)),
+        '*' if before.is_some_and(|c| c.is_ascii_digit())
+            && after.is_some_and(|c| c.is_ascii_digit()) =>
+        {
+            false
+        }
+        _ if opening => left,
+        _ => right,
+    }
+}
+
 /// Bold, italic or strikethrough opening at `at`: the tag, the marker
-/// width, and where the closing marker starts. An opener follows no
-/// letter or digit and comes before a non-space; a closer comes after a
-/// non-space and before no letter or digit (so `snake_case` and `2*3*4`
-/// stay as typed). Code spans are skipped while looking for the closer.
+/// width, and where the closing marker starts. Openers and closers
+/// follow CommonMark's flanking rules ([`can`]). Code spans are skipped
+/// while looking for the closer.
 fn emphasis(chars: &[char], at: usize, end: usize) -> Option<(Tag, usize, usize)> {
     let marker = chars[at];
     let run = run_length(chars, at, end);
-    if at > 0 && chars[at - 1].is_alphanumeric() {
+    if !can(chars, at, at + run, true) {
         return None;
     }
     let (tag, width) = match (marker, run) {
@@ -456,9 +496,7 @@ fn emphasis(chars: &[char], at: usize, end: usize) -> Option<(Tag, usize, usize)
         let length = run_length(chars, look, end);
         let fits = length == width || (width == 2 && length == 3 && marker != '~');
         let after = look + length;
-        let closes = fits
-            && !chars[look - 1].is_whitespace()
-            && (after >= end || !chars[after].is_alphanumeric());
+        let closes = fits && can(chars, look, after, false);
         if closes {
             let close = after - width;
             return (close > start).then_some((tag, width, close));
@@ -738,6 +776,27 @@ mod tests {
             html("```\n**x** [a](https://a.b)\n```"),
             "<pre>**x** [a](https://a.b)</pre>"
         );
+    }
+
+    #[test]
+    fn emphasis_works_next_to_korean_particles_and_inside_words() {
+        assert_eq!(
+            html("**설정 파일**을 고치세요"),
+            "<b>설정 파일</b>을 고치세요"
+        );
+        assert_eq!(
+            html("`config.toml`의 **telegram_format**을 html로"),
+            "<code>config.toml</code>의 <b>telegram_format</b>을 html로"
+        );
+        assert_eq!(
+            html("두 **PR**s and *한*글"),
+            "두 <b>PR</b>s and <i>한</i>글"
+        );
+        assert_eq!(html("값은 ~~예전~~이다"), "값은 <s>예전</s>이다");
+        // Punctuation around the markers (CommonMark's flanking rules).
+        assert_eq!(html("(**x**)"), "(<b>x</b>)");
+        // `_` still needs a word boundary.
+        assert_eq!(html("_설정_을 x_y_z"), "_설정_을 x_y_z");
     }
 
     #[test]
