@@ -265,7 +265,11 @@ impl Router {
         // Someone else's words: never a command, and marked as theirs, so
         // the model does not take them as the user's.
         let forwarded = forwarded_from(message);
-        let commands = forwarded.is_none();
+        // A caption is about its file: "/new" under a photo is no command
+        // that drops the photo.
+        let (mut files, mut notes) = attachments(message);
+        let attached = !(files.is_empty() && notes.is_empty() && incoming.album.is_empty());
+        let commands = forwarded.is_none() && !attached;
         match parse_command(&text, &self.me.username) {
             _ if !commands => {}
             Parsed::OtherBot => return,
@@ -315,7 +319,6 @@ impl Router {
                 Parsed::None => {}
             }
         }
-        let (mut files, mut notes) = attachments(message);
         for part in &incoming.album {
             let caption = text_of(part);
             if !caption.trim().is_empty() {

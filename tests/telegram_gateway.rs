@@ -1096,6 +1096,38 @@ async fn photos_and_albums_reach_the_model() {
     );
 }
 
+#[tokio::test]
+async fn a_caption_is_never_a_command() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    bot.file("ph1", "photos/file_1.png", png(20, 10));
+    let (api, served) =
+        common::fake_api(vec![(200, common::text_reply("A photo with a caption."))]).await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let me = USER.to_string();
+    bot.push(photo(USER, "ph1", Some("/new"), None));
+    let posts = bot.wait_post(&me, |p| p == "A photo with a caption.").await;
+    running.stop().await;
+    assert!(
+        !posts.iter().any(|p| p.starts_with("(new conversation)")),
+        "{posts:#?}"
+    );
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    let content = &common::body_of(&requests[0])["messages"][0]["content"];
+    assert_eq!(content[0]["type"], "image", "{content}");
+    assert_eq!(content[1]["text"], "/new", "{content}");
+}
+
 /// A photo from `from` in the group: part of `album`, with a caption (and
 /// its mention entities) or none.
 fn group_photo(from: i64, file_id: &str, caption: Option<&str>, album: &str) -> Value {
