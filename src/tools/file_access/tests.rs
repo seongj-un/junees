@@ -328,6 +328,85 @@ fn unattended_runs_in_the_home_or_state_folder_are_warned_about() {
 }
 
 #[tokio::test]
+async fn writes_refuse_read_only_files_like_a_direct_write() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root writes anywhere
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ro.txt");
+    std::fs::write(&path, "kept\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let output = write(&FileAccess::default(), &path, "changed\n").await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("Permission denied"),
+        "{}",
+        output.content
+    );
+    let output = edit(&FileAccess::default(), &path, "kept", "changed").await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("Permission denied"),
+        "{}",
+        output.content
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["ro.txt"]);
+}
+
+#[tokio::test]
+async fn write_file_keeps_hard_links_together_outside_unattended_runs() {
+    let layout = Layout::new();
+    let (first, second) = (layout.path("work/h1"), layout.path("work/h2"));
+    std::fs::write(&first, "old\n").unwrap();
+    std::fs::hard_link(&first, &second).unwrap();
+    let output = write(&FileAccess::default(), &first, "new\n").await;
+    assert!(!output.is_error, "{}", output.content);
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), "new\n");
+    // An unattended run breaks the link: the other name may lie outside
+    // its scope.
+    let output = write(&layout.scope("work", &[]), &first, "newer\n").await;
+    assert!(!output.is_error, "{}", output.content);
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "newer\n");
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), "new\n");
+}
+
+#[tokio::test]
+async fn writes_keep_the_group_when_the_owner_may_give_it() {
+    use std::os::unix::fs::MetadataExt;
+    // A supplementary group of this process other than its own.
+    let mut groups = vec![0 as libc::gid_t; 256];
+    // SAFETY: a buffer of `groups.len()` entries.
+    let count = unsafe { libc::getgroups(groups.len() as libc::c_int, groups.as_mut_ptr()) };
+    // SAFETY: getegid has no preconditions.
+    let own = unsafe { libc::getegid() };
+    let Some(&group) = groups[..count.max(0) as usize]
+        .iter()
+        .find(|&&group| group != own)
+    else {
+        eprintln!("skipped: no supplementary group");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.txt");
+    std::fs::write(&path, "old\n").unwrap();
+    std::os::unix::fs::chown(&path, None, Some(group)).unwrap();
+    let output = write(&FileAccess::default(), &path, "new\n").await;
+    assert!(!output.is_error, "{}", output.content);
+    let output = edit(&FileAccess::default(), &path, "new", "newer").await;
+    assert!(!output.is_error, "{}", output.content);
+    let meta = std::fs::metadata(&path).unwrap();
+    assert_eq!(meta.gid(), group);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "newer\n");
+}
+
+#[tokio::test]
 async fn no_file_tool_opens_proc_sys_or_dev() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();

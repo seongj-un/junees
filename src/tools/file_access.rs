@@ -288,6 +288,10 @@ impl FileAccess {
                         name,
                         real,
                         existing,
+                        // Another name of the same file may lie outside
+                        // an unattended run's scope: there the link is
+                        // broken instead.
+                        links_in_place: self.scope.is_none(),
                     });
                 }
                 Err(err) => return Err(err.into()),
@@ -345,6 +349,9 @@ pub struct Target {
     name: OsString,
     real: PathBuf,
     existing: Option<Stat>,
+    /// Whether a file with other names (hard links) is rewritten in place
+    /// by `write_file`, so every name sees the new content.
+    links_in_place: bool,
 }
 
 impl Target {
@@ -369,16 +376,29 @@ impl Target {
     }
 
     /// Puts `bytes` there: written to a new temporary file in the folder
-    /// (with the old file's permissions) and renamed over the name, so a
-    /// crash or a full disk never leaves a half-written file. With
-    /// `in_place`, a folder without room for the temporary file
-    /// (permission denied) makes it rewrite an existing file with a single
-    /// link in place instead.
+    /// (with the old file's permissions and, when allowed, its group) and
+    /// renamed over the name, so a crash or a full disk never leaves a
+    /// half-written file. An existing file this process may not write
+    /// (0444) is refused, as writing it directly would be.
+    ///
+    /// With `in_place` (write_file), an existing file is rewritten in
+    /// place instead when the temporary file cannot be made (a folder
+    /// without write permission) or renamed (a file bind-mounted on its
+    /// own: `EBUSY`; a sticky folder: `EPERM`), when it has a single
+    /// name, and when it has other names (hard links) outside an
+    /// unattended run, so they all keep seeing the same file.
     ///
     /// Blocking: every error comes back from the call that hit it, and a
     /// caller on one blocking thread cannot be stopped between creating
     /// the temporary file and renaming or removing it.
     pub fn replace(&self, bytes: &[u8], in_place: bool) -> io::Result<()> {
+        if let Some(stat) = &self.existing {
+            writable_at(&self.dir, &self.name)?;
+            if in_place && stat.nlink > 1 && self.links_in_place {
+                return self.write_in_place(bytes);
+            }
+        }
+        let single = self.existing.as_ref().is_some_and(|stat| stat.nlink == 1);
         let temp = temp_name(&self.name);
         let mode = if self.existing.is_some() {
             0o600
@@ -388,11 +408,7 @@ impl Target {
         let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW;
         let mut file = match open_at(&self.dir, &temp, flags, mode) {
             Ok(file) => file,
-            Err(err)
-                if in_place
-                    && err.kind() == io::ErrorKind::PermissionDenied
-                    && self.existing.as_ref().is_some_and(|stat| stat.nlink == 1) =>
-            {
+            Err(err) if in_place && err.kind() == io::ErrorKind::PermissionDenied && single => {
                 return self.write_in_place(bytes);
             }
             Err(err) => {
@@ -420,20 +436,34 @@ impl Target {
         };
         file.write_all(bytes)?;
         if let Some(stat) = &self.existing {
+            // Keep the group where the owner may give it (a member of it),
+            // before the mode: changing the group can clear setgid.
+            let _ = chgrp(&file, stat.gid);
             // The creation mode went through the umask; set the original
             // exactly.
             file.set_permissions(std::fs::Permissions::from_mode(stat.mode & 0o7777))?;
         }
         file.sync_all()?;
         drop(file);
-        rename_at(&self.dir, &temp, &self.name)?;
+        if let Err(err) = rename_at(&self.dir, &temp, &self.name) {
+            if in_place
+                && single
+                && matches!(
+                    err.raw_os_error(),
+                    Some(libc::EBUSY | libc::EXDEV | libc::EPERM)
+                )
+            {
+                drop(guard);
+                return self.write_in_place(bytes);
+            }
+            return Err(err);
+        }
         guard.armed = false;
         Ok(())
     }
 
     /// Rewrites the existing file in place, when it is still the file
-    /// checked and has no other name (a hard link elsewhere would change
-    /// too).
+    /// checked (same inode, as many names as then).
     fn write_in_place(&self, bytes: &[u8]) -> io::Result<()> {
         let mut file = open_at(
             &self.dir,
@@ -442,11 +472,10 @@ impl Target {
             0,
         )?;
         let meta = file.metadata()?;
-        let same = self
-            .existing
-            .as_ref()
-            .is_some_and(|stat| stat.dev == meta.dev() && stat.ino == meta.ino());
-        if !meta.is_file() || !same || meta.nlink() != 1 {
+        let same = self.existing.as_ref().is_some_and(|stat| {
+            stat.dev == meta.dev() && stat.ino == meta.ino() && stat.nlink == meta.nlink()
+        });
+        if !meta.is_file() || !same {
             return Err(io::Error::other(
                 "the file changed while it was being written; try again",
             ));
@@ -651,6 +680,7 @@ struct Stat {
     regular: bool,
     symlink: bool,
     mode: u32,
+    gid: u32,
     nlink: u64,
     dev: u64,
     ino: u64,
@@ -719,6 +749,28 @@ fn unlink_at(dir: &File, name: &OsStr) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether this process may write the file `name` in `dir`, by its
+/// effective ids (permission bits, ACLs, a read-only mount); `Permission
+/// denied` when not.
+fn writable_at(dir: &File, name: &OsStr) -> io::Result<()> {
+    let name = c_name(name)?;
+    // SAFETY: an open folder and a valid C string.
+    if unsafe { libc::faccessat(dir.as_raw_fd(), name.as_ptr(), libc::W_OK, libc::AT_EACCESS) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Gives the open `file` the group `gid`, keeping its owner.
+fn chgrp(file: &File, gid: libc::gid_t) -> io::Result<()> {
+    // SAFETY: an open descriptor; `uid_t::MAX` (-1) leaves the owner.
+    if unsafe { libc::fchown(file.as_raw_fd(), libc::uid_t::MAX, gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn readlink_at(dir: &File, name: &OsStr) -> io::Result<PathBuf> {
     let name = c_name(name)?;
     let mut buf = vec![0u8; libc::PATH_MAX as usize + 1];
@@ -767,6 +819,7 @@ fn stat_at(dir: &File, name: &OsStr) -> io::Result<Stat> {
         regular: kind == libc::S_IFREG,
         symlink: kind == libc::S_IFLNK,
         mode: stat.st_mode as u32,
+        gid: stat.st_gid as u32,
         nlink: stat.st_nlink as u64,
         dev: stat.st_dev as u64,
         ino: stat.st_ino as u64,
