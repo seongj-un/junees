@@ -38,6 +38,10 @@ pub enum Slash {
     Skill(String),
     /// `/mcp` shows the MCP servers and their tools.
     Mcp,
+    /// `/mcp login <server>` logs in to a server that asks for OAuth.
+    McpLogin(String),
+    /// `/mcp logout <server>` removes its saved login.
+    McpLogout(String),
     /// `/plugins` shows the plugins.
     Plugins,
     /// `/cron` lists the scheduled jobs.
@@ -103,7 +107,7 @@ pub fn parse(line: &str) -> Option<Slash> {
         "usage" => plain(Slash::Usage),
         "memory" => memory(arg.as_deref()),
         "skills" => plain(Slash::Skills),
-        "mcp" => plain(Slash::Mcp),
+        "mcp" => mcp(arg.as_deref()),
         "plugins" => plain(Slash::Plugins),
         "cron" => plain(Slash::Cron),
         "github" => plain(Slash::Github),
@@ -120,6 +124,26 @@ pub fn parse(line: &str) -> Option<Slash> {
         "exit" | "quit" => plain(Slash::Exit),
         _ => Slash::Bad(format!("unknown command /{name}; /help lists the commands")),
     })
+}
+
+/// `/mcp`, `/mcp login <server>` and `/mcp logout <server>`.
+fn mcp(arg: Option<&str>) -> Slash {
+    const USAGE: &str = "use /mcp, /mcp login <server> or /mcp logout <server>";
+    let Some(arg) = arg else {
+        return Slash::Mcp;
+    };
+    let mut words = arg.split_whitespace();
+    match (words.next(), words.next(), words.next()) {
+        (Some(word @ ("login" | "logout")), Some(name), None) => {
+            match crate::mcp::config::check_name(name) {
+                Err(err) => Slash::Bad(format!("{err:#}")),
+                Ok(()) if word == "login" => Slash::McpLogin(name.to_string()),
+                Ok(()) => Slash::McpLogout(name.to_string()),
+            }
+        }
+        (Some("login" | "logout"), None, _) => Slash::Bad(format!("which server? {USAGE}")),
+        _ => Slash::Bad(USAGE.into()),
+    }
 }
 
 /// `/memory` and `/memory clear <target>`.
@@ -229,6 +253,12 @@ mod tests {
             ("/memory  clear   notes ", Slash::MemoryClear(Target::Notes)),
             ("/memory clear project", Slash::MemoryClear(Target::Project)),
             ("/skills", Slash::Skills),
+            ("/mcp", Slash::Mcp),
+            ("/mcp login docs", Slash::McpLogin("docs".into())),
+            (
+                "/mcp  logout  my-server ",
+                Slash::McpLogout("my-server".into()),
+            ),
             ("/cron", Slash::Cron),
             ("/github", Slash::Github),
             ("/webhooks", Slash::Webhooks),
@@ -239,6 +269,18 @@ mod tests {
             ("/quit", Slash::Exit),
         ] {
             assert_eq!(parse(line), Some(command), "{line}");
+        }
+    }
+
+    #[test]
+    fn mcp_login_needs_one_server_name() {
+        for line in [
+            "/mcp login",
+            "/mcp login a b",
+            "/mcp list",
+            "/mcp login a/b",
+        ] {
+            assert!(matches!(parse(line), Some(Slash::Bad(_))), "{line}");
         }
     }
 

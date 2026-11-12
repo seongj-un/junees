@@ -48,12 +48,15 @@ each check, with one line on how to fix it:
   programs      git and gh on PATH
   and the Discord settings, the cron daemon, the webhook routes, their
   secrets and server, the size of the saved sessions, the MCP servers'
-  commands (not started) and HTTP header variables (not contacted) and
-  the enabled plugins' manifests.
+  commands (not started), HTTP header variables (not contacted) and saved
+  OAuth logins (there, private, expiry; never shown), and the enabled
+  plugins' manifests.
 
 Nothing is written or started, and the network is not used, unless:
   --online   also ask the API whether it takes the key (GET /v1/models,
-             no tokens used) and run `claude auth status`
+             no tokens used), run `claude auth status`, and find the
+             authorization server of each `url` MCP server that may use
+             OAuth (metadata only: no login, no token sent)
   --json     print the report as JSON
 
 Exits with 1 when a check failed.
@@ -328,6 +331,9 @@ pub async fn run_with(
     }
     if online {
         online::api_key(&mut report, settings).await;
+        if let Some(home) = home.as_deref() {
+            services::mcp_online(&mut report, home, &|key| settings.env(key)).await;
+        }
     }
     report.hidden.add_settings(settings);
     report.redact();

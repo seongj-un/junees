@@ -750,6 +750,9 @@ mod tests {
             ".junees/webhooks/../secrets/hook",
             "hooklink",
             "dirlink/hook",
+            // Saved MCP OAuth logins, in a folder of their own.
+            ".junees/secrets/mcp-oauth/docs.json",
+            "dirlink/mcp-oauth",
         ] {
             assert!(file.is(&root.join(path)), "{path}");
         }

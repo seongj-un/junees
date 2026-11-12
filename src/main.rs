@@ -113,6 +113,9 @@ async fn run() -> Result<ExitCode> {
             print!("{}", plugins::manage::run(&command, home.as_deref())?);
             return Ok(ExitCode::SUCCESS);
         }
+        // Needs no API key; the login waits for the browser or a pasted
+        // address.
+        Command::Mcp(command) => return mcp_command(&command).await,
         Command::SessionsHelp => {
             print!("{}", cli::SESSIONS_HELP);
             return Ok(ExitCode::SUCCESS);
@@ -188,6 +191,7 @@ async fn run() -> Result<ExitCode> {
         | Command::Help
         | Command::Version
         | Command::Plugin(_)
+        | Command::Mcp(_)
         | Command::SessionsHelp
         | Command::SessionsSearch(_)
         | Command::Doctor(_)
@@ -197,6 +201,27 @@ async fn run() -> Result<ExitCode> {
             unreachable!("handled above")
         }
     }
+}
+
+/// `junees mcp login|logout <server>`.
+async fn mcp_command(command: &junees::mcp::oauth::cli::McpCommand) -> Result<ExitCode> {
+    use junees::mcp::oauth::cli;
+    let home = junees::config_file::home_dir(|key| std::env::var(key).ok());
+    let input = SharedLines::stdin();
+    let mut ui = cli::Terminal { input: &input };
+    let env = |name: &str| std::env::var(name).ok();
+    Ok(
+        match cli::run(command, home.as_deref(), &env, &mut ui).await {
+            Ok(text) => {
+                println!("{}", text.trim_end());
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+    )
 }
 
 /// `junees doctor`: prints the report; exit code 1 when a check failed.
@@ -1304,6 +1329,8 @@ impl Repl {
                      $JUNEES_HOME/mcp.json is used on the api backend"
                 ),
             },
+            Slash::McpLogin(name) => return self.mcp_login(&name).await,
+            Slash::McpLogout(name) => self.mcp_logout(&name).await,
             Slash::Plugins => match &self.engine {
                 Engine::Api(_) => print!("{}", self.plugins.overview()),
                 Engine::Claude(_) => eprintln!(
@@ -1316,6 +1343,61 @@ impl Repl {
             Slash::Exit => {}
         }
         false
+    }
+
+    /// `/mcp login <server>`: the login (Ctrl-C cancels it), then the
+    /// server started again with it. Returns whether SIGTERM came.
+    async fn mcp_login(&mut self, name: &str) -> bool {
+        use junees::mcp::oauth::cli;
+        let command = cli::McpCommand::Login(name.to_string());
+        let env = |key: &str| std::env::var(key).ok();
+        let mut ui = cli::Terminal { input: &self.input };
+        let result = tokio::select! {
+            result = cli::run(&command, self.config.home.as_deref(), &env, &mut ui) => result,
+            signal = self.signals.next() => {
+                eprintln!("(login cancelled)");
+                return signal == libc::SIGTERM;
+            }
+        };
+        match result {
+            Ok(text) => {
+                println!("{text}");
+                if let Engine::Api(_) = self.engine
+                    && let Some(line) = self.mcp.restart(name).await
+                {
+                    eprintln!("{line}");
+                }
+            }
+            Err(message) => eprintln!("{message}"),
+        }
+        false
+    }
+
+    /// `/mcp logout <server>`: removes the saved login and disconnects the
+    /// server that used it.
+    async fn mcp_logout(&mut self, name: &str) {
+        use junees::mcp::oauth::{cli, store};
+        let had = self
+            .config
+            .home
+            .as_deref()
+            .is_some_and(|home| store::path(home, name).exists());
+        let command = cli::McpCommand::Logout(name.to_string());
+        let env = |key: &str| std::env::var(key).ok();
+        let mut ui = cli::Terminal { input: &self.input };
+        match cli::run(&command, self.config.home.as_deref(), &env, &mut ui).await {
+            Ok(text) => {
+                println!("{text}");
+                if had
+                    && let Some(server) = self.mcp.server(name)
+                    && server.config.http.is_some()
+                {
+                    server.shutdown().await;
+                    eprintln!("mcp: {name} disconnected for the rest of this session");
+                }
+            }
+            Err(message) => eprintln!("{message}"),
+        }
     }
 
     /// `/image <path> [<question>]`: sends the image and the question (or

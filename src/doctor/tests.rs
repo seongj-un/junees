@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::claude_code::testing::{fake_claude, fake_claude_auth};
 use crate::cron::schedule::Schedule;
+use crate::mcp::oauth::store::Saved;
 use crate::webhook::store::Secret;
 
 /// A state folder `home` (0700), a `bin` folder that is the whole `PATH`,
@@ -873,6 +874,164 @@ async fn mcp_commands_are_looked_up_without_starting_them() {
     );
     let report = fixture.run(false).await;
     expect(&report, "mcp", "mcp.json", Status::Fail, "wrong type");
+}
+
+fn saved_login(server_url: &str, expires_at: Option<u64>, refresh: bool) -> Saved {
+    Saved {
+        format: crate::mcp::oauth::store::FORMAT,
+        server_url: server_url.into(),
+        resource: server_url.into(),
+        issuer: "https://auth.example.com".into(),
+        token_endpoint: "https://auth.example.com/token".into(),
+        client_id: "client-1".into(),
+        client_secret: Some("client-pw-s3cret".into()),
+        client_auth: "client_secret_basic".into(),
+        access_token: "access-tok-s3cret".into(),
+        refresh_token: refresh.then(|| "refresh-tok-s3cret".into()),
+        expires_at,
+        scope: Some("files:read".into()),
+        wanted_scope: None,
+        saved_at: 1,
+    }
+}
+
+#[tokio::test]
+async fn saved_oauth_logins_are_checked_offline_and_never_shown() {
+    use crate::mcp::oauth::store;
+    let fixture = Fixture::new();
+    let servers = json!({"servers": {
+        "docs": {"url": "https://mcp.example.com/mcp"},
+        "stale": {"url": "https://stale.example.com/mcp"},
+        "moved": {"url": "https://mcp.example.com/new"},
+        "open": {"url": "https://open.example.com/mcp"},
+        "none": {"url": "https://none.example.com/mcp"},
+        "own": {"url": "https://own.example.com/mcp",
+                "headers": {"Authorization": "Bearer env:OWN_TOKEN"}},
+    }});
+    fixture.write("mcp.json", &servers.to_string(), 0o600);
+    let now = store::now();
+    let home = &fixture.home;
+    let save = |name: &str, saved: &Saved| store::write(home, name, saved).unwrap();
+    save(
+        "docs",
+        &saved_login("https://mcp.example.com/mcp", Some(now + 7200), true),
+    );
+    save(
+        "stale",
+        &saved_login("https://stale.example.com/mcp", Some(now - 5), false),
+    );
+    save(
+        "moved",
+        &saved_login("https://mcp.example.com/mcp", None, true),
+    );
+    save(
+        "open",
+        &saved_login("https://open.example.com/mcp", None, true),
+    );
+    mode(&store::path(home, "open"), 0o644);
+    save(
+        "own",
+        &saved_login("https://own.example.com/mcp", None, true),
+    );
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "mcp",
+        "login docs",
+        Status::Ok,
+        "saved, from https://auth.example.com. The access token is valid for 2 h; junees \
+         renews it by itself. Scope: files:read.",
+    );
+    expect(
+        &report,
+        "mcp",
+        "login stale",
+        Status::Warn,
+        "has expired; it cannot be renewed",
+    );
+    expect(
+        &report,
+        "mcp",
+        "login moved",
+        Status::Fail,
+        "for another address",
+    );
+    expect(&report, "mcp", "login open", Status::Fail, "chmod 600");
+    expect(
+        &report,
+        "mcp",
+        "login none",
+        Status::Skip,
+        "`junees mcp login none` if the server asks for one",
+    );
+    assert!(!has(&report, "mcp", "login own"));
+    for secret in [
+        "access-tok-s3cret",
+        "refresh-tok-s3cret",
+        "client-pw-s3cret",
+    ] {
+        assert_hidden(&report, secret);
+    }
+}
+
+#[tokio::test]
+async fn online_finds_the_authorization_server_without_logging_in() {
+    use crate::mcp::oauth::tests::{Fake, Knobs};
+    let good = Fake::start(Knobs::default()).await;
+    let no_pkce = Fake::start(Knobs::without_pkce()).await;
+    let no_registration = Fake::start(Knobs::without_registration()).await;
+    let mut fixture = Fixture::new();
+    // No API key: the online API check skips.
+    fixture.set("PATH", "/nonexistent");
+    let servers = json!({"servers": {
+        "good": {"url": good.url()},
+        "nopkce": {"url": no_pkce.url()},
+        "noreg": {"url": no_registration.url()},
+    }});
+    fixture.write("mcp.json", &servers.to_string(), 0o600);
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "mcp",
+        "login good (online)",
+        Status::Ok,
+        "(PKCE S256), a client registered at login",
+    );
+    expect(
+        &report,
+        "mcp",
+        "login nopkce (online)",
+        Status::Warn,
+        "PKCE with S256",
+    );
+    expect(
+        &report,
+        "mcp",
+        "login noreg (online)",
+        Status::Warn,
+        "(PKCE S256)",
+    );
+    let fix = check(&report, "mcp", "login noreg (online)")
+        .fix
+        .clone()
+        .unwrap();
+    assert!(
+        fix.contains("register a client at the authorization server and set `oauth.client_id`"),
+        "{fix}"
+    );
+    for fake in [&good, &no_pkce, &no_registration] {
+        let paths = fake.paths();
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path.contains("/register") && !path.contains("/token")),
+            "{paths:?}"
+        );
+    }
+    // Offline nothing is asked.
+    let before = good.paths().len();
+    fixture.run(false).await;
+    assert_eq!(good.paths().len(), before);
 }
 
 #[tokio::test]
