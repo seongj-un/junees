@@ -18,16 +18,25 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    /// The conversation no longer fits the model's context window.
+    /// The conversation no longer fits the model's context window: the
+    /// Anthropic API says the prompt is too long, OpenAI-compatible
+    /// servers name the context length (OpenAI's error code
+    /// `context_length_exceeded`, which [`super::openai`] keeps as the
+    /// kind).
     pub fn is_context_overflow(&self) -> bool {
         match self {
+            Self::Api {
+                kind: Some(kind), ..
+            } if kind == "context_length_exceeded" => true,
             Self::Api {
                 status: 400,
                 message,
                 ..
             } => {
                 let message = message.to_lowercase();
-                message.contains("prompt is too long") || message.contains("context window")
+                message.contains("prompt is too long")
+                    || message.contains("context window")
+                    || message.contains("context length")
             }
             _ => false,
         }
@@ -176,6 +185,18 @@ mod tests {
         assert!(overflow.is_context_overflow());
         assert!(!api(400, None, "messages: field required").is_context_overflow());
         assert!(!api(500, None, "prompt is too long").is_context_overflow());
+        // OpenAI-compatible servers.
+        assert!(
+            api(
+                400,
+                Some("invalid_request_error"),
+                "This model's maximum context length is 32768 tokens. However, you requested \
+                 40000 tokens."
+            )
+            .is_context_overflow()
+        );
+        assert!(api(413, Some("context_length_exceeded"), "too long").is_context_overflow());
+        assert!(!api(400, Some("invalid_request_error"), "bad tool schema").is_context_overflow());
     }
 
     #[test]

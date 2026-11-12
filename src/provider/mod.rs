@@ -4,6 +4,7 @@
 pub mod anthropic;
 mod error;
 mod http;
+pub mod openai;
 mod stream;
 
 pub use error::ProviderError;
