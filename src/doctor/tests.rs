@@ -90,9 +90,21 @@ impl Fixture {
     }
 
     async fn run(&self, online: bool) -> Report {
+        self.run_landlock(online, None).await
+    }
+
+    /// [`Self::run`] with the kernel's Landlock answer `landlock` (`None`:
+    /// the real kernel's).
+    async fn run_landlock(
+        &self,
+        online: bool,
+        landlock: Option<crate::sandbox::Support>,
+    ) -> Report {
         let (settings, broken) = self.settings();
         let probe = Probe {
             sysctl: self.sysctl.clone(),
+            landlock,
+            work: Some(self.root.clone()),
         };
         run_with(&settings, broken.as_ref(), online, &probe).await
     }
@@ -1449,4 +1461,84 @@ async fn folders_in_secrets_are_checked_inside() {
         .filter(|check| check.area == "state folder" && check.status != Status::Ok)
         .collect();
     assert!(failed.is_empty(), "{}", report.text());
+}
+
+#[tokio::test]
+async fn the_sandbox_is_tried_with_a_confined_child() {
+    use crate::sandbox::Support;
+    let fixture = Fixture::new();
+    fixture.config("model = \"m\"\n");
+    match Support::current() {
+        Support::Abi(_) => {
+            let report = fixture.run(false).await;
+            expect(&report, "sandbox", "landlock", Status::Ok, "Landlock ABI");
+            let config = fixture.home.join("config.toml");
+            expect(
+                &report,
+                "sandbox",
+                "test command",
+                Status::Ok,
+                &format!("could not read {}", config.display()),
+            );
+            // Reads narrowed past what sh needs to start.
+            fixture.config("sandbox_read = \"/nonexistent\"\n");
+            let report = fixture.run(false).await;
+            expect(
+                &report,
+                "sandbox",
+                "test command",
+                Status::Fail,
+                "cannot start a confined `sh`",
+            );
+        }
+        Support::Unavailable(why) => eprintln!("real kernel part skipped: {why}"),
+    }
+
+    let none = Some(Support::Unavailable("no Landlock (fake)".into()));
+    fixture.config("model = \"m\"\n");
+    let report = fixture.run_landlock(false, none.clone()).await;
+    expect(
+        &report,
+        "sandbox",
+        "landlock",
+        Status::Warn,
+        "scheduled jobs and webhook runs",
+    );
+    assert!(!has(&report, "sandbox", "test command"));
+    fixture.config("sandbox = \"require\"\n");
+    let report = fixture.run_landlock(false, none.clone()).await;
+    expect(
+        &report,
+        "sandbox",
+        "landlock",
+        Status::Fail,
+        "no Landlock (fake); sandbox = require",
+    );
+    fixture.config("sandbox = \"off\"\n");
+    let report = fixture.run_landlock(false, none.clone()).await;
+    expect(
+        &report,
+        "sandbox",
+        "landlock",
+        Status::Skip,
+        "sandbox = off",
+    );
+    fixture.config("sandbox_network = \"0\"\n");
+    let report = fixture.run_landlock(false, Some(Support::Abi(3))).await;
+    expect(
+        &report,
+        "sandbox",
+        "network",
+        Status::Warn,
+        "this kernel has 3",
+    );
+    fixture.config("sandbox = \"strict\"\n");
+    let report = fixture.run_landlock(false, none).await;
+    expect(
+        &report,
+        "sandbox",
+        "settings",
+        Status::Fail,
+        "JUNEES_SANDBOX must be auto, require or off",
+    );
 }

@@ -343,6 +343,64 @@ impl Sandbox {
     }
 }
 
+/// What a confined test command showed ([`Sandbox::try_child`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trial {
+    /// It ran confined, and could not open the protected file (if any
+    /// existed to try).
+    Confined { tried: Option<PathBuf> },
+    /// It ran without the sandbox (`auto` on a kernel without Landlock).
+    Unconfined,
+    /// The sandbox would refuse commands, or did not hold: why.
+    Failed(String),
+}
+
+impl Sandbox {
+    /// Runs a tiny command (`/bin/sh`, empty environment) the way bash's
+    /// commands in `work` would run, then one that tries to open the
+    /// first protected file that exists for reading, which must fail.
+    /// Writes nothing.
+    pub fn try_child(&self, work: &Path) -> Trial {
+        let confinement = match self.prepare(work) {
+            Prepared::Confined(confinement, _) => confinement,
+            Prepared::Unconfined(_) => return Trial::Unconfined,
+            Prepared::Refused(reason) => return Trial::Failed(reason),
+        };
+        let run = |script: &str, arg: Option<&Path>| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .args(["-c", script, "sh"])
+                .args(arg)
+                .env_clear()
+                .current_dir(work)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            confinement.apply_std(&mut command);
+            command.status()
+        };
+        match run("exit 0", None) {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                return Trial::Failed(format!("a confined `sh -c 'exit 0'` ended with {status}"));
+            }
+            Err(err) => return Trial::Failed(format!("cannot start a confined `sh`: {err}")),
+        }
+        let Some(file) = self.hidden.iter().find(|path| path.is_file()) else {
+            return Trial::Confined { tried: None };
+        };
+        match run("exec < \"$1\"", Some(file)) {
+            Ok(status) if status.success() => {
+                Trial::Failed(format!("a confined `sh` could read {}", file.display()))
+            }
+            Ok(_) => Trial::Confined {
+                tried: Some(file.clone()),
+            },
+            Err(err) => Trial::Failed(format!("cannot start a confined `sh`: {err}")),
+        }
+    }
+}
+
 /// What [`Sandbox::prepare`] decided for one command.
 pub enum Prepared {
     /// Apply this before spawning it; the note goes into its result.
@@ -372,6 +430,21 @@ impl Confinement {
             // and only makes the two system calls of `restrict_self`; the
             // descriptor stays open in the parent until spawning is done
             // (the caller keeps `self`), so the child has it too.
+            unsafe {
+                command.pre_exec(move || landlock::restrict_self(fd));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = command;
+    }
+
+    /// [`Self::apply`] for a std command.
+    pub fn apply_std(&self, command: &mut std::process::Command) {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            let fd = self.ruleset.raw_fd();
+            // SAFETY: as in `apply`.
             unsafe {
                 command.pre_exec(move || landlock::restrict_self(fd));
             }

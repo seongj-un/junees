@@ -4,8 +4,9 @@
 //!
 //! It only reads: no file is written, no lock is kept (a running daemon
 //! or server is seen through its lock, taken for a moment if free), no MCP server
-//! or plugin command is started, and the only program run is
-//! `claude --version`. The network is used only with `--online`: one
+//! or plugin command is started, and the only programs run are
+//! `claude --version` and a confined `/bin/sh` that tries the bash
+//! sandbox (it writes nothing). The network is used only with `--online`: one
 //! request that shows whether the API takes the key, and
 //! `claude auth status`.
 //!
@@ -27,6 +28,7 @@ mod claude;
 mod files;
 mod online;
 mod redact;
+mod sandbox;
 mod services;
 mod settings;
 #[cfg(test)]
@@ -46,6 +48,8 @@ each check, with one line on how to fix it:
   claude-code   `claude --version`, and bubblewrap and user namespaces for
                 Claude Code's environment scrub
   programs      git and gh on PATH
+  sandbox       the Landlock ABI of the kernel, and a tiny confined `sh`
+                run the way bash's commands would run (writes nothing)
   and the Discord settings, the cron daemon, the webhook routes, their
   secrets and server, the size of the saved sessions, the MCP servers'
   commands (not started), HTTP header variables (not contacted) and saved
@@ -283,12 +287,19 @@ impl Report {
 pub struct Probe {
     /// `/proc/sys`, for the user namespace switches.
     pub sysctl: PathBuf,
+    /// The kernel's Landlock support; `None` asks the kernel.
+    pub landlock: Option<crate::sandbox::Support>,
+    /// The folder the sandbox test command runs in; `None`: the current
+    /// one.
+    pub work: Option<PathBuf>,
 }
 
 impl Default for Probe {
     fn default() -> Self {
         Self {
             sysctl: PathBuf::from("/proc/sys"),
+            landlock: None,
+            work: None,
         }
     }
 }
@@ -320,6 +331,13 @@ pub async fn run_with(
     settings::keys(&mut report, settings, read.backend);
     claude::check(&mut report, settings, &read, path, probe, online).await;
     services::programs(&mut report, path);
+    if let Some(work) = probe.work.clone().or_else(|| std::env::current_dir().ok()) {
+        let support = probe
+            .landlock
+            .clone()
+            .unwrap_or_else(crate::sandbox::Support::current);
+        sandbox::check(&mut report, settings, support, &work);
+    }
     settings::discord(&mut report, settings);
     settings::telegram(&mut report, settings);
     if let Some(home) = home.as_deref() {
