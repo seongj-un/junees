@@ -33,6 +33,8 @@ use anyhow::{Result, bail};
 
 #[cfg(target_os = "linux")]
 mod landlock;
+#[cfg(test)]
+mod tests;
 
 /// What to do about confinement (`sandbox`, `JUNEES_SANDBOX`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

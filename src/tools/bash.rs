@@ -9,6 +9,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
+use crate::sandbox::{Prepared, Sandbox};
+
 use super::{
     CLAUDE_CODE_SECRET_ENV_VARS, CommandPolicy, SECRET_ENV_VARS, Tool, ToolOutput, ToolSettings,
     Verdict, opt_u64_arg, str_arg, truncate_middle,
@@ -36,10 +38,12 @@ pub struct Bash {
     webhook: bool,
     /// The run's GitHub CLI configuration folder ([`super::GhConfigDir`]).
     gh_config_dir: Option<std::path::PathBuf>,
+    /// The Landlock confinement of its commands ([`crate::sandbox`]).
+    sandbox: Option<Arc<Sandbox>>,
     /// Tests only: the folder commands run in and keep their user state
     /// in ([`testing::confine`]).
     #[cfg(test)]
-    sandbox: Option<std::path::PathBuf>,
+    test_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for Bash {
@@ -50,8 +54,9 @@ impl Default for Bash {
             policy: CommandPolicy::default(),
             webhook: false,
             gh_config_dir: None,
-            #[cfg(test)]
             sandbox: None,
+            #[cfg(test)]
+            test_dir: None,
         }
     }
 }
@@ -79,6 +84,23 @@ impl Bash {
             .hide_env(settings.hidden_env.iter().cloned())
             .policy(CommandPolicy::with_settings(settings))
             .without_git_credentials(settings.webhook, settings.gh_config_dir.clone())
+            .confined(Sandbox::for_tools(settings))
+    }
+
+    /// Confines its commands with `sandbox` ([`crate::sandbox`]); `None`
+    /// runs them unconfined.
+    pub fn confined(mut self, sandbox: Option<Sandbox>) -> Self {
+        self.sandbox = sandbox.map(Arc::new);
+        self
+    }
+
+    /// The folder its commands run in: the working folder.
+    fn work_dir(&self) -> std::io::Result<std::path::PathBuf> {
+        #[cfg(test)]
+        if let Some(dir) = &self.test_dir {
+            return Ok(dir.clone());
+        }
+        std::env::current_dir()
     }
 
     /// Runs commands without the user's git and GitHub CLI credentials
@@ -107,7 +129,7 @@ impl Bash {
         // First, so the settings under test (hidden variables, a webhook
         // run's credentials) still apply on top of it.
         #[cfg(test)]
-        if let Some(dir) = &self.sandbox {
+        if let Some(dir) = &self.test_dir {
             testing::confine(&mut cmd, dir);
         }
         for name in &self.hidden_env {
@@ -138,7 +160,9 @@ impl Tool for Bash {
          commands will not work. To leave a process running in the background, \
          redirect its output to a file, e.g. `server > server.log 2>&1 &`. \
          Destructive commands (for example `rm -rf /`, `sudo`, `shutdown`, force push) \
-         are blocked by policy and not run."
+         are blocked by policy and not run. Commands may also run in a sandbox: \
+         writing outside the working folder and the temporary folders, or reading \
+         Junees's settings and secrets, then fails with `Permission denied`."
     }
 
     fn input_schema(&self) -> Value {
@@ -169,8 +193,36 @@ impl Tool for Bash {
             return ToolOutput::error(format!("blocked by policy: {reason}"));
         }
 
-        let mut child = match self.command(command).spawn() {
+        let (confinement, note) = match &self.sandbox {
+            None => (None, None),
+            Some(sandbox) => {
+                let prepared = match self.work_dir() {
+                    Ok(work) => sandbox.prepare(&work),
+                    Err(err) => Prepared::Refused(format!(
+                        "cannot set up the sandbox: no working folder: {err}"
+                    )),
+                };
+                match prepared {
+                    Prepared::Confined(confinement, note) => (Some(confinement), note),
+                    Prepared::Unconfined(note) => (None, note),
+                    Prepared::Refused(reason) => {
+                        return ToolOutput::error(format!("not run: {reason}"));
+                    }
+                }
+            }
+        };
+        let mut process = self.command(command);
+        if let Some(confinement) = &confinement {
+            confinement.apply(&mut process);
+        }
+        let spawned = process.spawn();
+        // The child has its own copy of the ruleset now.
+        drop(confinement);
+        let mut child = match spawned {
             Ok(child) => child,
+            Err(err) if self.sandbox.is_some() => {
+                return ToolOutput::error(format!("failed to start bash in the sandbox: {err}"));
+            }
             Err(err) => return ToolOutput::error(format!("failed to start bash: {err}")),
         };
         // Kills the command and everything it started if this call ends
@@ -225,6 +277,10 @@ impl Tool for Bash {
             )),
         }
 
+        if let Some(note) = note {
+            text.push('\n');
+            text.push_str(&note);
+        }
         ToolOutput {
             content: truncate_middle(&text, MAX_OUTPUT_CHARS),
             is_error: !status.is_some_and(|status| status.success()),
@@ -389,7 +445,7 @@ pub(crate) mod testing {
         /// Runs this bash's commands in `dir` with their user state there
         /// ([`confine`]); every other setting stays.
         pub fn sandboxed(mut self, dir: &Path) -> Self {
-            self.sandbox = Some(dir.to_path_buf());
+            self.test_dir = Some(dir.to_path_buf());
             self
         }
     }

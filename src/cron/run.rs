@@ -61,6 +61,18 @@ pub enum Trigger<'a> {
     },
 }
 
+/// The sandbox settings of an unattended run: an unset mode means
+/// `require` ([`crate::sandbox::Settings::unattended`]).
+fn unattended(settings: &ToolSettings) -> Option<crate::sandbox::Settings> {
+    settings
+        .sandbox
+        .clone()
+        .map(|sandbox| crate::sandbox::Settings {
+            unattended: true,
+            ..sandbox
+        })
+}
+
 impl<'a> Trigger<'a> {
     /// The tool settings of a run with this trigger: a webhook run's bash
     /// gets the webhook rules ([`ToolSettings::webhook`]) and the run's
@@ -69,11 +81,13 @@ impl<'a> Trigger<'a> {
         match self {
             Trigger::Cron => ToolSettings {
                 webhook: false,
+                sandbox: unattended(settings),
                 ..settings.clone()
             },
             Trigger::Webhook { gh_config, .. } => ToolSettings {
                 webhook: true,
                 gh_config_dir: Some(gh_config.to_path_buf()),
+                sandbox: unattended(settings),
                 ..settings.clone()
             },
         }
