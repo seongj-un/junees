@@ -364,7 +364,7 @@ impl Ask for DiscordAsk {
         }));
         match tokio::time::timeout(self.timeout, answer).await {
             Ok(Ok(reply)) => {
-                ended.outcome = outcome(&reply);
+                ended.outcome = outcome(&reply, always);
                 reply.answer
             }
             // The channel's worker is going away.
@@ -381,11 +381,13 @@ impl Ask for DiscordAsk {
     }
 }
 
-/// The result line of an answered question.
-fn outcome(reply: &Reply) -> String {
+/// The result line of an answered question; `always` when an "always
+/// allow" answer is remembered (some kind of the call is not asked about
+/// every time).
+fn outcome(reply: &Reply, always: bool) -> String {
     let what = match &reply.answer {
-        Answer::Yes => "Allowed",
-        Answer::Always => "Allowed, and this kind from now on",
+        Answer::Always if always => "Allowed, and this kind from now on",
+        Answer::Yes | Answer::Always => "Allowed",
         Answer::No => "Declined",
         Answer::NoBecause(_) => "Declined with a reason",
     };
@@ -662,6 +664,25 @@ mod tests {
             })
         );
         assert!(!slot.press(press(&question.id, Choice::Allow, None)));
+    }
+
+    #[tokio::test]
+    async fn always_on_a_kind_asked_every_time_says_allowed() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(AnswerSlot::default());
+        let mut ask = DiscordAsk::new(tx, Arc::clone(&slot), Duration::from_secs(5));
+        let mut request = request();
+        request.kinds = vec![format!("bash: merge {ASKED_EVERY_TIME}")];
+        let (asking, question) = posted(&mut ask, &request, &mut rx).await;
+        assert!(slot.answer("1", "a".into()));
+        assert_eq!(asking.await, Answer::Always);
+        assert_eq!(
+            rx.recv().await,
+            Some(Progress::Answered {
+                id: question.id,
+                outcome: "Allowed.".into()
+            })
+        );
     }
 
     #[tokio::test]
