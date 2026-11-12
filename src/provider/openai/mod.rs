@@ -85,8 +85,23 @@ impl Settings {
 
 /// Refuses an address that is not https, or http on loopback.
 fn check_base_url(raw: &str) -> Result<()> {
-    let url = reqwest::Url::parse(raw.trim())
-        .with_context(|| format!("{BASE_URL_ENV} (`openai_base_url`) is not a URL: `{raw}`"))?;
+    let url = reqwest::Url::parse(raw.trim()).with_context(|| {
+        // A URL with a user name or password in it is not shown.
+        let shown = if raw.contains('@') {
+            "(not shown)"
+        } else {
+            raw
+        };
+        format!("{BASE_URL_ENV} (`openai_base_url`) is not a URL: `{shown}`")
+    })?;
+    // The address shows up in errors and in `junees doctor`, and a
+    // password in it would go along: the key goes in `openai_api_key`.
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!(
+            "{BASE_URL_ENV} (`openai_base_url`) must not hold a user name or password: put \
+             the key in openai_api_key ({API_KEY_ENV})"
+        );
+    }
     match url.scheme() {
         "https" => Ok(()),
         "http" if is_loopback(&url) => Ok(()),
@@ -408,6 +423,19 @@ mod tests {
         }
         for bad in ["ftp://localhost/v1", "localhost:11434"] {
             assert!(read(&[(BASE_URL_ENV, bad)]).is_err(), "{bad}");
+        }
+        // A user name or password in the address is refused, and the
+        // error does not repeat it.
+        for with_user in [
+            "https://user:hunter2@proxy.example/v1",
+            "https://hunter2@proxy.example/v1",
+            "https://:hunter2@proxy.example/v1",
+            "http://user:hunter2@localhost:11434/v1",
+            "https://user:hunter2@exa mple/v1",
+        ] {
+            let err = read(&[(BASE_URL_ENV, with_user)]).err().unwrap();
+            let err = format!("{err:#}");
+            assert!(!err.contains("hunter2"), "{with_user}: {err}");
         }
         // A remote https server without a key is refused only when used.
         let remote = read(&[(BASE_URL_ENV, "https://llm.example.com/v1")]).unwrap();
