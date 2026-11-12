@@ -280,6 +280,24 @@ async fn broken_tool_arguments_go_back_as_a_json_object_and_the_tool_refuses_the
     );
 }
 
+#[tokio::test]
+async fn an_answer_without_usage_keeps_the_last_conversation_size() {
+    let mut measured = answer("first");
+    measured["usage"] = json!({"prompt_tokens": 5000, "completion_tokens": 10});
+    let mut bare = answer("a reply the server sent without any usage");
+    bare.as_object_mut().unwrap().remove("usage");
+    let (url, server) = fake_api(vec![(200, measured), (200, bare)]).await;
+    let mut agent = agent(provider(&url));
+    agent.run("hi", |_| {}).await.unwrap();
+    assert_eq!(agent.context_tokens(), 5010);
+    agent.run("and again", |_| {}).await.unwrap();
+    served(server).await;
+    // The last size measured, plus an estimate of what came since; not
+    // a size of 0 that would keep compaction from ever starting.
+    let size = agent.context_tokens();
+    assert!(size > 5010 && size < 5100, "{size}");
+}
+
 fn streaming(url: &str) -> OpenAiProvider {
     provider(url).with_streaming(true)
 }
