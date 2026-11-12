@@ -30,6 +30,10 @@ use crate::prompt_text::escape_hidden;
 use crate::provider::ProviderError;
 use crate::skills;
 
+/// What a late answer to an answered approval question gets back.
+pub const LATE_NOTE: &str = "(that approval question was already answered; this reply was not \
+                             passed on. Send it again to pass it on.)";
+
 /// What the gateway shares with every channel's worker.
 pub struct Shared<P: Platform> {
     pub platform: P,
@@ -194,12 +198,15 @@ impl<P: Platform> Channels<P> {
             .is_some_and(|known| known.state.answers.press(press))
     }
 
-    /// A message for the bot that is no command: the answer to a waiting
-    /// approval question, or an input queued for the channel's worker.
-    /// `notes` say which attachments were left out.
+    /// A message of `user` for the bot that is no command: the answer to
+    /// a waiting approval question, a late answer to the one `user` just
+    /// answered ([`AnswerSlot::late`], told so and dropped), or an input
+    /// queued for the channel's worker. `notes` say which attachments were
+    /// left out.
     pub fn input(
         &mut self,
         channel: &str,
+        user: &str,
         content: String,
         attachments: Vec<P::Attachment>,
         notes: Vec<String>,
@@ -207,9 +214,17 @@ impl<P: Platform> Channels<P> {
         if attachments.is_empty()
             && !content.is_empty()
             && let Some(known) = self.channels.get(channel)
-            && known.state.answers.answer(content.clone())
         {
-            return;
+            let answers = &known.state.answers;
+            if answers.answer(user, content.clone()) {
+                return;
+            }
+            if answers.late(user, &content) {
+                let shared = Arc::clone(&self.shared);
+                let channel = channel.to_string();
+                tokio::spawn(async move { shared.say(&channel, LATE_NOTE).await });
+                return;
+            }
         }
         self.queue(channel, content, attachments, notes);
     }

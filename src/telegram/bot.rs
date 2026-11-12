@@ -349,6 +349,7 @@ impl Router {
                                 .get("message_id")
                                 .and_then(Value::as_i64)
                                 .map(|id| id.to_string()),
+                            user: user.to_string(),
                             by: presser(query.get("from").unwrap_or(&Value::Null)),
                         };
                         if self.channels.press(&Target { chat, thread }.key(), press) {
@@ -540,7 +541,9 @@ impl Router {
                 .to_string();
                 self.channels.queue(&channel, content, files, notes);
             }
-            None => self.channels.input(&channel, content, files, notes),
+            None => self
+                .channels
+                .input(&channel, &user.to_string(), content, files, notes),
         }
     }
 

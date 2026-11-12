@@ -334,6 +334,7 @@ impl Bot {
                             id: question,
                             choice,
                             message: text("/message/id").map(str::to_string),
+                            user: user.to_string(),
                             by: format!("<@{user}>"),
                         };
                         if self.channels.press(channel, press) {
@@ -435,7 +436,8 @@ impl Bot {
             self.channels.command(channel, command, direct);
             return;
         }
-        self.channels.input(channel, content, attachments, notes);
+        self.channels
+            .input(channel, user, content, attachments, notes);
     }
 
     /// Stops every channel: running turns are cancelled (and recorded as

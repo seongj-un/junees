@@ -11,9 +11,15 @@
 //! timed out or was stopped, or another conversation's question changes
 //! nothing ([`AnswerSlot::press`]). The routers check that the person
 //! pressing is an allowed user before they get here.
+//!
+//! Once a question is answered, the same user's next message, if it is
+//! only an answer word (`y`, `no`, ...) and comes within [`LATE_ANSWER`],
+//! is taken for a second answer to that question (someone who pressed a
+//! button and typed `y` to be sure) and not passed on as a new input
+//! ([`AnswerSlot::late`]).
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -118,8 +124,23 @@ pub struct Press {
     pub choice: Choice,
     /// The message the button sits on, as the platform names it.
     pub message: Option<String>,
+    /// The id of the user who pressed it.
+    pub user: String,
     /// Who pressed it, as the result line names them.
     pub by: String,
+}
+
+/// How long after answering a question a user's answer word is taken for
+/// a late answer to it ([`AnswerSlot::late`]).
+pub const LATE_ANSWER: Duration = Duration::from_secs(30);
+
+/// Whether `text` is nothing but an answer word: `y`, `yes`, `a`,
+/// `always`, `n` or `no`, in any case.
+pub fn answer_word(text: &str) -> bool {
+    matches!(
+        text.trim().to_lowercase().as_str(),
+        "y" | "yes" | "a" | "always" | "n" | "no"
+    )
 }
 
 /// What answered a question.
@@ -139,31 +160,50 @@ struct Pending {
     message: Option<String>,
 }
 
+/// Who answered the last question, and when.
+struct Answered {
+    user: String,
+    at: Instant,
+}
+
+#[derive(Default)]
+struct Slot {
+    pending: Option<Pending>,
+    answered: Option<Answered>,
+}
+
 /// Where a channel's next message (or a button press) goes while a
 /// question waits.
 #[derive(Default)]
-pub struct AnswerSlot(Mutex<Option<Pending>>);
+pub struct AnswerSlot(Mutex<Slot>);
 
 impl AnswerSlot {
     /// Whether a question waits for its answer.
     pub fn waiting(&self) -> bool {
         self.lock()
+            .pending
             .as_ref()
             .is_some_and(|pending| !pending.sender.is_closed())
     }
 
-    /// Hands `text` to the waiting question; false when none waits.
-    pub fn answer(&self, text: String) -> bool {
-        match self.lock().take() {
-            Some(pending) => pending
-                .sender
-                .send(Reply {
-                    answer: parse_answer(&text),
-                    by: None,
-                })
-                .is_ok(),
-            None => false,
+    /// Hands `text` of `user` to the waiting question; false when none
+    /// waits.
+    pub fn answer(&self, user: &str, text: String) -> bool {
+        let mut slot = self.lock();
+        let Some(pending) = slot.pending.take() else {
+            return false;
+        };
+        let sent = pending
+            .sender
+            .send(Reply {
+                answer: parse_answer(&text),
+                by: None,
+            })
+            .is_ok();
+        if sent {
+            slot.answered(user);
         }
+        sent
     }
 
     /// Answers the waiting question with a button press; false (and the
@@ -171,7 +211,7 @@ impl AnswerSlot {
     /// from its message once that is known, and is a button it offered.
     pub fn press(&self, press: Press) -> bool {
         let mut slot = self.lock();
-        let matches = slot.as_ref().is_some_and(|pending| {
+        let matches = slot.pending.as_ref().is_some_and(|pending| {
             pending.id == press.id
                 && !pending.sender.is_closed()
                 && (pending.message.is_none() || pending.message == press.message)
@@ -180,7 +220,7 @@ impl AnswerSlot {
         if !matches {
             return false;
         }
-        let Some(pending) = slot.take() else {
+        let Some(pending) = slot.pending.take() else {
             return false;
         };
         let answer = match press.choice {
@@ -188,28 +228,60 @@ impl AnswerSlot {
             Choice::Always => Answer::Always,
             Choice::Decline => Answer::No,
         };
-        pending
+        let sent = pending
             .sender
             .send(Reply {
                 answer,
                 by: Some(press.by),
             })
-            .is_ok()
+            .is_ok();
+        if sent {
+            slot.answered(&press.user);
+        }
+        sent
+    }
+
+    /// Whether `text` of `user`, which answered no waiting question, is a
+    /// late answer to the question `user` answered last: only an answer
+    /// word ([`answer_word`]), within [`LATE_ANSWER`] of that answer. Any
+    /// message of that user ends the window, so the same word sent again
+    /// is an input like any other.
+    pub fn late(&self, user: &str, text: &str) -> bool {
+        let mut slot = self.lock();
+        if slot
+            .answered
+            .as_ref()
+            .is_none_or(|answered| answered.user != user)
+        {
+            return false;
+        }
+        slot.answered
+            .take()
+            .is_some_and(|answered| answered.at.elapsed() < LATE_ANSWER && answer_word(text))
     }
 
     /// Notes the message that holds the buttons of question `id`.
     pub fn posted(&self, id: &str, message: String) {
-        if let Some(pending) = self.lock().as_mut()
+        if let Some(pending) = self.lock().pending.as_mut()
             && pending.id == id
         {
             pending.message = Some(message);
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Pending>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Slot> {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Slot {
+    fn answered(&mut self, user: &str) {
+        self.answered = Some(Answered {
+            user: user.to_string(),
+            at: Instant::now(),
+        });
     }
 }
 
@@ -225,7 +297,7 @@ struct Ended<'a> {
 
 impl Drop for Ended<'_> {
     fn drop(&mut self) {
-        self.slot.lock().take();
+        self.slot.lock().pending.take();
         let _ = self.out.send(Progress::Answered {
             id: std::mem::take(&mut self.id),
             outcome: std::mem::take(&mut self.outcome),
@@ -268,12 +340,16 @@ impl Ask for DiscordAsk {
             .kinds
             .iter()
             .any(|kind| !kind.ends_with(ASKED_EVERY_TIME));
-        *self.slot.lock() = Some(Pending {
-            id: id.clone(),
-            always,
-            sender,
-            message: None,
-        });
+        *self.slot.lock() = Slot {
+            pending: Some(Pending {
+                id: id.clone(),
+                always,
+                sender,
+                message: None,
+            }),
+            // A new question: no late answers to the one before.
+            answered: None,
+        };
         let mut ended = Ended {
             slot: &self.slot,
             out: &self.out,
@@ -474,6 +550,7 @@ mod tests {
             id: id.to_string(),
             choice,
             message: message.map(str::to_string),
+            user: "1".to_string(),
             by: "<@1>".to_string(),
         }
     }
@@ -487,10 +564,10 @@ mod tests {
         let (asking, question) = posted(&mut ask, &request, &mut rx).await;
         assert!(question.always);
         assert!(slot.waiting());
-        assert!(slot.answer("a".into()));
+        assert!(slot.answer("1", "a".into()));
         assert_eq!(asking.await, Answer::Always);
         assert!(!slot.waiting());
-        assert!(!slot.answer("y".into()));
+        assert!(!slot.answer("1", "y".into()));
         assert_eq!(
             rx.recv().await,
             Some(Progress::Answered {
@@ -585,5 +662,52 @@ mod tests {
             })
         );
         assert!(!slot.press(press(&question.id, Choice::Allow, None)));
+    }
+
+    #[tokio::test]
+    async fn an_answer_word_right_after_an_answer_is_a_late_answer() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(AnswerSlot::default());
+        let mut ask = DiscordAsk::new(tx, Arc::clone(&slot), Duration::from_secs(600));
+        let request = request();
+        // Nothing answered yet: no late answers.
+        assert!(!slot.late("1", "y"));
+
+        let (asking, question) = posted(&mut ask, &request, &mut rx).await;
+        assert!(slot.press(press(&question.id, Choice::Allow, None)));
+        assert_eq!(asking.await, Answer::Yes);
+        // Another user's word, then the presser's: late once, then no more.
+        assert!(!slot.late("2", "y"));
+        assert!(slot.late("1", " Yes "));
+        assert!(!slot.late("1", "y"));
+
+        // A text answer opens the window too; other words close it.
+        while rx.try_recv().is_ok() {}
+        let (asking, _) = posted(&mut ask, &request, &mut rx).await;
+        assert!(slot.answer("1", "n".into()));
+        assert_eq!(asking.await, Answer::No);
+        assert!(!slot.late("1", "y please"));
+        assert!(!slot.late("1", "y"));
+
+        // Only within LATE_ANSWER.
+        while rx.try_recv().is_ok() {}
+        let (asking, _) = posted(&mut ask, &request, &mut rx).await;
+        assert!(slot.answer("1", "y".into()));
+        assert_eq!(asking.await, Answer::Yes);
+        if let Some(answered) = slot.lock().answered.as_mut() {
+            answered.at = Instant::now().checked_sub(LATE_ANSWER).unwrap();
+        }
+        assert!(!slot.late("1", "y"));
+
+        // A question that ends unanswered leaves none.
+        while rx.try_recv().is_ok() {}
+        let (asking, _) = posted(&mut ask, &request, &mut rx).await;
+        assert!(slot.answer("1", "y".into()));
+        assert_eq!(asking.await, Answer::Yes);
+        while rx.try_recv().is_ok() {}
+        let (asking, _) = posted(&mut ask, &request, &mut rx).await;
+        drop(asking);
+        assert!(!slot.late("1", "y"));
+        assert!(answer_word("NO") && answer_word("a") && !answer_word("ok"));
     }
 }

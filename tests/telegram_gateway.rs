@@ -1537,6 +1537,60 @@ async fn a_button_answers_only_in_its_forum_topic() {
     running.stop().await;
 }
 
+#[tokio::test]
+async fn an_answer_word_right_after_a_press_starts_no_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let file = cwd.path().join("note.txt");
+    let (api, served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+        (200, common::text_reply("next one")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(TELEGRAM_NOTE),
+    );
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let me = USER.to_string();
+    bot.push(private(USER, "write a note"));
+    let (question, buttons) = bot.question(&me, 1).await;
+    bot.press(press(
+        "q1",
+        USER,
+        private_chat(),
+        question,
+        &buttons["Allow"],
+    ));
+    assert_eq!(bot.answered("q1").await.get("text"), None);
+    // To be sure, the user types y too: told it was answered, no new turn.
+    bot.push(private(USER, "y"));
+    bot.wait_post(&me, |p| p.contains("already answered")).await;
+    bot.wait_post(&me, |p| p == "wrote it").await;
+    assert!(file.exists());
+    // The next message is an input as always.
+    bot.push(private(USER, "next"));
+    bot.wait_post(&me, |p| p == "next one").await;
+    running.stop().await;
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(texts(&requests[2]).last().unwrap(), "user: next");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| texts(request).iter().any(|text| text == "user: y")),
+        "{requests:#?}"
+    );
+}
+
 /// A PNG header of `width` x `height`: enough for Junees, which never
 /// decodes the pixels.
 fn png(width: u32, height: u32) -> Vec<u8> {

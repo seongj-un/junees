@@ -1831,6 +1831,73 @@ async fn buttons_answer_questions_of_allowed_users_only() {
 
 // --------------------------------------------------------------- Images
 
+#[tokio::test]
+async fn an_answer_word_right_after_a_press_starts_no_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let marker = cwd.path().join("marker");
+    let command = format!(
+        "rm -f {}/nothing-here; touch {}",
+        cwd.path().display(),
+        marker.display()
+    );
+    let (api, served) = common::fake_api(vec![
+        (200, tool_call(&command)),
+        (200, common::text_reply("ran it")),
+        (200, common::text_reply("next one")),
+    ])
+    .await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "risky"),
+        cwd.path().into(),
+    ));
+    let running = start(
+        discord(&rest.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+
+    conn.dispatch(
+        "MESSAGE_CREATE",
+        message("505", USER, "clean up", false, &[]),
+    )
+    .await;
+    let (question, buttons) = rest.question("505", 1).await;
+    conn.dispatch(
+        "INTERACTION_CREATE",
+        press("11", "505", USER, &question, &buttons["Allow"]),
+    )
+    .await;
+    assert_eq!(rest.response("11").await, json!({"type": 6}));
+    // To be sure, the user types y too: told it was answered, no new turn.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "y", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p.contains("already answered"))
+        .await;
+    rest.wait_post("505", |p| p == "ran it").await;
+    assert!(marker.exists());
+    // The next message is an input as always.
+    conn.dispatch("MESSAGE_CREATE", message("505", USER, "next", false, &[]))
+        .await;
+    rest.wait_post("505", |p| p == "next one").await;
+    running.stop().await;
+
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(texts(&requests[2]).last().unwrap(), "user: next");
+    assert!(
+        !requests
+            .iter()
+            .any(|request| texts(request).iter().any(|text| text == "user: y")),
+        "{requests:#?}"
+    );
+}
+
 /// A PNG header of `width` x `height`: enough for Junees, which never
 /// decodes the pixels.
 fn png(width: u32, height: u32) -> Vec<u8> {
