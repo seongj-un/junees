@@ -117,6 +117,9 @@ fn line_secret(text: &str, start: usize, line: &str, hashes: bool) -> Option<&'s
     if has_discord_token(line) {
         return Some("a Discord bot token");
     }
+    if has_telegram_token(line) {
+        return Some("a Telegram bot token");
+    }
     for (at, run) in runs(line) {
         if has_hex_token(text, start + at, run, hashes) {
             return Some("a long hex token");
@@ -292,6 +295,37 @@ fn has_discord_token(text: &str) -> bool {
     })
 }
 
+/// The digits of a Telegram bot token's first part (the bot's user id).
+const TELEGRAM_ID_PART: std::ops::RangeInclusive<usize> = 6..=12;
+/// The length of its secret part, after the colon, as @BotFather issues
+/// it (Bot API docs: `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`).
+const TELEGRAM_SECRET_PART: usize = 35;
+
+/// Whether `text` holds a Telegram bot token: a bot id, a colon and 35
+/// characters of letters, digits, `_` and `-`, standing apart from the
+/// words around it.
+fn has_telegram_token(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let secret_char = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-');
+    text.match_indices(':').any(|(at, _)| {
+        let id = bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        let secret = bytes[at + 1..]
+            .iter()
+            .take_while(|b| secret_char(b))
+            .count();
+        let start = at - id;
+        let apart = |start: usize| start == 0 || !secret_char(&bytes[start - 1]);
+        // In a request URL it follows `/bot`.
+        let starts_apart =
+            apart(start) || (start >= 3 && &bytes[start - 3..start] == b"bot" && apart(start - 3));
+        TELEGRAM_ID_PART.contains(&id) && secret == TELEGRAM_SECRET_PART && starts_apart
+    })
+}
+
 /// Whether `text` is unpadded base64 (standard or URL alphabet) of a
 /// string of ASCII digits.
 fn base64_digits(text: &str) -> bool {
@@ -368,6 +402,31 @@ mod tests {
         }
         assert!(base64_digits("MTIzNDU2Nzg5MDEyMzQ1Njc4OQ"));
         assert!(!base64_digits("aGVsbG8gd29ybGQgaGVsbG8"));
+    }
+
+    #[test]
+    fn finds_telegram_bot_tokens() {
+        // Built at run time, so no complete fake token sits in the source.
+        let secret = format!("AA{}Hq3_zZ", "x7_Kq-2Lm".repeat(3));
+        assert_eq!(secret.len(), TELEGRAM_SECRET_PART);
+        let token = format!("{}:{secret}", "1234567890");
+        for text in [
+            token.clone(),
+            format!("JUNEES_TELEGRAM_TOKEN={token}"),
+            format!("telegram_token = \"{token}\""),
+            format!("https://api.telegram.org/bot{token}/getMe"),
+        ] {
+            assert_eq!(secret_kind(&text), Some("a Telegram bot token"), "{text}");
+        }
+        for text in [
+            "at 12:34:56 the build ran".to_string(),
+            format!("12345:{secret}"),
+            format!("id{}:{secret}", "1234567890"),
+            format!("{}:{secret}x", "1234567890"),
+            "ratio 1234567:12".to_string(),
+        ] {
+            assert_ne!(secret_kind(&text), Some("a Telegram bot token"), "{text}");
+        }
     }
 
     #[test]
