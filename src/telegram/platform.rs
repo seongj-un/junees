@@ -189,6 +189,10 @@ impl Platform for Telegram {
         MESSAGE_LIMIT
     }
 
+    fn code_blocks(&self) -> bool {
+        false
+    }
+
     async fn post(&self, channel: &str, text: &str) -> Result<()> {
         self.api
             .send_message(Self::target(channel)?, text)

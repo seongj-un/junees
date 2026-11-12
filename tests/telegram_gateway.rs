@@ -463,6 +463,10 @@ impl Conversation for FakeConversation {
             out.send(Progress::Text(lines.join("\n"))).unwrap();
             return Ok(());
         }
+        if input == "long code" {
+            out.send(Progress::Text(long_code())).unwrap();
+            return Ok(());
+        }
         self.turns += 1;
         out.send(Progress::Tool("-> bash echo hi".into())).unwrap();
         out.send(Progress::Text(format!("reply {}: {input}", self.turns)))
@@ -476,6 +480,12 @@ impl Conversation for FakeConversation {
     fn usage(&self) -> String {
         format!("{} fake turns", self.turns)
     }
+}
+
+/// A code block longer than one message.
+fn long_code() -> String {
+    let lines: Vec<String> = (0..900).map(|n| format!("let x{n} = {n};")).collect();
+    format!("```rust\n{}\n```", lines.join("\n"))
 }
 
 // -------------------------------------------------------------- Setup
@@ -733,6 +743,19 @@ async fn long_replies_are_split_and_flood_control_is_waited_out() {
     }
     let lines: Vec<String> = (0..900).map(|n| format!("줄 {n}: 값은 {n}")).collect();
     assert_eq!(posts.join("\n"), lines.join("\n"));
+
+    // Plain text: a code block cut between messages gets no fences added
+    // (Telegram would show them as typed).
+    let running = start(telegram(&bot.url, &[]), fake(), None, dir.path());
+    let before = posts.len();
+    bot.push(private(USER, "long code"));
+    let posts = bot
+        .wait_post(&me, |p| p.ends_with("let x899 = 899;\n```"))
+        .await;
+    running.stop().await;
+    let code = &posts[before..];
+    assert!(code.len() >= 2, "{} posts", code.len());
+    assert_eq!(code.join("\n"), long_code());
     // The first post was refused once by flood control, then sent once.
     let limited = bot
         .calls("sendMessage")

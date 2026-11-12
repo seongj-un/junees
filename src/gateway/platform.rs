@@ -28,6 +28,13 @@ pub trait Platform: Send + Sync + 'static {
     /// ([`super::split::length`]).
     fn message_limit(&self) -> usize;
 
+    /// Whether posts render Markdown code blocks, so a block cut between
+    /// two messages is closed and opened again; plain text shows fences
+    /// as typed.
+    fn code_blocks(&self) -> bool {
+        true
+    }
+
     /// Posts one message of at most [`Platform::message_limit`] units.
     /// Errors never hold the bot token.
     async fn post(&self, channel: &str, text: &str) -> Result<()>;

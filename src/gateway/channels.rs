@@ -20,7 +20,7 @@ use super::ask::{AnswerSlot, DiscordAsk, fence_safe};
 use super::engine::{Conversation, Engines, Progress};
 use super::platform::Platform;
 use super::sessions::{self, SessionIndex};
-use super::split::split_message;
+use super::split::{split_message, split_plain};
 use crate::agent::Cancelled;
 use crate::cancel::Cancel;
 use crate::claude_code::UsageLimit;
@@ -54,7 +54,13 @@ pub struct Shared<P: Platform> {
 impl<P: Platform> Shared<P> {
     /// Posts `text`, cut into messages; failures go to the log.
     pub async fn say(&self, channel: &str, text: &str) {
-        for part in split_message(text, self.platform.message_limit()) {
+        let limit = self.platform.message_limit();
+        let parts = if self.platform.code_blocks() {
+            split_message(text, limit)
+        } else {
+            split_plain(text, limit)
+        };
+        for part in parts {
             if let Err(err) = self.platform.post(channel, &part).await {
                 (self.log)(&format!(
                     "cannot post to {} {channel}: {err:#}",
