@@ -150,7 +150,7 @@ fn exclude(dir: &Path) -> Result<()> {
 /// Commits everything the model changed (new secret-looking or very large
 /// files left out); the new head, or `None` when nothing changed.
 pub fn commit(worktree: &Path, message: &str) -> Result<Option<String>> {
-    let commit = git::commit_all(worktree, message)?;
+    let commit = git::Repo::unconfined(worktree).commit_all(message)?;
     if !commit.made {
         return Ok(None);
     }

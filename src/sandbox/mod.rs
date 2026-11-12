@@ -268,6 +268,12 @@ impl Sandbox {
         self
     }
 
+    /// Also lets commands write in `paths`.
+    pub fn with_write(mut self, paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.settings.write.extend(paths);
+        self
+    }
+
     pub fn settings(&self) -> &Settings {
         &self.settings
     }
