@@ -497,8 +497,11 @@ pub struct Scope {
     /// Folders writable (and readable) besides the working folder: the
     /// temporary folders and `sandbox_write`.
     write: Vec<PathBuf>,
-    /// Folders readable besides those (`sandbox_read`).
+    /// Folders readable besides those (`sandbox_read`; a webhook run's
+    /// `webhook_sandbox_read`).
     read: Vec<PathBuf>,
+    /// The setting that names `read`, for refusals.
+    read_setting: &'static str,
     /// Never read nor written ([`UNATTENDED_CREDENTIALS`] in the home
     /// folder, the protected Junees paths, a webhook run's sessions).
     denied: Vec<PathBuf>,
@@ -520,22 +523,32 @@ impl Scope {
             .as_ref()
             .and_then(|file| file.home().map(Path::to_path_buf))
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+        // A webhook run (anyone's text) does not take `sandbox_read`: the
+        // user widens it for scheduled jobs (`/` beside `~/.ssh` for a job
+        // that pushes over ssh), and the same value would let a webhook
+        // run's `read_file` read the whole disk. It reads its own list.
+        let read = if settings.webhook {
+            sandbox.webhook_read.clone()
+        } else {
+            sandbox.read.clone().unwrap_or_default()
+        };
         let mut scope = Self::new(
             None,
             sandbox.temp.iter().chain(&sandbox.write).cloned().collect(),
-            sandbox.read.clone().unwrap_or_default(),
+            read,
             home.as_deref(),
             settings.settings_file.as_ref(),
         );
-        // A webhook run (anyone's text) does not read earlier
-        // conversations' tool output either.
-        if settings.webhook
-            && let Some(state) = settings
+        if settings.webhook {
+            scope.read_setting = "webhook_sandbox_read";
+            // Nor does it read earlier conversations' tool output.
+            if let Some(state) = settings
                 .settings_file
                 .as_ref()
                 .and_then(SettingsFile::folder)
-        {
-            scope.denied.push(crate::session::sessions_dir(&state));
+            {
+                scope.denied.push(crate::session::sessions_dir(&state));
+            }
         }
         Some(scope)
     }
@@ -562,6 +575,7 @@ impl Scope {
             work,
             write,
             read,
+            read_setting: "sandbox_read",
             denied,
             no_write: under_home(UNATTENDED_NO_WRITE),
         }
@@ -613,12 +627,15 @@ impl Scope {
         let (what, folders, setting) = match use_ {
             Use::Read => (
                 "read",
-                "the temporary folders and the `sandbox_write` and `sandbox_read` folders",
-                "sandbox_read",
+                format!(
+                    "the temporary folders and the `sandbox_write` and `{}` folders",
+                    self.read_setting
+                ),
+                self.read_setting,
             ),
             Use::Write => (
                 "write",
-                "the temporary folders and the `sandbox_write` folders",
+                "the temporary folders and the `sandbox_write` folders".to_string(),
                 "sandbox_write",
             ),
         };

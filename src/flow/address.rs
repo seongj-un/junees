@@ -1081,6 +1081,7 @@ pub(crate) mod tests {
                 mode: None,
                 write: Vec::new(),
                 read: None,
+                webhook_read: Vec::new(),
                 network: true,
                 temp: Vec::new(),
                 unattended: false,

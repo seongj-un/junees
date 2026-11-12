@@ -30,6 +30,7 @@ fn settings() -> Settings {
         mode: Some(Mode::Require),
         write: Vec::new(),
         read: None,
+        webhook_read: Vec::new(),
         network: true,
         temp: Vec::new(),
         unattended: false,
@@ -442,6 +443,8 @@ async fn unattended_runs_cannot_read_home_credentials() {
         settings_file: Some(layout.settings_file()),
         sandbox: Some(Settings {
             unattended,
+            // The webhook runs' own list names the keys too.
+            webhook_read: read.clone().unwrap_or_default(),
             read,
             ..settings()
         }),
@@ -497,7 +500,8 @@ async fn unattended_runs_cannot_read_home_credentials() {
     .await;
     shows(&keys, &["ssh-private", "other-private", "ssh-public"]);
     hides(&keys, &["aws-secret", "kube-token"]);
-    // A webhook run reads none of them, whatever `sandbox_read` says.
+    // A webhook run reads none of them, whatever `sandbox_read` and
+    // `webhook_sandbox_read` say.
     let webhook = run(
         &work,
         Sandbox::for_tools(&tools(true, true, read)).unwrap(),
@@ -900,6 +904,7 @@ fn reads_the_settings() {
     assert_eq!(defaults.mode(), Mode::Auto);
     assert!(defaults.network);
     assert_eq!(defaults.read, None);
+    assert!(defaults.webhook_read.is_empty());
     assert!(defaults.write.is_empty());
     assert_eq!(
         defaults.temp[..3],
@@ -930,6 +935,7 @@ fn reads_the_settings() {
         ("JUNEES_SANDBOX_WRITE", "/data/out, ,~/.cache"),
         ("HOME", "/home/tester"),
         ("JUNEES_SANDBOX_READ", "/usr,/etc"),
+        ("JUNEES_WEBHOOK_SANDBOX_READ", "/srv/in, ~/inbox"),
         ("JUNEES_SANDBOX_NETWORK", "0"),
         ("TMPDIR", "/scratch"),
     ])
@@ -945,6 +951,13 @@ fn reads_the_settings() {
     assert_eq!(
         set.read,
         Some(vec![PathBuf::from("/usr"), PathBuf::from("/etc")])
+    );
+    assert_eq!(
+        set.webhook_read,
+        [
+            PathBuf::from("/srv/in"),
+            PathBuf::from("/home/tester/inbox")
+        ]
     );
     assert!(!set.network);
     assert!(set.temp.contains(&PathBuf::from("/scratch")));
