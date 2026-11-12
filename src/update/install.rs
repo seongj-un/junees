@@ -253,6 +253,10 @@ pub fn notes(path: &Path, cargo_bin: Option<&Path>, home: Option<&Path>) -> Vec<
                 "the Telegram gateway (`junees telegram`)",
             ),
             (
+                held(&home.join(crate::slack::LOCK_FILE)),
+                "the Slack gateway (`junees slack`)",
+            ),
+            (
                 crate::cron::daemon::is_running(home),
                 "the cron daemon (`junees cron daemon`)",
             ),
