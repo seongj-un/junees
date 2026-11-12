@@ -62,6 +62,7 @@ sandbox_network = "1"
 정한 것:
 
 - 플러그인 명령과 stdio MCP 서버는 묶지 않는다. 사용자가 설치하고 켠 프로그램이고(모델은 입력만 준다), 자기 상태 폴더나 네트워크가 필요한 경우가 많아 bash와 같은 규칙으로는 깨진다. claude-code 백엔드도 대상이 아니다(Claude Code가 자기 도구를 자기 방식으로 돌린다). `read_file`/`write_file`/`edit_file`은 Junees 프로세스 안에서 돌고 지금처럼 경로 검사로 지킨다.
+- 브라우저 도구([브라우저 도구](browser.md))도 묶지 않는다. Chrome은 bash가 아니라 Junees가 직접 띄우는 프로그램이고, 자기 샌드박스(`browser_no_sandbox`면 그것도 없이)와 주소 검사(사설, 루프백, 링크 로컬 주소는 `browser_allow_private`일 때만)로만 지켜진다. 그래서 `sandbox_network = 0`과 예약 작업, 웹훅 실행의 `require`는 bash 명령만 묶는다: `browser_unattended`를 켜면 무인 실행의 모델이 `sandbox_network = 0`이어도 브라우저로 공개 웹에 나갈 수 있다(페이지를 열고 폼을 채워 보내는 것 포함, 비밀번호와 결제 칸, `evaluate`는 묻는 사람이 없으니 거절된다). 무인 실행에서 네트워크를 막으려면 `browser_unattended`를 끈 채 둔다.
 - 폴더 목록(`LANDLOCK_ACCESS_FS_READ_DIR`)은 다루지 않는다. Landlock 규칙은 허용만 하고 아래로 상속되므로, 비밀 폴더 하나만 빼고 그 위 폴더들을 나열할 수 있게 하는 방법이 없다. 그래서 `ls ~/.junees/secrets`로 파일 이름은 보인다(내용은 못 읽는다).
 - `landlock` 크레이트 대신 세 시스템 호출을 libc로 직접 부른다(구조체 두 개와 상수 몇 개라 의존성이 필요 없다). Linux가 아니면 지원하지 않는 커널과 같이 다룬다.
 
