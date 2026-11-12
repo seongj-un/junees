@@ -1087,6 +1087,44 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
     assert!(home.path().join("gateway/telegram.lock").exists());
 }
 
+#[tokio::test]
+async fn another_bots_command_is_no_answer_to_a_question_in_a_group() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let file = cwd.path().join("note.txt");
+    let (api, served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(TELEGRAM_NOTE),
+    );
+    let running = start(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    let chat = GROUP.to_string();
+    bot.push(group(USER, "@junees_bot write a note"));
+    bot.wait_post(&chat, |p| p.starts_with("Approve this tool call?"))
+        .await;
+    // Another bot's command while the question waits is not taken as the
+    // answer (it would decline); the question takes the next message.
+    bot.push(group(USER, "/roll 2d6"));
+    bot.push(group(USER, "y"));
+    bot.wait_post(&chat, |p| p == "wrote it").await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "written\n");
+    running.stop().await;
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 2);
+    let texts = texts(&requests[1]);
+    assert!(!texts.iter().any(|t| t.contains("roll")), "{texts:?}");
+}
+
 /// A PNG header of `width` x `height`: enough for Junees, which never
 /// decodes the pixels.
 fn png(width: u32, height: u32) -> Vec<u8> {

@@ -78,6 +78,14 @@ pub fn parse_command(text: &str, me: &str) -> Parsed {
     }
 }
 
+/// Whether `text` starts like a command, `/word`, known or not.
+fn command_form(text: &str) -> bool {
+    text.trim_start()
+        .strip_prefix('/')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
 /// `text` without `@username` (any case), trimmed.
 pub fn strip_mention(text: &str, username: &str) -> String {
     let mention = format!("@{username}");
@@ -372,8 +380,11 @@ impl Router {
             .and_then(Value::as_i64)
             == Some(self.me.id);
         // A waiting question takes any message of the chat as its answer,
-        // but a forwarded one is no answer of the user's.
-        let answering = forwarded.is_none() && self.channels.answering(&channel);
+        // but a forwarded one is no answer of the user's, and in a group
+        // neither is a `/word` with more text (`/roll 2d6`): likely another
+        // bot's command (the gateway's own commands were taken above).
+        let other_command = !direct && commands && command_form(&text);
+        let answering = forwarded.is_none() && !other_command && self.channels.answering(&channel);
         let album = message
             .get("media_group_id")
             .and_then(Value::as_str)
