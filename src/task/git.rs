@@ -31,13 +31,20 @@ pub const REPO_ENV_VARS: &[&str] = &[
 
 /// Settings put in front of every git command the harness runs. A session
 /// can write `.git/hooks` and `.git/config`, and the harness's git must not
-/// run what it put there: no hooks and no fsmonitor command. Command-line
-/// settings win over every config file.
+/// run what it put there: no hooks, no fsmonitor command, and no signing
+/// or signature check (`gpg.program` and its ssh and x509 kin are programs
+/// too). Command-line settings win over every config file.
 const SAFE_CONFIG: &[&str] = &[
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
     "core.fsmonitor=false",
+    "-c",
+    "commit.gpgSign=false",
+    "-c",
+    "tag.gpgSign=false",
+    "-c",
+    "log.showSignature=false",
 ];
 
 /// Runs git in `dir` and returns its stdout, or an error with its stderr.
@@ -341,6 +348,23 @@ pub(crate) mod testing {
         dir
     }
 
+    /// Writes the shell script `body` to `path` and makes it executable.
+    /// A shell writes it, so no write descriptor of this process can leak
+    /// into another test's fork (which would make exec fail with ETXTBSY).
+    pub fn script(path: &Path, body: &str) {
+        let status = Command::new("sh")
+            .args([
+                "-c",
+                "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"",
+                "sh",
+            ])
+            .arg(body)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     /// Commit subjects, newest first.
     pub fn subjects(root: &Path) -> Vec<String> {
         git(root, &["log", "--format=%s"])
@@ -627,5 +651,61 @@ mod tests {
             subjects(root),
             ["with configured hooks", "with default hooks"]
         );
+    }
+
+    #[test]
+    fn runs_no_signing_program_a_session_configured() {
+        let repo = repo();
+        let root = repo.path();
+        let marker = root.join(".git/signed.txt");
+        let gpg = root.join(".git/fake-gpg");
+        // Signs like gpg (git wants SIG_CREATED on the status fd) and
+        // records every call.
+        script(
+            &gpg,
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncat > /dev/null\n\
+                 printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 0 X\\n' >&2\n\
+                 printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nx\\n-----END PGP SIGNATURE-----\\n'\n",
+                marker.display()
+            ),
+        );
+        let program = gpg.to_string_lossy();
+        // A signed commit in the history, so `git log` has one to check.
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        git(root, &["add", "a.txt"]).unwrap();
+        let mut signed = Command::new("git");
+        signed
+            .args(["-c", &format!("gpg.program={program}")])
+            .args(["commit", "-q", "-S", "-m", "signed"])
+            .current_dir(root);
+        hide_env(&mut signed);
+        let output = signed.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(marker.exists(), "the fake gpg did not sign");
+        std::fs::remove_file(&marker).unwrap();
+
+        for (key, value) in [
+            ("gpg.program", &*program),
+            ("gpg.ssh.program", &*program),
+            ("commit.gpgSign", "true"),
+            ("tag.gpgSign", "true"),
+            ("log.showSignature", "true"),
+        ] {
+            git(root, &["config", key, value]).unwrap();
+        }
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        assert!(commit_all(root, "unsigned").unwrap().made);
+        assert!(recent_log(root, 5).contains(" signed\n"));
+        assert!(
+            !marker.exists(),
+            "{}",
+            std::fs::read_to_string(&marker).unwrap()
+        );
+        assert_eq!(subjects(root), ["unsigned", "signed"]);
     }
 }
