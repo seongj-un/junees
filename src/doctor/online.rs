@@ -1,4 +1,5 @@
-//! `--online`: one light request that shows whether the API takes the key.
+//! `--online`: one light request that shows whether the API takes the key,
+//! and one that asks GitHub for the latest release.
 
 use std::time::Duration;
 
@@ -9,6 +10,46 @@ use super::Report;
 
 const AREA: &str = "online";
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Whether a newer release is out, as `junees update --check` says.
+pub(super) async fn release(report: &mut Report, settings: &Settings) {
+    const NAME: &str = "release";
+    let lookup = |key: &str| settings.env(key);
+    let client =
+        match crate::update::Source::from_lookup(&lookup).and_then(crate::update::Client::new) {
+            Ok(client) => client,
+            Err(err) => {
+                report.warn(
+                    AREA,
+                    NAME,
+                    format!("cannot look for a newer release: {err:#}"),
+                    format!("unset {}", crate::update::BASE_ENV),
+                );
+                return;
+            }
+        };
+    let current = crate::update::this_version();
+    match client.latest().await {
+        Ok(None) => report.skip(AREA, NAME, "no release is published yet"),
+        Ok(Some(latest)) if latest > current => report.warn(
+            AREA,
+            NAME,
+            format!("junees {latest} is out (this is {current})"),
+            "run `junees update`",
+        ),
+        Ok(latest) => report.ok(
+            AREA,
+            NAME,
+            crate::update::compare(&current, latest.as_ref()),
+        ),
+        Err(err) => report.warn(
+            AREA,
+            NAME,
+            format!("{err:#}"),
+            "check the network; `junees update --check` asks the same",
+        ),
+    }
+}
 
 /// `GET /v1/models?limit=1` with the key: no tokens are used.
 pub(super) async fn api_key(report: &mut Report, settings: &Settings) {
