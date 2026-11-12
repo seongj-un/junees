@@ -146,7 +146,7 @@ src/
     tests.rs           가짜 GitHub REST 서버로 요청 모양, 페이지, 레이트 리밋, 오류와 토큰 비노출, 허용 목록, 승인 판정 검증
   browser/           브라우저 도구 (browser, docs/browser.md)
     mod.rs             설정(JUNEES_BROWSER*), 실행 종류(Run: 묻는 대화, 묻지 않는 실행, 무인 실행)에 따른 등록
-    process.rs         프로그램 찾기, --version, 임시 프로필(0700, 지움), --remote-debugging-pipe로 띄우기(fd 3/4), 비밀 변수 제거, 프로세스 그룹 종료와 거두기
+    process.rs         프로그램 찾기, --version, $JUNEES_HOME/browser 아래 프로필(0700, 지움, 소켓 경로가 길면 Chrome의 TMPDIR만 임시 폴더로), --remote-debugging-pipe로 띄우기(fd 3/4), 비밀 변수 제거, 프로세스 그룹 종료와 거두기
     cdp.rs             파이프 위 DevTools 프로토콜: NUL로 나눈 JSON, id로 답 찾기, 이벤트, 시간 한도, 닫힘 알림
     page.rs            브라우저 세션 하나: 페이지 붙기, 모든 요청 검사(Fetch), 다운로드 거절, 대화상자 닫기, 새 탭 옮기기, 로드 기다리기, 격리 world의 스냅샷과 요소 동작, 마우스/키 입력, 스크린샷
     snapshot.js        격리 world에서 도는 스냅샷 스크립트: 글과 번호 붙은 요소, 비밀번호/결제 칸과 폼 제출 판단, 클릭 위치와 덮인 요소
@@ -212,7 +212,7 @@ tests/
   github.rs            실제 바이너리와 가짜 API, 가짜 GitHub REST로 -p에서 origin repo의 PR 보기 -> 리뷰(무인 허용 목록), 허용 목록 밖 쓰기 거절, 토큰이 모델/터미널/세션 기록에 없음 검증
   cron.rs              실제 바이너리와 가짜 API, 가짜 디스코드 REST로 cron add/list/run(전달, 출력 파일, 세션, 읽기 전용 도구)/pause/resume/rm, 데몬이 때가 된 작업을 자식 프로세스로 실행하고 실패를 전달하는지 검증
   github_flow.rs       실제 바이너리로 webhook add-github(시크릿 파일 0600, 안내, 형식 2), serve에 서명한 pull_request.opened -> 모델의 리뷰가 가짜 GitHub에 POST, 같은 커밋의 두 번째 전달은 아무것도 안 함, list의 최근 처리 검증
-  browser.rs           실제 바이너리 -p와 가짜 API, 실제 Chromium(없으면 건너뜀)으로 루프백 페이지 열기(페이지 글 표시), evaluate 거절, 스크린샷 블록, 긴 TMPDIR(프로필은 /tmp로), 끝난 뒤 브라우저 프로세스와 프로필 없음 검증
+  browser.rs           실제 바이너리 -p와 가짜 API, 실제 Chromium(없으면 건너뜀)으로 루프백 페이지 열기(페이지 글 표시), evaluate 거절, 스크린샷 블록, 긴 JUNEES_HOME과 TMPDIR(프로필은 $JUNEES_HOME/browser, Chrome의 임시 폴더는 /tmp로), 끝난 뒤 브라우저 프로세스와 프로필, 임시 폴더 없음 검증
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
   doctor.rs            실제 바이너리로 junees doctor 출력과 종료 코드(권한 실패면 1), --json 형식, 깨진 설정 파일도 점검 결과로, --help와 잘못된 인자, 대화의 /doctor(대화 중에 깨진 설정 파일을 다시 읽음), 비밀 값이 출력되지 않음 검증
   usage.rs             실제 바이너리와 가짜 API로 대화의 /usage(호출, /model 전환 뒤 다른 가격, 합계), 기록 줄의 모델, junees usage(모델별, 날짜별, prices 덮어쓰기, 폴더 범위와 --all, 도움말과 오류) 검증

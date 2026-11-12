@@ -39,7 +39,7 @@ api 백엔드의 `bash` 도구가 실행하는 명령(대화, `-p`, 작업 모�
 
 - 쓰기: 작업 폴더(명령이 도는 폴더), 임시 폴더(`/tmp`, `/var/tmp`, `/dev/shm`, `$TMPDIR`과 Junees 프로세스의 임시 폴더), `sandbox_write`의 폴더 아래에서만 파일을 만들고 바꾸고 지우고 옮길 수 있다. `/dev` 아래 이미 있는 파일(`/dev/null`, 터미널)에는 쓸 수 있다. 그 밖에서는 `Permission denied`.
 - 읽기: 기본은 어디든 읽고 실행할 수 있다. `sandbox_read`를 주면 그 폴더들과 쓸 수 있는 폴더만 읽는다(bash가 시작하려면 `/usr`, `/lib`, `/lib64`, `/bin`, `/etc` 같은 시스템 폴더가 들어 있어야 한다. `junees doctor`가 확인한다).
-- 언제나: 설정 파일(`$JUNEES_HOME/config.toml`), `mcp.json`, `$JUNEES_HOME/secrets/`(웹훅 시크릿, MCP OAuth 토큰)는 읽지도 바꾸지도 못하고(`/proc/self/root/...`로 돌아가도, 하드 링크를 새로 걸어도), 데이터 폴더(`memory`, `projects`, `skills`, `cron`, `plugins`, `webhooks`, `flows`)는 읽기만 된다. 작업 폴더가 이것들을 품어도(홈에서 실행) 마찬가지다. 웹훅 실행에서는 git과 GitHub CLI 자격 증명(`~/.git-credentials`, `~/.config/git/credentials`, `~/.config/gh/`)도 읽지 못한다. 다른 실행에서는 `gh`와 git push가 그 파일을 읽어야 하므로 명령 정책만 막는다.
+- 언제나: 설정 파일(`$JUNEES_HOME/config.toml`), `mcp.json`, `$JUNEES_HOME/secrets/`(웹훅 시크릿, MCP OAuth 토큰), 실행 중인 브라우저의 프로필 폴더 `$JUNEES_HOME/browser/`(그 세션의 쿠키와 로그인)는 읽지도 바꾸지도 못하고(`/proc/self/root/...`로 돌아가도, 하드 링크를 새로 걸어도), 데이터 폴더(`memory`, `projects`, `skills`, `cron`, `plugins`, `webhooks`, `flows`)는 읽기만 된다. 작업 폴더가 이것들을 품어도(홈에서 실행) 마찬가지다. 웹훅 실행에서는 git과 GitHub CLI 자격 증명(`~/.git-credentials`, `~/.config/git/credentials`, `~/.config/gh/`)도 읽지 못한다. 다른 실행에서는 `gh`와 git push가 그 파일을 읽어야 하므로 명령 정책만 막는다.
 - 네트워크: `sandbox_network = 0`이면 TCP 연결과 bind를 모두 막는다(Landlock ABI 4 이상, Linux 6.7부터). 기본은 허용이다. UDP(DNS 포함)와 유닉스 소켓은 막지 않는다.
 - `no_new_privs`: setuid 프로그램(`sudo` 등)과 파일 capability가 권한을 주지 않는다.
 - 다른 프로세스: Landlock의 ptrace 규칙으로, 격리된 명령은 격리되지 않은 프로세스(Junees, MCP 서버, 같은 사용자의 다른 프로그램)를 추적하거나 그 `/proc/<pid>/environ`, `mem`을 읽지 못한다.
