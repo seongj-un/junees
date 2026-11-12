@@ -16,7 +16,7 @@ GitHub 릴리스에서 이 컴퓨터에 맞는 빌드를 받아 `~/.local/bin/ju
 4. 압축에서 `junees` 하나만 꺼내 설치 폴더에 임시 이름으로 복사하고 `mv`로 바꿔 넣는다(있던 junees는 새 파일이 다 쓰인 뒤에 한 번에 바뀐다).
 5. 설치 폴더가 PATH에 없으면 더할 줄을 알려 준다.
 
-임시 폴더(`$TMPDIR` 아래 `junees-install.*`)는 끝나거나 중단되면 지운다. 필요한 것: `curl` 또는 `wget`, `tar`, `sha256sum`/`shasum`/`openssl` 중 하나.
+임시 폴더(`$TMPDIR` 아래 `junees-install.*`)는 끝나거나 중단되면 지운다. 필요한 것: `curl` 또는 `wget`(BusyBox wget도 된다: wget에는 두 구현에 다 있는 `-q -O`만 넘긴다), `tar`, `sha256sum`/`shasum`/`openssl` 중 하나. 받기가 실패하면 어느 주소를 무엇(`curl`/`wget`)으로 받다 실패했는지 `download failed (...)`로 알려 준다.
 
 | 변수 | 뜻 |
 |---|---|

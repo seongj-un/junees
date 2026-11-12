@@ -910,6 +910,102 @@ async fn install_sh_refuses_an_unknown_architecture() {
     assert!(!dir.path().join("bin").exists());
 }
 
+/// A `wget` like BusyBox's (Alpine, small containers): it knows no
+/// `--https-only` (or any other option install.sh need not pass), logs its
+/// arguments to `$WGET_LOG` and fetches with the real curl (`$REAL_CURL`).
+const BUSYBOX_WGET: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$WGET_LOG"
+for arg in "$@"; do
+    case "$arg" in
+        -q | -O) ;;
+        -*) echo "wget: unrecognized option '$arg'" >&2; exit 1 ;;
+    esac
+done
+[ "$#" = 4 ] && [ "$1" = -q ] && [ "$2" = -O ] || exit 1
+exec "$REAL_CURL" -fsS -o "$3" "$4"
+"#;
+
+#[tokio::test]
+async fn install_sh_downloads_with_busybox_wget_when_there_is_no_curl() {
+    let Some(target) = script_target() else {
+        return;
+    };
+    let server = start(release_for("0.3.0", target, b"new binary", None)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("wget.sh");
+    std::fs::write(&source, BUSYBOX_WGET).unwrap();
+    let log = dir.path().join("wget.log");
+    // A PATH holding only the fake wget and links to the tools install.sh
+    // uses: no curl. The shell writes the fake (no ETXTBSY from Rust
+    // threads) and checks that it refuses --https-only like BusyBox.
+    let fake = dir.path().join("fake");
+    let prefix = format!(
+        "mkdir -p {fake} && cp {source} {fake}/wget && chmod +x {fake}/wget && \
+         for t in sh uname mktemp rm sed head awk tr tar gzip cut sha256sum mkdir cp chmod mv; do \
+         ln -s \"$(command -v $t)\" {fake}/$t || exit 1; done && \
+         ! WGET_LOG=/dev/null {fake}/wget --https-only -q -O {fake}/x http://127.0.0.1:9/ 2>/dev/null && \
+         REAL_CURL=$(command -v curl) WGET_LOG={log} PATH={fake} ",
+        fake = fake.display(),
+        source = source.display(),
+        log = log.display(),
+    );
+    let output = install_sh(
+        dir.path(),
+        &prefix,
+        &format!("JUNEES_DOWNLOAD_BASE={}", server.base),
+    )
+    .await;
+    assert!(!output.is_error, "{}", output.content);
+    assert_eq!(
+        std::fs::read(dir.path().join("bin/junees")).unwrap(),
+        b"new binary"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let urls: Vec<_> = calls
+        .lines()
+        .map(|line| {
+            let rest = line.strip_prefix("-q -O ").expect(line);
+            rest.split_once(' ').expect(line).1
+        })
+        .collect();
+    assert_eq!(
+        urls,
+        [
+            format!("{}/latest/download/SHA256SUMS", server.base),
+            format!(
+                "{}/download/v0.3.0/junees-0.3.0-{target}.tar.gz",
+                server.base
+            ),
+        ]
+    );
+    assert_eq!(server.paths().len(), 2);
+    assert!(is_empty_dir(&dir.path().join("tmp")));
+    let names: Vec<_> = std::fs::read_dir(dir.path().join("bin")).unwrap().collect();
+    assert_eq!(names.len(), 1);
+}
+
+#[tokio::test]
+async fn install_sh_says_which_download_failed() {
+    let server = start(Vec::new()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let output = install_sh(
+        dir.path(),
+        "",
+        &format!("JUNEES_DOWNLOAD_BASE={}", server.base),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains(&format!(
+            "download failed (curl): {}/latest/download/SHA256SUMS",
+            server.base
+        )),
+        "{}",
+        output.content
+    );
+    assert!(!dir.path().join("bin").exists());
+}
+
 #[tokio::test]
 async fn install_sh_takes_only_a_test_server_on_this_computer() {
     let dir = tempfile::tempdir().unwrap();

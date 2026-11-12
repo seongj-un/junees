@@ -55,22 +55,28 @@ detect_target() {
     printf '%s-%s\n' "$arch_part" "$os_part"
 }
 
+if command -v curl >/dev/null 2>&1; then
+    fetcher=curl
+elif command -v wget >/dev/null 2>&1; then
+    fetcher=wget
+else
+    fail "neither curl nor wget is installed"
+fi
+
 # download <url> <file>
 download() {
-    if command -v curl >/dev/null 2>&1; then
+    if [ "$fetcher" = curl ]; then
         if [ "$base" = "$repo_releases" ]; then
             curl --proto '=https' --tlsv1.2 -fsSL -o "$2" "$1"
         else
             curl -fsSL -o "$2" "$1"
         fi
-    elif command -v wget >/dev/null 2>&1; then
-        if [ "$base" = "$repo_releases" ]; then
-            wget --https-only -q -O "$2" "$1"
-        else
-            wget -q -O "$2" "$1"
-        fi
     else
-        fail "neither curl nor wget is installed"
+        # Only options BusyBox wget (Alpine, small containers) knows too. GNU
+        # wget's --https-only would not help: it applies to links followed in
+        # recursive mode, not to redirects. The archive is checked against
+        # SHA256SUMS either way.
+        wget -q -O "$2" "$1"
     fi
 }
 
@@ -105,11 +111,11 @@ if [ -n "$version" ]; then
     esac
     say "downloading SHA256SUMS of v$version"
     download "$base/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS" ||
-        fail "cannot download $base/download/v$version/SHA256SUMS (is v$version a release?)"
+        fail "download failed ($fetcher): $base/download/v$version/SHA256SUMS (is v$version a release?)"
 else
     say "looking for the latest release"
     download "$base/latest/download/SHA256SUMS" "$tmp/SHA256SUMS" ||
-        fail "cannot download $base/latest/download/SHA256SUMS (is a release published?)"
+        fail "download failed ($fetcher): $base/latest/download/SHA256SUMS (is a release published?)"
     # The archive names carry the version: junees-<version>-<target>.tar.gz.
     version=$(sed -n "s/^[0-9a-fA-F]\{64\}  *\*\{0,1\}junees-\([0-9A-Za-z.-]*\)-$target\.tar\.gz$/\1/p" "$tmp/SHA256SUMS" | head -n 1)
     [ -n "$version" ] || fail "the latest release has no build for $target"
@@ -121,7 +127,7 @@ expected=$(awk -v name="$archive" '$2 == name || $2 == "*" name { print $1; exit
 
 say "downloading $archive"
 download "$base/download/v$version/$archive" "$tmp/$archive" ||
-    fail "cannot download $base/download/v$version/$archive"
+    fail "download failed ($fetcher): $base/download/v$version/$archive"
 
 actual=$(sha256_of "$tmp/$archive")
 expected=$(printf '%s' "$expected" | tr 'A-F' 'a-f')
