@@ -109,7 +109,16 @@ impl Connection {
         {
             let mut writer = self.inner.writer.lock().await;
             if let Err(err) = writer.write_all(&bytes).await {
-                return Err(format!("the browser is gone ({err})"));
+                // Its end of the pipe is closed: the browser is gone, even
+                // if the reader has not seen the end of its own pipe yet.
+                let why = format!("the browser is gone ({err})");
+                let _pending = self.pending();
+                self.inner
+                    .closed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert_with(|| why.clone());
+                return Err(why);
             }
         }
         match tokio::time::timeout(timeout, receiver).await {
