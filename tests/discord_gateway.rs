@@ -184,8 +184,9 @@ impl FakeRest {
         (post.body["_sent_id"].as_str().unwrap().to_string(), buttons)
     }
 
-    /// The response to interaction `id`, once it came.
+    /// The response to interaction `id` ([`interaction`]), once it came.
     async fn response(&self, id: &str) -> Value {
+        let id = interaction(id);
         let path = format!("/interactions/{id}/token-{id}-of-the-press/callback");
         self.wait_request(|r| r.method == "POST" && r.path.ends_with(&path))
             .await
@@ -1628,9 +1629,24 @@ async fn risky_calls_wait_for_an_answer_in_the_channel() {
     );
 }
 
+/// The id of interaction `n` (a number): a snowflake made when the test
+/// binary first asked, plus `n`, so presses are fresh.
+fn interaction(n: &str) -> String {
+    static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let base = *BASE.get_or_init(|| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        (u64::try_from(now).unwrap() - 1_420_070_400_000) << 22
+    });
+    (base + n.parse::<u64>().unwrap()).to_string()
+}
+
 /// A press on the button `custom_id` of message `message` in `channel`
-/// (a DM) by `user`, as interaction `id`.
+/// (a DM) by `user`, as interaction `id` ([`interaction`]).
 fn press(id: &str, channel: &str, user: &str, message: &str, custom_id: &str) -> Value {
+    let id = interaction(id);
     json!({
         "id": id,
         "application_id": "1",
@@ -1868,6 +1884,13 @@ async fn an_answer_word_right_after_a_press_starts_no_turn() {
     )
     .await;
     let (question, buttons) = rest.question("505", 1).await;
+    // A press from 2015 (an event sent again much later): its token has
+    // expired, so it is neither answered nor applied.
+    let mut stale = press("10", "505", USER, &question, &buttons["Allow"]);
+    stale["id"] = json!("1");
+    stale["token"] = json!("token-1-of-the-press");
+    conn.dispatch("INTERACTION_CREATE", stale).await;
+    // Still waiting: this press answers it.
     conn.dispatch(
         "INTERACTION_CREATE",
         press("11", "505", USER, &question, &buttons["Allow"]),
@@ -1885,7 +1908,20 @@ async fn an_answer_word_right_after_a_press_starts_no_turn() {
     conn.dispatch("MESSAGE_CREATE", message("505", USER, "next", false, &[]))
         .await;
     rest.wait_post("505", |p| p == "next one").await;
-    running.stop().await;
+    let log = running.stop().await;
+    assert!(
+        !rest
+            .requests()
+            .iter()
+            .any(|r| r.path.contains("/interactions/1/")),
+        "{:#?}",
+        rest.requests()
+    );
+    assert!(
+        log.iter()
+            .any(|line| line.contains("ignoring a button press made")),
+        "{log:#?}"
+    );
 
     let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
     assert_eq!(requests.len(), 3);

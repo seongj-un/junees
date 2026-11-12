@@ -16,16 +16,28 @@
 //! state"), when it answered the question. The engine then edits the
 //! message: buttons off, result added. Any other press gets type 4 with
 //! the `EPHEMERAL` flag (1 << 6), a note only the presser sees.
+//!
+//! A press counts as it arrives, before Discord has the answer: when the
+//! answer comes too late (a request retried past the 3 seconds, an event
+//! sent again after a RESUME), Discord shows "This interaction failed"
+//! although the press was applied; the edited question message shows the
+//! result. Presses older than [`STALE_PRESS`] (by the time in their
+//! interaction id) are dropped without an answer: their interaction token
+//! has expired (it is valid for 15 minutes), so Discord shows them as
+//! failed whatever Junees does, and only an event sent again comes that
+//! late. A tighter limit, such as the 3 seconds, would hang on this
+//! machine's clock agreeing with Discord's: a clock a few seconds off would
+//! drop every press.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::ask::{Choice, Press, Question, button_data, fence_safe, parse_button};
+use super::ask::{Choice, Press, Question, button_data, fence_safe, human, parse_button};
 use super::channels::{Channels, Shared};
 use super::config::DiscordConfig;
 use super::platform::Platform;
@@ -61,6 +73,22 @@ const DEFERRED_UPDATE_MESSAGE: u64 = 6;
 const EPHEMERAL: u64 = 1 << 6;
 /// Interaction type of a message component.
 const MESSAGE_COMPONENT: u64 = 3;
+
+/// Discord's epoch, 2015-01-01, in Unix milliseconds: a snowflake id
+/// holds the time it was made as milliseconds since then, above bit 22
+/// (developer docs, "API Reference", Snowflakes).
+const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+
+/// Presses made longer ago are dropped without an answer (module docs).
+pub const STALE_PRESS: Duration = Duration::from_secs(15 * 60);
+
+/// How long before `now` snowflake `id` was made; `None` for an id that
+/// is no number or lies after `now` (a clock behind Discord's).
+pub fn snowflake_age(id: &str, now: SystemTime) -> Option<Duration> {
+    let made = (id.parse::<u64>().ok()? >> 22).checked_add(DISCORD_EPOCH_MS)?;
+    let now = u64::try_from(now.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()?;
+    now.checked_sub(made).map(Duration::from_millis)
+}
 
 /// What a press that answered nothing gets back.
 pub const ALREADY_HANDLED: &str =
@@ -323,6 +351,15 @@ impl Bot {
         let (Some(id), Some(token)) = (text("/id"), text("/token")) else {
             return;
         };
+        if let Some(age) = snowflake_age(id, SystemTime::now())
+            && age > STALE_PRESS
+        {
+            (self.channels.shared().log)(&format!(
+                "ignoring a button press made {} ago: too late to answer",
+                human(age)
+            ));
+            return;
+        }
         // `member` in a server, `user` in a DM.
         let user = text("/member/user/id").or_else(|| text("/user/id"));
         let channel = text("/channel_id").or_else(|| text("/channel/id"));
@@ -465,6 +502,20 @@ mod tests {
         for text in ["new", "!", "! new", "!!!", "!123", "hello !new"] {
             assert_eq!(parse_command(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn reads_the_age_of_an_interaction() {
+        // The docs' example: 175928847299117063 was made at 1462015105796.
+        let made = UNIX_EPOCH + Duration::from_millis(1_462_015_105_796);
+        let id = "175928847299117063";
+        assert_eq!(snowflake_age(id, made), Some(Duration::ZERO));
+        assert_eq!(
+            snowflake_age(id, made + Duration::from_secs(60)),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(snowflake_age(id, made - Duration::from_secs(1)), None);
+        assert_eq!(snowflake_age("not-a-number", made), None);
     }
 
     #[test]
