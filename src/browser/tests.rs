@@ -906,6 +906,66 @@ fn settings_and_registration() {
 }
 
 #[test]
+fn the_browser_gets_no_secret_variables() {
+    let settings = Settings {
+        no_sandbox: true,
+        ..Settings::default()
+    };
+    let command = process::command(
+        Path::new("/x/chrome"),
+        &settings,
+        &["DB_PASSWORD".to_string()],
+        Path::new("/tmp/p"),
+    );
+    let removed: Vec<String> = command
+        .as_std()
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    for name in crate::tools::SECRET_ENV_VARS
+        .iter()
+        .chain(crate::tools::CLAUDE_CODE_SECRET_ENV_VARS)
+        .chain(&["DB_PASSWORD"])
+    {
+        assert!(
+            removed.iter().any(|removed| removed == name),
+            "{name}: {removed:?}"
+        );
+    }
+    let args: Vec<String> = command
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    for arg in [
+        "--headless=new",
+        "--remote-debugging-pipe",
+        "--user-data-dir=/tmp/p",
+        "--no-sandbox",
+    ] {
+        assert!(args.iter().any(|a| a == arg), "{arg}: {args:?}");
+    }
+    assert!(
+        !args
+            .iter()
+            .any(|a| a.starts_with("--remote-debugging-port"))
+    );
+    let sandboxed = process::command(
+        Path::new("/x/chrome"),
+        &Settings::default(),
+        &[],
+        Path::new("/tmp/p"),
+    );
+    assert!(
+        !sandboxed
+            .as_std()
+            .get_args()
+            .any(|arg| arg == "--no-sandbox")
+    );
+}
+
+#[test]
 fn finds_the_program() {
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("chromium");

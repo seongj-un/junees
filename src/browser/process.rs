@@ -176,43 +176,7 @@ pub fn launch(
     // Chrome writes to fd 4, Junees reads `from_child`.
     let (child_reads, to_child) = cloexec_pipe()?;
     let (from_child, child_writes) = cloexec_pipe()?;
-    let (width, height) = WINDOW;
-    let mut command = Command::new(program);
-    command
-        .arg("--headless=new")
-        .arg("--remote-debugging-pipe")
-        .arg(format!("--user-data-dir={}", profile.path().display()))
-        .args([
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
-            "--disable-component-update",
-            "--disable-default-apps",
-            "--disable-extensions",
-            "--disable-sync",
-            "--disable-breakpad",
-            "--disable-client-side-phishing-detection",
-            "--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication",
-            "--deny-permission-prompts",
-            "--password-store=basic",
-            "--use-mock-keychain",
-            "--metrics-recording-only",
-            "--mute-audio",
-            "--hide-scrollbars",
-        ])
-        .arg(format!("--window-size={width},{height}"));
-    if settings.no_sandbox {
-        command.arg("--no-sandbox");
-    }
-    command
-        .arg("about:blank")
-        .current_dir(profile.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true);
-    scrub(&mut command, hidden_env);
+    let mut command = command(program, settings, hidden_env, profile.path());
     let (read_fd, write_fd) = (child_reads.as_raw_fd(), child_writes.as_raw_fd());
     // SAFETY: only async-signal-safe calls (fcntl, dup2) between fork and
     // exec. Both ends are first copied above fd 10 so that neither copy
@@ -266,6 +230,53 @@ pub fn launch(
         },
         pipes,
     ))
+}
+
+/// The browser's command line and environment, without the pipe.
+pub(super) fn command(
+    program: &Path,
+    settings: &Settings,
+    hidden_env: &[String],
+    profile: &Path,
+) -> Command {
+    let (width, height) = WINDOW;
+    let mut command = Command::new(program);
+    command
+        .arg("--headless=new")
+        .arg("--remote-debugging-pipe")
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .args([
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-sync",
+            "--disable-breakpad",
+            "--disable-client-side-phishing-detection",
+            "--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication",
+            "--deny-permission-prompts",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--metrics-recording-only",
+            "--mute-audio",
+            "--hide-scrollbars",
+        ])
+        .arg(format!("--window-size={width},{height}"));
+    if settings.no_sandbox {
+        command.arg("--no-sandbox");
+    }
+    command
+        .arg("about:blank")
+        .current_dir(profile)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true);
+    scrub(&mut command, hidden_env);
+    command
 }
 
 impl Process {
