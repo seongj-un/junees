@@ -44,6 +44,16 @@ const MARK_CLOSED: &str =
     "function() { if (globalThis.__juneesGuard) globalThis.__juneesGuard.closed(this); }";
 /// The object group of the handles [`Browser::mark_closed_hosts`] takes.
 const CLOSED_GROUP: &str = "junees-closed-hosts";
+/// The most hosts of closed shadow roots marked one by one per check (two
+/// DevTools calls each, per world); a page with more counts as closed
+/// everywhere ([`CLOSED_EVERYWHERE`]).
+pub const MAX_CLOSED_HOSTS: usize = 256;
+/// The most frames told [`CLOSED_EVERYWHERE`] besides the top one.
+const MAX_CLOSED_FRAMES: usize = 16;
+/// Makes every element count as inside a closed shadow root in the guard
+/// of the world it runs in.
+const CLOSED_EVERYWHERE: &str =
+    "globalThis.__juneesGuard && globalThis.__juneesGuard.closedEverywhere()";
 
 /// Notes of one kind kept until the model looks; older ones are only
 /// counted ([`Notes::more`]), so a page cannot fill the result with them.
@@ -429,7 +439,16 @@ impl Browser {
         // The guard is already there unless this document came without
         // it; then it starts here, late but still before the actions.
         self.evaluate_in(world, &format!("{GUARD_JS}\n;0")).await?;
-        self.mark_closed_hosts(world).await?;
+        if self.mark_closed_hosts(world).await? {
+            self.notes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .dialog(&format!(
+                    "the page has more than {MAX_CLOSED_HOSTS} closed shadow roots, whose \
+                     insides cannot be checked: every click, Enter or Space and typing on it \
+                     asks the user first"
+                ));
+        }
         let value = self.evaluate_in(world, SNAPSHOT_JS).await?;
         // A page that came while the snapshot ran is not read either.
         self.refuse_private_page().await?;
@@ -536,14 +555,42 @@ impl Browser {
     /// and the checks run in) and of their own frame, and the rules treat
     /// them like frames of another site. A flat DOMSnapshot rather than
     /// `DOM.getDocument`, which fails on deeply nested pages; a closed
-    /// root without nodes in it holds nothing to click.
-    async fn mark_closed_hosts(&self, world: i64) -> Result<()> {
+    /// root without nodes in it holds nothing to click. A page with more
+    /// than [`MAX_CLOSED_HOSTS`] hosts (which would keep every check busy
+    /// for seconds) counts as closed everywhere instead: `true` then.
+    async fn mark_closed_hosts(&self, world: i64) -> Result<bool> {
         let snapshot = self
             .call_page("DOMSnapshot.captureSnapshot", json!({"computedStyles": []}))
             .await?;
         let hosts = closed_hosts(&snapshot);
         if hosts.is_empty() {
-            return Ok(());
+            return Ok(false);
+        }
+        if hosts.len() > MAX_CLOSED_HOSTS {
+            self.evaluate_in(world, CLOSED_EVERYWHERE).await?;
+            let mut frames: Vec<&str> = Vec::new();
+            for (frame, _) in &hosts {
+                if frames.len() == MAX_CLOSED_FRAMES {
+                    break;
+                }
+                if *frame != self.target && !frames.contains(&frame.as_str()) {
+                    frames.push(frame);
+                }
+            }
+            for frame in frames {
+                // A frame whose world cannot be made has no guard to tell.
+                if let Ok(made) = self
+                    .call_page(
+                        "Page.createIsolatedWorld",
+                        json!({"frameId": frame, "worldName": WORLD}),
+                    )
+                    .await
+                    && let Some(id) = made["executionContextId"].as_i64()
+                {
+                    let _ = self.evaluate_in(id, CLOSED_EVERYWHERE).await;
+                }
+            }
+            return Ok(true);
         }
         let mut worlds = HashMap::from([(self.target.clone(), world)]);
         for (frame, node) in hosts {
@@ -594,7 +641,7 @@ impl Browser {
                 json!({"objectGroup": CLOSED_GROUP}),
             )
             .await;
-        Ok(())
+        Ok(false)
     }
 
     /// Runs one of the snapshot's element functions that checks an

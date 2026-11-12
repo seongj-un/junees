@@ -1462,6 +1462,72 @@ async fn closed_shadow_roots_need_an_approval() {
     );
 }
 
+/// More closed shadow roots than the tool marks one by one, and plain
+/// elements outside them.
+const MANY_CLOSED_PAGE: &str = r#"<title>Many</title>
+<button onclick="document.title = 'clicked'">Plain</button>
+<input aria-label="Name">
+<div id="hosts"></div>
+<script>
+for (let i = 0; i < 300; i++) {
+  const host = document.createElement('span');
+  host.attachShadow({mode: 'closed'}).innerHTML = '<b>x</b>';
+  document.getElementById('hosts').append(host);
+}
+</script>"#;
+
+#[tokio::test]
+async fn a_page_with_too_many_closed_shadow_roots_needs_approvals() {
+    let Some(program) = chromium("a_page_with_too_many_closed_shadow_roots_needs_approvals") else {
+        return;
+    };
+    let _lock = LOCK.lock().await;
+    let (address, _) = serve(
+        "127.0.0.1",
+        HashMap::from([("/many", (200, "", MANY_CLOSED_PAGE.to_string()))]),
+    )
+    .await;
+    let tool = BrowserTool::new(settings(&program), Vec::new(), false);
+    let page = run(
+        &tool,
+        json!({"action": "open", "url": format!("http://{address}/many")}),
+    )
+    .await
+    .content;
+    assert!(
+        page.contains(&format!(
+            "more than {} closed shadow roots",
+            page::MAX_CLOSED_HOSTS
+        )),
+        "{page}"
+    );
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "button", "Plain")}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("nobody is asked") && output.content.contains(page::CLOSED_RISK),
+        "{}",
+        output.content
+    );
+    let output = run(
+        &tool,
+        json!({"action": "type", "ref": number(&page, "textbox", "Name"), "text": "x"}),
+    )
+    .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("nobody is asked"),
+        "{}",
+        output.content
+    );
+    let output = run(&tool, json!({"action": "snapshot"})).await;
+    assert!(output.content.contains("title: Many"), "{}", output.content);
+    run(&tool, json!({"action": "close"})).await;
+}
+
 #[tokio::test]
 async fn the_browser_goes_away_when_dropped_or_cancelled() {
     let Some(program) = chromium("the_browser_goes_away_when_dropped_or_cancelled") else {
