@@ -216,6 +216,9 @@ pub struct Sandbox {
     support: Option<Support>,
     /// Whether a result already said the commands run unconfined.
     told: AtomicBool,
+    /// Whether a result already said the working folder holds protected
+    /// paths.
+    told_holds: AtomicBool,
 }
 
 impl Sandbox {
@@ -247,6 +250,7 @@ impl Sandbox {
             read_only,
             support: None,
             told: AtomicBool::new(false),
+            told_holds: AtomicBool::new(false),
         }
     }
 
@@ -297,7 +301,19 @@ impl Sandbox {
             note = self.tell_once(format!("[sandbox: {why}; TCP is not restricted]"));
         }
         match self.build(abi, work) {
-            Ok(confinement) => Prepared::Confined(confinement, note),
+            Ok((confinement, holds)) => {
+                if holds && !self.told_holds.swap(true, Ordering::Relaxed) {
+                    let line = "[sandbox: the working folder holds Junees's state folder, so \
+                                commands cannot create or remove entries directly in the \
+                                working folder or the folders between it and the protected \
+                                files; work in a subfolder]";
+                    note = Some(match note {
+                        Some(note) => format!("{note}\n{line}"),
+                        None => line.to_string(),
+                    });
+                }
+                Prepared::Confined(confinement, note)
+            }
             Err(err) => Prepared::Refused(format!("cannot set up the sandbox: {err}")),
         }
     }
@@ -307,8 +323,11 @@ impl Sandbox {
         (!self.told.swap(true, Ordering::Relaxed)).then_some(note)
     }
 
+    /// The ruleset for a command in `work`, and whether a writable folder
+    /// holds a protected path (so that folder gets rules on its entries
+    /// only, [`landlock::Ruleset::grant_except`]).
     #[cfg(target_os = "linux")]
-    fn build(&self, abi: u32, work: &Path) -> io::Result<Confinement> {
+    fn build(&self, abi: u32, work: &Path) -> io::Result<(Confinement, bool)> {
         use landlock::{READ, Ruleset, WRITE, WRITE_EXISTING, real_path};
         let ruleset = Ruleset::new(abi, !self.settings.network)?;
         let hidden: Vec<PathBuf> = self.hidden.iter().map(|path| real_path(path)).collect();
@@ -317,7 +336,9 @@ impl Sandbox {
             .cloned()
             .chain(self.read_only.iter().map(|path| real_path(path)))
             .collect();
-        let mut writable = vec![real_path(work)];
+        let work = real_path(work);
+        let holds = no_write.iter().any(|path| path.starts_with(&work));
+        let mut writable = vec![work];
         for path in self.settings.temp.iter().chain(&self.settings.write) {
             writable.push(real_path(path));
         }
@@ -334,11 +355,11 @@ impl Sandbox {
                 }
             }
         }
-        Ok(Confinement { ruleset })
+        Ok((Confinement { ruleset }, holds))
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn build(&self, _abi: u32, _work: &Path) -> io::Result<Confinement> {
+    fn build(&self, _abi: u32, _work: &Path) -> io::Result<(Confinement, bool)> {
         Err(io::Error::other("Landlock needs Linux"))
     }
 }

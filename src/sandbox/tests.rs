@@ -200,6 +200,7 @@ async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
     let output = run(&home, layout.sandbox(settings()), &command).await;
     let text = &output.content;
     for line in [
+        "the working folder holds Junees's state folder",
         "sub-ok",
         "config-refused",
         "config-write-refused",
@@ -210,6 +211,15 @@ async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
         assert!(text.contains(line), "{line}: {text}");
     }
     assert!(!text.contains("fake-key"), "{text}");
+    // New entries right in the working folder are out of reach there.
+    let top = run(
+        &home,
+        layout.sandbox(settings()),
+        &format!("echo a > {}/top || echo top-refused", home.display()),
+    )
+    .await;
+    assert!(top.content.contains("top-refused"), "{}", top.content);
+    assert!(!home.join("top").exists());
     assert!(!junees.join("memory/new.md").exists());
     assert!(junees.join("secrets/token").exists());
     assert_eq!(
