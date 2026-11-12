@@ -361,6 +361,24 @@ async fn writes_refuse_read_only_files_like_a_direct_write() {
 }
 
 #[tokio::test]
+async fn writes_refuse_paths_that_end_in_a_dot() {
+    let layout = Layout::new();
+    for access in [FileAccess::default(), layout.scope("work", &[])] {
+        let output = write(&access, &layout.path("work/newdir/."), "x").await;
+        assert!(output.is_error, "{}", output.content);
+        assert!(!layout.path("work/newdir").exists());
+        let output = write(&access, &layout.path("work/a.txt/."), "x").await;
+        assert!(output.is_error, "{}", output.content);
+        let output = edit(&access, &layout.path("work/a.txt/."), "work", "x").await;
+        assert!(output.is_error, "{}", output.content);
+        assert_eq!(
+            std::fs::read_to_string(layout.path("work/a.txt")).unwrap(),
+            "work text\n"
+        );
+    }
+}
+
+#[tokio::test]
 async fn write_file_keeps_hard_links_together_outside_unattended_runs() {
     let layout = Layout::new();
     let (first, second) = (layout.path("work/h1"), layout.path("work/h2"));

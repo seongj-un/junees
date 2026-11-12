@@ -252,7 +252,9 @@ impl FileAccess {
     /// checked (with missing folders created when `create`), and its name
     /// there, links in the last component followed and checked.
     pub fn open_write(&self, path: &str, create: bool) -> Result<Target, Refusal> {
-        if path.ends_with('/') {
+        // `name/` and `name/.` name a folder; the path components below
+        // drop a trailing `.`, which would write a file `name`.
+        if path.ends_with('/') || path == "." || path.ends_with("/.") {
             return Err(Refusal::NotRegular);
         }
         let given = std::path::absolute(path)?;
