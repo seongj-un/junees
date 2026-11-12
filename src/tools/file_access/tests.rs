@@ -232,6 +232,102 @@ async fn scheduled_and_webhook_runs_get_the_scope_and_conversations_do_not() {
 }
 
 #[tokio::test]
+async fn webhook_runs_do_not_read_saved_sessions() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let session = home.join(".junees/sessions/s.jsonl");
+    std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+    std::fs::write(&session, "{\"tool_output\":\"earlier secret\"}\n").unwrap();
+    // `sandbox_read` holds the home folder, so only the sessions rule
+    // stands between the run and the file.
+    let mut settings = tools(&home);
+    if let Some(sandbox) = settings.sandbox.as_mut() {
+        sandbox.read = Some(vec![home.clone()]);
+    }
+    let gh = tempfile::tempdir().unwrap();
+    let webhook = crate::cron::run::Trigger::Webhook {
+        route: "r",
+        github_allow: &[],
+        gh_config: gh.path(),
+        context_dir: &home,
+    }
+    .tool_settings(&settings);
+    let output = ReadFile::with_settings(&webhook)
+        .run(json!({"path": session}))
+        .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        !output.content.contains("earlier secret"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("saved sessions"),
+        "{}",
+        output.content
+    );
+    // A scheduled job (the user's own prompt) still may.
+    let cron = crate::cron::run::Trigger::Cron.tool_settings(&settings);
+    let output = ReadFile::with_settings(&cron)
+        .run(json!({"path": session}))
+        .await;
+    assert!(
+        output.content.contains("earlier secret"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn unattended_runs_in_the_home_folder_leave_startup_files_alone() {
+    let layout = Layout::new();
+    let access = layout.scope("home", &[]);
+    for path in [
+        "home/.bashrc",
+        "home/.profile",
+        "home/.zshrc",
+        "home/.gitconfig",
+        "home/.config/git/config",
+        "home/.config/systemd/user/evil.service",
+        "home/.config/autostart/evil.desktop",
+    ] {
+        let output = write(&access, &layout.path(path), "planted\n").await;
+        assert!(output.is_error, "{path}: {}", output.content);
+        assert!(
+            output.content.contains("shell startup file"),
+            "{path}: {}",
+            output.content
+        );
+    }
+    let output = edit(&access, &layout.path("home/.bashrc"), "# rc", "planted").await;
+    assert!(output.is_error, "{}", output.content);
+    assert_eq!(
+        std::fs::read_to_string(layout.path("home/.bashrc")).unwrap(),
+        "# rc\n"
+    );
+    assert!(!layout.path("home/.config/systemd").exists());
+    // Reading them and writing other files there is fine.
+    let output = read(&access, &layout.path("home/.bashrc")).await;
+    assert!(output.content.contains("# rc"), "{}", output.content);
+    let output = write(&access, &layout.path("home/notes.md"), "ok\n").await;
+    assert!(!output.is_error, "{}", output.content);
+}
+
+#[test]
+fn unattended_runs_in_the_home_or_state_folder_are_warned_about() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let state = home.join(".junees");
+    let warn = |dir: &Path| super::unattended_folder_warning(dir, Some(&home), Some(&state));
+    let warning = warn(&home).unwrap();
+    assert!(warning.contains("the home folder"), "{warning}");
+    let warning = warn(&layout.root).unwrap();
+    assert!(warning.contains("state folder"), "{warning}");
+    assert_eq!(warn(&layout.path("work")), None);
+    assert_eq!(warn(&layout.path("home/.ssh")), None);
+}
+
+#[tokio::test]
 async fn no_file_tool_opens_proc_sys_or_dev() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();

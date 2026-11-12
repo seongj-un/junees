@@ -20,8 +20,11 @@
 //!   so a [`Scope`] limits them: writes to the working folder, the
 //!   temporary folders and the `sandbox_write` folders; reads to those and
 //!   the `sandbox_read` folders; and neither to the credential files and
-//!   folders in the home folder ([`UNATTENDED_CREDENTIALS`]) or the private
-//!   Junees paths, even inside those folders.
+//!   folders in the home folder ([`UNATTENDED_CREDENTIALS`]), the private
+//!   Junees paths or, in a webhook run, the saved sessions, even inside
+//!   those folders. Nor do they change the files that run or configure
+//!   programs later ([`UNATTENDED_NO_WRITE`]: shell startup files, user
+//!   services, git's settings) when the working folder holds them.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{File, Metadata};
@@ -64,6 +67,63 @@ pub const UNATTENDED_CREDENTIALS: &[&str] = &[
     ".cargo/credentials",
     ".cargo/credentials.toml",
 ];
+
+/// Files and folders under the home folder that the file tools of an
+/// unattended run do not change (they may read them), even when the
+/// working folder holds them: what they hold runs later, outside the run
+/// and its sandbox. Shell startup files, user services and session
+/// autostart entries, and git's own settings (`core.hooksPath`,
+/// `core.fsmonitor`, aliases).
+pub const UNATTENDED_NO_WRITE: &[&str] = &[
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".bash_aliases",
+    ".profile",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".config/fish",
+    ".pam_environment",
+    ".xprofile",
+    ".xsessionrc",
+    ".config/systemd",
+    ".local/share/systemd",
+    ".config/environment.d",
+    ".config/autostart",
+    ".gitconfig",
+    ".config/git",
+];
+
+/// Why the working folder `dir` of an unattended run is a risky choice,
+/// if it is: the home folder itself, or a folder holding Junees's state
+/// folder `state`. The run's tools may write anywhere in the working
+/// folder; the protected paths stay protected, but everything else there
+/// (other projects, dotfiles not listed) does not.
+pub fn unattended_folder_warning(
+    dir: &Path,
+    home: Option<&Path>,
+    state: Option<&Path>,
+) -> Option<String> {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let dir = real(dir);
+    let what = if home.is_some_and(|home| real(home) == dir) {
+        "the home folder"
+    } else if state.is_some_and(|state| real(state).starts_with(&dir)) {
+        "a folder holding Junees's state folder"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "this unattended run works in {} ({what}): its tools may change everything there \
+         except the protected paths (credentials, Junees's settings and data, shell startup \
+         files); give the job or route a project folder instead",
+        dir.display()
+    ))
+}
 
 /// How many symbolic links a write follows before giving up, like the
 /// kernel.
@@ -409,8 +469,10 @@ pub struct Scope {
     /// Folders readable besides those (`sandbox_read`).
     read: Vec<PathBuf>,
     /// Never read nor written ([`UNATTENDED_CREDENTIALS`] in the home
-    /// folder, the protected Junees paths).
+    /// folder, the protected Junees paths, a webhook run's sessions).
     denied: Vec<PathBuf>,
+    /// Never written ([`UNATTENDED_NO_WRITE`] in the home folder).
+    no_write: Vec<PathBuf>,
 }
 
 impl Scope {
@@ -427,18 +489,30 @@ impl Scope {
             .as_ref()
             .and_then(|file| file.home().map(Path::to_path_buf))
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
-        Some(Self::new(
+        let mut scope = Self::new(
             None,
             sandbox.temp.iter().chain(&sandbox.write).cloned().collect(),
             sandbox.read.clone().unwrap_or_default(),
             home.as_deref(),
             settings.settings_file.as_ref(),
-        ))
+        );
+        // A webhook run (anyone's text) does not read earlier
+        // conversations' tool output either.
+        if settings.webhook
+            && let Some(state) = settings
+                .settings_file
+                .as_ref()
+                .and_then(SettingsFile::folder)
+        {
+            scope.denied.push(crate::session::sessions_dir(&state));
+        }
+        Some(scope)
     }
 
     /// A scope with the working folder `work` (`None`: the current one),
-    /// more writable and readable folders, and the credentials in `home`
-    /// and the paths protected with `settings_file` denied.
+    /// more writable and readable folders, the credentials in `home` and
+    /// the paths protected with `settings_file` denied, and the startup
+    /// files in `home` not writable.
     pub fn new(
         work: Option<PathBuf>,
         write: Vec<PathBuf>,
@@ -446,29 +520,34 @@ impl Scope {
         home: Option<&Path>,
         settings_file: Option<&SettingsFile>,
     ) -> Self {
-        let mut denied: Vec<PathBuf> = home
-            .iter()
-            .flat_map(|home| UNATTENDED_CREDENTIALS.iter().map(|name| home.join(name)))
-            .collect();
+        let under_home = |names: &[&str]| -> Vec<PathBuf> {
+            home.iter()
+                .flat_map(|home| names.iter().map(|name| home.join(name)))
+                .collect()
+        };
+        let mut denied = under_home(UNATTENDED_CREDENTIALS);
         denied.extend(settings_file.iter().flat_map(|file| file.protected_paths()));
         Self {
             work,
             write,
             read,
             denied,
+            no_write: under_home(UNATTENDED_NO_WRITE),
         }
     }
 
     fn check(&self, real: &Path, shown: &str, use_: Use) -> Result<(), Refusal> {
-        if let Some(denied) = self
-            .denied
-            .iter()
-            .find(|path| forms(path).iter().any(|form| real.starts_with(form)))
-        {
+        let within = |paths: &[PathBuf]| {
+            paths
+                .iter()
+                .find(|path| forms(path).iter().any(|form| real.starts_with(form)))
+                .cloned()
+        };
+        if let Some(denied) = within(&self.denied) {
             return Err(Refusal::Denied(format!(
-                "{shown} is a credential file or folder or a private Junees path ({}). This run \
-                 is unattended (a scheduled job or a webhook), and its file tools neither read \
-                 nor change it.",
+                "{shown} is a credential file or folder, a private Junees path or saved sessions \
+                 ({}). This run is unattended (a scheduled job or a webhook), and its file tools \
+                 neither read nor change it.",
                 denied.display()
             )));
         }
@@ -486,6 +565,18 @@ impl Scope {
             .flat_map(|path| forms(path))
             .any(|form| real.starts_with(form))
         {
+            // Within the allowed folders (a job working in the home
+            // folder), still not the files that run later.
+            if use_ == Use::Write
+                && let Some(startup) = within(&self.no_write)
+            {
+                return Err(Refusal::Denied(format!(
+                    "{shown} is a shell startup file, user service, autostart entry or git setting \
+                     ({}): what it holds runs later, outside this run. This run is unattended (a \
+                     scheduled job or a webhook), and its file tools do not change it.",
+                    startup.display()
+                )));
+            }
             return Ok(());
         }
         let (what, folders, setting) = match use_ {
