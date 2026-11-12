@@ -42,6 +42,14 @@ struct PartialCall {
     object: Option<Value>,
 }
 
+impl PartialCall {
+    /// Whether its arguments are complete: an object, or text that reads
+    /// as JSON.
+    fn is_whole(&self) -> bool {
+        self.object.is_some() || serde_json::from_str::<Value>(&self.arguments).is_ok()
+    }
+}
+
 impl Chunks {
     /// Applies the data of one event, reporting text as it comes. Returns
     /// whether it was the `[DONE]` that ends the stream.
@@ -101,14 +109,27 @@ impl Chunks {
 
     fn call_piece(&mut self, piece: &Value) {
         let id = piece["id"].as_str().unwrap_or_default();
+        let function = &piece["function"];
         let index = match piece["index"].as_u64() {
             Some(index) => index,
             // No index: a new call when it brings an id the last one does
-            // not have, else more of the last one.
+            // not have. Without an id either, a piece that names a function
+            // after the last call's arguments are whole starts a new call
+            // (servers that send each call whole); else it is more of the
+            // last one (servers that repeat the name in every piece).
             None => match self.calls.last() {
-                Some(last) if id.is_empty() || last.id == id => last.index,
-                Some(last) => last.index + 1,
                 None => 0,
+                Some(last) => {
+                    let named = function["name"]
+                        .as_str()
+                        .is_some_and(|name| !name.is_empty());
+                    let same = if id.is_empty() {
+                        !(named && last.is_whole())
+                    } else {
+                        last.id == id
+                    };
+                    if same { last.index } else { last.index + 1 }
+                }
             },
         };
         let call = match self.calls.iter().position(|call| call.index == index) {
@@ -128,7 +149,6 @@ impl Chunks {
         if call.id.is_empty() {
             call.id = id.to_string();
         }
-        let function = &piece["function"];
         if call.name.is_empty()
             && let Some(name) = function["name"].as_str()
         {
@@ -306,6 +326,48 @@ mod tests {
         );
         assert_eq!(response.stop_reason, StopReason::ToolUse);
         assert_eq!(response.usage, Usage::default());
+    }
+
+    #[test]
+    fn calls_without_an_index_or_an_id_stay_apart() {
+        let chunks = [
+            // Two whole calls, neither with an index or an id.
+            delta(json!({"tool_calls": [
+                {"function": {"name": "read_file", "arguments": "{\"path\":\"a\"}"}},
+            ]})),
+            delta(json!({"tool_calls": [
+                {"function": {"name": "read_file", "arguments": "{\"path\":\"b\"}"}},
+            ]})),
+            // A third in pieces that repeat its name.
+            delta(json!({"tool_calls": [
+                {"function": {"name": "bash", "arguments": "{\"comm"}},
+            ]})),
+            delta(json!({"tool_calls": [
+                {"function": {"name": "bash", "arguments": "and\": \"ls\"}"}},
+            ]})),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        ];
+        let (response, _) = run(&chunks);
+        let calls: Vec<(String, Value)> = response
+            .unwrap()
+            .content
+            .into_iter()
+            .map(|block| match block {
+                ContentBlock::ToolUse { id, name, input } => {
+                    assert!(id.starts_with("call_junees_"), "{id}");
+                    (name, input)
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("read_file".into(), json!({"path": "a"})),
+                ("read_file".into(), json!({"path": "b"})),
+                ("bash".into(), json!({"command": "ls"})),
+            ]
+        );
     }
 
     #[test]
