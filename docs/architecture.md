@@ -128,6 +128,14 @@ src/
     api.rs             Bot API: getMe/getUpdates/sendMessage/sendChatAction/getFile/파일 받기, URL과 토큰 없는 오류, 429 retry_after, 중복 전송 없는 재시도, 응답과 파일 크기 상한
     bot.rs             메시지 고르기(허용 사용자, 개인/그룹 멘션/답장/승인 답, 포럼 토픽), /명령 읽기(@봇, 멘션 뒤 명령, 다른 봇, /start, 캡션과 전달은 명령 아님), 전달 표시, 앨범 묶기와 나뉘어 온 그룹 앨범
     platform.rs        Platform 구현(Telegram): 평문 4096자, 타이핑, 사진/이미지 문서 고르기와 받기, 평문 승인 질문, 도움말
+  slack/             슬랙 게이트웨이 (junees gateway slack)
+    mod.rs             SlackGateway::run: auth.test, Socket Mode 연결과 라우터를 LocalSet에서, 종료 처리
+    config.rs          slack_* 설정 (xoxb-/xapp- 토큰 모양 검사와 Debug 숨김, member id 필수, API/파일 주소는 슬랙 또는 루프백)
+    api.rs             Web API: auth.test/apps.connections.open/chat.postMessage, Bearer 헤더(민감), URL과 토큰 없는 오류, 429 Retry-After, 중복 전송 없는 재시도, files.slack.com에서만 토큰으로 받기(리다이렉트 직접 확인)
+    socket.rs          Socket Mode: 연결 주소 받기와 wss://*.slack.com 확인, hello, 봉투마다 즉시 ack, disconnect/끊김/무응답이면 다시 연결, ping, 지수 대기
+    bot.rs             이벤트 고르기(허용 사용자, DM/채널 멘션/봇 스레드, subtype과 봇 메시지 거르기, event_id와 메시지 중복 제거), ! 명령
+    format.rs          Markdown -> mrkdwn 변환과 이스케이프(멘션 막기), 들어온 슬랙 표기를 평문으로
+    platform.rs        Platform 구현(Slack): 3800자 나누기, 대화 키(DM 또는 채널:스레드), 이미지 파일 고르기와 받기, 승인 질문, 도움말
   cron/              예약 작업 (junees cron)
     tz.rs              시스템 시간대 파일(TZif)과 POSIX TZ 규칙 읽기, 현지 시각 <-> UTC(건너뛴/두 번 오는 시각), 날짜 계산
     schedule.rs        일정 문법(every, in, daily, weekdays, cron 식, ISO 시각)과 다음 실행 시각
@@ -211,6 +219,7 @@ tests/
   skills.rs            실제 바이너리와 가짜 API 서버로 시스템 프롬프트의 스킬 목록, skill_view/skill_manage(0600), 세션 중 목록 고정, /skills, /skill, /new 뒤 목록 다시 읽기, /skills 화면의 제어 문자 이스케이프 검증
   discord_gateway.rs   테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST로 IDENTIFY/READY, 하트비트와 ACK 누락, resume_gateway_url로 RESUME, Reconnect, INVALID_SESSION, 닫힘 코드, 거절된 토큰이 오류와 로그에 안 나옴, 허용 사용자와 멘션 규칙, 메시지 나누기, 채널별 대기열과 동시 실행, !stop/!new/!status, 종료 시 취소, 429 재시도, 실제 에이전트와 가짜 API로 재시작 뒤 채널 세션 이어 가기(meta의 source/channel, -c와 /sessions 번호 목록에서 빠짐)와 승인 답장/시간 초과 검증
   telegram_gateway.rs  테스트 안에서 띄운 가짜 Bot API(루프백, 롱 폴링과 offset 확인)로 허용 사용자와 그룹/답장/토픽 규칙, /명령과 다른 봇 명령, 그룹의 `@봇 /stop`, 전달된 메시지 표시, 캡션은 명령 아님, 409 몇 번 기다리기와 계속되면 끝내기, 업데이트 확인과 다시 온 업데이트, 재시작 뒤 중복 없음, 4096자 나누기(코드 블록 울타리 없이)와 429, /stop//status//new, 거절된 토큰이 오류와 로그에 안 나옴, 실제 에이전트와 가짜 API로 승인 질문과 답(파일 쓰기), 채팅 세션(meta source), 사진과 앨범, 두 응답에 나뉘어 온 그룹 앨범, 바이너리 시작/답/SIGTERM 종료 검증
+  slack_gateway.rs     테스트 안에서 띄운 가짜 Web API와 가짜 Socket Mode WebSocket 서버(루프백)로 연결과 ack, disconnect와 끊김 뒤 다시 연결, 허용 사용자, DM/채널 멘션/봇 스레드 규칙, subtype과 봇 메시지 무시, 다시 온 이벤트와 두 번 온 멘션, mrkdwn 변환과 이스케이프, 긴 답 나누기와 429, !stop/!status/!new/!help, 거절된 토큰(봇, 앱)과 연결 실패에 토큰·URL 없음, 실제 에이전트와 가짜 API로 DM과 스레드의 승인 질문과 답, 세션 meta, 이미지 첨부(files 호스트에서만 토큰으로, 원격 파일 안 받음), 바이너리 시작/답/SIGTERM 종료 검증
   mcp_oauth.rs         실제 바이너리 `junees mcp login`을 붙여 넣기 방식으로(가짜 인가 서버와 MCP 서버, PKCE와 resource 확인), 저장 파일 0600/0700, 출력에 토큰 없음, 저장된 로그인으로 `-p`의 도구 호출(토큰은 MCP 주소에만), `mcp logout`, 로그인 없는 실행은 401 한 번 뒤 그 서버만 실패하고 로그인을 시작하지 않음 검증
   mcp_http.rs          실제 바이너리 `-p`로 루프백 HTTP MCP 서버의 도구 호출(SSE 응답), 헤더 값이 환경 변수에서 오고 bash에는 그 변수가 없음, 변수가 없으면 그 서버만 빠짐 검증
   mcp.rs               실제 바이너리와 가짜 API, 가짜 MCP 서버(tests/fixtures/fake_mcp.py)로 모델의 MCP 도구 호출, 서버 환경에 API 키/디스코드 토큰/숨긴 변수가 없음, 종료 때 서버와 그 자식 정리, 0644 mcp.json 거절, /mcp, 파이프 입력 대화의 승인 거절과 trust, 게이트웨이 채널 질문, 작업 폴더의 모듈과 스크립트를 서버로 실행하지 않음(작업 폴더 안 상대 경로는 trust만) 검증
