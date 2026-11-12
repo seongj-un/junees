@@ -3,7 +3,7 @@
 ```sh
 junees doctor             # 항목마다 ok / warn / FAIL / --(해당 없음)과 고치는 방법 한 줄
 junees doctor --json      # 같은 내용을 JSON으로
-junees doctor --online    # API 키 확인 요청과 claude auth status까지
+junees doctor --online    # API 키 확인 요청, 최신 릴리스 확인, claude auth status까지
 ```
 
 대화 안에서는 `/doctor`(네트워크 없이, `junees doctor`처럼 설정을 그때 다시 읽으므로 대화 중에 고치거나 깨뜨린 `config.toml`도 보인다). 실패(`FAIL`)가 하나라도 있으면 종료 코드 1, 경고만 있으면 0이다.
@@ -23,7 +23,7 @@ junees doctor --online    # API 키 확인 요청과 claude auth status까지
 - 세션: `$JUNEES_HOME/sessions`의 파일 수와 크기, 1 GiB를 넘으면 경고.
 - MCP: `mcp.json`이 읽히는지(`url`과 `headers` 형식 포함), 켜진 서버의 `command`가 PATH(서버 `env`에 PATH가 있으면 그것)나 그 경로에 실행 파일로 있는지, `cwd`가 폴더인지, `url` 서버의 헤더가 참조하는 환경 변수가 있는지(값은 출력하지 않는다), 저장된 OAuth 로그인(`login <서버>`: 있는지, 이 `url`의 것인지, 0600인지, 발급자와 만료, 갱신할 수 있는지. 만료됐는데 리프레시 토큰이 없으면 경고, 쓸 수 없으면 실패. 토큰 값은 `[hidden]`). 서버를 실행하거나 HTTP 서버에 연결하지는 않는다.
 - 플러그인: 켜진 플러그인의 폴더와 `plugin.json`이 실제 실행 때와 같은 검사(소유자, 권한, manifest 형식, 프롬프트 파일)를 통과하는지.
-- `--online`: 키가 있으면 `GET <base_url>/v1/models?limit=1`을 한 번 보낸다(토큰을 쓰지 않는다). 2xx면 ok, 401/403이면 실패, 그 밖이나 연결 실패는 경고(URL은 출력하지 않고 호스트만). 켜진 `url` MCP 서버마다 로그인 때와 같은 인가 서버 찾기만 한다(`login <서버> (online)`: 토큰 없는 `server/discover` 하나와 메타데이터 GET. 등록, 로그인, 토큰 요청은 하지 않는다). 로그인을 요구하지 않는 서버는 건너뛰고, PKCE가 없거나 클라이언트를 얻을 길이 없으면 경고.
+- `--online`: 키가 있으면 `GET <base_url>/v1/models?limit=1`을 한 번 보낸다(토큰을 쓰지 않는다). 2xx면 ok, 401/403이면 실패, 그 밖이나 연결 실패는 경고(URL은 출력하지 않고 호스트만). GitHub에 최신 릴리스를 묻는다(`junees update --check`와 같은 요청, [업데이트](install.md#업데이트)): 새 버전이 있으면 경고(`junees update` 안내), 최신이면 ok, 릴리스가 없으면 해당 없음, 묻지 못하면 경고. 켜진 `url` MCP 서버마다 로그인 때와 같은 인가 서버 찾기만 한다(`login <서버> (online)`: 토큰 없는 `server/discover` 하나와 메타데이터 GET. 등록, 로그인, 토큰 요청은 하지 않는다). 로그인을 요구하지 않는 서버는 건너뛰고, PKCE가 없거나 클라이언트를 얻을 길이 없으면 경고.
 
 점검은 읽기만 한다: 파일을 만들거나 쓰지 않고, 잠금을 붙잡고 있지 않으며, MCP 서버와 플러그인 명령을 실행하지 않으며(실행하는 프로그램은 `claude --version`, 브라우저의 `--version`, 샌드박스 시험용 `sh`뿐), 기본으로 네트워크를 쓰지 않는다.
 
