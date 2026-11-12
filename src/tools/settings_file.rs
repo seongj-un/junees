@@ -213,12 +213,17 @@ impl SettingsFile {
         Some(resolve(&dir).unwrap_or(dir))
     }
 
-    /// The settings file, the MCP server list and the secrets folder: the
-    /// paths the bash sandbox ([`crate::sandbox`]) keeps commands from
-    /// reading.
+    /// The settings file, the MCP server list, the secrets folder and the
+    /// browser profiles ([`crate::browser::PROFILES_FOLDER`]): the paths
+    /// the bash sandbox ([`crate::sandbox`]) keeps commands from reading.
     pub fn protected_paths(&self) -> Vec<PathBuf> {
         let mut paths = vec![self.path.clone(), self.mcp_path()];
         paths.extend(self.path.parent().map(secrets_dir));
+        paths.extend(
+            self.path
+                .parent()
+                .map(|home| home.join(crate::browser::PROFILES_FOLDER)),
+        );
         paths
             .into_iter()
             .filter_map(|path| std::path::absolute(path).ok())

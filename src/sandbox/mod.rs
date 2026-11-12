@@ -9,7 +9,9 @@
 //!   (`/dev/null`, terminals);
 //! - read everything (or only what `sandbox_read` lists, plus the
 //!   writable folders), except the settings file, the MCP server list,
-//!   the secrets folder and, in a webhook run, the git and GitHub CLI
+//!   the secrets folder, the browser profiles
+//!   ([`crate::browser::PROFILES_FOLDER`]: cookies and logins of a
+//!   running browser) and, in a webhook run, the git and GitHub CLI
 //!   credentials;
 //! - never write in Junees's data folders (memory, skills, cron, ...);
 //! - with `sandbox_network = 0` and a kernel of Landlock ABI 4 or later,

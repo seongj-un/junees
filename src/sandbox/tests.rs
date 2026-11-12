@@ -178,6 +178,57 @@ async fn the_settings_file_mcp_list_and_secrets_are_unreadable() {
 }
 
 #[tokio::test]
+async fn the_browser_profiles_are_out_of_reach() {
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let work = layout.path("work");
+    // A running browser's profile, where `browser::process::Profile`
+    // puts it.
+    let profiles = layout
+        .path("home/.junees")
+        .join(crate::browser::PROFILES_FOLDER);
+    let profile = profiles.join("0123456789abcdef");
+    std::fs::create_dir_all(profile.join("Default")).unwrap();
+    std::fs::write(profile.join("Default/Cookies"), "fake-cookie\n").unwrap();
+    // Listing stays allowed (folder listing is not a right the sandbox
+    // handles); the files' contents are what matter.
+    let command = format!(
+        "cat {p}/Default/Cookies || echo read-refused; \
+         echo x >> {p}/Default/Cookies || echo append-refused; \
+         echo x > {p}/Default/planted || echo write-refused; \
+         mkdir {b}/other || echo mkdir-refused; \
+         mv {p} {w}/moved || echo move-refused; \
+         cp -r {b} {w}/copy || echo copy-refused",
+        p = profile.display(),
+        b = profiles.display(),
+        w = work.display(),
+    );
+    let output = run(&work, layout.sandbox(settings()), &command).await;
+    let text = &output.content;
+    assert!(!text.contains("fake-cookie"), "{text}");
+    for line in [
+        "read-refused",
+        "append-refused",
+        "write-refused",
+        "mkdir-refused",
+        "move-refused",
+        "copy-refused",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(profile.join("Default/Cookies")).unwrap(),
+        "fake-cookie\n"
+    );
+    assert!(!profile.join("Default/planted").exists());
+    assert!(!profiles.join("other").exists());
+    assert!(!work.join("moved").exists());
+    assert!(!work.join("copy/0123456789abcdef/Default/Cookies").exists());
+}
+
+#[tokio::test]
 async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
     // Junees started in the home folder: everything there is writable
     // except the state folder's protected and data parts.
@@ -681,7 +732,8 @@ fn the_tools_sandbox_follows_the_settings() {
         [
             junees.join("config.toml"),
             junees.join("mcp.json"),
-            junees.join("secrets")
+            junees.join("secrets"),
+            junees.join(crate::browser::PROFILES_FOLDER)
         ]
     );
     assert!(plain.read_only.contains(&junees.join("memory")));
