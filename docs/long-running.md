@@ -274,6 +274,17 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 상호 운용 스모크(커밋하지 않음): 공식 Python SDK `mcp` 2.3.0 `MCPServer`의 Streamable HTTP를 루프백에 띄우고 바이너리 `-p`(가짜 API)로 `add` 도구를 불렀다. JSON/SSE x modern/legacy 네 가지 모두 `sum=42`. legacy는 SDK 앞에 `server/discover`만 평문 400으로 막는 ASGI 래퍼를 두어 SDK의 legacy 경로(세션 id, 2025-11-25 협상, 종료 DELETE)를 탔다
 - 남은 위험: 헤더 변수는 Junees 프로세스 환경에 있어야 하고(`PR_SET_DUMPABLE`로 `/proc/<junees>/environ`은 막혀 있음) 자식에게서만 숨긴다. 같은 변수를 bash의 다른 도구가 써야 하면 이름을 나눠야 한다. 원격 서버가 돌려준 내용은 stdio와 같이 데이터로 표시할 뿐 신뢰하지 않는다. legacy 서버가 응답 스트림을 답 없이 끊는 경우(재연결 기대) 그 호출은 실패로 끝난다
 
+### MCP OAuth 인가 (로드맵 9단계 2차 A)
+
+- 목표: 9단계 A의 `url` 서버에 MCP 인가 명세(2026-07-28 `basic/authorization`, 2025-11-25와 같은 흐름에 RFC 9207 `iss` 확인이 더해짐)를 붙인다. 코드는 `src/mcp/oauth/`.
+- 흐름: 토큰 없는 `server/discover`에 401 + `WWW-Authenticate: Bearer resource_metadata=...` -> 보호 자원 메타데이터(RFC 9728, 없으면 well-known 경로 삽입 -> 루트) -> `resource`가 서버 주소를 덮는지 확인 -> 인가 서버 메타데이터(RFC 8414/OIDC 순서, `issuer` 글자 그대로 일치, `S256` 없으면 중단) -> 클라이언트(`oauth.client_id` 또는 동적 등록 RFC 7591, `application_type: native`) -> PKCE S256 + `state` + `resource` + scope로 인가 주소 출력 -> 127.0.0.1 임의 포트 한 번 수신기 또는 붙여 넣은 주소 -> `iss` 확인 -> 코드 교환(`resource` 포함) -> `$JUNEES_HOME/secrets/mcp-oauth/<서버>.json`(0600, 폴더 0700).
+- 로그인은 `junees mcp login <서버>`와 대화 `/mcp login <서버>`만 시작한다(모델의 bash는 상태 변경 명령으로 막거나 묻는다). 시작 시 401이면 그 서버만 실패하고 안내한다. 무인 실행(cron, webhook, `-p`, 게이트웨이)은 저장된 로그인만 쓰고 갱신만 한다.
+- 사용: 모든 요청에 `Authorization: Bearer`(민감 표시), 저장된 `url`과 지금 `url`이 다르면 보내지 않음. 만료 1분 전과 401 뒤 한 번 갱신(동시 401도 한 번, 다른 프로세스와는 폴더 flock, 회전된 리프레시 토큰은 디스크에서 다시 읽음). 403 `insufficient_scope`는 실패시키고 scope를 기억해 다음 로그인이 함께 요청(step-up).
+- 결정: mcp.json `headers`의 `Authorization`이 이긴다(로그인 거절, 저장된 로그인 무시, `oauth`와 같이 쓰면 설정 오류). 다른 헤더는 토큰과 함께 보낸다. Client ID Metadata Document는 호스팅할 고정 https 주소가 없어 직접 하지 않고, 사용자가 호스팅한 URL을 `oauth.client_id`로 줄 수 있게만 했다. 브라우저는 열지 않고 주소만 출력한다.
+- doctor: 오프라인은 저장된 로그인(있는지, 이 주소의 것인지, 권한, 발급자, 만료와 갱신 가능 여부, 값은 `[hidden]`), `--online`은 인가 서버 찾기만(등록/토큰 요청 없음).
+- 검증: `src/mcp/oauth/tests.rs`의 루프백 가짜 인가 서버+MCP 서버(메타데이터, 등록, authorize 흉내, token의 PKCE/redirect_uri/resource 확인, refresh, 401/403 챌린지), `tests/mcp_oauth.rs` 바이너리 `mcp login` 붙여 넣기와 `-p`, `mcp logout`.
+- 범위 밖: Client ID Metadata Document 호스팅, 토큰 철회(RFC 7009), `private_key_jwt`/DPoP, 게이트웨이 채널의 로그인, legacy GET 스트림.
+
 ### 이미지 입력 (로드맵 9단계 1차 B)
 - 새 모듈 `src/images/`(`mod.rs` 형식/크기/상한/추정, `store.rs` 기록 저장, `discord.rs` 첨부). 공유 파일은 연결만: `message.rs`(이미지 블록, 도구 결과의 `images`, 직접 쓴 `Serialize`), `session.rs`(형식 7과 8, `append_content`, `clear_images`, 쓰기/읽기 때 저장과 복원, 비우기/압축/추정), `tools/`(`ToolOutput::images`, read_file), `agent.rs`(`run_with_images`), `context.rs`(요약에 이미지 한 줄), `main.rs`/`cli.rs`/`slash.rs`(`--image`, `/image`), `gateway/`(첨부, `Conversation::turn_with_images`), `search/scan.rs`(`append_content`의 글). 새 의존성 `base64`(reqwest가 이미 빌드하는 0.22), sha256은 이미 있는 `ring`
 - 블록 모양: vision 문서(`curl https://platform.claude.com/docs/en/build-with-claude/vision.md`)의 base64 소스, 도구 결과 안 이미지는 handle-tool-calls 문서(`content`가 text/image 블록 목록). 이미지는 입력 글 앞에(문서 권장). 형식은 JPEG/PNG/GIF/WebP만, 매직 바이트로
