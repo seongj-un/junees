@@ -122,6 +122,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [예약 작업](docs/automation.md#예약-작업): 프롬프트를 일정에 맞춰 무인 실행하고 결과를 파일, 디스코드, 웹훅으로 보낸다.
 - [웹훅](docs/automation.md#웹훅): HTTP 요청(GitHub 웹훅 등)이 무인 실행을 시작하고, `add-github`는 PR 리뷰, 리뷰 반영, merge를 맡는다.
 - [GitHub](docs/automation.md#github): 모델의 `github` 도구로 PR 읽기, 코멘트, 리뷰, PR 열기, merge.
+- [브라우저](docs/browser.md): 모델의 `browser` 도구로 헤드리스 Chromium을 열고 읽고 클릭하고 입력한다(기본 꺼짐, http/https만, 사설 주소와 위험한 입력은 설정과 승인으로만).
 - [플러그인](docs/plugins.md): 명령 도구, 훅, 프롬프트 조각을 폴더 하나로 더한다.
 - [컨텍스트 관리](docs/context.md): 프롬프트 캐싱, 오래된 도구 결과 비우기, 압축.
 - [기본 도구](docs/tools.md): `bash`, `read_file`, `write_file`, `edit_file`.
@@ -141,6 +142,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [docs/plugins.md](docs/plugins.md): 플러그인
 - [docs/context.md](docs/context.md): 컨텍스트 관리
 - [docs/tools.md](docs/tools.md): 기본 도구와 `edit_file`
+- [docs/browser.md](docs/browser.md): 브라우저 도구
 - [docs/safety.md](docs/safety.md): 명령 정책, 실행 전 승인
 - [docs/doctor.md](docs/doctor.md): 점검(`junees doctor`)
 - [docs/architecture.md](docs/architecture.md): 구조(모듈 설명과 테스트 목록)
