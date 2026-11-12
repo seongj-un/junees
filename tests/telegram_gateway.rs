@@ -632,6 +632,9 @@ async fn answers_only_allowed_users_where_it_is_addressed() {
     bot.push(private(USER, "/model opus"));
     bot.wait_post(&me, |p| p == "unknown command /model; /help lists them")
         .await;
+    // A one-word path that starts a sentence is a message (#58).
+    bot.push(private(USER, "/tmp is full"));
+    bot.wait_post(&me, |p| p.ends_with(": /tmp is full")).await;
     // Inputs run in order: once this one is answered, an input made of
     // the other bot's command would have been too.
     bot.push(private(USER, "ping"));

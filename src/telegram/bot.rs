@@ -7,6 +7,8 @@
 //! (`/model`, `/sessions`, ...) do not exist here: a `/` word the gateway
 //! does not know gets "unknown command" in a private chat or when it
 //! names the bot, and is left to the other bots in a group otherwise.
+//! An unknown word with more text after it that is not one of those
+//! terminal commands (`/tmp is full`) is an ordinary message.
 //! `/start`, which Telegram sends when a user opens the bot, shows the
 //! help. A caption under a file and a forwarded message are never
 //! commands.
@@ -36,7 +38,10 @@ pub enum Parsed {
 
 /// Reads a command at the start of `text`: `/word`, `/word@bot` or
 /// `!word`, followed by the end or whitespace. `/etc/hosts` and `/ x` are
-/// no commands.
+/// no commands, and neither is a word the gateway does not know that
+/// more text follows (`/tmp is full`), unless it names the bot or is one
+/// of Junees's terminal commands (`/model opus` still gets "unknown
+/// command", which says the gateway has no such thing).
 pub fn parse_command(text: &str, me: &str) -> Parsed {
     let text = text.trim_start();
     let Some(rest) = text.strip_prefix('/').or_else(|| text.strip_prefix('!')) else {
@@ -57,6 +62,13 @@ pub fn parse_command(text: &str, me: &str) -> Parsed {
         Command::Unknown(word) if word.eq_ignore_ascii_case("start") => Command::Help,
         command => command,
     };
+    if let Command::Unknown(word) = &command
+        && bot.is_none()
+        && !rest[first.len()..].trim().is_empty()
+        && !crate::slash::is_command(&word.to_ascii_lowercase())
+    {
+        return Parsed::None;
+    }
     match bot {
         Some(bot) if !bot.eq_ignore_ascii_case(me) => Parsed::OtherBot,
         named => Parsed::Command {
@@ -420,6 +432,23 @@ mod tests {
             command(Command::Unknown("model".into()), false)
         );
         assert_eq!(parse_command("/stop@other_bot", me), Parsed::OtherBot);
+        // An unknown word followed by more text reads as a message, unless
+        // it names the bot or is a terminal command the gateway lacks.
+        for text in ["/tmp is full", "!important read this", "/Opt has 3 GB left"] {
+            assert_eq!(parse_command(text, me), Parsed::None, "{text}");
+        }
+        assert_eq!(
+            parse_command("/tmp@junees_bot is full", me),
+            command(Command::Unknown("tmp".into()), true)
+        );
+        assert_eq!(
+            parse_command("/tmp", me),
+            command(Command::Unknown("tmp".into()), false)
+        );
+        assert_eq!(
+            parse_command("/search build failed", me),
+            command(Command::Unknown("search".into()), false)
+        );
         for text in [
             "stop",
             "/",
