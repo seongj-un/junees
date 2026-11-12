@@ -91,6 +91,12 @@ impl<'a> Trigger<'a> {
                 webhook: true,
                 gh_config_dir: Some(gh_config.to_path_buf()),
                 sandbox: unattended(settings),
+                // Claude Code's memory and instruction files too: they
+                // would reach the user's own Claude Code sessions.
+                settings_file: settings
+                    .settings_file
+                    .clone()
+                    .map(crate::tools::SettingsFile::with_claude_folder),
                 ..settings.clone()
             },
         }
@@ -793,6 +799,35 @@ mod tests {
         let cron = Trigger::Cron.tool_settings(&settings);
         assert!(!cron.webhook);
         assert_eq!(cron.gh_config_dir, None);
+
+        // A webhook run's tools keep off all of Claude Code's folder, a
+        // scheduled job's only its login and settings.
+        let user = home.path().join("user");
+        let settings = ToolSettings {
+            settings_file: Some(crate::tools::SettingsFile::new(
+                user.join(".junees/config.toml"),
+                Some(user.clone()),
+            )),
+            ..ToolSettings::default()
+        };
+        let memory = user.join(".claude/projects/p/memory/MEMORY.md");
+        let login = user.join(".claude/.credentials.json");
+        let webhook = Trigger::Webhook {
+            route: "flow",
+            github_allow: allow,
+            gh_config: Path::new("/run/gh-config"),
+            context_dir: home.path(),
+            approvers: &[],
+        }
+        .tool_settings(&settings)
+        .settings_file
+        .unwrap();
+        assert!(webhook.is(&memory) && webhook.is(&login));
+        let cron = Trigger::Cron
+            .tool_settings(&settings)
+            .settings_file
+            .unwrap();
+        assert!(!cron.is(&memory) && cron.is(&login));
     }
 
     #[tokio::test]
