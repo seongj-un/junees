@@ -33,7 +33,9 @@ const WORLD: &str = "junees";
 pub const FRAME_RISK: &str =
     "goes into a frame from another site, whose fields and buttons cannot be checked";
 /// The risk the guard and the snapshot give a click or key press that
-/// goes into a closed shadow root (`CLOSED_RISK` in guard.js).
+/// goes into a closed shadow root (`CLOSED_RISK` in guard.js); the tool
+/// passes it on from there, so only the tests name it.
+#[cfg(test)]
 pub const CLOSED_RISK: &str =
     "goes into a closed shadow root, whose fields and buttons cannot be checked";
 /// Marks the element it is called on as the host of a closed shadow root
