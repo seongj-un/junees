@@ -46,7 +46,9 @@ pub fn to_mrkdwn(text: &str) -> String {
         let indent = line.len() - trimmed.len();
         let marker = fence_marker(trimmed).filter(|_| indent <= 3);
         match (fence, marker) {
-            (None, Some((c, n, _))) => {
+            // ```ls -la``` on one line is inline code, and a fence's
+            // language is one word: anything else is no opening fence.
+            (None, Some((c, n, rest))) if opens_block(rest) => {
                 fence = Some((c, n));
                 out.push("```".to_string());
             }
@@ -55,7 +57,7 @@ pub fn to_mrkdwn(text: &str) -> String {
                 out.push("```".to_string());
             }
             (Some(_), _) => out.push(escape(&line.replace("```", "`\u{200b}``"))),
-            (None, None) => out.push(block_line(line)),
+            (None, _) => out.push(block_line(line)),
         }
     }
     let mut text = out.join("\n");
@@ -72,6 +74,12 @@ fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
     let c = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let n = line.chars().take_while(|x| *x == c).count();
     (n >= 3).then(|| (c, n, line[n..].trim()))
+}
+
+/// Whether a fence with `info` after it opens a code block: no info or
+/// a single word (a language) without backticks.
+fn opens_block(info: &str) -> bool {
+    !info.contains(char::is_whitespace) && !info.contains('`')
 }
 
 /// One line outside a code block: headings, quotes, list items and rules,
@@ -169,7 +177,7 @@ fn link(rest: &str) -> Option<(String, usize)> {
     let label_end = rest.strip_prefix('[')?.find("](")? + 1;
     let label = &rest[1..label_end];
     let after = &rest[label_end + 2..];
-    let url_end = after.find(')')?;
+    let url_end = url_end(after)?;
     let url = after[..url_end].trim();
     if label.is_empty() || label.contains('\n') || url.is_empty() {
         return None;
@@ -181,6 +189,23 @@ fn link(rest: &str) -> Option<(String, usize)> {
     } else {
         Some((format!("{label} ({})", escape(url)), used))
     }
+}
+
+/// Where the address of a link ends in `after` (the text behind `](`):
+/// the `)` that balances the parentheses inside it, as in
+/// `https://en.wikipedia.org/wiki/Rust_(programming_language)`.
+fn url_end(after: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, c) in after.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(at),
+            ')' => depth -= 1,
+            '\n' => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `<https://...>` at the start of `rest`.
@@ -363,6 +388,15 @@ mod tests {
                 "x (https://a.example/|&lt;!here&gt;)",
             ),
             ("<javascript:x>", "&lt;javascript:x&gt;"),
+            // Parentheses inside the address are part of it.
+            (
+                "[Rust](https://en.wikipedia.org/wiki/Rust_(programming_language)) ok",
+                "<https://en.wikipedia.org/wiki/Rust_(programming_language)|Rust> ok",
+            ),
+            (
+                "([a](https://x.example/f(1)(2)))",
+                "(<https://x.example/f(1)(2)|a>)",
+            ),
         ];
         for (markdown, want) in cases {
             assert_eq!(to_mrkdwn(markdown), want, "{markdown}");
@@ -401,6 +435,12 @@ mod tests {
             to_mrkdwn("~~~~\na ``` b\n~~~~"),
             "```\na `\u{200b}`` b\n```"
         );
+        // A fence closed on its own line is inline code, not a block.
+        assert_eq!(to_mrkdwn("```ls -la```\n**bold**"), "`ls -la`\n*bold*");
+        assert_eq!(to_mrkdwn("```ls```"), "`ls`");
+        // Words after a fence are no language: no block opens.
+        assert_eq!(to_mrkdwn("``` not a fence\n*it*"), "``` not a fence\n_it_");
+        assert_eq!(to_mrkdwn("```sh\nls\n```"), "```\nls\n```");
         // Korean text passes through whole.
         assert_eq!(
             to_mrkdwn("**한글** 문장 <태그>"),
