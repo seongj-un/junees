@@ -133,6 +133,14 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
         words: &["plugins", "remove"],
         does: "removes a plugin",
     },
+    SelfCommand {
+        words: &["mcp", "login"],
+        does: "logs in to an MCP server (saves an OAuth token Junees sends to it)",
+    },
+    SelfCommand {
+        words: &["mcp", "logout"],
+        does: "removes the saved login of an MCP server",
+    },
 ];
 
 /// The approval kind of these commands ([`super::Caution::kind`]).
@@ -246,6 +254,8 @@ mod tests {
             ("junees plugins enable p", "junees plugins enable"),
             ("junees plugins disable p", "junees plugins disable"),
             ("junees plugins remove p", "junees plugins remove"),
+            ("junees mcp login docs", "junees mcp login"),
+            ("junees mcp logout docs", "junees mcp logout"),
         ] {
             assert_eq!(
                 find(&words(command)).map(SelfCommand::command).as_deref(),
@@ -264,6 +274,8 @@ mod tests {
             "junees plugin list",
             "junees plugins",
             "junees plugin --help",
+            "junees mcp",
+            "junees mcp --help",
             "junees status",
             "junees -p cron add",
             "junees add cron",

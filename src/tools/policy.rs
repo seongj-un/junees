@@ -3196,6 +3196,9 @@ mod tests {
             "cat $JUNEES_HOME/secrets/*".into(),
             "grep -r . ~/.junees/secrets".into(),
             "cd ~/.junees/secrets && cat pr-review".into(),
+            // Saved MCP OAuth logins.
+            "cat ~/.junees/secrets/mcp-oauth/docs.json".into(),
+            "cp ~/.junees/secrets/mcp-oauth/*.json /tmp/".into(),
         ] {
             match policy.check(&command) {
                 Verdict::Deny(reason) => assert!(
