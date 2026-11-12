@@ -18,6 +18,7 @@ pub use bash::Bash;
 pub(crate) use bash::testing;
 pub(crate) use bash::{Capture, GroupGuard, own_session};
 pub use edit_file::EditFile;
+pub use file_access::UNATTENDED_CREDENTIALS;
 pub(crate) use policy::resolve;
 pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};
 pub use read_file::ReadFile;

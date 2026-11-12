@@ -15,6 +15,8 @@
 //!   credentials;
 //! - never write in Junees's data folders (memory, skills, cron, ...)
 //!   or the saved sessions;
+//! - in an unattended run, not read the credentials in the home folder
+//!   either ([`unattended_credentials`]);
 //! - with `sandbox_network = 0` and a kernel of Landlock ABI 4 or later,
 //!   neither connect nor bind TCP sockets.
 //!
@@ -282,6 +284,9 @@ impl Sandbox {
             state = file.folder();
             read_only.extend(state.as_deref().map(crate::session::sessions_dir));
         }
+        if settings.unattended {
+            hidden.extend(unattended_credentials(tools, &settings));
+        }
         let mut sandbox = Self::new(settings, hidden, read_only);
         sandbox.state = state;
         Some(sandbox)
@@ -483,6 +488,83 @@ impl Sandbox {
     fn build(&self, _abi: u32, _work: &Path) -> io::Result<(Confinement, bool)> {
         Err(io::Error::other("Landlock needs Linux"))
     }
+}
+
+/// The files in `~/.ssh` a scheduled job's commands may still read: public
+/// keys (`*.pub`) and what ssh reads besides the private key, so `git`
+/// over ssh can check hosts and use its settings.
+pub const SSH_PUBLIC: &[&str] = &[
+    "known_hosts",
+    "known_hosts.old",
+    "known_hosts2",
+    "authorized_keys",
+    "authorized_keys2",
+    "config",
+];
+
+/// The credentials in the home folder an unattended run's commands may
+/// not read ([`crate::tools::UNATTENDED_CREDENTIALS`], the same list the
+/// file tools refuse), as given; the rules cover each resolved too.
+///
+/// A webhook run (anyone's text) gets all of them. A scheduled job keeps
+/// the public files of `~/.ssh` ([`SSH_PUBLIC`]) and loses only the rest
+/// (private keys, whatever their name), since the user's own job may
+/// pull or push over ssh; and the user can let a job's commands read a
+/// credential by naming it, or a path in it, in `sandbox_read` (for
+/// example `sandbox_read = "/, ~/.ssh"` keeps reading everything and adds
+/// the ssh keys). Naming a folder above it (`/`, `~`) does not count.
+fn unattended_credentials(tools: &crate::tools::ToolSettings, settings: &Settings) -> Vec<PathBuf> {
+    let Some(home) = tools.settings_file.as_ref().and_then(|file| file.home()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for name in crate::tools::UNATTENDED_CREDENTIALS {
+        let root = home.join(name);
+        if tools.webhook {
+            out.push(root);
+            continue;
+        }
+        let named: Vec<&PathBuf> = settings
+            .read
+            .iter()
+            .flatten()
+            .filter(|read| within(read, &root))
+            .collect();
+        let paths = if *name == ".ssh" {
+            ssh_private(&root)
+        } else {
+            vec![root]
+        };
+        out.extend(paths.into_iter().filter(|path| {
+            !named
+                .iter()
+                .any(|read| within(path, read) || within(read, path))
+        }));
+    }
+    out
+}
+
+/// The entries of the ssh folder `dir` that are not in [`SSH_PUBLIC`] or
+/// public keys; the folder itself when it cannot be listed.
+fn ssh_private(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![dir.to_path_buf()];
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            !(name.ends_with(".pub") || SSH_PUBLIC.contains(&name.as_ref()))
+        })
+        .map(|name| dir.join(name))
+        .collect()
+}
+
+/// Whether `path` is `folder` or inside it, as given or resolved.
+fn within(path: &Path, folder: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path.starts_with(folder) || real(path).starts_with(real(folder))
 }
 
 /// What a confined test command showed ([`Sandbox::try_child`]).
