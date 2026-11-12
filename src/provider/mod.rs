@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 mod error;
+mod http;
 mod stream;
 
 pub use error::ProviderError;
