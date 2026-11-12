@@ -2,21 +2,24 @@
 //! posts through `sendMessage` (as HTML converted from the model's
 //! Markdown, [`super::format`], or in plain text), typing through
 //! `sendChatAction`, and images through `getFile` and the file download.
+//! Approval questions come with an inline keyboard ([`keyboard`]); the
+//! router ([`super::bot`]) takes the presses.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::api::{Api, Target};
 use super::config::Format;
 use super::format;
 use crate::approval::{Request, render};
-use crate::gateway::ask::{fence_safe, human};
+use crate::gateway::ask::{Choice, Question, button_data, fence_safe, human};
 use crate::gateway::platform::Platform;
-use crate::gateway::split::split_plain;
+use crate::gateway::split::{length, split_plain};
 use crate::images::{Image, MAX_IMAGE_BYTES, too_large};
 use crate::prompt_text::escape_hidden;
 
@@ -212,9 +215,107 @@ pub struct Telegram {
     /// The bot's username, for `/help`.
     pub username: String,
     pub format: Format,
+    /// The questions posted with buttons, by question id, until they end.
+    questions: Mutex<HashMap<String, Sent>>,
+}
+
+/// The last message of a post: where the buttons of a question sit.
+struct Sent {
+    chat: i64,
+    message: i64,
+    /// Its text as sent, which the edit keeps.
+    text: String,
+    html: bool,
+}
+
+/// The inline keyboard of `question`: its buttons in one row.
+pub fn keyboard(question: &Question) -> Value {
+    let row: Vec<Value> = Choice::offered(question)
+        .into_iter()
+        .map(|choice| {
+            let mut button = json!({
+                "text": choice.label(),
+                "callback_data": button_data(&question.id, choice),
+            });
+            match choice {
+                Choice::Allow => button["style"] = json!("success"),
+                Choice::Decline => button["style"] = json!("danger"),
+                Choice::Always => {}
+            }
+            button
+        })
+        .collect();
+    json!({"inline_keyboard": [row]})
 }
 
 impl Telegram {
+    pub fn new(api: Arc<Api>, username: String, format: Format) -> Self {
+        Self {
+            api,
+            username,
+            format,
+            questions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn questions(&self) -> std::sync::MutexGuard<'_, HashMap<String, Sent>> {
+        self.questions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Posts `text` as [`Platform::post`] describes, the `keyboard` on the
+    /// last message; that message, if the answer named it.
+    async fn send(
+        &self,
+        channel: &str,
+        text: &str,
+        keyboard: Option<&Value>,
+    ) -> Result<Option<Sent>> {
+        let target = Self::target(channel)?;
+        let group = target.chat < 0;
+        let mut last = None;
+        if self.format == Format::Plain {
+            let text = if group {
+                defuse_mentions(text)
+            } else {
+                text.to_string()
+            };
+            let parts = split_plain(&text, MESSAGE_LIMIT);
+            let count = parts.len();
+            for (at, part) in parts.into_iter().enumerate() {
+                let markup = keyboard.filter(|_| at + 1 == count);
+                let message = self.api.send_with(target, &part, false, markup).await?;
+                last = message.map(|message| Sent::new(target, message, part, false));
+            }
+            return Ok(last);
+        }
+        let parts = format::render(text, group, MESSAGE_LIMIT);
+        let count = parts.len();
+        for (at, part) in parts.into_iter().enumerate() {
+            let final_part = at + 1 == count;
+            let markup = keyboard.filter(|_| final_part);
+            match self.api.send_with(target, &part.html, true, markup).await {
+                Ok(message) => {
+                    last = message.map(|message| Sent::new(target, message, part.html, true))
+                }
+                Err(err) if err.is_unparsable() => {
+                    self.api
+                        .note(&format!("{err}; sending that message as plain text"));
+                    let pieces = split_plain(&part.plain, MESSAGE_LIMIT);
+                    let pieces_count = pieces.len();
+                    for (piece_at, piece) in pieces.into_iter().enumerate() {
+                        let markup =
+                            keyboard.filter(|_| final_part && piece_at + 1 == pieces_count);
+                        let message = self.api.send_with(target, &piece, false, markup).await?;
+                        last = message.map(|message| Sent::new(target, message, piece, false));
+                    }
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Ok(last)
+    }
     fn target(channel: &str) -> Result<Target> {
         Target::parse(channel).ok_or_else(|| anyhow!("`{channel}` is not a Telegram chat"))
     }
@@ -277,33 +378,7 @@ impl Platform for Telegram {
     /// (Telegram gives groups negative chat ids), `@name`s are broken
     /// first ([`defuse_mentions`]), in HTML outside code only.
     async fn post(&self, channel: &str, text: &str) -> Result<()> {
-        let target = Self::target(channel)?;
-        let group = target.chat < 0;
-        if self.format == Format::Plain {
-            let text = if group {
-                defuse_mentions(text)
-            } else {
-                text.to_string()
-            };
-            for part in split_plain(&text, MESSAGE_LIMIT) {
-                self.api.send_message(target, &part).await?;
-            }
-            return Ok(());
-        }
-        for part in format::render(text, group, MESSAGE_LIMIT) {
-            match self.api.send_html(target, &part.html).await {
-                Ok(()) => {}
-                Err(err) if err.is_unparsable() => {
-                    self.api
-                        .note(&format!("{err}; sending that message as plain text"));
-                    for piece in split_plain(&part.plain, MESSAGE_LIMIT) {
-                        self.api.send_message(target, &piece).await?;
-                    }
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
-        Ok(())
+        self.send(channel, text, None).await.map(drop)
     }
 
     async fn typing(&self, channel: &str) -> Result<()> {
@@ -353,6 +428,57 @@ impl Platform for Telegram {
     fn question(request: &Request, timeout: Duration) -> String {
         question(request, timeout)
     }
+
+    async fn post_question(&self, channel: &str, question: &Question) -> Result<Option<String>> {
+        let keyboard = keyboard(question);
+        let Some(sent) = self.send(channel, &question.text, Some(&keyboard)).await? else {
+            bail!("Telegram's sendMessage answer names no message_id");
+        };
+        let message = sent.message.to_string();
+        self.questions().insert(question.id.clone(), sent);
+        Ok(Some(message))
+    }
+
+    /// The result goes under the question (bold in HTML); when that would
+    /// not fit the message, the buttons go and the result is a post of its
+    /// own.
+    async fn close_question(&self, channel: &str, id: &str, outcome: &str) -> Result<()> {
+        let Some(sent) = self.questions().remove(id) else {
+            return Ok(());
+        };
+        let outcome = if sent.chat < 0 {
+            defuse_mentions(outcome)
+        } else {
+            outcome.to_string()
+        };
+        let line = if sent.html {
+            format!("<b>{}</b>", format::escape_html(&outcome))
+        } else {
+            outcome.clone()
+        };
+        let closed = format!("{}\n\n{line}", sent.text);
+        if length(&closed) <= MESSAGE_LIMIT {
+            self.api
+                .edit_text(sent.chat, sent.message, &closed, sent.html)
+                .await?;
+            return Ok(());
+        }
+        self.api
+            .edit_text(sent.chat, sent.message, &sent.text, sent.html)
+            .await?;
+        self.post(channel, &outcome).await
+    }
+}
+
+impl Sent {
+    fn new(target: Target, message: i64, text: String, html: bool) -> Self {
+        Self {
+            chat: target.chat,
+            message,
+            text,
+            html,
+        }
+    }
 }
 
 /// An approval question. What the call does is in a code block, so in
@@ -363,10 +489,10 @@ pub fn question(request: &Request, timeout: Duration) -> String {
     let mut details = render(request);
     details.push_str(&format!("     always allows: {}", request.kinds.join(", ")));
     format!(
-        "Approve this tool call?\n```\n{}\n```\nReply y to run it, n to decline (n <reason> tells the \
-         model why), a to allow this kind for the rest of this chat's conversation. Anything \
-         else declines with your words as the reason. No answer within {} declines. In a \
-         group, reply to this message.",
+        "Approve this tool call?\n```\n{}\n```\nPress a button, or reply y to run it, n to decline \
+         (n <reason> tells the model why), a to allow this kind for the rest of this chat's \
+         conversation. Anything else declines with your words as the reason. No answer within \
+         {} declines. In a group, reply to this message.",
         fence_safe(&details),
         human(timeout)
     )
@@ -496,7 +622,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("always allows: bash: delete</pre>\nReply y"),
+            html.contains("always allows: bash: delete</pre>\nPress a button, or reply y"),
             "{html}"
         );
         assert!(!html.contains("<b>") && !html.contains("<code>"), "{html}");

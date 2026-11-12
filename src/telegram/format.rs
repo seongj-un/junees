@@ -659,6 +659,11 @@ fn defuse_mentions(atoms: Vec<Atom>) -> Vec<Atom> {
 
 // ------------------------------------------------------------ Cutting
 
+/// `text` for Telegram HTML: `<`, `>` and `&` escaped.
+pub fn escape_html(text: &str) -> String {
+    escape(text, false)
+}
+
 fn escape(text: &str, attribute: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {

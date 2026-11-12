@@ -12,6 +12,12 @@
 //! `/start`, which Telegram sends when a user opens the bot, shows the
 //! help. A caption under a file and a forwarded message are never
 //! commands.
+//!
+//! A press on an approval question's button arrives as a `callback_query`
+//! update. It answers the question only when an allowed user pressed it
+//! on the question that waits in that chat (or forum topic), from the
+//! message holding it ([`Channels::press`]); every press gets
+//! `answerCallbackQuery`, with a note when it answered nothing.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -21,6 +27,7 @@ use serde_json::Value;
 
 use super::api::{Me, Target};
 use super::platform::{MAX_ATTACHMENTS, Telegram, TelegramFile, attachments};
+use crate::gateway::ask::{Press, parse_button};
 use crate::gateway::bot::command_word;
 use crate::gateway::channels::{Channels, Command, Shared};
 use crate::prompt_text::escape_hidden;
@@ -203,6 +210,30 @@ fn album_key(message: &Value) -> Option<AlbumKey> {
     ))
 }
 
+/// What a press that answered nothing shows.
+pub const ALREADY_HANDLED: &str = "This question was already answered, timed out or stopped.";
+/// What a press of a user not in `telegram_allowed_users` shows.
+pub const NOT_ALLOWED: &str = "Only the users in telegram_allowed_users can answer Junees.";
+/// What a press of a button that is not Junees's shows.
+const NOT_OURS: &str = "Junees does not know this button.";
+
+/// Who pressed a button, as the result line names them: first and last
+/// name, hidden characters escaped, cut.
+fn presser(user: &Value) -> String {
+    let name = ["first_name", "last_name"]
+        .iter()
+        .filter_map(|key| user.get(*key).and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let name = name.trim();
+    let mut name = escape_hidden(if name.is_empty() { "someone" } else { name });
+    if let Some((cut, _)) = name.char_indices().nth(MAX_FORWARDED_NAME) {
+        name.truncate(cut);
+        name.push_str("...");
+    }
+    name
+}
+
 /// Albums remembered as taken in a group.
 const ALBUMS: usize = 64;
 
@@ -255,7 +286,14 @@ impl Router {
     /// albums of that chat on first, so the chat keeps its order.
     pub fn handle(&mut self, updates: &[Value]) {
         let now = Instant::now();
-        for message in updates.iter().filter_map(|update| update.get("message")) {
+        for update in updates {
+            if let Some(query) = update.get("callback_query") {
+                self.press(query);
+                continue;
+            }
+            let Some(message) = update.get("message") else {
+                continue;
+            };
             if let Some(key) = album_key(message) {
                 let due = now + self.album_wait;
                 match self.held.iter_mut().find(|held| held.key == key) {
@@ -280,6 +318,68 @@ impl Router {
             });
         }
         self.flush_due();
+    }
+
+    /// A press on an inline keyboard button (module docs).
+    fn press(&mut self, query: &Value) {
+        let Some(id) = query.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let user = query.pointer("/from/id").and_then(Value::as_i64);
+        let note = match user {
+            Some(user) if self.allowed.contains(&user) => {
+                let message = query.get("message");
+                let chat = message
+                    .and_then(|message| message.pointer("/chat/id"))
+                    .and_then(Value::as_i64);
+                let data = query.get("data").and_then(Value::as_str);
+                match (chat, data.and_then(parse_button)) {
+                    (Some(chat), Some((question, choice))) => {
+                        let message = message.unwrap_or(&Value::Null);
+                        let topic =
+                            message.get("is_topic_message").and_then(Value::as_bool) == Some(true);
+                        let thread = message
+                            .get("message_thread_id")
+                            .and_then(Value::as_i64)
+                            .filter(|_| topic);
+                        let press = Press {
+                            id: question,
+                            choice,
+                            message: message
+                                .get("message_id")
+                                .and_then(Value::as_i64)
+                                .map(|id| id.to_string()),
+                            by: presser(query.get("from").unwrap_or(&Value::Null)),
+                        };
+                        if self.channels.press(&Target { chat, thread }.key(), press) {
+                            None
+                        } else {
+                            Some(ALREADY_HANDLED)
+                        }
+                    }
+                    _ => Some(NOT_OURS),
+                }
+            }
+            _ => {
+                if let Some(user) = user
+                    && self.strangers.insert(user)
+                {
+                    (self.channels.shared().log)(&format!(
+                        "ignoring button presses of user {user}: not in telegram_allowed_users"
+                    ));
+                }
+                Some(NOT_ALLOWED)
+            }
+        };
+        let shared = self.channels.shared();
+        let api = Arc::clone(&shared.platform.api);
+        let log = Arc::clone(&shared.log);
+        let id = id.to_string();
+        tokio::spawn(async move {
+            if let Err(err) = api.answer_callback(&id, note).await {
+                log(&format!("cannot answer a button press: {err}"));
+            }
+        });
     }
 
     /// When the next held album is due, if one is held.
