@@ -17,6 +17,7 @@ junees cron daemon               # 때가 된 작업을 실행 (계속 띄워 �
 ```
 
 - 작업은 id(8자리 hex), `--name`, id 앞부분(겹치지 않을 때)으로 가리키고, 이 순서로 찾는다. 그래서 이름이 다른 작업의 id 앞부분과 같아도 이름이 같은 작업을 고른다(손으로 고친 `jobs.json`에서 두 작업의 이름이 같으면 모호하다는 오류). 폴더는 `--dir`(기본은 `cron add`를 실행한 폴더)이고 실행은 그 폴더에서 한다. 대화 안 `/cron`과 게이트웨이 `!cron`은 목록만 보여 준다(`!cron`은 서버 채널에서 프롬프트와 폴더를 빼고, DM에서는 다 보여 준다).
+- 홈 폴더 거절(#84): 작업 폴더가 홈 자체이거나 홈을 품은 폴더(`/home`, `/`)면 `cron add`가 거절한다(`... is the home folder (or a folder holding it): ...; give it a project folder with --dir, or add --allow-home to accept this`). 무인 실행의 도구는 작업 폴더 안 어디든 쓸 수 있고, Junees가 막는 것은 정해 둔 목록([실행 격리](safety.md#실행-격리-landlock)의 셸 시작 파일, systemd, `~/.ssh` 등)뿐이다. 나중에 코드를 실행하는 홈의 파일(파이썬 `.pth`와 `usercustomize.py`, vim/emacs 설정, 다른 저장소의 `.git/hooks`)은 목록으로 다 막을 수 없으므로, 홈을 작업 폴더로 쓰는 것 자체를 기본으로 막는다. 그래도 홈에서 돌려야 하면 `--allow-home`을 준다. 작업에 `"allow_home": true`로 저장되고(`--no-secret`처럼 작업마다), 실행을 시작할 때 `!! this unattended run works in ... (the home folder)` 경고는 계속 나온다. 이 표시 없이 저장된 작업(이 기능 전에 추가한 작업)은 실행할 때 실패로 기록되고(`... remove the job and add it again with a project folder (--dir), or with --allow-home to accept this`, 전달도 그대로 간다) `junees doctor`가 경고한다. 웹훅 경로와 GitHub 흐름(`webhook add`, `add-github`)도 같다. 대화, `-p`, `task` 모드는 사람이 보고 있으므로 해당 없다.
 - 일정(따옴표로 한 덩어리로 준다):
   - `every 30m`, `every 2h`, `every 1h30m`: 추가한 때부터 그 간격마다(1분 이상, 10년 이하).
   - `in 20m`: 지금부터 그만큼 뒤 한 번(10년 이하).
@@ -64,7 +65,7 @@ loginctl enable-linger "$USER"           # 로그아웃해도 계속 돌게
 
 ## 웹훅
 
-`junees webhook`은 HTTP 요청(GitHub 웹훅 등)을 받아 예약 작업과 같은 무인 실행을 시작한다. 경로(route)마다 프롬프트 템플릿, 시크릿, 이벤트 필터, 작업 폴더, 전달처를 정해 두면, `junees webhook serve`가 `POST /hooks/<이름>`을 받아 서명을 확인하고 곧바로 202로 답한 뒤 템플릿에 요청 값을 채운 프롬프트를 돌린다.
+`junees webhook`은 HTTP 요청(GitHub 웹훅 등)을 받아 예약 작업과 같은 무인 실행을 시작한다. 경로(route)마다 프롬프트 템플릿, 시크릿, 이벤트 필터, 작업 폴더(`--dir`, 기본은 현재 폴더. 홈이나 홈을 품은 폴더는 예약 작업처럼 `--allow-home` 없이는 거절한다. [홈 폴더 거절](#예약-작업)), 전달처를 정해 두면, `junees webhook serve`가 `POST /hooks/<이름>`을 받아 서명을 확인하고 곧바로 202로 답한 뒤 템플릿에 요청 값을 채운 프롬프트를 돌린다.
 
 ```sh
 cd ~/work/some-project
