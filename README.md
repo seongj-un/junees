@@ -3,6 +3,25 @@
 Rust로 만드는 AI 에이전트 하네스. LLM이 도구를 호출하며 일을 처리하는 루프를 바닥부터 직접 만든다.
 [Hermes Agent](https://github.com/NousResearch/hermes-agent)에서 영감을 받았고, 단일 바이너리와 적은 메모리 사용을 목표로 한다.
 
+- 단일 바이너리: `junees` 하나로 대화, 한 번 실행, 장기 작업, 채팅 봇, 예약 작업, 웹훅 서버를 모두 돌린다.
+- 두 가지 백엔드: Anthropic API 키로 Junees 자신의 에이전트를 돌리거나(`api`), Claude Pro/Max 구독으로 로그인한 공식 Claude Code CLI에 맡긴다(`claude-code`).
+- 장기 작업: 큰 목표를 검증 가능한 기능 목록으로 쪼개고, 매번 새 컨텍스트로 시작하는 세션들이 기능 하나씩 구현, 검증, 커밋한다. 완료 판정은 모델이 아니라 하네스가 검증 명령의 종료 코드로 한다.
+- 어디서나: 터미널, 디스코드와 텔레그램 봇, 일정에 맞춘 예약 작업, GitHub 웹훅으로 시작하는 PR 리뷰와 merge 흐름.
+- 기억과 확장: 세션 기록과 검색, 영구 메모리, 스킬, 프로젝트 지침 파일, 서브에이전트, MCP 서버, 플러그인.
+- 안전장치: 명령 정책, 대화 모드의 실행 전 승인, 도구 환경에서 비밀 값 숨기기. 샌드박스는 아니다([명령 정책과 실행 전 승인](docs/safety.md)).
+
+## 설치
+
+Rust 1.88 이상(edition 2024)이 필요하다. Linux에서 개발하고 CI(ubuntu)로 확인한다.
+
+```sh
+git clone https://github.com/seongj-un/junees
+cd junees
+cargo install --path .
+```
+
+`cargo install` 없이 `cargo build --release` 후 `./target/release/junees`로 써도 된다. 구독으로 쓰려면 Claude Code CLI(`claude`, 2.1.259 이상)를 따로 설치하고 직접 로그인해 둔다([구독 모드](docs/subscription.md)). 설치와 설정은 `junees doctor`로 점검한다.
+
 ## 빠른 시작
 
 ```sh
@@ -12,60 +31,120 @@ junees "이 폴더에 뭐가 있어?"        # 한 번만 묻기
 junees -c                           # 이 폴더의 마지막 대화 이어서
 junees task "할 일 관리 웹 앱을 만들어"   # 장기 작업: 계획하고 바로 실행 (git 저장소 안에서)
 junees setup                        # 설정 다시
-junees gateway                      # 디스코드 봇으로 띄우기 (docs/gateways.md)
-junees gateway telegram             # 텔레그램 봇으로 띄우기 (docs/gateways.md)
-junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작업 (docs/automation.md)
-junees doctor                       # 설치와 설정 점검 (docs/doctor.md)
+junees gateway                      # 디스코드 봇으로 띄우기
+junees gateway telegram             # 텔레그램 봇으로 띄우기
+junees cron add "daily 09:00" "오늘 할 일을 정리해 줘"   # 예약 작업
+junees doctor                       # 설치와 설정 점검
 ```
 
-대화 안에서 쓰는 명령:
+봇은 [게이트웨이](docs/gateways.md), 예약 작업은 [예약 작업](docs/automation.md#예약-작업), 점검은 [점검](docs/doctor.md)에 자세히 있다.
 
-- `/task <목표>`: 지금 폴더의 git 저장소에서 장기 작업을 계획하고 바로 실행한다(`junees task "목표"`와 같음). `/task`만 쓰면 멈춘 작업을 이어서 한다(`junees task`).
-- `/status`: 작업 상태(`junees status`와 같음).
-- `/sessions`: 최근 세션 10개를 번호와 함께 보여 주고, 번호를 넣으면 그 세션으로 이어 간다(Enter는 그대로). 디스코드 게이트웨이의 채널 세션과 예약 작업 실행 세션은 번호 없이 따로 보여 주기만 한다([디스코드 게이트웨이](docs/gateways.md#디스코드-게이트웨이), [예약 작업](docs/automation.md#예약-작업)).
-- `/search <낱말>`: 저장된 세션에서 낱말을 찾아 번호와 함께 보여 준다([세션 검색](docs/usage.md#세션-검색)).
-- `/new`: 새 대화(예전 이름 `/reset`도 됨).
-- `/image <경로> [질문]`: 이미지와 질문을 한 입력으로 보낸다(api 백엔드, [이미지 입력](docs/usage.md#이미지-입력)).
-- `/model [이름]`: 지금 모델을 보여 주거나, 이 실행 동안만 다른 모델로 바꾼다(claude-code 백엔드에서는 Claude Code에 `--model`로 넘긴다).
-- `/backend [api|claude-code]`: 대화와 `/task`를 무엇으로 돌릴지 보여 주거나, 이 실행 동안만 둘 다 바꾼다. 대화를 바꾸면 새 세션으로 시작한다([구독 모드](docs/subscription.md#구독-모드-claude-code-백엔드)).
-- `/memory`: 영구 메모리 세 저장소의 파일, 사용량, 항목을 보여 준다. `/memory clear user|notes|project`는 한 저장소를 비운다(`y`로 확인한 뒤. [메모리](docs/memory-and-skills.md#메모리)).
-- `/skills`: 스킬 목록(`$JUNEES_HOME/skills`, [스킬](docs/memory-and-skills.md#스킬)), `/skill <이름>`: 스킬 본문과 파일 목록.
-- `/mcp`: MCP 서버(`$JUNEES_HOME/mcp.json`)의 상태와 도구. `/mcp login <서버>`는 OAuth를 요구하는 서버에 로그인하고(브라우저로 열 주소를 출력), `/mcp logout <서버>`는 저장한 로그인을 지운다([MCP 서버](docs/mcp.md#mcp-서버)).
-- `/plugins`: 이 세션이 쓰는 플러그인과 설치된 플러그인([플러그인](docs/plugins.md#플러그인)).
-- `/cron`: 예약 작업 목록([예약 작업](docs/automation.md#예약-작업)).
-- `/github`: GitHub 토큰 상태(값은 보이지 않는다), 쓸 수 있는 저장소, 남은 요청 한도([GitHub](docs/automation.md#github)).
-- `/webhooks`: 웹훅 경로 목록(`junees webhook`이 관리한다, [웹훅](docs/automation.md#웹훅)).
-- `/context`: 컨텍스트 크기와 한도(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), 그리고 이 세션이 읽은 프로젝트 지침 파일과 바이트 수(두 백엔드 모두, [프로젝트 지침 파일](docs/memory-and-skills.md#프로젝트-지침-파일)).
-- `/doctor`: 설치와 설정 점검(`junees doctor`와 같은 목록, 네트워크 없이. [점검](docs/doctor.md#점검-junees-doctor)).
-- `/compact`(api 백엔드만), `/usage`, `/help`, `/exit`(`/quit`도 됨).
+### 설정 파일과 처음 설정
+
+설정은 `$JUNEES_HOME/config.toml`(기본 `~/.junees/config.toml`)에 있다. 처음 실행할 때 설정 파일도 `ANTHROPIC_API_KEY`도 없고 터미널이면 설정 마법사가 먼저 뜬다(`junees setup`으로 언제든 다시). 마법사는 Claude에 닿는 방법(`1) Claude subscription` 또는 `2) Anthropic API key`)을 묻고, API 키면 대화 모델과 작업 기본 예산을, 마지막으로 디스코드 봇 설정(선택)을 묻는다. 터미널이 아니면(cron, 파이프) 마법사를 띄우지 않는다.
+
+파일은 TOML의 단순한 부분(한 줄에 `키 = 값`, 표와 배열은 받지 않음)만 쓴다. 키마다 환경 변수 하나에 대응하고 환경 변수가 있으면 파일보다 우선한다. 파일은 `0600`으로 만들고, 모델의 도구가 이 파일을 읽고 쓰는 것을 막는다(차단 목록이라 한계가 있다).
+
+```toml
+backend = "claude-code"          # JUNEES_BACKEND
+api_key = "sk-ant-..."           # ANTHROPIC_API_KEY
+model = "claude-sonnet-4-6"      # JUNEES_MODEL
+task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
+task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
+```
+
+마법사의 단계, 모든 키와 환경 변수 표는 [설정](docs/configuration.md)에 있다.
+
+## 대화 안 명령
+
+각 명령의 자세한 설명은 [대화 안 명령](docs/usage.md#대화-안-명령)에 있다.
+
+- `/task <목표>`, `/task`: 장기 작업을 계획하고 실행, 멈춘 작업 이어서 하기
+- `/status`: 작업 상태
+- `/sessions`: 최근 세션을 골라 이어 가기
+- `/search <낱말>`: 저장된 세션 검색
+- `/new`: 새 대화(`/reset`도 됨)
+- `/image <경로> [질문]`: 이미지와 함께 묻기(api 백엔드)
+- `/model [이름]`: 모델 보기, 이 실행 동안 바꾸기
+- `/backend [api|claude-code]`: 백엔드 보기, 이 실행 동안 바꾸기
+- `/memory`, `/memory clear user|notes|project`: 영구 메모리 보기, 한 저장소 비우기
+- `/skills`, `/skill <이름>`: 스킬 목록과 본문
+- `/mcp`, `/mcp login <서버>`, `/mcp logout <서버>`: MCP 서버 상태와 OAuth 로그인
+- `/plugins`: 플러그인
+- `/cron`: 예약 작업 목록
+- `/github`: GitHub 토큰, 저장소, 요청 한도
+- `/webhooks`: 웹훅 경로 목록
+- `/context`: 컨텍스트 크기와 이 세션이 읽은 지침 파일
+- `/doctor`: 설치와 설정 점검
+- `/compact`: 앞 대화를 요약으로 바꾸기(api 백엔드)
+- `/usage`: 이 세션의 토큰과 추정 비용
+- `/help`, `/exit`(`/quit`, Ctrl-D)
+
+턴 중 Ctrl-C는 그 턴만 취소한다([중단](docs/usage.md#중단-ctrl-c-sigterm)).
+
+## 명령줄
+
+하위 명령마다 `--help`가 있다(`junees cron --help` 등).
+
+- `junees [-p] "<질문>"`, `-c`, `--resume <id>`, `--no-session`, `--image <경로>`: 한 번 실행과 세션([고급 사용법](docs/usage.md))
+- `junees task ["<목표>"]`, `junees task init|run|status`, `junees status`: 장기 작업([장기 작업 모드](docs/usage.md#장기-작업-모드))
+- `junees setup`: 설정 마법사
+- `junees gateway`(`junees discord`), `junees gateway telegram`(`junees telegram`): 채팅 봇([게이트웨이](docs/gateways.md))
+- `junees cron add|list|remove|pause|resume|run|daemon`: 예약 작업([예약 작업](docs/automation.md#예약-작업))
+- `junees webhook serve|add|add-github|list|remove|pause|resume|test`: 웹훅과 GitHub PR 흐름([웹훅](docs/automation.md#웹훅))
+- `junees sessions search <낱말>`: 세션 검색([세션 검색](docs/usage.md#세션-검색))
+- `junees usage`: 지난 며칠의 토큰과 비용([사용량과 비용](docs/usage.md#사용량과-비용))
+- `junees doctor`: 설치와 설정 점검([점검](docs/doctor.md))
+- `junees plugin list|install|enable|disable|remove`: 플러그인([플러그인](docs/plugins.md))
+- `junees mcp login|logout <서버>`: MCP 서버 OAuth 로그인([OAuth 로그인](docs/mcp.md#oauth-로그인))
 
 명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `usage`, `plugin`, `plugins`, `mcp`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
-설정 파일과 환경 변수: [docs/configuration.md](docs/configuration.md)
+## 기능
 
-고급 사용법(세션 기록, 세션 검색, 사용량과 비용, 장기 작업 모드, 스트리밍, 확장 사고, 웹 검색, 이미지 입력): [docs/usage.md](docs/usage.md)
+- [세션 기록](docs/usage.md#세션-기록): 대화가 바뀔 때마다 JSONL로 남아, 언제 죽어도 `-c`나 `--resume`으로 이어 간다.
+- [중단](docs/usage.md#중단-ctrl-c-sigterm): Ctrl-C와 SIGTERM은 턴을 취소하고 실행 중인 도구의 프로세스 그룹을 끝낸다.
+- [세션 검색](docs/usage.md#세션-검색): 모델 도구 `session_search`, `/search`, `junees sessions search`로 지난 세션을 찾는다.
+- [사용량과 비용](docs/usage.md#사용량과-비용): 세션 기록에서 토큰과 추정 비용을 센다(`/usage`, `junees usage`).
+- [장기 작업 모드](docs/usage.md#장기-작업-모드): 기능 목록, 세션마다 새 컨텍스트, 하네스의 검증과 체크포인트 커밋, 예산, 크래시 복구, 알림.
+- [스트리밍 출력](docs/usage.md#스트리밍-출력): 응답을 SSE로 받아 도착하는 대로 찍는다.
+- [확장 사고](docs/usage.md#확장-사고): thinking 예산을 켜고, thinking 블록을 고치지 않고 돌려보낸다.
+- [웹 검색](docs/usage.md#웹-검색): Anthropic의 서버 도구 `web_search`(기본 꺼짐, 별도 과금).
+- [이미지 입력](docs/usage.md#이미지-입력): `read_file`, `/image`, `--image`, 채팅 첨부로 그림을 보여 준다(api 백엔드).
+- [메모리](docs/memory-and-skills.md#메모리): 세션을 넘어 남는 짧은 메모(`user`, `notes`, `project`).
+- [프로젝트 지침 파일](docs/memory-and-skills.md#프로젝트-지침-파일): 저장소의 `AGENTS.md`, `JUNEES.md`, `CLAUDE.md`를 시스템 프롬프트에 넣는다.
+- [스킬](docs/memory-and-skills.md#스킬): 반복 작업의 절차를 적은 문서를 모델이 읽고 고친다.
+- [서브에이전트](docs/memory-and-skills.md#서브에이전트-delegate): `delegate`로 독립적인 하위 작업을 동시에 맡긴다.
+- [구독 모드](docs/subscription.md): 대화와 장기 작업을 Claude 구독으로 로그인한 Claude Code가 실행한다.
+- [디스코드 게이트웨이](docs/gateways.md#디스코드-게이트웨이): 채널(스레드, DM)마다 대화 하나를 두는 디스코드 봇.
+- [텔레그램 게이트웨이](docs/gateways.md#텔레그램-게이트웨이): 같은 엔진으로 도는 텔레그램 봇.
+- [MCP 서버](docs/mcp.md): stdio와 Streamable HTTP MCP 서버의 도구, OAuth 로그인.
+- [예약 작업](docs/automation.md#예약-작업): 프롬프트를 일정에 맞춰 무인 실행하고 결과를 파일, 디스코드, 웹훅으로 보낸다.
+- [웹훅](docs/automation.md#웹훅): HTTP 요청(GitHub 웹훅 등)이 무인 실행을 시작하고, `add-github`는 PR 리뷰, 리뷰 반영, merge를 맡는다.
+- [GitHub](docs/automation.md#github): 모델의 `github` 도구로 PR 읽기, 코멘트, 리뷰, PR 열기, merge.
+- [플러그인](docs/plugins.md): 명령 도구, 훅, 프롬프트 조각을 폴더 하나로 더한다.
+- [컨텍스트 관리](docs/context.md): 프롬프트 캐싱, 오래된 도구 결과 비우기, 압축.
+- [기본 도구](docs/tools.md): `bash`, `read_file`, `write_file`, `edit_file`.
+- [명령 정책](docs/safety.md#명령-정책): 치명적인 명령과 비밀 파일을 다루는 명령을 실행 전에 막는다.
+- [실행 전 승인](docs/safety.md#실행-전-승인): 대화 모드에서 위험할 수 있는 도구 호출을 먼저 묻는다.
+- [점검](docs/doctor.md): `junees doctor`로 설치와 설정을 점검한다(기본은 네트워크 없이).
 
-메모리, 프로젝트 지침 파일, 스킬, 서브에이전트: [docs/memory-and-skills.md](docs/memory-and-skills.md)
+## 문서
 
-구독 모드(claude-code 백엔드): [docs/subscription.md](docs/subscription.md)
-
-디스코드, 텔레그램 게이트웨이: [docs/gateways.md](docs/gateways.md)
-
-MCP 서버: [docs/mcp.md](docs/mcp.md)
-
-예약 작업, 웹훅, GitHub: [docs/automation.md](docs/automation.md)
-
-플러그인: [docs/plugins.md](docs/plugins.md)
-
-컨텍스트 관리: [docs/context.md](docs/context.md)
-
-기본 도구: [docs/tools.md](docs/tools.md)
-
-명령 정책과 실행 전 승인: [docs/safety.md](docs/safety.md)
-
-점검(junees doctor): [docs/doctor.md](docs/doctor.md)
-
-구조(모듈과 테스트 목록): [docs/architecture.md](docs/architecture.md)
+- [docs/configuration.md](docs/configuration.md): 설정 파일, 처음 설정 마법사, 환경 변수 표
+- [docs/usage.md](docs/usage.md): 대화 안 명령, 고급 사용법, 세션 기록과 검색, 사용량과 비용, 장기 작업 모드, 스트리밍, 확장 사고, 웹 검색, 이미지 입력
+- [docs/memory-and-skills.md](docs/memory-and-skills.md): 메모리, 프로젝트 지침 파일, 스킬, 서브에이전트
+- [docs/subscription.md](docs/subscription.md): 구독 모드(claude-code 백엔드)
+- [docs/gateways.md](docs/gateways.md): 디스코드, 텔레그램 게이트웨이
+- [docs/mcp.md](docs/mcp.md): MCP 서버(stdio, Streamable HTTP, OAuth)
+- [docs/automation.md](docs/automation.md): 예약 작업, 웹훅(GitHub PR 흐름 포함), GitHub 도구
+- [docs/plugins.md](docs/plugins.md): 플러그인
+- [docs/context.md](docs/context.md): 컨텍스트 관리
+- [docs/tools.md](docs/tools.md): 기본 도구와 `edit_file`
+- [docs/safety.md](docs/safety.md): 명령 정책, 실행 전 승인
+- [docs/doctor.md](docs/doctor.md): 점검(`junees doctor`)
+- [docs/architecture.md](docs/architecture.md): 구조(모듈 설명과 테스트 목록)
+- [docs/long-running.md](docs/long-running.md): 단계별 계획과 진행 장부(각 단계에서 무엇을 왜 그렇게 만들었는지, 리뷰 반영 기록)
 
 ## 로드맵
 
