@@ -2040,6 +2040,17 @@ fn profiles_left_by_a_process_that_is_gone_are_removed() {
         libc::killpg(owner.id() as i32, libc::SIGKILL);
     }
     owner.wait().unwrap();
+    // `sleep` holds the locked descriptor too, and may outlive `flock`
+    // for a moment after the SIGKILL: wait until the lock is free.
+    let mut waited = 0;
+    while taken() {
+        assert!(
+            waited < 100,
+            "the killed flock(1) group still holds the lock"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        waited += 1;
+    }
     drop(process::Profile::new(Some(&folder)).unwrap());
     assert!(!held.exists());
     drop(live);
