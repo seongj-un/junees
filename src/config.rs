@@ -199,6 +199,7 @@ impl Config {
             webhook: false,
             gh_config_dir: None,
             instruction_files: context_files.names.clone(),
+            sandbox: Some(crate::sandbox::Settings::read(get)?),
         };
         let approval = ApprovalMode::parse(get("JUNEES_APPROVAL").as_deref())?;
 
@@ -354,9 +355,22 @@ mod tests {
                     .iter()
                     .map(|name| name.to_string())
                     .collect(),
+                sandbox: Some(crate::sandbox::Settings::read(|_| None).unwrap()),
                 ..ToolSettings::default()
             }
         );
+        let sandbox = self::config(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            ("JUNEES_SANDBOX", "require"),
+            ("JUNEES_SANDBOX_NETWORK", "0"),
+        ])
+        .unwrap()
+        .tools
+        .sandbox
+        .unwrap();
+        assert_eq!(sandbox.mode, Some(crate::sandbox::Mode::Require));
+        assert!(!sandbox.network);
+        assert!(self::config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_SANDBOX", "on")]).is_err());
         let elsewhere =
             self::config(&[("ANTHROPIC_API_KEY", "k"), ("JUNEES_HOME", "/data/j")]).unwrap();
         assert_eq!(

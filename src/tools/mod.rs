@@ -181,6 +181,10 @@ pub struct ToolSettings {
     /// setting). In a webhook run the file tools and bash refuse to write
     /// files with these names ([`instruction_files`]).
     pub instruction_files: Vec<String>,
+    /// The Landlock sandbox of bash's commands ([`crate::sandbox`],
+    /// `JUNEES_SANDBOX*`); `None`: no sandbox (tests, the claude-code
+    /// backend).
+    pub sandbox: Option<crate::sandbox::Settings>,
 }
 
 impl ToolSettings {
