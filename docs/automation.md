@@ -74,7 +74,7 @@ junees webhook add pr-review --secret-env PR_HOOK_SECRET \
   --prompt "PR #{{payload.number}} \"{{payload.pull_request.title}}\"({{payload.pull_request.html_url}})를 읽고 문제를 짚어 줘" \
   --deliver discord:234567890123456789
 junees webhook list                 # 경로, 이벤트, 마지막 실행, 프롬프트, 폴더, 전달처, 시크릿 위치
-junees webhook test pr-review payload.json --event pull_request   # 서버 없이 한 번 실행
+junees webhook test pr-review payload.json --event pull_request   # 서버 없이 한 번 실행 (전달 id는 --delivery <id>)
 junees webhook pause pr-review      # 멈춤 (resume으로 다시, 그동안 요청은 503)
 junees webhook remove pr-review     # (rm)
 junees webhook serve                # 127.0.0.1:8650에서 받기 (계속 띄워 둔다)

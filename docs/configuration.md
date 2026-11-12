@@ -24,7 +24,7 @@ task_max_time = "2h"             # JUNEES_TASK_MAX_TIME
 task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 ```
 
-그 밖의 키: `base_url`, `prices`([사용량과 비용](usage.md#사용량과-비용)), `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `context_files`(쉼표로 구분한 문자열, [프로젝트 지침 파일](memory-and-skills.md#프로젝트-지침-파일)), `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`, `timezone`, `cron_max_time`, `cron_max_tokens`, `webhook_max_time`, `webhook_max_tokens`, `github_token`, `github_api_url`, `github_repos`, `github_allow_unattended`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `discord_*`는 `JUNEES_DISCORD_*`, `cron_*`는 `JUNEES_CRON_*`, `webhook_*`는 `JUNEES_WEBHOOK_*`, `github_*`는 `JUNEES_GITHUB_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
+그 밖의 키: `base_url`, `prices`([사용량과 비용](usage.md#사용량과-비용)), `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `task_skill_manage`, `subagents`, `subagent_max_turns`, `subagent_max_tokens`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `context_files`(쉼표로 구분한 문자열, [프로젝트 지침 파일](memory-and-skills.md#프로젝트-지침-파일)), `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`, `telegram_token`, `telegram_allowed_users`, `telegram_parallel`, `telegram_approval_timeout`, `timezone`, `cron_max_time`, `cron_max_tokens`, `webhook_max_time`, `webhook_max_tokens`, `github_token`, `github_api_url`, `github_repos`, `github_allow_unattended`, `github_flow_merge`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `discord_*`는 `JUNEES_DISCORD_*`, `telegram_*`는 `JUNEES_TELEGRAM_*`, `cron_*`는 `JUNEES_CRON_*`, `webhook_*`는 `JUNEES_WEBHOOK_*`, `github_*`는 `JUNEES_GITHUB_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
 파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령과, 이 파일이 든 폴더(`$JUNEES_HOME`)를 통째로 다루는 명령을 막는다([명령 정책](safety.md#명령-정책) 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽은 차단 목록일 뿐 샌드박스가 아니어서 다른 변수나 실행 중에 만든 경로, 더 위 폴더를 통째로 다루는 명령으로는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
 ## 환경 변수
@@ -35,7 +35,9 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (api 백엔드에서 필수, 또는 설정 파일 `api_key`) | Anthropic API 키 |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API 주소 |
+| `JUNEES_BACKEND` | `api` | 대화와 작업을 돌릴 것: `api`(Junees의 에이전트) 또는 `claude-code`([구독 모드](subscription.md#구독-모드-claude-code-백엔드)) |
 | `JUNEES_MODEL` | `claude-sonnet-4-6` | 모델 |
+| `JUNEES_PRICES` | (없음) | 비용 추정에 쓸 모델 가격, `<모델>=<입력>/<출력>` 쉼표 목록 ([사용량과 비용](usage.md#사용량과-비용)) |
 | `JUNEES_MAX_TOKENS` | `8192` | 모델 호출 1회의 최대 출력 토큰 |
 | `JUNEES_MAX_TURNS` | `50` | 입력 하나당 최대 모델 호출 횟수 |
 | `JUNEES_SUBAGENTS` | `3` | `delegate`가 동시에 돌리는 서브에이전트 수(1~10). `0`이면 `delegate`를 끈다 ([서브에이전트](memory-and-skills.md#서브에이전트-delegate)) |
@@ -61,3 +63,14 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 | `JUNEES_WEB_SEARCH_MAX_USES` | `5` | 한 턴의 웹 검색 횟수 상한 (`max_uses`) |
 | `JUNEES_WEB_SEARCH_ALLOWED_DOMAINS` | (없음) | 이 도메인에서만 검색, 쉼표 구분 (예: `docs.rs,example.com/blog`) |
 | `JUNEES_WEB_SEARCH_BLOCKED_DOMAINS` | (없음) | 이 도메인은 검색하지 않음, 쉼표 구분. `ALLOWED`와 함께 쓸 수 없다 |
+| `JUNEES_CLAUDE_BIN` | `PATH`의 `claude` | claude-code 백엔드가 실행할 `claude` 프로그램 |
+| `JUNEES_CLAUDE_MODEL` | (없음) | claude-code 백엔드에서 `claude`에 `--model`로 넘길 모델 |
+| `JUNEES_MEMORY_USER_CHARS` | `1500` | 메모리 `user` 저장소의 문자 수 상한(1~8000, [메모리](memory-and-skills.md#메모리)) |
+| `JUNEES_MEMORY_NOTES_CHARS` | `2500` | 메모리 `notes` 저장소의 문자 수 상한(1~8000) |
+| `JUNEES_MEMORY_PROJECT_CHARS` | `2500` | 메모리 `project` 저장소의 문자 수 상한(1~8000) |
+| `JUNEES_CONTEXT_FILES` | `AGENTS.md,JUNEES.md,CLAUDE.md` | 읽을 프로젝트 지침 파일 이름, 쉼표 구분. `off`면 끈다 ([프로젝트 지침 파일](memory-and-skills.md#프로젝트-지침-파일)) |
+| `JUNEES_TIMEZONE` | 시스템 시간대 | 예약 작업의 일정과 `junees usage`의 날짜 경계 |
+| `JUNEES_CRON_MAX_TIME` | `30m` | 예약 작업 실행 하나의 시간 한도 ([예약 작업](automation.md#예약-작업)) |
+| `JUNEES_CRON_MAX_TOKENS` | `1000000` | 예약 작업 실행 하나의 토큰 한도 |
+
+디스코드(`JUNEES_DISCORD_*`)와 텔레그램(`JUNEES_TELEGRAM_*`) 설정은 [게이트웨이](gateways.md), GitHub 설정(`JUNEES_GITHUB_*`)은 [GitHub](automation.md#github)의 설정 예시에 있다.
