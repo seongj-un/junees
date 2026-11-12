@@ -11,7 +11,7 @@ Usage:
   junees webhook serve [--listen 127.0.0.1:8650]
                                    receive POST /hooks/<name> (keep it running)
   junees webhook add <name> --prompt \"<template>\" [--kind github|generic]
-                     [--secret-env <VAR> | --secret-file <path>]
+                     [--secret-env <VAR> | --secret-file <path> | --no-secret]
                      [--events pull_request.opened,issue_comment,...]
                      [--dir <folder>] [--deliver discord:<channel id>|webhook|local]
                      [--github-allow comment,review,approve,pr_create,merge]
@@ -34,11 +34,16 @@ X-Junees-Event (default `webhook`), X-Junees-Delivery and check
 X-Junees-Signature (sha256=<hex HMAC-SHA256 of the body>). The secret is
 read from the environment variable or the private (0600) file named, never
 stored; a file must be in $JUNEES_HOME/secrets/, which the model's tools
-may not read. A route without a secret is only served on a loopback address,
-to JSON requests sent straight to it: Host 127.0.0.1:<port>, localhost:<port>
-or [::1]:<port>, Content-Type application/json, no Origin or Sec-Fetch-*
-header (browsers) and no X-Forwarded-For, Forwarded, CF-Connecting-IP or
-X-Real-IP header (proxies and tunnels).
+may not read. Without either, `add` makes a random secret in
+$JUNEES_HOME/secrets/webhook-<name> (like add-github).
+--no-secret accepts unsigned requests instead: such a route is only served
+on a loopback address, to JSON requests sent straight to it: Host
+127.0.0.1:<port>, localhost:<port> or [::1]:<port>, Content-Type
+application/json, no Origin or Sec-Fetch-* header (browsers) and no
+X-Forwarded-For, Forwarded, CF-Connecting-IP or X-Real-IP header (proxies
+and tunnels). Anything on this machine that can open a connection (other
+users, the model's own commands) can still start runs. A route without a
+secret that was not added with --no-secret (an older one) is refused (403).
 --events keeps the events that run (`pull_request` or `pull_request.opened`;
 default every event); GitHub's ping is answered and does not run.
 
@@ -127,6 +132,8 @@ pub struct AddArgs {
     pub kind: Option<String>,
     pub secret_env: Option<String>,
     pub secret_file: Option<PathBuf>,
+    /// `--no-secret`: unsigned requests, on a loopback address only.
+    pub no_secret: bool,
     pub events: Option<String>,
     pub dir: Option<PathBuf>,
     pub deliver: Option<String>,
@@ -239,7 +246,7 @@ fn serve(rest: Vec<String>) -> Result<WebhookCommand> {
 }
 
 fn add(rest: Vec<String>) -> Result<AddArgs> {
-    let (positional, options) = split(
+    let (positional, options) = split_flags(
         rest,
         &[
             "--prompt",
@@ -251,6 +258,7 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
             "--deliver",
             "--github-allow",
         ],
+        &["--no-secret"],
         "add",
     )?;
     let mut args = AddArgs::default();
@@ -264,6 +272,7 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
             "--events" => args.events = Some(value),
             "--dir" => args.dir = Some(PathBuf::from(value)),
             "--github-allow" => args.github_allow = Some(value),
+            "--no-secret" => args.no_secret = true,
             _ => args.deliver = Some(value),
         }
     }
@@ -271,13 +280,16 @@ fn add(rest: Vec<String>) -> Result<AddArgs> {
         Ok([name]) => name,
         Err(_) => bail!(
             "usage: junees webhook add <name> --prompt \"<template>\" [--kind ...] \
-             [--secret-env VAR | --secret-file path] [--events ...] [--dir ...] [--deliver ...] \
-             [--github-allow ...]"
+             [--secret-env VAR | --secret-file path | --no-secret] [--events ...] [--dir ...] \
+             [--deliver ...] [--github-allow ...]"
         ),
     };
     args.prompt = prompt.context("`junees webhook add` needs --prompt \"<template>\"")?;
     if args.secret_env.is_some() && args.secret_file.is_some() {
         bail!("give --secret-env or --secret-file, not both");
+    }
+    if args.no_secret && (args.secret_env.is_some() || args.secret_file.is_some()) {
+        bail!("--no-secret takes no --secret-env or --secret-file");
     }
     Ok(args)
 }
@@ -432,12 +444,17 @@ mod tests {
                 kind: Some("generic".into()),
                 secret_env: Some("PR_SECRET".into()),
                 secret_file: None,
+                no_secret: false,
                 events: Some("pull_request.opened,issue_comment".into()),
                 dir: Some(PathBuf::from("/srv")),
                 deliver: Some("discord:42".into()),
                 github_allow: Some("comment,review".into()),
             })
         );
+        match parse_words(&["add", "local", "--prompt", "x", "--no-secret"]).unwrap() {
+            WebhookCommand::Add(args) => assert!(args.no_secret && args.secret_env.is_none()),
+            other => panic!("{other:?}"),
+        }
         assert_eq!(
             parse_words(&[
                 "add-github",
@@ -518,6 +535,18 @@ mod tests {
                     "f",
                 ][..],
                 "not both",
+            ),
+            (
+                &[
+                    "add",
+                    "a",
+                    "--prompt",
+                    "x",
+                    "--no-secret",
+                    "--secret-env",
+                    "A",
+                ][..],
+                "--no-secret takes no",
             ),
             (&["add", "a", "--prompt"][..], "needs a value"),
             (&["add", "a", "--color", "x"][..], "unknown option"),

@@ -107,8 +107,10 @@ pub fn overview_with(
         } else {
             line.push_str(&format!(": {}", route.events.join(", ")));
         }
-        if route.secret.is_none() {
-            line.push_str(", no secret (loopback only)");
+        match (&route.secret, route.no_secret) {
+            (None, true) => line.push_str(", no secret (loopback only)"),
+            (None, false) => line.push_str(", no secret (refused: add it again with one)"),
+            _ => {}
         }
         if !route.github_allow.is_empty() {
             line.push_str(&format!(
@@ -308,6 +310,7 @@ mod tests {
         let mut open = route("open");
         open.kind = store::Kind::Generic;
         open.secret = None;
+        open.no_secret = true;
         open.paused = true;
         let routes = [pr, open];
         assert_eq!(
