@@ -216,20 +216,19 @@ pub fn launch(
             }
         });
     }
+    // From here on a failure drops `process`, which kills the browser.
+    let process = Process {
+        child,
+        pid,
+        stderr,
+        profile,
+    };
     let pipes = Pipes {
         from_browser: pipe::Receiver::from_owned_fd(from_child)
             .context("cannot read from the browser")?,
         to_browser: pipe::Sender::from_owned_fd(to_child).context("cannot write to the browser")?,
     };
-    Ok((
-        Process {
-            child,
-            pid,
-            stderr,
-            profile,
-        },
-        pipes,
-    ))
+    Ok((process, pipes))
 }
 
 /// The browser's command line and environment, without the pipe.
@@ -273,8 +272,8 @@ pub(super) fn command(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true);
+        // `Process`'s drop kills the whole group and reaps it.
+        .process_group(0);
     scrub(&mut command, hidden_env);
     command
 }

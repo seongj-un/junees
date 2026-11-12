@@ -123,6 +123,7 @@ const HOME_PAGE: &str = r#"<!doctype html><html><head><title>Test page</title></
   <button type="submit">Sign in</button>
 </form>
 <button>Buy now</button>
+<input type="file" aria-label="Upload" oncancel="document.title = 'picker cancelled'">
 </body></html>"#;
 
 fn home_routes() -> HashMap<&'static str, (u16, &'static str, String)> {
@@ -359,6 +360,22 @@ async fn opens_a_page_and_works_with_its_elements() {
     let size = output.images[0].size().unwrap();
     assert_eq!((size.width, size.height), (1280, 800));
     assert!(output.content.contains("<page-"), "{}", output.content);
+
+    // A file picker is cancelled: no local file can be chosen.
+    let output = run(&tool, json!({"action": "open", "url": format!("{base}/")})).await;
+    let page = output.content;
+    let output = run(
+        &tool,
+        json!({"action": "click", "ref": number(&page, "file", "Upload")}),
+    )
+    .await;
+    assert!(!output.is_error, "{}", output.content);
+    let output = run(&tool, json!({"action": "snapshot"})).await;
+    assert!(
+        output.content.contains("title: picker cancelled"),
+        "{}",
+        output.content
+    );
 
     // A download is refused.
     let output = run(&tool, json!({"action": "open", "url": format!("{base}/")})).await;
