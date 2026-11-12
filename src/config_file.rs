@@ -44,6 +44,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("sandbox", "JUNEES_SANDBOX"),
     ("sandbox_write", "JUNEES_SANDBOX_WRITE"),
     ("sandbox_read", "JUNEES_SANDBOX_READ"),
+    ("webhook_sandbox_read", "JUNEES_WEBHOOK_SANDBOX_READ"),
     ("sandbox_network", "JUNEES_SANDBOX_NETWORK"),
     ("notify_webhook", "JUNEES_NOTIFY_WEBHOOK"),
     ("notify_each_session", "JUNEES_NOTIFY_EACH_SESSION"),

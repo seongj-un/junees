@@ -79,6 +79,7 @@ impl Mode {
 pub const MODE_ENV: &str = "JUNEES_SANDBOX";
 pub const WRITE_ENV: &str = "JUNEES_SANDBOX_WRITE";
 pub const READ_ENV: &str = "JUNEES_SANDBOX_READ";
+pub const WEBHOOK_READ_ENV: &str = "JUNEES_WEBHOOK_SANDBOX_READ";
 pub const NETWORK_ENV: &str = "JUNEES_SANDBOX_NETWORK";
 
 /// The temporary folders commands may always write in, besides `$TMPDIR`.
@@ -111,6 +112,12 @@ pub struct Settings {
     /// The folders commands may read (`JUNEES_SANDBOX_READ`); `None`:
     /// everything.
     pub read: Option<Vec<PathBuf>>,
+    /// The folders a webhook run's file tools may read besides the
+    /// working, temporary and `write` folders
+    /// (`JUNEES_WEBHOOK_SANDBOX_READ`). They take it instead of `read`,
+    /// which widens the file tools of scheduled jobs only: a webhook run
+    /// starts from anyone's text.
+    pub webhook_read: Vec<PathBuf>,
     /// Whether commands may use TCP (`JUNEES_SANDBOX_NETWORK`, on by
     /// default).
     pub network: bool,
@@ -131,6 +138,7 @@ impl Settings {
         let read = get(READ_ENV)
             .map(|raw| paths(Some(raw), READ_ENV, home.as_deref()))
             .transpose()?;
+        let webhook_read = paths(get(WEBHOOK_READ_ENV), WEBHOOK_READ_ENV, home.as_deref())?;
         let network = match get(NETWORK_ENV) {
             None => true,
             raw => crate::config::parse_flag(raw, NETWORK_ENV)?,
@@ -150,6 +158,7 @@ impl Settings {
             mode,
             write,
             read,
+            webhook_read,
             network,
             temp,
             unattended: false,

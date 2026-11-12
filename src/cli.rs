@@ -141,7 +141,8 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_WEBHOOK_MAX_TOKENS  [webhook_max_tokens] tokens one webhook run may use (default 1000000)
   JUNEES_SANDBOX  [sandbox] Landlock confinement of bash commands: auto (default; require
                   for scheduled and webhook runs), require or off; also
-                  JUNEES_SANDBOX_WRITE, JUNEES_SANDBOX_READ, JUNEES_SANDBOX_NETWORK
+                  JUNEES_SANDBOX_WRITE, JUNEES_SANDBOX_READ, JUNEES_SANDBOX_NETWORK,
+                  JUNEES_WEBHOOK_SANDBOX_READ (webhook runs' file tools)
   (also JUNEES_THINKING_BUDGET, JUNEES_STREAM, JUNEES_DENY_COMMANDS,
   JUNEES_ALLOW_DANGEROUS, JUNEES_HIDDEN_ENV: see docs/configuration.md)
 ";
