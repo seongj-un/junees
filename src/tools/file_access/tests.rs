@@ -239,11 +239,12 @@ async fn webhook_runs_do_not_read_saved_sessions() {
     let session = home.join(".junees/sessions/s.jsonl");
     std::fs::create_dir_all(session.parent().unwrap()).unwrap();
     std::fs::write(&session, "{\"tool_output\":\"earlier secret\"}\n").unwrap();
-    // `sandbox_read` holds the home folder, so only the sessions rule
+    // The read settings hold the home folder, so only the sessions rule
     // stands between the run and the file.
     let mut settings = tools(&home);
     if let Some(sandbox) = settings.sandbox.as_mut() {
         sandbox.read = Some(vec![home.clone()]);
+        sandbox.webhook_read = vec![home.clone()];
     }
     let gh = tempfile::tempdir().unwrap();
     let webhook = crate::cron::run::Trigger::Webhook {
@@ -278,6 +279,85 @@ async fn webhook_runs_do_not_read_saved_sessions() {
         "{}",
         output.content
     );
+}
+
+#[tokio::test]
+async fn webhook_runs_read_their_own_list_instead_of_sandbox_read() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let outside = layout.path("outside/notes.txt");
+    std::fs::write(layout.path("scratch/s.txt"), "scratch text\n").unwrap();
+    // `/` beside `~/.ssh`, as for a scheduled job that pushes over ssh.
+    let mut settings = tools(&home);
+    if let Some(sandbox) = settings.sandbox.as_mut() {
+        sandbox.read = Some(vec![PathBuf::from("/"), home.join(".ssh")]);
+        sandbox.temp = vec![layout.path("scratch")];
+    }
+    let gh = tempfile::tempdir().unwrap();
+    let work = layout.path("work");
+    let webhook = |settings: &ToolSettings| {
+        crate::cron::run::Trigger::Webhook {
+            route: "r",
+            github_allow: &[],
+            gh_config: gh.path(),
+            context_dir: &work,
+            approvers: &[],
+        }
+        .tool_settings(settings)
+    };
+    let read_with = |settings: ToolSettings, path: PathBuf| async move {
+        ReadFile::with_settings(&settings)
+            .run(json!({ "path": path }))
+            .await
+    };
+
+    // A scheduled job reads anywhere `sandbox_read` says, but not the key.
+    let cron = crate::cron::run::Trigger::Cron.tool_settings(&settings);
+    let output = read_with(cron.clone(), outside.clone()).await;
+    assert!(
+        output.content.contains("outside text"),
+        "{}",
+        output.content
+    );
+    let output = read_with(cron, home.join(".ssh/id_ed25519")).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(!output.content.contains("PRIVATE KEY"));
+
+    // A webhook run keeps to the working and temporary folders.
+    let output = read_with(webhook(&settings), outside.clone()).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        !output.content.contains("outside text"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output
+            .content
+            .contains("the user can add a folder to the `webhook_sandbox_read` setting"),
+        "{}",
+        output.content
+    );
+    let output = read_with(webhook(&settings), layout.path("scratch/s.txt")).await;
+    assert!(
+        output.content.contains("scratch text"),
+        "{}",
+        output.content
+    );
+
+    // `webhook_sandbox_read` opens a folder to it, still not the key.
+    if let Some(sandbox) = settings.sandbox.as_mut() {
+        sandbox.webhook_read = vec![layout.path("outside"), home.join(".ssh")];
+    }
+    let output = read_with(webhook(&settings), outside.clone()).await;
+    assert!(
+        output.content.contains("outside text"),
+        "{}",
+        output.content
+    );
+    let output = read_with(webhook(&settings), home.join(".ssh/id_ed25519")).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(!output.content.contains("PRIVATE KEY"));
 }
 
 #[tokio::test]
