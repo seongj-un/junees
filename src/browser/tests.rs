@@ -832,6 +832,48 @@ fn proxies_come_from_the_arguments_or_the_environment() {
     assert!(process::proxies(&http, &args(&["--no-proxy-server"])).is_empty());
 }
 
+#[test]
+fn documents_without_an_address_are_noted() {
+    use page::{Remote, document_remote};
+    let policy = Policy {
+        proxies: vec!["10.0.0.2".parse().unwrap()],
+        ..Policy::new(false)
+    };
+    let response = |remote: &str, url: &str, worker: bool| json!({"remoteIPAddress": remote, "url": url, "fromServiceWorker": worker});
+    assert_eq!(
+        document_remote(&policy, &response("93.184.216.34", "http://a.test/", false)),
+        Remote::Fine
+    );
+    assert_eq!(
+        document_remote(&policy, &response("10.0.0.2", "http://a.test/", false)),
+        Remote::Fine
+    );
+    assert_eq!(
+        document_remote(&policy, &response("10.0.0.3", "http://a.test/", false)),
+        Remote::Private("10.0.0.3".parse().unwrap())
+    );
+    assert_eq!(
+        document_remote(&policy, &response("", "https://a.test/", false)),
+        Remote::Unknown
+    );
+    assert_eq!(
+        document_remote(&policy, &json!({"url": "http://a.test/"})),
+        Remote::Unknown
+    );
+    assert_eq!(
+        document_remote(&policy, &response("", "https://a.test/", true)),
+        Remote::Fine
+    );
+    assert_eq!(
+        document_remote(&policy, &response("", "data:text/html,x", false)),
+        Remote::Fine
+    );
+    assert_eq!(
+        document_remote(&Policy::new(true), &response("", "http://a.test/", false)),
+        Remote::Fine
+    );
+}
+
 #[tokio::test]
 async fn risky_actions_need_an_approval() {
     let Some(program) = chromium("risky_actions_need_an_approval") else {

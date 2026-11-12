@@ -1006,7 +1006,7 @@ fn exception(details: &Value) -> String {
 /// event on to the actions waiting for one: paused requests (checked
 /// against `policy`), documents that came from a private or local address
 /// although their name passed (left for a blank page, `private_page`
-/// set), dialogs (dismissed), downloads (refused by the browser; noted)
+/// set) or without an address (noted), dialogs (dismissed), downloads (refused by the browser; noted)
 /// and new tabs (noted).
 async fn guard(
     connection: Connection,
@@ -1049,9 +1049,18 @@ async fn guard(
             // so the action that waits for the load sees it.
             "Network.responseReceived" if event.params["type"] == "Document" => {
                 let response = &event.params["response"];
-                let remote = response["remoteIPAddress"].as_str().unwrap_or_default();
-                if let Err(ip) = policy.check_remote(remote) {
-                    let url = cut(response["url"].as_str().unwrap_or_default(), MAX_NOTE);
+                let url = cut(response["url"].as_str().unwrap_or_default(), MAX_NOTE);
+                let remote = document_remote(&policy, response);
+                if remote == Remote::Unknown {
+                    notes
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .dialog(&format!(
+                            "a page came without the address it was loaded from (not from a \
+                             service worker), so it was not checked for DNS rebinding: {url}"
+                        ));
+                }
+                if let Remote::Private(ip) = remote {
                     notes
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -1131,6 +1140,36 @@ async fn guard(
         if !event.method.starts_with("Network.") {
             let _ = events.send(event);
         }
+    }
+}
+
+/// What the address a document came from says ([`Policy::check_remote`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Remote {
+    /// Allowed, or nothing to check: not fetched (no http/https), from a
+    /// service worker, or every address allowed.
+    Fine,
+    /// A private or local address.
+    Private(std::net::IpAddr),
+    /// Fetched, but Chrome named no address: not checked, only noted.
+    Unknown,
+}
+
+/// The verdict on a `Network.Response` of a document.
+pub(super) fn document_remote(policy: &Policy, response: &Value) -> Remote {
+    let remote = response["remoteIPAddress"].as_str().unwrap_or_default();
+    if remote.is_empty() {
+        let url = response["url"].as_str().unwrap_or_default();
+        let fetched = url.starts_with("http://") || url.starts_with("https://");
+        return if fetched && !policy.allow_private && response["fromServiceWorker"] != true {
+            Remote::Unknown
+        } else {
+            Remote::Fine
+        };
+    }
+    match policy.check_remote(remote) {
+        Ok(()) => Remote::Fine,
+        Err(ip) => Remote::Private(ip),
     }
 }
 
