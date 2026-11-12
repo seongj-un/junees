@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -88,6 +88,9 @@ pub struct ChannelState {
     answers: Arc<AnswerSlot>,
     session: Mutex<String>,
     usage: Mutex<String>,
+    /// When the channel last had something to do: a message queued for
+    /// it or a job of its worker started or ended.
+    touched: Mutex<Option<Instant>>,
 }
 
 impl ChannelState {
@@ -220,6 +223,7 @@ impl<P: Platform> Channels<P> {
             return;
         }
         let known = self.channel(channel);
+        store(&known.state.touched, Some(Instant::now()));
         let epoch = known.state.epoch.load(Ordering::SeqCst);
         known.state.queued.fetch_add(1, Ordering::SeqCst);
         let _ = known.jobs.send(Job::Input {
@@ -261,6 +265,32 @@ impl<P: Platform> Channels<P> {
         })
     }
 
+    /// Ends the workers of the channels that had nothing to do for
+    /// `idle` (no turn running, waiting or asking, nothing queued), and
+    /// with them their open conversations; returns how many. The
+    /// channel's session stays saved: its next message starts a worker
+    /// that opens it again. For gateways whose channels come and go
+    /// (Slack threads), so their workers do not pile up.
+    pub fn close_idle(&mut self, idle: Duration) -> usize {
+        let before = self.channels.len();
+        self.channels.retain(|_, known| {
+            let state = &known.state;
+            let quiet = !state.busy()
+                && state.queued.load(Ordering::SeqCst) == 0
+                && !state.answers.waiting()
+                && locked(&state.touched).is_some_and(|at| at.elapsed() >= idle);
+            // Dropping the channel drops its job sender: the worker's
+            // next receive ends it.
+            !quiet
+        });
+        before - self.channels.len()
+    }
+
+    /// How many channels have a worker.
+    pub fn open_count(&self) -> usize {
+        self.channels.len()
+    }
+
     /// Runs a command; `direct` when it came in a private conversation
     /// with the bot.
     pub fn command(&mut self, channel: &str, command: Command, direct: bool) {
@@ -268,6 +298,7 @@ impl<P: Platform> Channels<P> {
         let reply = match command {
             Command::New => {
                 let known = self.channel(channel);
+                store(&known.state.touched, Some(Instant::now()));
                 let epoch = known.state.epoch.load(Ordering::SeqCst);
                 known.state.queued.fetch_add(1, Ordering::SeqCst);
                 let _ = known.jobs.send(Job::New { epoch });
@@ -472,6 +503,7 @@ async fn worker<P: Platform>(
     // before each later one while it is unavailable for now.
     let mut ready = false;
     while let Some(job) = jobs.recv().await {
+        store(&state.touched, Some(Instant::now()));
         if job.epoch() < state.epoch.load(Ordering::SeqCst) {
             continue;
         }
@@ -575,6 +607,7 @@ async fn worker<P: Platform>(
                 .await;
             }
         }
+        store(&state.touched, Some(Instant::now()));
     }
 }
 

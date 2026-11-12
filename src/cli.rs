@@ -22,6 +22,7 @@ Usage:
   junees setup            change the settings
   junees gateway          run as a Discord bot (also `junees discord`; see README)
   junees gateway telegram run as a Telegram bot (also `junees telegram`; see README)
+  junees gateway slack    run as a Slack app over Socket Mode (also `junees slack`)
   junees cron             prompts that run on a schedule (`junees cron --help`)
   junees webhook          HTTP requests that start a run (`junees webhook --help`)
   junees doctor           check the installation and the settings (--json,
@@ -124,6 +125,13 @@ Environment (each also a key of config.toml, named in brackets):
   JUNEES_TELEGRAM_PARALLEL       [telegram_parallel] chats running a turn at once (default 2)
   JUNEES_TELEGRAM_APPROVAL_TIMEOUT  [telegram_approval_timeout] wait for an approval
                                  answer before declining (default 5m)
+  JUNEES_SLACK_BOT_TOKEN       [slack_bot_token] bot token (xoxb-) of `junees gateway slack`
+  JUNEES_SLACK_APP_TOKEN       [slack_app_token] app-level token (xapp-) for Socket Mode
+  JUNEES_SLACK_ALLOWED_USERS   [slack_allowed_users] Slack member ids the bot answers
+                               (comma list; the gateway refuses to start without it)
+  JUNEES_SLACK_PARALLEL        [slack_parallel] conversations running a turn at once (default 2)
+  JUNEES_SLACK_APPROVAL_TIMEOUT  [slack_approval_timeout] wait for an approval answer
+                               before declining (default 5m)
   JUNEES_TIMEZONE         [timezone] zone of `junees cron` schedules (default the system's)
   JUNEES_CRON_MAX_TIME    [cron_max_time] time one scheduled run may take (default 30m)
   JUNEES_CRON_MAX_TOKENS  [cron_max_tokens] tokens one scheduled run may use (default 1000000)
@@ -142,7 +150,7 @@ pub const REPL_HELP: &str = "\
 /status            show where the task stands
 /sessions          list recent sessions and pick one to continue
 /search <words>    search the saved sessions of this folder (\"a phrase\" in quotes;
-                   --all every folder, --limit N, --source discord|telegram|cron|webhook)
+                   --all every folder, --limit N, --source discord|telegram|slack|cron|webhook)
 /new               start a new conversation (also /reset)
 /image <path> [<question>]
                    send an image with a question (PNG, JPEG, GIF or WebP up to
@@ -189,6 +197,8 @@ pub enum Command {
     /// `junees gateway telegram` (or `junees telegram`): run as a Telegram
     /// bot.
     Telegram,
+    /// `junees gateway slack` (or `junees slack`): run as a Slack app.
+    Slack,
     /// `junees cron ...`: scheduled jobs.
     Cron(crate::cron::cli::CronCommand),
     /// `junees webhook ...`: webhook routes and their server.
@@ -361,21 +371,21 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
             }
             return crate::plugins::manage::parse(args).map(Command::Plugin);
         }
-        Some(name @ ("gateway" | "discord" | "telegram")) => {
+        Some(name @ ("gateway" | "discord" | "telegram" | "slack")) => {
             let mut name = name.to_string();
             args.next();
-            let mut command = match name.as_str() {
+            let platform_command = |name: &str| match name {
                 "telegram" => Command::Telegram,
+                "slack" => Command::Slack,
                 _ => Command::Gateway,
             };
+            let mut command = platform_command(&name);
             let mut next = args.next();
-            // `junees gateway discord` / `junees gateway telegram`.
+            // `junees gateway discord|telegram|slack`.
             if name == "gateway"
-                && let Some(platform @ ("discord" | "telegram")) = next.as_deref()
+                && let Some(platform @ ("discord" | "telegram" | "slack")) = next.as_deref()
             {
-                if platform == "telegram" {
-                    command = Command::Telegram;
-                }
+                command = platform_command(platform);
                 name = format!("gateway {platform}");
                 next = args.next();
             }
@@ -452,7 +462,8 @@ as written. Newest sessions first.
 Options:
   --all            every working folder, not only this one
   --limit <N>      sessions to show, 1 to 20 (default 5)
-  --source <S>     only sessions from terminal, discord, telegram, cron, webhook or all
+  --source <S>     only sessions from terminal, discord, telegram, slack, cron, webhook
+                   or all
                    (default all; repeat or use a comma list)
   --session <ID>   only this session (an id or the start of one), in any folder
 ";
@@ -722,6 +733,11 @@ mod tests {
                 .contains("gateway telegram takes no arguments")
         );
         assert!(parse(&["telegram", "discord"]).is_err());
+        assert_eq!(parse(&["gateway", "slack"]).unwrap(), Command::Slack);
+        assert_eq!(parse(&["slack"]).unwrap(), Command::Slack);
+        assert_eq!(parse(&["slack", "-h"]).unwrap(), Command::Help);
+        let err = parse(&["gateway", "slack", "now"]).unwrap_err();
+        assert!(err.to_string().contains("gateway slack takes no arguments"));
         assert_eq!(
             parse(&["cron", "rm", "ab"]).unwrap(),
             Command::Cron(crate::cron::cli::CronCommand::Remove("ab".into()))

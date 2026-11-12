@@ -199,7 +199,7 @@ async fn people_search_with_the_slash_command_and_the_cli() {
     // People see every source of this folder, numbered.
     let expected = format!(
         "2 sessions match `\"빌드 실패\"` in this folder ({}) from terminal, discord, telegram, \
-         cron, webhook, newest first:\n",
+         slack, cron, webhook, newest first:\n",
         work.display()
     );
     assert!(stdout.contains(&expected), "{stdout}");

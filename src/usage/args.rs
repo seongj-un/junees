@@ -12,7 +12,7 @@ Options:
   --days <N>   today and the N-1 days before it (default 7), by the
                `timezone` setting (JUNEES_TIMEZONE; default the system's)
   --by <B>     one row per day (default), model, folder or source
-               (terminal, discord, telegram, cron, webhook)
+               (terminal, discord, telegram, slack, cron, webhook)
   --all        every working folder, not only this one
 
 The cost is an estimate from the Claude API's list prices (the table in

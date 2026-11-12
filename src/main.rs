@@ -30,6 +30,8 @@ use junees::provider::{Provider, ProviderError};
 use junees::session::{self, Journal, Session, SessionWriter, Transcript};
 use junees::setup::{self, EchoOff, Prompter};
 use junees::skills;
+use junees::slack::config::SlackConfig;
+use junees::slack::{SLACK_NOTE, SlackGateway};
 use junees::slash::{self, Slash};
 use junees::subagent;
 use junees::task::budget::Budget;
@@ -191,6 +193,7 @@ async fn run() -> Result<ExitCode> {
         Command::Task(command) => run_task(command, &settings).await,
         Command::Gateway => discord_gateway(&settings).await,
         Command::Telegram => telegram_gateway(&settings).await,
+        Command::Slack => slack_gateway(&settings).await,
         Command::Cron(command) => junees::cron::command::main(command, settings).await,
         Command::Webhook(command) => junees::webhook::command::main(command, settings).await,
         Command::Setup
@@ -324,7 +327,11 @@ fn wants_first_setup(command: &Command, settings: &Settings) -> bool {
     // The gateway usually runs as a service, with no one to answer.
     if matches!(
         command,
-        Command::Gateway | Command::Telegram | Command::Cron(_) | Command::Webhook(_)
+        Command::Gateway
+            | Command::Telegram
+            | Command::Slack
+            | Command::Cron(_)
+            | Command::Webhook(_)
     ) || settings.file_exists()
         || settings.path().is_none()
         || settings.env("ANTHROPIC_API_KEY").is_some()
@@ -827,6 +834,33 @@ async fn telegram_gateway(settings: &Settings) -> Result<ExitCode> {
     started.mcp.shutdown().await;
     result?;
     eprintln!("telegram gateway stopped");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `junees gateway slack`: Junees as a Slack app over Socket Mode, like
+/// [`discord_gateway`].
+async fn slack_gateway(settings: &Settings) -> Result<ExitCode> {
+    let slack = SlackConfig::from_lookup(|key| settings.get(key))?;
+    let started = gateway_engines(settings, SLACK_NOTE).await?;
+    let cancel = Cancel::new();
+    cancel_on_signals(Signals::install()?, cancel.clone());
+    eprintln!(
+        "junees {VERSION} slack gateway, working in {}; SIGINT or SIGTERM stops it",
+        started.cwd.display()
+    );
+    let memory = conversation_memory(&started.config, &started.cwd);
+    let result = SlackGateway::new(
+        slack,
+        started.engines,
+        started.config.home.clone(),
+        started.cwd,
+        memory,
+    )
+    .run(cancel)
+    .await;
+    started.mcp.shutdown().await;
+    result?;
+    eprintln!("slack gateway stopped");
     Ok(ExitCode::SUCCESS)
 }
 

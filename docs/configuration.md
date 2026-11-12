@@ -78,6 +78,6 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 | `JUNEES_CRON_MAX_TIME` | `30m` | 예약 작업 실행 하나의 시간 한도 ([예약 작업](automation.md#예약-작업)) |
 | `JUNEES_CRON_MAX_TOKENS` | `1000000` | 예약 작업 실행 하나의 토큰 한도 |
 
-디스코드(`JUNEES_DISCORD_*`)와 텔레그램(`JUNEES_TELEGRAM_*`) 설정은 [게이트웨이](gateways.md), GitHub 설정(`JUNEES_GITHUB_*`)은 [GitHub](automation.md#github)의 설정 예시에 있다.
+디스코드(`JUNEES_DISCORD_*`), 텔레그램(`JUNEES_TELEGRAM_*`), 슬랙(`JUNEES_SLACK_*`: `slack_bot_token`, `slack_app_token`, `slack_allowed_users`, `slack_parallel`, `slack_approval_timeout`) 설정은 [게이트웨이](gateways.md), GitHub 설정(`JUNEES_GITHUB_*`)은 [GitHub](automation.md#github)의 설정 예시에 있다.
 
 브라우저 도구의 키 `browser`, `browser_path`, `browser_allow_private`, `browser_unattended`, `browser_no_sandbox`(환경 변수 `JUNEES_BROWSER`, `JUNEES_BROWSER_PATH`, `JUNEES_BROWSER_ALLOW_PRIVATE`, `JUNEES_BROWSER_UNATTENDED`, `JUNEES_BROWSER_NO_SANDBOX`)는 [브라우저 도구](browser.md#켜기)에 있다.

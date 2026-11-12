@@ -213,6 +213,53 @@ pub(super) fn telegram(report: &mut Report, settings: &Settings) {
     }
 }
 
+/// The Slack gateway's tokens and allowed users. Offline: the tokens'
+/// shapes are checked; `--online` asks `auth.test` ([`super::online::slack`]).
+pub(super) fn slack(report: &mut Report, settings: &Settings) {
+    use crate::slack::config as slack;
+    const AREA: &str = "slack";
+    if [
+        slack::BOT_TOKEN_ENV,
+        slack::APP_TOKEN_ENV,
+        slack::ALLOWED_USERS_ENV,
+    ]
+    .iter()
+    .all(|key| settings.get(key).is_none())
+    {
+        report.skip(
+            AREA,
+            "gateway",
+            "not set up (`junees gateway slack` needs slack_bot_token, slack_app_token and \
+             slack_allowed_users)",
+        );
+        return;
+    }
+    match slack::SlackConfig::from_lookup(|key| settings.get(key)) {
+        Ok(config) => report.ok(
+            AREA,
+            "gateway",
+            format!(
+                "bot token set ({}), app-level token set ({}), {} allowed users{}",
+                source(settings, slack::BOT_TOKEN_ENV),
+                source(settings, slack::APP_TOKEN_ENV),
+                config.allowed_users.len(),
+                if config.is_slack() {
+                    String::new()
+                } else {
+                    format!(", Web API at {}", config.api_url)
+                }
+            ),
+        ),
+        Err(err) => report.fail(
+            AREA,
+            "gateway",
+            format!("{err:#}"),
+            "set slack_bot_token (xoxb-), slack_app_token (xapp-, scope connections:write) and \
+             slack_allowed_users (README, 슬랙 게이트웨이)",
+        ),
+    }
+}
+
 /// The Discord gateway's token and allowed users.
 pub(super) fn discord(report: &mut Report, settings: &Settings) {
     const AREA: &str = "discord";
