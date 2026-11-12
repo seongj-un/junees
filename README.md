@@ -127,8 +127,8 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [스킬](docs/memory-and-skills.md#스킬): 반복 작업의 절차를 적은 문서를 모델이 읽고 고친다.
 - [서브에이전트](docs/memory-and-skills.md#서브에이전트-delegate): `delegate`로 독립적인 하위 작업을 동시에 맡긴다.
 - [구독 모드](docs/subscription.md): 대화와 장기 작업을 Claude 구독으로 로그인한 Claude Code가 실행한다.
-- [디스코드 게이트웨이](docs/gateways.md#디스코드-게이트웨이): 채널(스레드, DM)마다 대화 하나를 두는 디스코드 봇.
-- [텔레그램 게이트웨이](docs/gateways.md#텔레그램-게이트웨이): 같은 엔진으로 도는 텔레그램 봇.
+- [디스코드 게이트웨이](docs/gateways.md#디스코드-게이트웨이): 채널(스레드, DM)마다 대화 하나를 두는 디스코드 봇. 승인 질문은 버튼이나 글 답장으로 답한다.
+- [텔레그램 게이트웨이](docs/gateways.md#텔레그램-게이트웨이): 같은 엔진으로 도는 텔레그램 봇(승인 버튼은 인라인 키보드).
 - [슬랙 게이트웨이](docs/gateways.md#슬랙-게이트웨이): Socket Mode로 받는 슬랙 앱(DM과 채널 스레드마다 대화 하나, mrkdwn 서식).
 - [MCP 서버](docs/mcp.md): stdio와 Streamable HTTP MCP 서버의 도구, OAuth 로그인.
 - [예약 작업](docs/automation.md#예약-작업): 프롬프트를 일정에 맞춰 무인 실행하고 결과를 파일, 디스코드, 웹훅으로 보낸다.
