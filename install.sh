@@ -28,6 +28,9 @@ fail() {
 base="${JUNEES_DOWNLOAD_BASE:-$repo_releases}"
 base="${base%/}"
 case "$base" in
+    # curl and wget read what comes before an @ as a user name and go to the
+    # host after it: http://127.0.0.1:1@evil.example would leave this computer.
+    *@*) fail "JUNEES_DOWNLOAD_BASE must be a server on this computer (it is only for tests)" ;;
     "$repo_releases") ;;
     http://127.0.0.1:* | http://127.0.0.1/* | http://localhost:* | http://localhost/* | http://\[::1\]:* | http://\[::1\]/*) ;;
     *) fail "JUNEES_DOWNLOAD_BASE must be a server on this computer (it is only for tests)" ;;

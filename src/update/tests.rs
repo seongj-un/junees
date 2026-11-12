@@ -1007,6 +1007,24 @@ async fn install_sh_says_which_download_failed() {
 }
 
 #[tokio::test]
+async fn install_sh_refuses_a_test_server_address_with_a_user_name() {
+    // curl would read `127.0.0.1:1` as user name and password and go to the
+    // host after the @: here the fake server, which must see no request.
+    let server = start(release("0.3.0", b"new binary", None)).await;
+    let base = server.base.replacen("http://", "http://127.0.0.1:1@", 1);
+    let dir = tempfile::tempdir().unwrap();
+    let output = install_sh(dir.path(), "", &format!("JUNEES_DOWNLOAD_BASE={base}")).await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("must be a server on this computer"),
+        "{}",
+        output.content
+    );
+    assert!(server.paths().is_empty());
+    assert!(!dir.path().join("bin").exists());
+}
+
+#[tokio::test]
 async fn install_sh_takes_only_a_test_server_on_this_computer() {
     let dir = tempfile::tempdir().unwrap();
     let output = install_sh(

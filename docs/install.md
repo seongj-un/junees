@@ -22,7 +22,7 @@ GitHub 릴리스에서 이 컴퓨터에 맞는 빌드를 받아 `~/.local/bin/ju
 |---|---|
 | `JUNEES_INSTALL_DIR` | 설치 폴더(기본 `~/.local/bin`) |
 | `JUNEES_VERSION` | 설치할 릴리스(`v0.1.0` 또는 `0.1.0`, 기본 최신) |
-| `JUNEES_DOWNLOAD_BASE` | 테스트용. 릴리스 주소를 이 컴퓨터의 서버(`http://127.0.0.1:...`)로 바꾼다. 다른 주소는 거절 |
+| `JUNEES_DOWNLOAD_BASE` | 테스트용. 릴리스 주소를 이 컴퓨터의 서버(`http://127.0.0.1:...`)로 바꾼다. 다른 주소와 `@`(사용자 정보: `http://127.0.0.1:1@다른곳`)가 든 주소는 거절 |
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/seongj-un/junees/main/install.sh | JUNEES_VERSION=v0.1.0 JUNEES_INSTALL_DIR=~/bin sh
