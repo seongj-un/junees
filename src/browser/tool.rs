@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use super::address::Policy;
-use super::page::{self, Browser, Element, Notes, STALE, Snapshot};
+use super::page::{self, Browser, Element, FRAME_RISK, Notes, STALE, Snapshot};
 use super::{IDLE, Settings, TOOL_NAME};
 use crate::approval::ToolQuestions;
 use crate::github::Question;
@@ -52,6 +52,8 @@ struct Known {
     refs: Vec<Element>,
     /// The element the last action focused, if it is still in `refs`.
     focused: Option<usize>,
+    /// The latest snapshot found the focus in a frame of another site.
+    frame_focus: bool,
 }
 
 struct Inner {
@@ -183,11 +185,11 @@ fn question(known: &Known, input: &Value) -> Question {
             _ => return (target, Vec::new(), Vec::new(), None),
         },
         "press" if submit_key(input) => {
-            let risk = element.or(known.focused).map(meta).unwrap_or_default();
-            if risk.enter_risk.is_empty() {
+            let risk = key_risk(known, element, space_key(input));
+            if risk.is_empty() {
                 return (target, Vec::new(), Vec::new(), None);
             }
-            (format!("the key press {}", risk.enter_risk), KIND_SUBMIT)
+            (format!("the key press {risk}"), KIND_SUBMIT)
         }
         _ => return (target, Vec::new(), Vec::new(), None),
     };
@@ -203,6 +205,27 @@ fn question(known: &Known, input: &Value) -> Question {
         _ => None,
     };
     (target, vec![reason], vec![kind.to_string()], preview)
+}
+
+/// What the latest snapshot says Enter (or Space, when `space`) would
+/// do: in element `element`, else in the element the last action
+/// focused, else in a frame of another site holding the focus.
+fn key_risk(known: &Known, element: Option<usize>, space: bool) -> String {
+    match element.or(known.focused) {
+        Some(n) => known
+            .refs
+            .get(n.wrapping_sub(1))
+            .map(|element| {
+                if space {
+                    element.space_risk.clone()
+                } else {
+                    element.enter_risk.clone()
+                }
+            })
+            .unwrap_or_default(),
+        None if known.frame_focus => FRAME_RISK.to_string(),
+        None => String::new(),
+    }
 }
 
 fn preview_lines(text: &str, max: usize) -> String {
@@ -230,6 +253,12 @@ fn element_number(input: &Value) -> Option<usize> {
 fn submit_key(input: &Value) -> bool {
     let key = input.get("key").and_then(Value::as_str).unwrap_or("");
     page::key(key).is_some_and(|key| key.code == "Enter" || key.code == "Space")
+}
+
+/// The key pressed is Space.
+fn space_key(input: &Value) -> bool {
+    let key = input.get("key").and_then(Value::as_str).unwrap_or("");
+    page::key(key).is_some_and(|key| key.code == "Space")
 }
 
 #[async_trait]
@@ -455,6 +484,7 @@ impl BrowserTool {
             known.url = snapshot.url.clone();
             known.refs = snapshot.refs.clone();
             known.focused = None;
+            known.frame_focus = snapshot.frame_focus;
         }
         let notes = browser.take_notes();
         Ok(ToolOutput::ok(render(&snapshot, offset, &notes)))
@@ -496,7 +526,12 @@ impl BrowserTool {
     async fn click(&self, browser: &mut Browser, input: &Value) -> Result<ToolOutput, Failure> {
         let n = element_number(input).ok_or_else(|| err("`click` needs `ref`"))?;
         let meta = self.meta(n)?;
-        let point = browser.element_call(&format!("point({n})")).await?;
+        // Checks the element and arms the page's input guard in one call
+        // (see guard.js): an approval covers this element alone.
+        let approved = !meta.click_risk.is_empty();
+        let point = browser
+            .element_check(&format!("point({n}, {approved})"))
+            .await?;
         match point["error"].as_str() {
             Some("covered") => {
                 return Err(err(wrap(&format!(
@@ -510,12 +545,21 @@ impl BrowserTool {
             }
             _ => {}
         }
-        self.allowed(&meta.click_risk, point["click_risk"].as_str().unwrap_or(""))?;
+        let now = point["click_risk"].as_str().unwrap_or("");
+        self.allowed(&meta.click_risk, now)?;
         let (x, y) = (
             point["x"].as_f64().unwrap_or_default(),
             point["y"].as_f64().unwrap_or_default(),
         );
-        browser.click_at(x, y).await?;
+        let frames = approved && point["in_frame"].as_bool() == Some(true);
+        if frames {
+            browser.arm_frames(&json!({"risk": now})).await;
+        }
+        let clicked = self.click_checked(browser, n, x, y).await;
+        if frames {
+            browser.arm_frames(&Value::Null).await;
+        }
+        clicked?;
         let mut output = self.page_output(browser, 0).await?;
         if let Some(covered) = point["covered"].as_str().filter(|text| !text.is_empty()) {
             output.content = format!(
@@ -525,6 +569,34 @@ impl BrowserTool {
             );
         }
         Ok(output)
+    }
+
+    /// Moves the mouse to element `n` at `(x, y)`, checks again what is
+    /// under the pointer (a mousemove handler may have moved another
+    /// element there), then clicks; fails when the guard stopped the
+    /// click.
+    async fn click_checked(
+        &self,
+        browser: &mut Browser,
+        n: usize,
+        x: f64,
+        y: f64,
+    ) -> Result<(), Failure> {
+        browser.move_mouse(x, y).await?;
+        let again = browser
+            .element_check(&format!("recheck({n}, {x}, {y})"))
+            .await?;
+        if again["error"].as_str() == Some("covered") {
+            let _ = browser.element_call("stopped()").await;
+            return Err(err(wrap(&format!(
+                "not clicked: when the pointer moved onto element {n}, the page put another \
+                 element ({}) under it, which {}. Take a snapshot",
+                text_of(&again["covered"]),
+                text_of(&again["risk"])
+            ))));
+        }
+        browser.click_at(x, y).await?;
+        stopped(browser, "click").await
     }
 
     async fn type_text(&self, browser: &mut Browser, input: &Value) -> Result<ToolOutput, Failure> {
@@ -560,7 +632,7 @@ impl BrowserTool {
         let approved = !meta.type_risk.is_empty();
         let text_json = serde_json::to_string(text).unwrap_or_default();
         let typed = browser
-            .element_call(&format!("typeInto({n}, {text_json}, {clear}, {approved})"))
+            .element_check(&format!("typeInto({n}, {text_json}, {clear}, {approved})"))
             .await?;
         match typed["error"].as_str() {
             Some("not editable") => {
@@ -612,33 +684,74 @@ impl BrowserTool {
         let key = page::key(name)
             .ok_or_else(|| err(format!("unknown key `{name}` (use {})", page::KEYS)))?;
         let submits = key.code == "Enter" || key.code == "Space";
-        let asked_about = match element_number(input) {
-            Some(n) => {
-                let meta = self.meta(n)?;
-                browser.element_call(&format!("focusOnly({n})")).await?;
-                self.known().focused = Some(n);
-                meta.enter_risk
-            }
-            None => {
-                let focused = self.known().focused;
-                focused
-                    .and_then(|n| self.meta(n).ok())
-                    .map(|meta| meta.enter_risk)
-                    .unwrap_or_default()
-            }
-        };
-        if submits {
-            let now = browser.element_call("enterRisk()").await?;
-            let now = now.as_str().unwrap_or("");
-            if self.inner.asks && asked_about.is_empty() && !now.is_empty() {
-                return Err(err(format!(
+        let element = element_number(input);
+        if let Some(n) = element {
+            self.meta(n)?;
+        }
+        let asked_about = key_risk(&self.known(), element, key.code == "Space");
+        if element.is_none() && !submits {
+            // Only Enter and Space need a check; the guard lets other
+            // keys through anywhere.
+            browser.press(&key).await?;
+            return self.page_output(browser, 0).await;
+        }
+        // Focuses the element, reads the risk where the focus is and arms
+        // the page's input guard in one call (see guard.js): an approval
+        // covers the element checked here alone.
+        let approved = submits && !asked_about.is_empty();
+        // Only Enter and Space have a risk; other keys arm the guard alone.
+        let key_name =
+            serde_json::to_string(if submits { key.key } else { "" }).unwrap_or_default();
+        let armed = browser
+            .element_check(&format!(
+                "armKey({}, {key_name}, {approved})",
+                element.map_or("null".to_string(), |n| n.to_string())
+            ))
+            .await?;
+        if let Some(n) = element {
+            self.known().focused = Some(n);
+        }
+        let now = armed["risk"].as_str().unwrap_or("");
+        if submits && self.inner.asks && asked_about.is_empty() && !now.is_empty() {
+            let now = crate::prompt_text::escape_hidden(now);
+            return Err(err(if now == FRAME_RISK {
+                format!(
+                    "not run: the focus is in a frame from another site now, so this key press \
+                     {now}; take a snapshot and press again, so the approval question can name it"
+                )
+            } else if let Some(n) = element {
+                format!(
+                    "not run: the focus moved away from element {n} when it was focused, and \
+                     this key press {now}. Take a snapshot"
+                )
+            } else {
+                format!(
                     "not run: this key press {now}; give `ref` of the field or button to press \
                      it there, so the approval question can name it"
-                )));
-            }
+                )
+            }));
+        }
+        if submits {
             self.allowed(&asked_about, now)?;
         }
-        browser.press(&key).await?;
+        let frames = approved && armed["in_frame"].as_bool() == Some(true);
+        if frames {
+            let arm = if now == FRAME_RISK {
+                json!({"any": true})
+            } else {
+                json!({"risk": now})
+            };
+            browser.arm_frames(&arm).await;
+        }
+        let pressed = browser.press(&key).await;
+        let checked = match pressed {
+            Ok(()) => stopped(browser, "key press").await,
+            Err(error) => Err(error.into()),
+        };
+        if frames {
+            browser.arm_frames(&Value::Null).await;
+        }
+        checked?;
         self.page_output(browser, 0).await
     }
 
@@ -739,6 +852,26 @@ impl From<anyhow::Error> for Failure {
 
 fn err(message: impl Into<String>) -> Failure {
     Failure::Error(message.into())
+}
+
+/// Fails when the page's input guard stopped events of the `action`
+/// that just ran (the target changed after the check to one that needs
+/// approval), and disarms the guard. A page that navigated took its guard
+/// along: nothing to read then.
+async fn stopped(browser: &Browser, action: &str) -> Result<(), Failure> {
+    let Ok(stopped) = browser.element_call("stopped()").await else {
+        return Ok(());
+    };
+    let Some(first) = stopped.as_array().and_then(|events| events.first()) else {
+        return Ok(());
+    };
+    Err(err(wrap(&format!(
+        "the {action} was stopped: when its {} event arrived, its target was another element \
+         ({}), which {}. Take a snapshot",
+        text_of(&first["event"]),
+        text_of(&first["target"]),
+        text_of(&first["risk"])
+    ))))
 }
 
 fn text_of(value: &Value) -> String {
@@ -847,6 +980,20 @@ pub(crate) fn test_question(refs: Vec<Element>, focused: Option<usize>, input: &
             url: "http://example.test/".into(),
             refs,
             focused,
+            frame_focus: false,
+        },
+        input,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_question_in_frame(input: &Value) -> Question {
+    question(
+        &Known {
+            url: "http://example.test/".into(),
+            refs: Vec::new(),
+            focused: None,
+            frame_focus: true,
         },
         input,
     )

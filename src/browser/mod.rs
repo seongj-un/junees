@@ -22,6 +22,11 @@
 //!   submit such a form or look like a payment go to the approval
 //!   question; where no one is asked (`-p`, `JUNEES_APPROVAL=off`, cron,
 //!   webhooks) they are refused;
+//! - between the check and the mouse or key events, the page cannot move
+//!   another such element under the pointer or the focus: the click
+//!   checks again after the mouse moved, and an input guard in every frame
+//!   (`guard.js`, before the page's scripts) stops events whose target is
+//!   not the one checked and needs approval;
 //! - scheduled and webhook runs get the tool only with
 //!   `browser_unattended`;
 //! - page text, titles and script results are marked as data from the web,
