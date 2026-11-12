@@ -138,10 +138,12 @@ impl Drop for Profile {
         {
             let _ = std::fs::remove_dir_all(folder);
         }
-        // A dying helper process may still write a file: try again once.
-        if std::fs::remove_dir_all(&self.0).is_err() {
-            std::thread::sleep(Duration::from_millis(100));
-            let _ = std::fs::remove_dir_all(&self.0);
+        // A dying helper process may still write a file: try again.
+        for _ in 0..10 {
+            if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }
@@ -298,22 +300,49 @@ impl Process {
 
     /// Waits up to `grace` for the browser to exit by itself (after
     /// `Browser.close` or the pipe closing), then kills what is left.
-    pub async fn finish(mut self, grace: Duration) {
-        let _ = tokio::time::timeout(grace, self.child.wait()).await;
-        // `drop` kills the group (helpers may still run) and reaps.
+    pub async fn finish(self, grace: Duration) {
+        let deadline = tokio::time::Instant::now() + grace;
+        while !self.exited() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Not reaped yet: `drop` kills the group (helpers may still run),
+        // reaps and removes the profile.
+    }
+
+    /// Whether the browser's main process has exited (a zombie until
+    /// reaped here, or gone).
+    fn exited(&self) -> bool {
+        match std::fs::read_to_string(format!("/proc/{}/stat", self.pid)) {
+            Ok(stat) => stat
+                .rfind(')')
+                .and_then(|at| stat.get(at + 2..at + 3))
+                .is_none_or(|state| state == "Z"),
+            Err(_) => true,
+        }
     }
 
     fn kill_and_reap(&mut self) {
-        // SAFETY: signals the process group this process started; the
-        // child is not reaped yet, so its pid (the group id) is still ours.
+        // SAFETY: signals the process group this process started. Only
+        // this function reaps the child, so its pid, the group's id,
+        // cannot belong to anyone else yet.
         unsafe {
             libc::killpg(self.pid, libc::SIGKILL);
         }
         for _ in 0..200 {
             match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
+                Ok(Some(_)) | Err(_) => break,
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             }
+        }
+        // Wait until the helpers of the group are gone too, so none of
+        // them writes into the profile while it is removed. Signal 0
+        // sends nothing, whoever has the id by now.
+        for _ in 0..200 {
+            // SAFETY: kill with signal 0 only checks that the group exists.
+            if unsafe { libc::kill(-self.pid, 0) } != 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
