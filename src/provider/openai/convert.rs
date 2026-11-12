@@ -322,6 +322,16 @@ pub(super) struct ApiUsage {
     completion_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionDetails>,
+}
+
+#[derive(Deserialize, Default, Clone, Copy)]
+struct CompletionDetails {
+    /// Part of `completion_tokens`: reasoning, which Chat Completions never
+    /// returns, so it is not sent back either.
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Deserialize, Default, Clone, Copy)]
@@ -335,16 +345,26 @@ struct PromptDetails {
 impl From<ApiUsage> for Usage {
     /// Junees counts input without the cached prompt tokens, which are
     /// priced apart; Chat Completions counts them in `prompt_tokens`.
+    /// `completion_tokens` holds the reasoning tokens too, which are billed
+    /// as output (the reasoning guide), so output keeps them and
+    /// `reasoning_tokens` says how many there were.
     fn from(usage: ApiUsage) -> Self {
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let details = usage.prompt_tokens_details.unwrap_or_default();
         let read = details.cached_tokens.unwrap_or(0).min(prompt);
         let written = details.cache_write_tokens.unwrap_or(0).min(prompt - read);
+        let output = usage.completion_tokens.unwrap_or(0);
+        let reasoning = usage
+            .completion_tokens_details
+            .and_then(|details| details.reasoning_tokens)
+            .unwrap_or(0)
+            .min(output);
         Usage {
             input_tokens: prompt - read - written,
-            output_tokens: usage.completion_tokens.unwrap_or(0),
+            output_tokens: output,
             cache_creation_input_tokens: written,
             cache_read_input_tokens: read,
+            reasoning_tokens: reasoning,
             ..Usage::default()
         }
     }
@@ -917,6 +937,30 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(Usage::from(nulls).output_tokens, 3);
+    }
+
+    #[test]
+    fn reasoning_tokens_stay_in_the_output_and_are_noted() {
+        let usage: ApiUsage = serde_json::from_value(json!({
+            "prompt_tokens": 1000, "completion_tokens": 900,
+            "completion_tokens_details": {"reasoning_tokens": 832, "audio_tokens": 0,
+                "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0}
+        }))
+        .unwrap();
+        let usage = Usage::from(usage);
+        assert_eq!((usage.output_tokens, usage.reasoning_tokens), (900, 832));
+        assert_eq!(usage.context_tokens(), 1068);
+        // More reasoning than output is not believed.
+        let odd: ApiUsage = serde_json::from_value(json!({
+            "completion_tokens": 5, "completion_tokens_details": {"reasoning_tokens": 50}
+        }))
+        .unwrap();
+        assert_eq!(Usage::from(odd).reasoning_tokens, 5);
+        let null: ApiUsage = serde_json::from_value(json!({
+            "completion_tokens": 5, "completion_tokens_details": null
+        }))
+        .unwrap();
+        assert_eq!(Usage::from(null).reasoning_tokens, 0);
     }
 
     #[test]

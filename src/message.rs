@@ -383,6 +383,12 @@ pub struct Usage {
     pub cache_creation_input_tokens: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cache_read_input_tokens: u64,
+    /// The part of `output_tokens` a reasoning model spent on reasoning the
+    /// API does not give back (OpenAI's
+    /// `completion_tokens_details.reasoning_tokens`): billed as output, but
+    /// not part of the conversation the next request sends.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reasoning_tokens: u64,
     /// Calls of the tools the API runs itself, billed apart from tokens.
     #[serde(
         default,
@@ -425,6 +431,7 @@ impl Usage {
         self.output_tokens += other.output_tokens;
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
         self.cache_read_input_tokens += other.cache_read_input_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
         self.server_tool_use.web_search_requests += other.server_tool_use.web_search_requests;
     }
 
@@ -434,12 +441,13 @@ impl Usage {
     }
 
     /// Size of the conversation after this call: everything it read plus
-    /// what it wrote, which the next request sends back.
+    /// what it wrote, which the next request sends back. Reasoning the API
+    /// keeps to itself is not sent back.
     pub fn context_tokens(&self) -> u64 {
         self.input_tokens
             + self.cache_creation_input_tokens
             + self.cache_read_input_tokens
-            + self.output_tokens
+            + self.output_tokens.saturating_sub(self.reasoning_tokens)
     }
 }
 
@@ -447,6 +455,25 @@ impl Usage {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reasoning_tokens_count_as_output_but_not_as_conversation() {
+        let mut usage = Usage {
+            input_tokens: 100,
+            output_tokens: 30,
+            reasoning_tokens: 20,
+            ..Usage::default()
+        };
+        assert_eq!(usage.context_tokens(), 110);
+        usage.add(usage);
+        assert_eq!((usage.output_tokens, usage.reasoning_tokens), (60, 40));
+        // Kept in the journal only when there are some, and read back.
+        let value = serde_json::to_value(usage).unwrap();
+        assert_eq!(value["reasoning_tokens"], 40);
+        assert_eq!(serde_json::from_value::<Usage>(value).unwrap(), usage);
+        let plain = serde_json::to_value(Usage::default()).unwrap();
+        assert!(plain.get("reasoning_tokens").is_none(), "{plain}");
+    }
 
     #[test]
     fn tool_result_omits_is_error_when_false() {

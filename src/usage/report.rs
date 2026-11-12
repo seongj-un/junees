@@ -108,6 +108,7 @@ fn minus(a: Usage, b: Usage) -> Usage {
     out.cache_read_input_tokens = a
         .cache_read_input_tokens
         .saturating_sub(b.cache_read_input_tokens);
+    out.reasoning_tokens = a.reasoning_tokens.saturating_sub(b.reasoning_tokens);
     out.server_tool_use.web_search_requests = a.web_searches().saturating_sub(b.web_searches());
     out
 }

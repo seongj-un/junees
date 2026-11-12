@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use junees::agent::{Agent, AgentOptions};
 use junees::message::{ContentBlock, Message, StopReason};
-use junees::provider::openai::{OpenAiProvider, Settings};
+use junees::provider::openai::{LimitField, OpenAiProvider, Settings};
 use junees::provider::{
     CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent,
 };
@@ -297,6 +297,29 @@ async fn an_answer_without_usage_keeps_the_last_conversation_size() {
 
 fn streaming(url: &str) -> OpenAiProvider {
     provider(url).with_streaming(true)
+}
+
+#[tokio::test]
+async fn a_reasoning_model_gets_its_settings_and_its_reasoning_is_not_conversation() {
+    let mut reasoned = answer("42");
+    reasoned["usage"] = json!({"prompt_tokens": 5000, "completion_tokens": 700,
+        "completion_tokens_details": {"reasoning_tokens": 640}});
+    let (url, server) = fake_api(vec![(200, reasoned)]).await;
+    let mut settings = settings(&url, Some("sk-fake"));
+    // A proxy on loopback in front of a reasoning model.
+    settings.limit_field = LimitField::MaxCompletionTokens;
+    settings.reasoning_effort = Some("low".into());
+    let provider = OpenAiProvider::new(settings, "o-model".into()).unwrap();
+    let mut agent = agent(provider);
+    assert_eq!(agent.run("think", |_| {}).await.unwrap(), "42");
+    // The reasoning is billed as output but never sent back.
+    assert_eq!(agent.context_tokens(), 5060);
+
+    let requests = served(server).await;
+    let body = body_of(&requests[0]);
+    assert_eq!(body["max_completion_tokens"], 64, "{body}");
+    assert!(body.get("max_tokens").is_none(), "{body}");
+    assert_eq!(body["reasoning_effort"], "low", "{body}");
 }
 
 async fn stream_call(
