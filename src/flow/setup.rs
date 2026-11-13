@@ -142,6 +142,7 @@ pub fn add(store: &Store, lookup: &Lookup, args: AddGithubArgs, now: i64) -> Res
         allow_home: args.allow_home,
         deliver,
         paused: false,
+        paused_for_home: false,
         created_at: now,
         last: None,
         last_event: None,

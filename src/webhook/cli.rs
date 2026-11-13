@@ -25,6 +25,10 @@ Usage:
   junees webhook remove <name>     (also rm)
   junees webhook pause <name>
   junees webhook resume <name>
+  junees webhook allow-home <name> let the route work in the home folder (resumes
+                                   it if a refused run paused it)
+  junees webhook disallow-home <name>
+                                   take that back (pauses it if it works there)
   junees webhook test <name> <payload.json> [--event <event>] [--delivery <id>]
                                    run it once now, without the server
 
@@ -53,8 +57,9 @@ in data tags and the prompt says they are data, not instructions.
 
 Each request runs like a scheduled job (see `junees cron --help`): a new
 session in the route's folder (default: the current one; not the home
-folder or a folder holding it unless --allow-home), no approval
-questions, the command policy, the memory and skills read only, up to
+folder or a folder holding it unless --allow-home; a route added before
+that rule is paused at its first refused run, and `allow-home` marks and
+resumes it), no approval questions, the command policy, the memory and skills read only, up to
 webhook_max_time (default 30m) and webhook_max_tokens (default 1000000).
 One run per route at a time; up to 20 more wait. The answer goes to
 $JUNEES_HOME/webhooks/output/<name>/ and to --deliver (default local).
@@ -111,6 +116,11 @@ pub enum WebhookCommand {
     Remove(String),
     Pause(String),
     Resume(String),
+    /// `allow-home`: mark the route as allowed to work in the home folder,
+    /// and resume it if a refused run paused it.
+    AllowHome(String),
+    /// `disallow-home`: take that mark back.
+    DisallowHome(String),
     Test {
         name: String,
         payload: PathBuf,
@@ -172,6 +182,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<WebhookCommand> {
         "remove" | "rm" => WebhookCommand::Remove(one(&rest, "remove")?),
         "pause" => WebhookCommand::Pause(one(&rest, "pause")?),
         "resume" => WebhookCommand::Resume(one(&rest, "resume")?),
+        "allow-home" => WebhookCommand::AllowHome(one(&rest, "allow-home")?),
+        "disallow-home" => WebhookCommand::DisallowHome(one(&rest, "disallow-home")?),
         "test" => test(rest)?,
         "run" => run(rest)?,
         other => {
@@ -424,6 +436,14 @@ mod tests {
             WebhookCommand::Resume("pr".into())
         );
         assert_eq!(
+            parse_words(&["allow-home", "pr"]).unwrap(),
+            WebhookCommand::AllowHome("pr".into())
+        );
+        assert_eq!(
+            parse_words(&["disallow-home", "pr"]).unwrap(),
+            WebhookCommand::DisallowHome("pr".into())
+        );
+        assert_eq!(
             parse_words(&["add", "--help"]).unwrap(),
             WebhookCommand::Help
         );
@@ -563,6 +583,8 @@ mod tests {
             (&["add", "a", "--color", "x"][..], "unknown option"),
             (&["serve", "now"][..], "no arguments"),
             (&["rm"][..], "needs a route name"),
+            (&["allow-home"][..], "needs a route name"),
+            (&["disallow-home", "a", "b"][..], "one route name"),
             (&["pause", "a", "b"][..], "one route name"),
             (&["test", "a"][..], "usage"),
             (&["run", "a"][..], "needs --run-id"),

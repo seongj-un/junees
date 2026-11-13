@@ -17,7 +17,7 @@ use super::store::{Kind, Route, Secret, Store, check_event, check_name};
 use super::template;
 use crate::cancel::Cancel;
 use crate::config_file::{self, Settings};
-use crate::cron::command::{cancel_on_signals, check_home_folder, engine_in};
+use crate::cron::command::{cancel_on_signals, check_home_folder, engine_in, user_home};
 use crate::cron::deliver::{Delivery, Lookup};
 use crate::cron::run::Outcome;
 use crate::cron::store::{RunStatus, random_hex};
@@ -108,11 +108,16 @@ pub async fn main(command: WebhookCommand, settings: Settings) -> Result<ExitCod
             let pause = matches!(command, WebhookCommand::Pause(_));
             let mut locked = store.lock()?;
             let index = locked.find(name)?;
-            locked.routes[index].paused = pause;
+            let route = &mut locked.routes[index];
+            route.paused = pause;
+            // A pause by hand is the user's; a resume ends either kind.
+            route.paused_for_home = false;
             locked.save()?;
             let word = if pause { "paused" } else { "resumed" };
             println!("{word} route {}", locked.routes[index].name);
         }
+        WebhookCommand::AllowHome(name) => allow_home(&store, &lookup, &name)?,
+        WebhookCommand::DisallowHome(name) => disallow_home(&store, &lookup, &name)?,
         WebhookCommand::Serve { listen } => return serve(&home, lookup, listen).await,
         WebhookCommand::Test {
             name,
@@ -273,6 +278,7 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         allow_home: args.allow_home,
         deliver,
         paused: false,
+        paused_for_home: false,
         created_at: unix_now(),
         last: None,
         last_event: None,
@@ -404,7 +410,12 @@ async fn run_now(
     // gh in the run's commands finds no login there (removed after the run).
     let gh_config = crate::tools::GhConfigDir::new()
         .context("cannot make the run's GitHub CLI configuration folder");
-    let refused = check_home_folder(lookup, &route.dir, route.allow_home, Some("route"));
+    let refused = check_home_folder(
+        lookup,
+        &route.dir,
+        route.allow_home,
+        Some(("route", &route.name)),
+    );
     let (outcome, prompt, quiet) = match (&refused, &route.flow, &gh_config) {
         (Err(err), _, _) => {
             let (note, first) = pause_refused(home, &route.name);
@@ -468,6 +479,75 @@ async fn run_now(
     })
 }
 
+/// `junees webhook allow-home <name>`: marks a route in the home folder
+/// (or a folder holding it) like `--allow-home` would have, keeping its
+/// secret, and resumes it when a run refused for that folder paused it.
+/// A pause made with `webhook pause` stays. A route elsewhere is refused:
+/// the mark would change nothing.
+fn allow_home(store: &Store, lookup: &Lookup, name: &str) -> Result<()> {
+    let mut locked = store.lock()?;
+    let index = locked.find(name)?;
+    let route = &mut locked.routes[index];
+    let dir = escape_hidden(&route.dir.display().to_string());
+    if !crate::tools::holds_home(&route.dir, user_home(lookup).as_deref()) {
+        bail!(
+            "route {} works in {dir}, which is not the home folder or a folder holding it: it \
+             needs no allow-home",
+            route.name
+        );
+    }
+    route.allow_home = true;
+    let resumed = std::mem::take(&mut route.paused_for_home);
+    if resumed {
+        route.paused = false;
+    }
+    let (name, paused) = (route.name.clone(), route.paused);
+    locked.save()?;
+    println!(
+        "route {name} may work in the home folder now: the tools of its runs may change \
+         everything in {dir} but the protected paths"
+    );
+    if resumed {
+        println!("resumed route {name}");
+    } else if paused {
+        println!(
+            "route {name} stays paused (paused with `junees webhook pause`; `junees webhook \
+             resume {name}` resumes it)"
+        );
+    }
+    Ok(())
+}
+
+/// `junees webhook disallow-home <name>`: takes the `allow-home` mark
+/// back. A route whose folder is the home folder (or holds it) is paused
+/// at once (requests get 503), as its next run would be refused;
+/// `allow-home` resumes it.
+fn disallow_home(store: &Store, lookup: &Lookup, name: &str) -> Result<()> {
+    let mut locked = store.lock()?;
+    let index = locked.find(name)?;
+    let route = &mut locked.routes[index];
+    let name = route.name.clone();
+    if !route.allow_home {
+        println!("route {name} has no allow-home mark");
+        return Ok(());
+    }
+    route.allow_home = false;
+    let pause = !route.paused && crate::tools::holds_home(&route.dir, user_home(lookup).as_deref());
+    if pause {
+        route.paused = true;
+        route.paused_for_home = true;
+    }
+    locked.save()?;
+    println!("route {name} may no longer work in the home folder");
+    if pause {
+        println!(
+            "paused route {name}: it works in the home folder (or a folder holding it); \
+             `junees webhook allow-home {name}` resumes it"
+        );
+    }
+    Ok(())
+}
+
 /// Pauses route `name` after [`check_home_folder`] refused its run, so
 /// the server answers its requests 503 instead of starting runs: a route
 /// saved in the home folder before `--allow-home` existed fails and
@@ -479,6 +559,8 @@ fn pause_refused(home: &Path, name: &str) -> (String, bool) {
             return Ok(false);
         };
         let first = !route.paused;
+        // A pause the user made stays theirs: `allow-home` keeps it.
+        route.paused_for_home |= first;
         route.paused = true;
         locked.save()?;
         Ok(first)

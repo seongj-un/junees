@@ -118,7 +118,12 @@ pub fn overview_with(
                 crate::github::Write::join(&route.github_allow)
             ));
         }
-        if route.paused {
+        if route.paused_for_home {
+            line.push_str(&format!(
+                ", paused: works in the home folder (`junees webhook allow-home {}`)",
+                route.name
+            ));
+        } else if route.paused {
             line.push_str(", paused");
         }
         out.push_str(&line);

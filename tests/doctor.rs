@@ -210,7 +210,10 @@ async fn doctor_warns_about_a_job_in_the_home_folder() {
         "{found}"
     );
     assert!(
-        found["fix"].as_str().unwrap().contains("--allow-home"),
+        found["fix"]
+            .as_str()
+            .unwrap()
+            .contains("run `junees cron allow-home h`"),
         "{found}"
     );
 }
