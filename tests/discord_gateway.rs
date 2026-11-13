@@ -1625,7 +1625,7 @@ async fn risky_calls_wait_for_an_answer_in_the_channel() {
         message("505", USER, "once more", false, &[]),
     )
     .await;
-    rest.wait_post("505", |p| p == "(1s 안에 답이 없어 거절했습니다)")
+    rest.wait_post("505", |p| p == "(1초 안에 답이 없어 거절했습니다)")
         .await;
     rest.wait_post("505", |p| p == "timed out").await;
     assert!(!cwd.path().join("marker").exists());
@@ -1820,7 +1820,7 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         edit["content"]
             .as_str()
             .unwrap()
-            .ends_with("**2s 안에 답이 없어 거절했습니다.**"),
+            .ends_with("**2초 안에 답이 없어 거절했습니다.**"),
         "{edit}"
     );
     rest.wait_post("505", |p| p == "timed out").await;

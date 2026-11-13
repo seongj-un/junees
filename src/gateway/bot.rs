@@ -96,7 +96,7 @@ pub fn snowflake_age(id: &str, now: SystemTime) -> Option<Duration> {
 pub const ALREADY_HANDLED: &str =
     "이미 답했거나 시간이 지났거나 멈춘 질문이라 이 버튼은 이제 아무것도 하지 않습니다.";
 /// What a press of a user not in `discord_allowed_users` gets back.
-pub const NOT_ALLOWED: &str = "discord_allowed_users에 있는 사용자만 Junees에 답할 수 있습니다.";
+pub const NOT_ALLOWED: &str = "discord_allowed_users에 있는 사용자만 Junees에게 답할 수 있습니다.";
 /// What a press of a button that is not Junees's gets back.
 const NOT_OURS: &str = "Junees does not know this button.";
 

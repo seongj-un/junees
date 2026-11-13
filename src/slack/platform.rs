@@ -630,7 +630,7 @@ mod tests {
             text.contains("승인 요청 bash: rm -r build &amp;&amp; echo &lt;done&gt;"),
             "{text}"
         );
-        assert!(text.contains("5m 안에 답이 없으면"), "{text}");
+        assert!(text.contains("5분 안에 답이 없으면"), "{text}");
         assert!(!text.contains("**"), "{text}");
     }
 

@@ -1259,7 +1259,7 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
     bot.wait_post(&me, |p| p == "about the forward").await;
 
     bot.push(private(USER, "once more"));
-    bot.wait_post(&me, |p| p == "(1s 안에 답이 없어 거절했습니다)")
+    bot.wait_post(&me, |p| p == "(1초 안에 답이 없어 거절했습니다)")
         .await;
     bot.wait_post(&me, |p| p == "timed out").await;
     assert!(!file.exists());
@@ -1450,7 +1450,7 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         edit["text"]
             .as_str()
             .unwrap()
-            .ends_with("<b>2s 안에 답이 없어 거절했습니다.</b>"),
+            .ends_with("<b>2초 안에 답이 없어 거절했습니다.</b>"),
         "{edit}"
     );
     bot.wait_post(&me, |p| p == "timed out").await;

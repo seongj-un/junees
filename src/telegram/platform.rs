@@ -771,7 +771,7 @@ mod tests {
             text.starts_with("이 도구 호출을 승인할까요?\n```\n"),
             "{text}"
         );
-        assert!(text.contains("5m 안에 답이 없으면"), "{text}");
+        assert!(text.contains("5분 안에 답이 없으면"), "{text}");
         let parts = format::render(&text, true, MESSAGE_LIMIT);
         assert_eq!(parts.len(), 1, "{parts:#?}");
         let html = &parts[0].html;
@@ -781,7 +781,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                "항상 허용하면: bash: delete</pre>\n버튼을 누르거나 답장하세요. y는 실행"
+                "항상 허용 범위: bash: delete</pre>\n버튼을 누르거나 답장하세요. y는 실행"
             ),
             "{html}"
         );
