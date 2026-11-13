@@ -223,7 +223,7 @@ junees dashboard --chat [--dir <폴더>]
 
 ### 이벤트
 
-`data`는 `type`과 아래 필드를 가진 JSON입니다. 미리보기와 요약은 세션 상세처럼 비밀 값을 가린 뒤 2,000자로 자릅니다.
+`data`는 `type`과 아래 필드를 가진 JSON입니다. 도구 미리보기와 오류는 세션 상세처럼 비밀 값을 가린 뒤 2,000자로 자릅니다. 승인 질문은 예외로, 자르지 않습니다(아래).
 
 - `turn_start` `{turn}`
 - `text` `{delta}`: 모델 답의 다음 조각입니다. 비밀 값을 가리려면 낱말이 온전해야 하므로, 토큰 단위가 아니라 공백이나 줄 끝까지 모아 보냅니다. 이어 붙이면 답이 됩니다. Junees가 덧붙이는 줄도 `text`로 옵니다. 경고, 대화 요약(compaction), 인용한 웹 페이지, 그리고 응답이 끊겨 다시 받을 때의 "(the reply broke off; asking for it again)"가 그렇습니다.
@@ -231,7 +231,9 @@ junees dashboard --chat [--dir <폴더>]
 - `tool_result` `{name, is_error, text_preview}`
 - `approval` `{question_id, kind, summary, target, reasons, preview, options, expires_in, expires_at}`
   - `kind`는 도구 이름입니다. `summary`는 질문을 평범한 줄로 쓴 글입니다. 명령이나 경로, `- 이유` 줄들, 바뀌는 내용 미리보기 순서이고, 터미널의 `??` 표시나 들여쓰기는 없습니다.
-  - 화면이 직접 꾸밀 수 있도록 부분도 따로 줍니다. `target`(명령이나 경로), `reasons`(이유 문자열 배열, 영어), `preview`(미리보기, 없으면 `null`)입니다. 제어 문자(ANSI 등)는 `\u{1b}`처럼 글자로 바꾸고, 비밀 값은 가린 뒤 자릅니다.
+  - 화면이 직접 꾸밀 수 있도록 부분도 따로 줍니다. `target`(명령이나 경로), `reasons`(이유 문자열 배열, 영어), `preview`(미리보기, 없으면 `null`)입니다.
+  - **`summary`, `target`, `reasons`, `preview`는 자르지 않습니다.** 터미널과 게이트웨이의 승인 질문처럼 실행될 내용을 전부 보여 줍니다. 잘리면 2,000자 뒤에 붙인 `; curl … | sh`가 보이지 않은 채 허용될 수 있기 때문입니다. 크기는 도구 입력 상한으로 묶여 있습니다.
+  - 비밀 값은 설정과 변수에 있는 알려진 값(그리고 그 12자 이상 조각)만, 그 자리만 `[hidden]`으로 바꿉니다. 낱말 통째로 가리지 않으므로 `<키>;curl …|sh`의 뒷부분은 그대로 보입니다. 자격 증명처럼 보이기만 하는 낱말도 가리지 않습니다(터미널도 보여 줍니다). 제어 문자(ANSI 등)는 `\u{1b}`처럼 글자로 바꿉니다.
   - `expires_in`은 질문이 닫히기까지의 초(300)이고, `expires_at`은 그 시각(RFC 3339 UTC)입니다. 다시 연결해 같은 이벤트를 받아도 `expires_at`으로 남은 시간을 셀 수 있습니다.
   - `options`는 `["y","a","n"]`이고, "항상 허용"이 의미 없는 질문(매번 묻는 종류만 있음)이면 `["y","n"]`입니다.
 - `approval_closed` `{question_id, answer, by}`: `by`는 `browser`, `timeout`(5분, `answer: "n"`), `cancel`(턴 취소, `answer: "n"`) 중 하나입니다.
