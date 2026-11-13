@@ -33,9 +33,9 @@ Usage:
   junees usage            tokens and estimated cost of the saved sessions
                           (--days N, --by day|model|folder|source, --all; see
                           `junees usage --help`)
-  junees dashboard        a read-only page about this Junees in the browser,
-                          on 127.0.0.1 (--listen, --no-open; see
-                          `junees dashboard --help`)
+  junees dashboard        a page about this Junees in the browser, on
+                          127.0.0.1 (--listen, --no-open; --chat to talk with
+                          Junees there; see `junees dashboard --help`)
   junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
                           plugin install <folder> [--name <n>], enable <name> [--trust],
                           disable <name>, remove <name>
@@ -739,6 +739,8 @@ mod tests {
             Command::Dashboard(crate::dashboard::Options {
                 listen: "127.0.0.1:7878".parse().unwrap(),
                 open: false,
+                chat: false,
+                dir: None,
             })
         );
         assert_eq!(

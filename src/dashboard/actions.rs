@@ -218,11 +218,19 @@ fn log(home: &Path, group: Group, key: &str, action: Action, result: &Result<Val
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let line = format!(
-        "{} {} {target} {key} {outcome}\n",
-        crate::session::format_utc_seconds(now),
-        action.word()
+    log_line(
+        home,
+        &format!(
+            "{} {} {target} {key} {outcome}\n",
+            crate::session::format_utc_seconds(now),
+            action.word()
+        ),
     );
+}
+
+/// Appends `line` (ending in a newline) to the log in `home`, made 0600;
+/// a failure is reported on stderr.
+pub(super) fn log_line(home: &Path, line: &str) {
     let written = {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()

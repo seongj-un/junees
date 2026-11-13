@@ -15,6 +15,7 @@
 mod actions;
 mod api;
 mod assets;
+pub mod chat;
 mod code;
 #[cfg(test)]
 mod page_files;
@@ -37,7 +38,7 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
 const TOKEN_BYTES: usize = 32;
 
 pub const HELP: &str = "\
-Usage: junees dashboard [--listen 127.0.0.1:7878] [--no-open]
+Usage: junees dashboard [--listen 127.0.0.1:7878] [--no-open] [--chat [--dir <folder>]]
 
 Serves a dashboard of this Junees (settings, sessions and their
 conversations, usage, scheduled jobs, webhooks, doctor) to the browser of
@@ -48,6 +49,10 @@ jobs and webhook routes.
                       (127.0.0.1 or ::1). Port 0 picks a free one.
   --no-open           print an address to paste instead of opening a
                       browser
+  --chat              also talk with Junees on the page, approval questions
+                      answered with its buttons: the page then has the
+                      power of a terminal conversation (api backend only)
+  --dir <folder>      where the chat works (default: the current folder)
 
 The page needs a token made for this run. An opened browser gets a code
 that trades for it once, within a minute, and keeps the token in that tab
@@ -61,34 +66,58 @@ dashboard.
 pub struct Options {
     pub listen: SocketAddr,
     pub open: bool,
+    /// `--chat`: the chat API ([`chat`]) is served.
+    pub chat: bool,
+    /// `--dir`: where the chat works; `None` is the current folder.
+    pub dir: Option<std::path::PathBuf>,
 }
 
 /// Reads the arguments after `dashboard`; `None` for `--help`.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>> {
     let mut listen = None;
     let mut open = true;
+    let mut chat = false;
+    let mut dir = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--no-open" => open = false,
+            "--chat" => chat = true,
+            "--dir" => {
+                let value = args.next().context("--dir needs a folder")?;
+                dir = Some(std::path::PathBuf::from(value));
+            }
             "--listen" => {
                 let value = args
                     .next()
                     .context("--listen needs an address (127.0.0.1:7878)")?;
                 listen = Some(listen_address(&value)?);
             }
-            other => match other.strip_prefix("--listen=") {
-                Some(value) => listen = Some(listen_address(value)?),
-                None => bail!("unknown argument `{other}`; see `junees dashboard --help`"),
-            },
+            other => {
+                if let Some(value) = other.strip_prefix("--listen=") {
+                    listen = Some(listen_address(value)?);
+                } else if let Some(value) = other.strip_prefix("--dir=") {
+                    dir = Some(std::path::PathBuf::from(value));
+                } else {
+                    bail!("unknown argument `{other}`; see `junees dashboard --help`");
+                }
+            }
         }
     }
     let listen = match listen {
         Some(listen) => listen,
         None => listen_address(DEFAULT_LISTEN)?,
     };
-    Ok(Some(Options { listen, open }))
+    if dir.is_some() && !chat {
+        bail!("--dir is the folder of the chat: use it with --chat");
+    }
+    Ok(Some(Options {
+        listen,
+        open,
+        chat,
+        dir,
+    }))
 }
 
 /// `text` as an address to listen on: an IP address and a port, on
@@ -132,8 +161,9 @@ pub fn new_token() -> Result<String> {
     crate::mcp::oauth::pkce::random_text(TOKEN_BYTES).map_err(anyhow::Error::msg)
 }
 
-/// Runs `junees dashboard` until Ctrl-C.
-pub async fn main(options: Options) -> Result<ExitCode> {
+/// Runs `junees dashboard` until Ctrl-C; with `chat` (`--chat`, set up
+/// by the binary) the chat API too.
+pub async fn main(options: Options, chat: Option<chat::Setup>) -> Result<ExitCode> {
     let token = new_token()?;
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
@@ -142,12 +172,13 @@ pub async fn main(options: Options) -> Result<ExitCode> {
         .local_addr()
         .context("cannot read the address it listens on")?;
     let env: Env = Arc::new(|key: &str| std::env::var(key).ok());
-    let context = Arc::new(Context::new(
-        token.clone(),
-        address.ip(),
-        address.port(),
-        env,
-    ));
+    let chat = chat.map(chat::Chat::start);
+    let mut context = Context::new(token.clone(), address.ip(), address.port(), env);
+    if let Some(chat) = &chat {
+        chat.log_started();
+        context = context.with_chat(Arc::clone(chat));
+    }
+    let context = Arc::new(context);
     // Not println!: it panics when stdout is closed (`| head -1`, a closed
     // terminal), and the server goes on without anyone reading it.
     let mut out = std::io::stdout();
@@ -186,15 +217,24 @@ pub async fn main(options: Options) -> Result<ExitCode> {
             )
         })
     };
+    if let Some(chat) = &chat {
+        let _ = writeln!(
+            out,
+            "The chat works in {}: the page can do what a terminal conversation there can.",
+            chat.dir().display()
+        );
+    }
     if printed.and_then(|()| out.flush()).is_err() {
         eprintln!("Cannot print the dashboard's address; it serves on {address}.");
     }
-    tokio::select! {
-        served = serve(listener, context) => {
-            served.context("the dashboard stopped serving")?;
-        }
-        _ = tokio::signal::ctrl_c() => {}
+    let served = tokio::select! {
+        served = serve(listener, context) => served.context("the dashboard stopped serving"),
+        _ = tokio::signal::ctrl_c() => Ok(()),
+    };
+    if let Some(chat) = &chat {
+        chat.shutdown().await;
     }
+    served?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -241,6 +281,8 @@ mod tests {
             Some(Options {
                 listen: "127.0.0.1:7878".parse().unwrap(),
                 open: true,
+                chat: false,
+                dir: None,
             })
         );
         assert_eq!(
@@ -248,6 +290,8 @@ mod tests {
             Some(Options {
                 listen: "[::1]:0".parse().unwrap(),
                 open: false,
+                chat: false,
+                dir: None,
             })
         );
         assert_eq!(
@@ -258,6 +302,11 @@ mod tests {
             "127.0.0.2:9000".parse().unwrap()
         );
         assert_eq!(parse(args(&["--help"])).unwrap(), None);
+        let chat = parse(args(&["--chat", "--dir", "/w"])).unwrap().unwrap();
+        assert!(chat.chat);
+        assert_eq!(chat.dir.as_deref(), Some(std::path::Path::new("/w")));
+        assert!(parse(args(&["--dir=/w"])).is_err());
+        assert!(parse(args(&["--chat", "--dir"])).is_err());
         assert!(parse(args(&["--listen"])).is_err());
         assert!(parse(args(&["--port", "1"])).is_err());
     }
