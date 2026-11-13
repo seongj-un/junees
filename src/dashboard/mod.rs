@@ -39,7 +39,9 @@ Ctrl-C.
   --no-open           print the address without opening a browser
 
 The address it prints holds a token made for this run; the page needs it.
-Anyone who can read the address can read the dashboard.
+Anyone who can read the address can read the dashboard. On a computer
+other users log in to, use --no-open: the opened browser's command line,
+which they can list, holds the address.
 ";
 
 /// The arguments of `junees dashboard`.
