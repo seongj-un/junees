@@ -1,6 +1,6 @@
 # 변경 기록
 
-## 다음 버전 (미출시)
+## 0.3.0 (2026-11-13)
 
 ### 업그레이드할 때 확인할 것
 
@@ -12,7 +12,7 @@
   - 양쪽에 키가 다 있으면 오류 없이 주소 쪽 키를 씁니다. 그래서 예전에 환경 변수 키가 이기던 설정(파일에 `base_url`과 `api_key`, 셸에 `ANTHROPIC_API_KEY`)은 이제 파일의 키를 씁니다.
   - 올리기 전에 `junees doctor`를 돌려 `Anthropic API key` 줄을 확인합니다. "set, but not where the address is set"이면 위처럼 옮깁니다.
 - **Anthropic 주소 검사와 리다이렉트 (#88)**
-  - api 백엔드의 `ANTHROPIC_BASE_URL`(`base_url`)은 이제 OpenAI 주소처럼 `https://`이거나 이 컴퓨터의 `http://`(`localhost`, `127.0.0.1`, `::1`)여야 하고, 사용자 이름이나 비밀번호(`https://user:pass@proxy`)를 담을 수 없습니다. 아니면 시작할 때 `ANTHROPIC_BASE_URL (`base_url`) must use https ...` 오류로 끝나고 `junees doctor`의 `provider` 줄이 실패로 알립니다. 다른 컴퓨터의 프록시를 평문 `http://`로 쓰고 있었다면 https로 바꾸거나 이 컴퓨터에서 터널을 거쳐 씁니다. claude-code 백엔드는 이 주소를 쓰지 않으므로 검사하지 않습니다(`claude`가 이 변수를 따로 읽어도 그대로입니다).
+  - api 백엔드의 `ANTHROPIC_BASE_URL`(`base_url`)은 이제 OpenAI 주소처럼 `https://`이거나 이 컴퓨터의 `http://`(`localhost`, `127.0.0.1`, `::1`)여야 하고, 사용자 이름이나 비밀번호(`https://user:pass@proxy`)를 담을 수 없습니다. 아니면 시작할 때 `` ANTHROPIC_BASE_URL (`base_url`) must use https ... `` 오류로 끝나고 `junees doctor`의 `provider` 줄이 실패로 알립니다. 다른 컴퓨터의 프록시를 평문 `http://`로 쓰고 있었다면 https로 바꾸거나 이 컴퓨터에서 터널을 거쳐 씁니다. claude-code 백엔드는 이 주소를 쓰지 않으므로 검사하지 않습니다(`claude`가 이 변수를 따로 읽어도 그대로입니다).
   - Anthropic 요청은 이제 리다이렉트(3xx)를 따라가지 않습니다. reqwest는 다른 호스트로 넘어갈 때 `x-api-key`를 떼지 않으므로, 프록시가 3xx로 다른 곳을 가리키면 키가 그곳으로 갔습니다. 3xx를 돌려주는 프록시는 이제 `API error 307` 같은 오류가 되니, 최종 주소를 `base_url`에 직접 적습니다.
 - **작업 폴더가 홈인 예약 작업과 웹훅 경로는 거절 (#84)**
   - 예약 작업, 웹훅 경로, GitHub 흐름(`add-github`)의 작업 폴더가 홈 자체이거나 홈을 품은 폴더(`/home`, `/`)면, 추가할 때 거절하고 이미 있는 것은 처음 실행할 때 실패로 기록하고 전달한 뒤 멈춥니다(`paused`. 일정이나 요청마다 실패가 다시 오지 않습니다). 막을 경로 목록(셸 시작 파일, systemd, `~/.ssh` 등)으로는 파이썬 `.pth`, 에디터 설정, 다른 저장소의 git 훅 같은 나중에 실행되는 파일을 다 막을 수 없기 때문입니다.
@@ -20,15 +20,16 @@
   - 고치는 법(권장): 작업을 지우고 프로젝트 폴더로 다시 추가합니다. `junees cron rm <id>` 뒤 `junees cron add "<일정>" "<프롬프트>" --dir ~/work/<프로젝트>`.
   - 홈에서 계속 돌려야 하면 지우지 말고 `junees cron allow-home <id>`, `junees webhook allow-home <이름>`으로 허용 표시를 붙입니다(#89). 홈 폴더 때문에 멈춘 작업과 경로는 이 명령이 다시 시작하고, id, 일정, 웹훅 시크릿이 그대로라 GitHub의 Secret도 바꾸지 않아도 됩니다. `junees cron pause`로 직접 멈춘 것은 멈춘 채 둡니다. 허용을 거두려면 `disallow-home`을 씁니다(작업 폴더가 홈이면 바로 멈춥니다).
   - `XDG_CONFIG_HOME`이 홈 아래의 경로로 있으면(홈 자체는 제외) 무인 실행이 `$XDG_CONFIG_HOME/systemd`, `environment.d`, `autostart`, `git`, `fish`에도 쓰지 못합니다(`~/.config` 아래와 같은 규칙).
-- **`OPENAI_API_KEY`를 bash에서 숨김 (OpenAI 호환 provider)**
+- **비밀 값 검사가 OpenAI 키 모양도 찾음 (#81, #85)**
+  - 스킬 저장, GitHub 도구와 flow가 바깥으로 올리는 글, doctor 출력의 비밀 값 검사가 이제 OpenAI와 OpenRouter 키 모양(`sk-proj-`, `sk-svcacct-`, `sk-admin-`, `sk-or-v1-`)과 접두 없는 긴 `sk-` 키(`sk-` 뒤에 영숫자 32자 이상)도 찾습니다. 그래서 0.2.0에서 통과하던 예시 키가 든 스킬이나, 키 모양 문자열이 든 PR 코멘트가 거절될 수 있습니다. 예시에는 `sk-...`처럼 짧게 줄인 값을 씁니다.
+- **`OPENAI_API_KEY`를 bash에서 숨김 (OpenAI 호환 provider, #81)**
   - `OPENAI_API_KEY`는 이제 Junees가 읽는 자격 증명이라 `ANTHROPIC_API_KEY`처럼 bash 도구, MCP 서버, 플러그인, `claude` 자식의 환경에서 지웁니다. 모델이 실행하는 스크립트가 이 변수를 쓰고 있었다면 그 스크립트가 직접 읽도록 바꿔야 합니다.
-
 - **웹훅 실행의 파일 도구와 `sandbox_read` (#77)**
   - 웹훅 실행(GitHub 흐름의 단계 포함)의 파일 도구(`read_file`)는 이제 `sandbox_read`를 받지 않습니다. 작업 폴더, 임시 폴더, `sandbox_write`, 그리고 새 설정 `webhook_sandbox_read`(`JUNEES_WEBHOOK_SANDBOX_READ`, 기본은 없음)의 폴더만 읽습니다.
   - 그래서 예약 작업용으로 설정 파일에 `sandbox_read = "/, ~/.ssh"`를 적어도, 웹훅 실행의 `read_file`은 디스크 전체를 읽지 않습니다. 0.2.0에서 안내한 "`JUNEES_SANDBOX_READ`는 예약 작업 데몬의 환경에만" 우회는 더 필요 없습니다.
   - 웹훅 실행의 파일 도구가 `sandbox_read`의 폴더를 읽고 있었다면 그 폴더를 `webhook_sandbox_read`에 옮겨 적습니다. 여기에 자격 증명(`~/.ssh` 등)을 적어도 웹훅 실행은 읽지 않습니다.
   - 예약 작업과 대화는 그대로입니다: 예약 작업의 파일 도구와 bash는 계속 `sandbox_read`를 따르고, 거기 적은 자격 증명을 예약 작업의 bash가 다시 읽습니다. 웹훅 실행의 bash 읽기도 계속 `sandbox_read`를 따릅니다(주면 좁아질 뿐이고, 자격 증명은 0.2.0처럼 모두 숨깁니다).
-- **작업 폴더가 홈인 무인 실행의 bash (#75 남은 위험)**
+- **작업 폴더가 홈인 무인 실행의 bash (#82, #75 남은 위험)**
   - 예약 작업과 웹훅 실행의 bash는 이제 파일 도구와 같이 셸 시작 파일(`~/.bashrc`, `~/.profile` 등), systemd user 유닛(`~/.config/systemd`, `~/.local/share/systemd`), `~/.config/autostart`, `~/.gitconfig`, `~/.config/git`, cargo 설정(`~/.cargo/config.toml`, `~/.cargo/config`), `~/.ssh`의 `known_hosts*`를 뺀 모든 항목(`config`, `rc`, `environment`, `authorized_keys*`, `config`가 부르는 스크립트와 `Include` 파일), `~/.local/bin`, `~/bin`, 그리고 데몬 `PATH`에 든 홈 아래 폴더(`~/.cargo/bin` 등)에 쓰지 못합니다(읽기는 됩니다). 파일 도구의 쓰기 거절 목록에도 cargo 설정, `~/.local/bin`, `~/bin`, PATH 폴더가 더해졌습니다(`~/.ssh`는 파일 도구가 원래 통째로 거절합니다).
   - 작업 폴더가 그런 프로그램 폴더이거나 그 안에 있으면(`~/scripts`가 `PATH`에 있고 작업 폴더가 `~/scripts/job`) 그 폴더는 작업 폴더에 대해서만 보호하지 않으므로 작업 폴더에는 그대로 씁니다. 작업 폴더가 프로그램 폴더 자체면 실행을 시작할 때 경고합니다(그 실행이 쓴 프로그램은 다음 셸에서 돕니다).
   - 작업 폴더가 홈이면 무인 실행의 bash는 홈, `~/.config`, `~/.local/share` 바로 아래에 새 파일이나 폴더를 만들지 못합니다(이미 있는 하위 폴더 안은 됩니다). 예약 작업이 `cargo install`이나 `pip install --user`로 `~/.cargo/bin`, `~/.local/bin`에 설치하던 경우도 실패합니다. `ControlPath`를 `~/.ssh` 안에 둔 ssh 다중화도 소켓을 만들지 못합니다. 작업과 웹훅 경로에는 프로젝트 폴더를 주세요.
@@ -41,7 +42,7 @@
 
 ### 새 기능
 
-- OpenAI 호환 API provider: `provider = "openai"`, `openai_base_url`, `openai_api_key`(`OPENAI_API_KEY`)로 api 백엔드가 OpenAI Chat Completions 형식의 서버(OpenAI, OpenRouter, Ollama, vLLM, LM Studio)를 부른다. 도구 호출(병렬 포함), 이미지, 스트리밍, 사용량과 `prices` 비용, 재시도와 컨텍스트 초과 압축이 그대로 동작하고, 확장 사고·서버 웹 검색·프롬프트 캐시 표시는 꺼진다. `junees doctor`가 provider와 주소를 보여 주고 `--online`이면 모델 목록을 확인한다 ([OpenAI 호환 API](docs/configuration.md#openai-호환-api))
+- OpenAI 호환 API provider (#81): `provider = "openai"`, `openai_base_url`, `openai_api_key`(`OPENAI_API_KEY`)로 api 백엔드가 OpenAI Chat Completions 형식의 서버(OpenAI, OpenRouter, Ollama, vLLM, LM Studio)를 부른다. 도구 호출(병렬 포함), 이미지, 스트리밍, 사용량과 `prices` 비용, 재시도와 컨텍스트 초과 압축이 그대로 동작하고, 확장 사고·서버 웹 검색·프롬프트 캐시 표시는 꺼진다. `junees doctor`가 provider와 주소를 보여 주고 `--online`이면 모델 목록을 확인한다 ([OpenAI 호환 API](docs/configuration.md#openai-호환-api))
 - OpenAI 호환 provider 후속 (#83)
   - 출력 상한을 `max_completion_tokens`로 보내는 곳을 OpenAI의 지역 도메인(`eu.api.openai.com` 등 `*.api.openai.com`)과 Azure OpenAI v1 API(`*.openai.azure.com`, `*.services.ai.azure.com`, `*.cognitiveservices.azure.com`)로 넓혔다. 새 설정 `openai_max_tokens_field`(`JUNEES_OPENAI_MAX_TOKENS_FIELD`: `auto`, `max_tokens`, `max_completion_tokens`)로 직접 고를 수 있다.
   - 새 설정 `openai_reasoning_effort`(`JUNEES_OPENAI_REASONING_EFFORT`): 정했을 때만 `reasoning_effort`로 보낸다. 정해 두면 압축 요약 호출의 상한에 추론용 25,000 토큰을 더한다. 창이 작아 서버가 이 상한을 400으로 거절하면 더한 만큼 빼고 한 번 더 보낸다.
@@ -54,6 +55,11 @@
 - 예약 작업과 웹훅 경로의 `--allow-home`: 홈(또는 홈을 품은 폴더)을 작업 폴더로 쓰는 것을 작업마다 명시적으로 허용 (#84)
 - `junees cron allow-home`/`disallow-home`, `junees webhook allow-home`/`disallow-home`: 이미 있는 작업과 경로에 `--allow-home` 표시를 붙이거나 거둔다. 붙이면 홈 폴더 때문에 멈춘 것을 다시 시작하고, 거두면 작업 폴더가 홈일 때 바로 멈춘다. 모델이 bash로 `allow-home`을 실행하면 "항상 허용"과 상관없이 매번 승인을 묻는다 (#89)
 - `junees dashboard`: 이 컴퓨터의 브라우저에서 보는 읽기 전용 웹 대시보드(상태, 세션, 사용량, 예약 작업, 웹훅, 점검). 루프백 주소에만 열고, 실행마다 새로 만든 토큰이 있어야 API가 답한다. `Host`와 `Origin` 검사, CSP 등 보안 헤더, 요청 크기와 시간 제한을 둔다. 키와 시크릿은 있는지만 보이고, 세션은 비밀 값을 가린 앞부분 200자만 보인다 ([대시보드](docs/dashboard.md))
+
+### 고친 것
+
+- Rust 1.100에서 `unused ExitCode` 경고로 빌드가 깨지던 것 (#87)
+- 가끔 실패하던 claude-code 취소 테스트: 죽은 프로세스(`X` 상태)를 실행 중으로 보던 판정 (#90, #94)
 
 ## 0.2.0 (2026-11-12)
 
