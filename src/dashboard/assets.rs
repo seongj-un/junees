@@ -51,7 +51,10 @@ mod tests {
         for entry in std::fs::read_dir(&page).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().into_string().unwrap();
-            if !entry.file_type().unwrap().is_file() || name.starts_with('.') {
+            // Hidden files and editor leftovers are left out on purpose.
+            if !entry.file_type().unwrap().is_file()
+                || super::super::page_files::judge(&name) == super::super::page_files::Verdict::Skip
+            {
                 continue;
             }
             let asset = find(&format!("/{name}")).unwrap_or_else(|| panic!("{name} is not served"));

@@ -14,6 +14,8 @@
 mod actions;
 mod api;
 mod assets;
+#[cfg(test)]
+mod page_files;
 pub mod server;
 mod session_view;
 
