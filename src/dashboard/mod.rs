@@ -16,7 +16,6 @@ use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 
@@ -138,14 +137,7 @@ pub async fn main(options: Options) -> Result<ExitCode> {
         open_browser(&url);
     }
     let env: Env = Arc::new(|key: &str| std::env::var(key).ok());
-    let context = Arc::new(Context {
-        token,
-        ip: address.ip(),
-        port: address.port(),
-        env,
-        started: Instant::now(),
-        sessions: Default::default(),
-    });
+    let context = Arc::new(Context::new(token, address.ip(), address.port(), env));
     tokio::select! {
         served = serve(listener, context) => {
             served.context("the dashboard stopped serving")?;

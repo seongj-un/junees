@@ -37,6 +37,8 @@ pub const MAX_BODY: u64 = 1024;
 pub const READ_TIME: Duration = Duration::from_secs(10);
 /// How long a connection may last, answer included.
 pub const CONNECTION_TIME: Duration = Duration::from_secs(60);
+/// How long to wait after a failed accept.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 /// Connections served at once; more wait to be accepted.
 const MAX_CONNECTIONS: usize = 16;
 
@@ -66,6 +68,22 @@ pub struct Context {
     pub started: Instant,
     /// What `/api/sessions` counted in each journal.
     pub(crate) sessions: std::sync::Mutex<api::SessionCache>,
+    /// One `/api/doctor` at a time.
+    pub(crate) doctor: Arc<Semaphore>,
+}
+
+impl Context {
+    pub fn new(token: String, ip: IpAddr, port: u16, env: Env) -> Self {
+        Self {
+            token,
+            ip,
+            port,
+            env,
+            started: Instant::now(),
+            sessions: Default::default(),
+            doctor: Arc::new(Semaphore::new(1)),
+        }
+    }
 }
 
 /// An answer: status, content type, body and headers beyond the usual.
@@ -115,14 +133,23 @@ impl Answer {
     }
 }
 
-/// Serves `listener` until accepting fails.
+/// Serves `listener`; a failed accept is reported and the next one tried.
 pub async fn serve(listener: TcpListener, context: Arc<Context>) -> std::io::Result<()> {
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         let Ok(slot) = slots.clone().acquire_owned().await else {
             return Ok(());
         };
-        let (stream, _) = listener.accept().await?;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            // Out of file descriptors, a connection reset before it was
+            // taken: the next one may do.
+            Err(err) => {
+                eprintln!("dashboard: cannot accept a connection: {err}");
+                tokio::time::sleep(ACCEPT_PAUSE).await;
+                continue;
+            }
+        };
         let context = context.clone();
         tokio::spawn(async move {
             let _slot = slot;

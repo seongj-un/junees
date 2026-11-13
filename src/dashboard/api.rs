@@ -69,7 +69,7 @@ pub async fn answer(path: &str, query: &str, context: &Arc<Context>) -> Answer {
         },
         "/api/cron" => blocking(settings, cron).await,
         "/api/webhooks" => blocking(settings, webhooks).await,
-        "/api/doctor" => run_doctor(settings, broken).await,
+        "/api/doctor" => run_doctor(settings, broken, context).await,
         _ => {
             return Answer::error(404, "not_found", "there is no such API path");
         }
@@ -449,20 +449,40 @@ fn read_store<T>(
     read(path).map_err(|err| Failure::internal(&err))
 }
 
+/// How long `/api/doctor` waits for its turn, and then for doctor.
+const DOCTOR_TIME: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// [`doctor`] on a runtime of its own on a blocking thread: some checks
 /// hold values that are not `Send` across their awaits, so the future
-/// cannot move between the server's threads.
-async fn run_doctor(settings: Settings, broken: Option<anyhow::Error>) -> Result<Value, Failure> {
+/// cannot move between the server's threads. One runs at a time, and a
+/// request waits [`DOCTOR_TIME`] for its turn and again for the answer;
+/// a check that hangs keeps one thread, not one per request.
+async fn run_doctor(
+    settings: Settings,
+    broken: Option<anyhow::Error>,
+    context: &Context,
+) -> Result<Value, Failure> {
+    let busy = |what: &str| Failure {
+        status: 503,
+        code: "doctor_busy",
+        message: format!("doctor {what}; try again shortly"),
+    };
+    let permit = tokio::time::timeout(DOCTOR_TIME, context.doctor.clone().acquire_owned())
+        .await
+        .map_err(|_| busy("is still running for an earlier request"))?
+        .map_err(|_| busy("is not available"))?;
     let work = move || {
+        let _permit = permit;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|err| Failure::internal(&anyhow::anyhow!("cannot run doctor: {err}")))?;
         Ok(runtime.block_on(doctor(&settings, broken.as_ref())))
     };
-    match tokio::task::spawn_blocking(work).await {
-        Ok(result) => result,
-        Err(err) => Err(Failure::internal(&anyhow::anyhow!("doctor failed: {err}"))),
+    match tokio::time::timeout(DOCTOR_TIME, tokio::task::spawn_blocking(work)).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => Err(Failure::internal(&anyhow::anyhow!("doctor failed: {err}"))),
+        Err(_) => Err(busy("took too long")),
     }
 }
 
