@@ -373,7 +373,11 @@ async fn setup(settings: &mut Settings, input: &SharedLines) -> Result<()> {
     eprintln!("Saved {}.", path.display());
     // The key goes with its address (config_file::PAIRED_KEYS): with
     // ANTHROPIC_BASE_URL exported, the file's key is not sent there.
-    if has_key && settings.origin("ANTHROPIC_BASE_URL") == Some(Origin::Env) {
+    let exported_address = settings.origin("ANTHROPIC_BASE_URL") == Some(Origin::Env)
+        && !settings.get("ANTHROPIC_BASE_URL").is_some_and(|url| {
+            junees::config_file::is_default_address(&url, junees::config::DEFAULT_BASE_URL)
+        });
+    if has_key && exported_address {
         eprintln!(
             "Note: ANTHROPIC_BASE_URL is set in your environment, so the key comes from \
              ANTHROPIC_API_KEY there, not from `api_key` in the file."

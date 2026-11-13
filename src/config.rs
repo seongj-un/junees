@@ -130,7 +130,11 @@ impl Config {
             .transpose()?;
         let api_key = match (need_key, &openai) {
             (false, _) => String::new(),
-            (true, None) => match (get("ANTHROPIC_API_KEY"), get("ANTHROPIC_BASE_URL")) {
+            (true, None) => match (
+                get("ANTHROPIC_API_KEY"),
+                get("ANTHROPIC_BASE_URL")
+                    .filter(|url| !crate::config_file::is_default_address(url, DEFAULT_BASE_URL)),
+            ) {
                 (Some(key), _) => key,
                 (None, None) => bail!(
                     "no API key: run `junees setup`, or set ANTHROPIC_API_KEY \

@@ -18,11 +18,30 @@ use anyhow::{Context, Result, bail};
 use crate::provider::openai;
 
 /// The API keys read only from where their address is set: (key,
-/// address), as environment variable names ([`Settings::get`]).
-pub const PAIRED_KEYS: &[(&str, &str)] = &[
-    (ANTHROPIC_KEY_ENV, ANTHROPIC_BASE_URL_ENV),
-    (openai::API_KEY_ENV, openai::BASE_URL_ENV),
+/// address, the address used when none is set), as environment variable
+/// names ([`Settings::get`]).
+pub const PAIRED_KEYS: &[(&str, &str, &str)] = &[
+    (
+        ANTHROPIC_KEY_ENV,
+        ANTHROPIC_BASE_URL_ENV,
+        crate::config::DEFAULT_BASE_URL,
+    ),
+    (
+        openai::API_KEY_ENV,
+        openai::BASE_URL_ENV,
+        openai::DEFAULT_BASE_URL,
+    ),
 ];
+
+/// Whether `address` is `default` as written down (case of letters and a
+/// trailing `/` aside): such an address counts as not set, since every
+/// key it could take goes to the same official API.
+pub fn is_default_address(address: &str, default: &str) -> bool {
+    address
+        .trim()
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(default)
+}
 
 /// The Anthropic key and the address it goes to.
 pub const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
@@ -461,8 +480,8 @@ impl Settings {
     }
 
     fn lookup(&self, name: &str) -> Option<(String, Origin)> {
-        match PAIRED_KEYS.iter().find(|(key, _)| *key == name) {
-            Some((key, address)) => self.paired_key(key, address),
+        match PAIRED_KEYS.iter().find(|(key, _, _)| *key == name) {
+            Some((key, address, default)) => self.paired_key(key, address, default),
             None => self.first(name),
         }
     }
@@ -488,10 +507,14 @@ impl Settings {
     /// comes from the file, from the environment when the address
     /// variable does. Taken key by key, a key exported for other tools
     /// would go to the file's server (OpenRouter, a proxy), or the file's
-    /// key to an exported address. With the default address either one is
-    /// taken, the environment first.
-    fn paired_key(&self, key: &str, address: &str) -> Option<(String, Origin)> {
-        match self.first(address).map(|(_, origin)| origin) {
+    /// key to an exported address. With the default address, unset or
+    /// written down ([`is_default_address`]), either one is taken, the
+    /// environment first.
+    fn paired_key(&self, key: &str, address: &str, default: &str) -> Option<(String, Origin)> {
+        let set = self
+            .first(address)
+            .filter(|(value, _)| !is_default_address(value, default));
+        match set.map(|(_, origin)| origin) {
             None | Some(Origin::Override) => self.first(key),
             Some(Origin::Env) => self
                 .overridden(key)
@@ -794,6 +817,21 @@ mod tests {
         assert_eq!(default.get(KEY).as_deref(), Some("env-key"));
         let default = settings(&[], &[("openai_api_key", "file-key")]);
         assert_eq!(default.get(KEY).as_deref(), Some("file-key"));
+        // So does the default address written down.
+        let written = settings(
+            &[("OPENAI_BASE_URL", "https://api.openai.com/v1/")],
+            &[("openai_api_key", "file-key")],
+        );
+        assert_eq!(written.get(KEY).as_deref(), Some("file-key"));
+        let written = settings(
+            &[(KEY, "env-key")],
+            &[("openai_base_url", "https://api.openai.com/v1")],
+        );
+        assert_eq!(written.get(KEY).as_deref(), Some("env-key"));
+        assert!(!is_default_address(
+            "https://api.openai.com",
+            openai::DEFAULT_BASE_URL
+        ));
 
         // Starting refuses a remote address without its own key.
         let mut file = ConfigFile::default();
@@ -883,6 +921,40 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains("hunter2"), "{err}");
+        // The default address written down counts as not set: the key may
+        // come from either place, since both go to the official API.
+        for (env_pairs, file_pairs, expected) in [
+            (
+                &[("ANTHROPIC_BASE_URL", "https://api.anthropic.com")][..],
+                &[("api_key", "sk-ant-file")][..],
+                "sk-ant-file",
+            ),
+            (
+                &[(KEY, "sk-ant-env")][..],
+                &[("base_url", "https://API.anthropic.com/ ")][..],
+                "sk-ant-env",
+            ),
+        ] {
+            let settings = settings(env_pairs, file_pairs);
+            assert_eq!(settings.get(KEY).as_deref(), Some(expected));
+            assert!(!settings.key_away_from_address(KEY));
+            let config = Config::from_lookup(|key| settings.get(key)).unwrap();
+            assert_eq!(config.api_key, expected);
+        }
+        // Without any key that is the plain error, not "same place".
+        let none = settings(&[("ANTHROPIC_BASE_URL", "https://api.anthropic.com/")], &[]);
+        let err = Config::from_lookup(|key| none.get(key))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.starts_with("no API key: run `junees setup`"), "{err}");
+        // A path after it is another address.
+        let other = settings(
+            &[(KEY, "sk-ant-env")],
+            &[("base_url", "https://api.anthropic.com/proxy")],
+        );
+        assert_eq!(other.get(KEY), None);
+
         // The claude-code backend reads no key, so the pairing changes
         // nothing there.
         let config = Config::from_lookup_without_key(|key| env_address.get(key)).unwrap();
