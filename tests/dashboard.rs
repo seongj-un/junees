@@ -1084,3 +1084,50 @@ async fn an_opened_browser_gets_a_one_time_code_not_the_token() {
     let reply = post(&dashboard, "/api/token", &origin, &body).await;
     assert_eq!((reply.status, reply.error()), (401, json!("bad_code")));
 }
+
+#[tokio::test]
+async fn without_an_opener_it_prints_the_token_address() {
+    let home = Home::new();
+    // No xdg-open or open on PATH: an SSH session, a server without a
+    // desktop. No command line held a code, so the token address is safe
+    // to print, and it is the only way in.
+    let empty = home.root.join("empty-bin");
+    std::fs::create_dir(&empty).unwrap();
+    let mut child = home
+        .command(&["dashboard", "--listen", "127.0.0.1:0"])
+        .env("PATH", &empty)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = tokio::time::timeout(Duration::from_secs(30), lines.next_line())
+        .await
+        .expect("nothing printed")
+        .unwrap()
+        .expect("the dashboard exited");
+    tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+    let url = first
+        .strip_prefix("Junees dashboard: ")
+        .unwrap_or_else(|| panic!("not the address line: {first}"));
+    let (base, token) = url
+        .split_once("/#token=")
+        .unwrap_or_else(|| panic!("no token in the address: {url}"));
+    assert_eq!(token.len(), 43);
+    let host = base.strip_prefix("http://").unwrap();
+    let port: u16 = host.rsplit_once(':').unwrap().1.parse().unwrap();
+    let dashboard = Dashboard {
+        child,
+        port,
+        token: token.to_string(),
+    };
+    assert_eq!(dashboard.json("/api/status").await["backend"], "api");
+    // The code made for the browser that never started ended with it.
+    let reply = post(
+        &dashboard,
+        "/api/token",
+        &format!("Origin: http://{host}"),
+        "{\"code\":\"x\"}",
+    )
+    .await;
+    assert_eq!((reply.status, reply.error()), (401, json!("bad_code")));
+}
