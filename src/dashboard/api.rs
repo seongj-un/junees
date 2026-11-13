@@ -193,11 +193,11 @@ fn prices(settings: &Settings) -> Result<crate::usage::Prices, Failure> {
     )
 }
 
-/// The first `chars` characters of `text`, with secrets cut out first so
-/// that no piece of one is left at the cut.
+/// The first `chars` characters of what a user wrote, with secrets cut
+/// out first so that no piece of one is left at the cut.
 fn shown(settings: &Settings, text: &str, chars: usize) -> Value {
     let mut text = text.trim().to_string();
-    crate::doctor::hide_secrets(settings, std::iter::once(&mut text));
+    crate::doctor::hide_secrets_in_user_text(settings, std::iter::once(&mut text));
     if text.is_empty() {
         return Value::Null;
     }
@@ -293,8 +293,20 @@ fn last_run(settings: &Settings, last: Option<&LastRun>) -> Value {
     json!({
         "at": time(last.started_at),
         "status": last.status.word(),
-        "note": shown(settings, &last.note, usize::MAX),
+        "note": note(settings, &last.note),
     })
+}
+
+/// A run's note (an error message, mostly), with secrets cut out as
+/// `junees doctor` cuts them; `null` when empty.
+fn note(settings: &Settings, text: &str) -> Value {
+    let mut text = text.trim().to_string();
+    crate::doctor::hide_secrets(settings, std::iter::once(&mut text));
+    if text.is_empty() {
+        Value::Null
+    } else {
+        Value::String(text)
+    }
 }
 
 fn cron(settings: &Settings) -> Result<Value, Failure> {
@@ -434,6 +446,28 @@ mod tests {
             let err = number(query, "limit", limit).unwrap_err();
             assert_eq!((err.status, err.code), (400, "bad_query"), "{query}");
         }
+    }
+
+    #[test]
+    fn user_text_keeps_its_quotes_and_loses_its_secrets() {
+        let settings = Settings::new(
+            |_: &str| None,
+            crate::config_file::ConfigFile::default(),
+            None,
+            false,
+        );
+        assert_eq!(
+            shown(&settings, "I got `undefined` from foo", 200),
+            json!("I got `undefined` from foo")
+        );
+        let key = "sk-ant-api03-Abc1Def2Ghi3Jkl4Mno5Pqr6Stu7Vwx8";
+        let text = format!("use {key} please");
+        let preview = shown(&settings, &text, 200);
+        assert!(!preview.as_str().unwrap().contains("sk-ant"), "{preview}");
+        // Cut after hiding: no prefix of the key is left at the end.
+        let cut = shown(&settings, &text, 10);
+        assert!(!cut.as_str().unwrap().contains("sk-"), "{cut}");
+        assert_eq!(shown(&settings, "  \n ", 200), Value::Null);
     }
 
     #[test]

@@ -322,6 +322,18 @@ pub fn hide_secrets<'a>(settings: &Settings, texts: impl Iterator<Item = &'a mut
     redact::redact(&hidden, texts);
 }
 
+/// [`hide_secrets`] for what a user wrote (a session's first message):
+/// the report's rule that shortens ``got `value` `` to a length does not
+/// apply, since there it is ordinary text.
+pub fn hide_secrets_in_user_text<'a>(
+    settings: &Settings,
+    texts: impl Iterator<Item = &'a mut String>,
+) {
+    let mut hidden = redact::Hidden::default();
+    hidden.add_settings(settings);
+    redact::redact_user_text(&hidden, texts);
+}
+
 /// Runs every check on `settings`. `broken` is why the settings file could
 /// not be read, if it could not (the checks then go on without it).
 pub async fn run(settings: &Settings, broken: Option<&anyhow::Error>, online: bool) -> Report {
