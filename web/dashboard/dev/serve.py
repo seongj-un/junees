@@ -303,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
         if what == "messages":
             text = body.get("text")
             if not isinstance(text, str) or not 1 <= len(text) <= 32000:
-                return self.send_json(400, {"error": "bad_text", "message": "text is 1 to 32,000 characters"})
+                return self.send_json(400, {"error": "bad_body", "message": "text is 1 to 32,000 characters"})
             return self.send_json(*chats.send(chat, text))
         if what == "cancel":
             return self.send_json(*chats.cancel(chat))
@@ -431,7 +431,7 @@ def main():
     server.codes = {}
     server.fixtures = load_fixtures()
     if args.chat:
-        server.chats = chat_sim.Chats(server.fixtures["session_details"].keys(), args.approval_seconds)
+        server.chats = chat_sim.Chats(server.fixtures["session_details"], args.approval_seconds)
     base = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"{base}#token={server.token}", flush=True)
     print(f"{base}#code={server.new_code()}  (one-time, 60 s; GET /__dev/code for another)", flush=True)

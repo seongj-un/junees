@@ -5,7 +5,13 @@ What the scripted turn does depends on the message:
     contains 정리, 지워 or 승인   asks to approve a bash command (y/a/n)
     contains 파일                 asks to approve a write_file (y/n, no "always")
     contains 오류                 ends the turn with an error event
+    contains 한도                 stops at the step limit (stop_reason max_turns)
     anything else                reads a file, then answers
+The events follow #109: no user text in turn_start, no expires_at on a
+question, approval_closed by "cancel" when a turn is cancelled while it
+waits, turn_end {turn, stop_reason}, event ids from one counter for the
+whole server, at most 8 streams (429) and 16 open chats (the oldest is
+closed and its streams end; POST /api/chat with its id opens it again).
 Every turn streams its answer in small pieces so the page shows it growing.
 """
 
@@ -16,41 +22,75 @@ import time
 
 APPROVAL_SECONDS = 300
 KEEP_EVENTS = 1000
+MAX_STREAMS = 8
+MAX_CHATS = 16
+_SEQ = [0]
+_SEQ_LOCK = threading.Lock()
+
+
+def next_seq():
+    with _SEQ_LOCK:
+        _SEQ[0] += 1
+        return _SEQ[0]
 
 
 class Chat:
     def __init__(self, session_id):
         self.id = session_id
         self.events = []  # (seq, dict)
-        self.seq = 0
         self.turn = 0
         self.running = False
         self.cancelled = False
         self.questions = {}  # id -> {"options", "answer", "closed"}
         self.cond = threading.Condition()
+        self.closed = False
+        self.used = time.monotonic()
 
     def emit(self, event):
+        # The session file has the turn before turn_end goes out.
+        hook = getattr(self, "before_end", None)
+        if event["type"] == "turn_end" and hook:
+            self.before_end = None
+            hook()
         with self.cond:
-            self.seq += 1
-            self.events.append((self.seq, event))
+            seq = next_seq()
+            self.events.append((seq, event))
             del self.events[:-KEEP_EVENTS]
             self.cond.notify_all()
 
     def since(self, after):
         with self.cond:
+            # An `after` past the newest kept event (an id from before the
+            # server restarted) starts over from the oldest, as #109 does.
+            if after is not None and self.events and after > self.events[-1][0]:
+                after = None
             return [(seq, ev) for seq, ev in self.events if after is None or seq > after]
 
 
 class Chats:
     """Every chat of one dev server, and what its scripted turns do."""
 
-    def __init__(self, known_sessions, approval_seconds=APPROVAL_SECONDS):
-        self.known = set(known_sessions)
+    def __init__(self, journal, approval_seconds=APPROVAL_SECONDS):
+        # The fixtures' session details, by id: turns are written here as the
+        # real server writes the session file, so the session API (and the
+        # history the chat screen shows on returning) has them.
+        self.journal = journal
+        self.known = set(journal)
         self.chats = {}
         self.lock = threading.Lock()
         self.approval_seconds = approval_seconds
         # Raised by GET /__dev/drop-streams: open streams end, as a network drop.
         self.generation = 0
+        self.streams = 0
+        # One turn at a time for the whole dashboard, as #109.
+        self.turn_running = False
+
+    def close(self, chat):
+        """Closes a chat (to keep 16 open); its streams end."""
+        with chat.cond:
+            chat.closed = True
+            chat.cond.notify_all()
+        self.chats.pop(chat.id, None)
 
     def get(self, session_id):
         with self.lock:
@@ -63,16 +103,43 @@ class Chats:
                 session_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime()) + "-" + secrets.token_hex(2)
             elif session_id not in self.known and session_id not in self.chats:
                 return 404, {"error": "not_found", "message": f"no session {session_id} in this folder"}
-            self.chats.setdefault(session_id, Chat(session_id))
+            chat = self.chats.get(session_id)
+            if chat is None:
+                chat = self.chats[session_id] = Chat(session_id)
+                while len(self.chats) > MAX_CHATS:
+                    idle = [c for c in self.chats.values() if not c.running and c is not chat]
+                    if not idle:
+                        break
+                    self.close(min(idle, key=lambda c: c.used))
+            chat.used = time.monotonic()
             self.known.add(session_id)
+            if session_id not in self.journal:
+                now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                self.journal[session_id] = {
+                    "id": session_id, "title": "", "updated_at": now, "source": "dashboard",
+                    "cwd": "/home/me/work/junees", "model": "claude-sonnet-4-6", "total": 0, "messages": [],
+                }
         return 200, {"session_id": session_id}
+
+    def record(self, chat, role, blocks):
+        """Appends a message to the chat's session, as the session file gets it."""
+        with self.lock:
+            detail = self.journal[chat.id]
+            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            detail["messages"].append({"index": len(detail["messages"]), "role": role, "at": now, "blocks": blocks})
+            detail["total"] = len(detail["messages"])
+            detail["updated_at"] = now
+            if not detail.get("title") and role == "user":
+                detail["title"] = blocks[0]["text"][:60]
 
     def send(self, chat, text):
         """(status, body) for POST /api/chat/<id>/messages."""
         with chat.cond:
-            if chat.running:
+            if chat.running or self.turn_running:
                 return 409, {"error": "turn_running", "message": "a turn is still running; wait for turn_end or cancel it"}
+            self.turn_running = True
             chat.running = True
+            chat.used = time.monotonic()
             chat.cancelled = False
             chat.turn += 1
             turn = chat.turn
@@ -85,33 +152,45 @@ class Chats:
             if question is None:
                 return 404, {"error": "not_found", "message": "no such question"}
             if question["closed"]:
-                return 409, {"error": "closed", "message": "the question is closed already"}
+                return 409, {"error": "conflict", "message": "the question is closed already"}
             if answer not in question["options"]:
-                return 400, {"error": "bad_answer", "message": f"answer one of {question['options']}"}
+                return 400, {"error": "bad_body", "message": f"answer one of {question['options']}"}
             question["answer"] = answer
             chat.cond.notify_all()
-        return 200, {}
+        return 200, {"question_id": question_id, "answer": answer}
 
     def cancel(self, chat):
         with chat.cond:
-            chat.cancelled = True
+            running = chat.running
+            if running:
+                chat.cancelled = True
             chat.cond.notify_all()
-        return 200, {}
+        return 200, {"cancelled": running}
 
     # ---- the scripted agent ----
 
     def script(self, chat, turn, text):
+        def save_reply():
+            # The answer's text as one message; tool calls are left out of
+            # the dev journal for brevity.
+            reply = "".join(getattr(chat, "reply", [])).strip()
+            if reply:
+                self.record(chat, "assistant", [{"type": "text", "text": reply}])
+
+        chat.before_end = save_reply
         try:
             self.run_turn(chat, turn, text)
         finally:
             with chat.cond:
                 chat.running = False
+                self.turn_running = False
 
     def stream_text(self, chat, words):
         for word in words.split(" "):
             if chat.cancelled:
                 return False
             chat.emit({"type": "text", "delta": word + " "})
+            chat.reply.append(word + " ")
             time.sleep(0.06)
         return True
 
@@ -122,31 +201,32 @@ class Chats:
         with chat.cond:
             chat.questions[question_id] = question
         expires = time.time() + self.approval_seconds
-        chat.emit({
-            "type": "approval",
-            "question_id": question_id,
-            "kind": kind,
-            "summary": summary,
-            "options": options,
-            "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires)),
-        })
+        chat.emit({"type": "approval", "question_id": question_id, "kind": kind, "summary": summary, "options": options})
         with chat.cond:
             while question["answer"] is None and not chat.cancelled and time.time() < expires:
                 chat.cond.wait(timeout=max(0.1, expires - time.time()))
-            answer, by = (question["answer"], "browser") if question["answer"] else ("n", "timeout")
+            if question["answer"]:
+                answer, by = question["answer"], "browser"
+            else:
+                answer, by = "n", "cancel" if chat.cancelled else "timeout"
             question["closed"] = True
-        # The contract names no `by` for a cancelled turn; the turn_end that
-        # follows closes the card on the page.
-        if not (chat.cancelled and question["answer"] is None):
-            chat.emit({"type": "approval_closed", "question_id": question_id, "answer": answer, "by": by})
+        chat.emit({"type": "approval_closed", "question_id": question_id, "answer": answer, "by": by})
         return answer
 
     def run_turn(self, chat, turn, text):
-        chat.emit({"type": "turn_start", "turn": turn, "text": text})
+        chat.emit({"type": "turn_start", "turn": turn})
+        self.record(chat, "user", [{"type": "text", "text": text}])
+        chat.reply = []
         time.sleep(0.3)
         ok = self.stream_text(chat, "요청을 확인했습니다. 먼저 작업 폴더를 살펴보겠습니다.")
         if ok and "오류" in text:
             chat.emit({"type": "error", "message": "the API answered 529 overloaded three times; try again later"})
+            chat.emit({"type": "usage", "input_tokens": 1830, "output_tokens": 14, "cost_usd": 0.0058})
+            chat.emit({"type": "turn_end", "turn": turn, "stop_reason": "error"})
+            return
+        if ok and "한도" in text:
+            chat.emit({"type": "usage", "input_tokens": 9120, "output_tokens": 640, "cost_usd": 0.0371})
+            chat.emit({"type": "turn_end", "turn": turn, "stop_reason": "max_turns"})
             return
         if ok:
             chat.emit({"type": "tool_use", "name": "read_file", "input_preview": '{"path": "README.md"}'})
@@ -184,11 +264,23 @@ class Chats:
         elif ok:
             ok = self.stream_text(chat, "README에 설치 방법과 사용법이 정리되어 있습니다. 더 알고 싶은 부분이 있으면 말씀해 주세요.")
         chat.emit({"type": "usage", "input_tokens": 1830 + 400 * turn, "output_tokens": 212, "cost_usd": 0.0087})
-        chat.emit({"type": "turn_end", "stop_reason": "cancelled" if chat.cancelled else "end_turn"})
+        chat.emit({"type": "turn_end", "turn": turn, "stop_reason": "cancelled" if chat.cancelled else "end_turn"})
 
 
 def stream(handler, chat, after, chats):
-    """Writes GET /api/chat/<id>/events until the client goes or a drop is asked."""
+    """Writes GET /api/chat/<id>/events until the client goes, the chat closes or a drop is asked."""
+    with chats.lock:
+        if chats.streams >= MAX_STREAMS:
+            return handler.send_json(429, {"error": "too_many_streams", "message": f"at most {MAX_STREAMS} event streams at once"})
+        chats.streams += 1
+    try:
+        _stream(handler, chat, after, chats)
+    finally:
+        with chats.lock:
+            chats.streams -= 1
+
+
+def _stream(handler, chat, after, chats):
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     for key, value in handler.SECURITY_HEADERS.items():
@@ -197,14 +289,14 @@ def stream(handler, chat, after, chats):
     generation = chats.generation
     last = after
     try:
-        while chats.generation == generation:
+        while chats.generation == generation and not chat.closed:
             events = chat.since(last)
             for seq, event in events:
                 handler.wfile.write(f"id: {seq}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
                 last = seq
             handler.wfile.flush()
             with chat.cond:
-                if not chat.since(last):
+                if not chat.since(last) and not chat.closed:
                     if not chat.cond.wait(timeout=15) and chats.generation == generation:
                         handler.wfile.write(b": keepalive\n\n")
                         handler.wfile.flush()
