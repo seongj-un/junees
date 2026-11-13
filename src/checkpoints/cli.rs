@@ -98,7 +98,7 @@ pub fn render(manifests: &[Manifest]) -> String {
         for file in &manifest.files {
             let note = if file.before == "too_large" {
                 "  (too large to record: cannot be undone)"
-            } else if !file.restorable() {
+            } else if !file.restorable {
                 "  (changed since: skipped unless forced)"
             } else {
                 ""

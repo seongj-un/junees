@@ -86,7 +86,7 @@ async fn records_what_a_turn_changed_first_content_only() {
     let dir = session.dir().join("1");
     let content = modified.content.as_deref().unwrap();
     assert_eq!(fs::read(dir.join(content)).unwrap(), b"one two");
-    assert!(modified.restorable() && created.restorable());
+    assert!(modified.restorable && created.restorable);
 
     // Private: the folders 0700, the files 0600.
     assert_eq!(mode(session.dir()), 0o700);
@@ -115,7 +115,7 @@ async fn a_large_file_is_noted_and_not_restored() {
     assert_eq!(manifest.files[0].before, "too_large");
     assert_eq!(manifest.files[0].size, Some(MAX_FILE_BYTES + 1));
     assert!(manifest.files[0].content.is_none());
-    assert!(!manifest.files[0].restorable());
+    assert!(!manifest.files[0].restorable);
 
     let undone = session.undo(number, true, &FileAccess::default()).unwrap();
     assert!(undone.restored.is_empty());
@@ -161,7 +161,7 @@ async fn a_file_changed_since_is_skipped_unless_forced() {
     let number = turn_writing(&session, &file, "by the turn").await;
     // Someone (bash, a person) changed it afterwards.
     fs::write(&file, "by hand").unwrap();
-    assert!(!session.list().unwrap()[0].files[0].restorable());
+    assert!(!session.list().unwrap()[0].files[0].restorable);
 
     let undone = session.undo(number, false, &FileAccess::default()).unwrap();
     assert_eq!(
@@ -242,6 +242,15 @@ async fn turns_are_undone_newest_first_and_an_undo_can_be_undone() {
     let first = turn_writing(&session, &file, "v1").await;
     let second = turn_writing(&session, &file, "v2").await;
     assert_eq!((first, second), (1, 2));
+
+    // Turn 1 alone would find v2, not v1; but an undo from turn 1 undoes
+    // turn 2 first, so the list marks both restorable.
+    let list = session.list().unwrap();
+    assert!(list[0].files[0].restorable && list[1].files[0].restorable);
+    fs::write(&file, "by hand").unwrap();
+    let list = session.list().unwrap();
+    assert!(!list[0].files[0].restorable && !list[1].files[0].restorable);
+    fs::write(&file, "v2").unwrap();
 
     // Turn 1 and every later one: v2 -> v1 (turn 2) -> v0 (turn 1).
     let undone = session.undo(first, false, &FileAccess::default()).unwrap();

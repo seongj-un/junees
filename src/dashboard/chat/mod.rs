@@ -370,7 +370,7 @@ fn turn_json(manifest: &crate::checkpoints::Manifest) -> Value {
         "files": manifest.files.iter().map(|file| json!({
             "path": file.path,
             "change": file.change().word(),
-            "restorable": file.restorable(),
+            "restorable": file.restorable,
         })).collect::<Vec<_>>(),
     })
 }

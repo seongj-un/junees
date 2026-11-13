@@ -240,6 +240,10 @@ pub struct Recorded {
     /// SHA-256 of what the turn left; `None`: the turn removed it.
     pub after_sha256: Option<String>,
     pub at: String,
+    /// Whether undoing from this turn puts it back without `force`, as
+    /// [`SessionStore::list`] works it out (not stored).
+    #[serde(skip)]
+    pub restorable: bool,
 }
 
 /// How a turn changed a file.
@@ -269,9 +273,10 @@ impl Recorded {
         }
     }
 
-    /// Whether an undo can restore it without `force`: its old state is
-    /// known and the file is still what the turn left.
-    pub fn restorable(&self) -> bool {
+    /// Whether an undo of this turn alone could restore it without
+    /// `force`: its old state is known and the file is still what the
+    /// turn left.
+    fn restorable_now(&self) -> bool {
         self.before != "too_large"
             && matches!(state(Path::new(&self.path)), Ok(now) if now == self.after_sha256)
     }
@@ -537,8 +542,27 @@ impl SessionStore {
         Ok(last + 1)
     }
 
-    /// The turns with recorded files, oldest first.
+    /// The turns with recorded files, oldest first, each file marked
+    /// [`Recorded::restorable`]: an undo from that turn undoes the later
+    /// turns first, so a file a later turn changed again is restorable when
+    /// that later turn's change is.
     pub fn list(&self) -> io::Result<Vec<Manifest>> {
+        let mut manifests = self.read_manifests()?;
+        let mut later: HashMap<String, bool> = HashMap::new();
+        for manifest in manifests.iter_mut().rev() {
+            for file in manifest.files.iter_mut().rev() {
+                file.restorable = file.before != "too_large"
+                    && match later.get(&file.path) {
+                        Some(&chain) => chain,
+                        None => file.restorable_now(),
+                    };
+                later.insert(file.path.clone(), file.restorable);
+            }
+        }
+        Ok(manifests)
+    }
+
+    fn read_manifests(&self) -> io::Result<Vec<Manifest>> {
         let mut manifests = Vec::new();
         for (_, dir) in turn_dirs(&self.dir)? {
             if let Ok(text) = fs::read_to_string(dir.join(MANIFEST))
@@ -777,6 +801,7 @@ impl Turn {
             },
             after_sha256: None,
             at: now_text(),
+            restorable: false,
         };
         let written = mkdir(&dir).and_then(|()| match &before {
             Before::Content(bytes, _) => write_private(&dir.join(format!("{index}.bin")), bytes),
