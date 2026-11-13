@@ -238,6 +238,13 @@ pub(super) fn keys(report: &mut Report, settings: &Settings, backend: Backend) {
             "Anthropic API key",
             "not set (provider = openai does not need it)",
         ),
+        (false, Backend::Api) if settings.key_away_from_address(KEY) => report.fail(
+            AREA,
+            "Anthropic API key",
+            "set, but not where the address is set, so it is not used",
+            "put the key in the same place as the address: api_key with base_url in \
+             config.toml, or ANTHROPIC_API_KEY with ANTHROPIC_BASE_URL",
+        ),
         (false, Backend::Api) => report.fail(
             AREA,
             "Anthropic API key",

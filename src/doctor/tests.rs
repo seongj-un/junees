@@ -1885,6 +1885,73 @@ async fn the_browser_program_and_its_version() {
 }
 
 #[tokio::test]
+async fn the_anthropic_key_and_its_address() {
+    // A key exported for other tools does not go to the file's address.
+    let mut fixture = Fixture::new();
+    fixture.set("ANTHROPIC_API_KEY", "sk-fake");
+    fixture.config("base_url = \"https://proxy.example\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Fail,
+        "set, but not where the address is set",
+    );
+    // Nor the file's key to an exported address.
+    let mut exported = Fixture::new();
+    exported.set("ANTHROPIC_BASE_URL", "https://gateway.example");
+    exported.config("api_key = \"sk-fake-file\"\n");
+    let report = exported.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Fail,
+        "set, but not where the address is set",
+    );
+
+    // With the key next to the address, that key is used and its place
+    // is shown.
+    fixture.config("base_url = \"https://proxy.example\"\napi_key = \"sk-fake-file\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Ok,
+        "set (config.toml)",
+    );
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Ok,
+        "anthropic: the Messages API at https://proxy.example",
+    );
+    // With the default address the environment's key wins, as before.
+    fixture.config("api_key = \"sk-fake-file\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Ok,
+        "set (environment)",
+    );
+    // The claude-code backend needs no key.
+    fixture.config("backend = \"claude-code\"\nbase_url = \"https://proxy.example\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Skip,
+        "not set (the claude-code backend does not need it)",
+    );
+}
+
+#[tokio::test]
 async fn the_provider_and_its_settings() {
     let fixture = Fixture::new();
     let report = fixture.run(false).await;
