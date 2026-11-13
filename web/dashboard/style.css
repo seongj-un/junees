@@ -2020,3 +2020,8 @@ a.button {
     scroll-margin-bottom: 16px;
   }
 }
+
+.chat-status-action {
+  margin-left: 4px;
+  vertical-align: baseline;
+}

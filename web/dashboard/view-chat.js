@@ -22,7 +22,7 @@ import {
 } from "./chat-stream.js";
 import { code, el, notice } from "./dom.js";
 import { formatInt, formatUsd } from "./format.js";
-import { linkHistory, parseCheckpoints, undoneBy, undoPlan } from "./checkpoints.js";
+import { linkHistory, parseCheckpoints, undoneBy, undoPlan, unknownVerdict } from "./checkpoints.js";
 import { chatHash, sessionHash } from "./routes.js";
 import { messageView, peek, toolBody } from "./view-session.js";
 import { changePanel, confirmUndo, outcomeView, turnFooter } from "./view-undo.js";
@@ -177,7 +177,7 @@ class ChatView {
 
   build() {
     const id = (name) => `chat${this.n}-${name}`;
-    this.statusLine = el("p", { class: "chat-status", id: id("status") });
+    this.statusLine = el("p", { class: "chat-status", id: id("status"), tabindex: "-1" });
     this.history = el("div", { class: "chat-history", hidden: true });
     this.empty = el(
       "div",
@@ -241,8 +241,15 @@ class ChatView {
     this.setStatus("연결하는 중입니다");
   }
 
-  setStatus(text, tone = "neutral") {
+  /** The line above the chat; `action` (`{ label, onclick }`) adds a small button after the text. */
+  setStatus(text, tone = "neutral", action = null) {
     this.statusLine.textContent = text;
+    if (action) {
+      this.statusLine.append(
+        " ",
+        el("button", { type: "button", class: "button button-secondary button-small chat-status-action", onclick: action.onclick }, action.label),
+      );
+    }
     this.statusLine.className = `chat-status chat-status-${tone}`;
     this.statusLine.hidden = !text;
   }
@@ -928,17 +935,21 @@ class ChatView {
     if (!this.alive || load !== this.cpLoads) return false;
     const pending = this.pendingUndo;
     if (pending) {
-      // The undo's own checkpoint, if it changed anything: one made after
-      // the click whose `undid` is the checkpoints it was asked to undo.
-      const want = [...pending.turns].sort((a, b) => a - b).join(",");
-      const made = list.find((item) => item.turn > pending.newest && [...item.undid].sort((a, b) => a - b).join(",") === want);
-      const said = made
-        ? "답은 받지 못했지만 서버는 파일을 되돌렸습니다. 파일 변경 기록에서 결과를 확인해 주세요."
-        : "서버에 새 되돌리기 기록이 없어, 되돌린 파일이 없는 것으로 확인했습니다.";
-      this.setStatus(said, made ? "warn" : "neutral");
-      this.ctx.announce(said);
-      this.unsure.clear();
-      this.pendingUndo = null;
+      // The undo's own checkpoint shows it was done. Without it, look a few
+      // more times before saying anything: the server may still be at it.
+      const verdict = unknownVerdict(list, pending, Date.now());
+      if (verdict.state === "wait") {
+        this.checkUnsureLater(verdict.next);
+      } else {
+        const said =
+          verdict.state === "done"
+            ? "답은 받지 못했지만 서버는 파일을 되돌렸습니다. 파일 변경 기록에서 결과를 확인해 주세요."
+            : "되돌렸는지 확인하지 못했습니다. 몇 번 다시 확인했지만 새 되돌리기 기록이 없습니다. 서버가 아직 되돌리는 중이거나 바뀐 파일이 없었을 수 있으니, 잠시 뒤 다시 확인해 주세요.";
+        this.setStatus(said, "warn", verdict.state === "none" ? { label: "다시 확인", onclick: () => this.checkAgain(pending) } : null);
+        this.ctx.announce(said);
+        this.unsure.clear();
+        this.pendingUndo = null;
+      }
     }
     this.checkpoints = list;
     if (this.cwd === null && list.length) {
@@ -956,10 +967,34 @@ class ChatView {
   }
 
   /** Asks for the list again while an unanswered undo is not settled (5 s, then 10 s, up to a minute). */
-  checkUnsureLater() {
+  /** "다시 확인" after the rechecks found nothing: one more look for that undo's checkpoint. */
+  async checkAgain(pending) {
+    const button = this.statusLine.querySelector("button");
+    // The line is drawn again below; keep the keyboard on it.
+    const hadFocus = this.statusLine.contains(document.activeElement);
+    const refocus = () => hadFocus && (this.statusLine.querySelector("button") ?? this.statusLine).focus();
+    if (button) button.disabled = true;
+    const ok = await this.refreshCheckpoints();
+    if (!this.alive) return;
+    const action = { label: "다시 확인", onclick: () => this.checkAgain(pending) };
+    let said;
+    if (!ok) said = "파일 변경 기록을 받지 못했습니다. 잠시 뒤 다시 확인해 주세요.";
+    else if (unknownVerdict(this.checkpoints, { ...pending, since: -Infinity }, Date.now()).state === "done") {
+      said = "되돌리기가 끝나 있었습니다. 파일 변경 기록에서 결과를 확인해 주세요.";
+      this.setStatus(said, "warn");
+      refocus();
+      this.ctx.announce(said);
+      return;
+    } else said = "아직 새 되돌리기 기록이 없습니다. 바뀐 파일이 없었거나 서버가 아직 되돌리는 중일 수 있습니다.";
+    this.setStatus(said, "warn", action);
+    refocus();
+    this.ctx.announce(said);
+  }
+
+  checkUnsureLater(delay = null) {
     if (this.unsureTimer) return;
-    const wait = Math.min(5000 * 2 ** this.unsureTries, 60000);
-    this.unsureTries += 1;
+    const wait = delay ?? Math.min(5000 * 2 ** this.unsureTries, 60000);
+    if (delay === null) this.unsureTries += 1;
     this.unsureTimer = true;
     this.later(() => {
       this.unsureTimer = false;
@@ -1085,8 +1120,8 @@ class ChatView {
         // until the list shows whether the undo left its own checkpoint.
         for (const t of turns) this.unsure.add(t);
         this.unsureTries = 0;
-        this.pendingUndo = { newest, turns };
-        this.setStatus("되돌리기의 답을 받지 못했습니다. 파일을 이미 되돌렸을 수 있어 확인하는 중입니다.", "warn");
+        this.pendingUndo = { newest, turns, since: Date.now() };
+        this.setStatus("되돌리기의 답을 받지 못했습니다. 서버가 아직 되돌리는 중일 수 있어, 파일 변경 기록을 몇 번 더 받아 확인하는 중입니다.", "warn");
         this.renderCheckpoints();
         this.refreshCheckpoints();
         break;
