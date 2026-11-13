@@ -95,10 +95,12 @@ def api_body(name, query, mode, fixtures):
         days = bounded(query, "days", 30, 1, 365)
         start = (dt.date.today() - dt.timedelta(days=days - 1)).isoformat()
         rows = [] if mode == "empty" else [r for r in fixtures["usage"]["days"] if r["date"] >= start]
+        priced = [r for r in rows if r["cost_usd"] is not None]
         total = {
             "input_tokens": sum(r["input_tokens"] for r in rows),
             "output_tokens": sum(r["output_tokens"] for r in rows),
-            "cost_usd": round(sum(r["cost_usd"] for r in rows), 4),
+            # null when nothing in the range could be priced, as the server does
+            "cost_usd": round(sum(r["cost_usd"] for r in priced), 4) if priced else None,
         }
         return 200, {"days": rows, "total": total}
     if name == "cron":

@@ -55,8 +55,8 @@
       "allow_home": true,
       "next_run": "2026-11-13T12:00:00Z",
       "last_run": {
-        "at": "2026-11-13T08:00:03Z",
-        "status": "ok",
+        "at": "2026-11-13T08:59:30Z",
+        "status": "running",
         "note": null
       }
     },
@@ -70,6 +70,21 @@
       "allow_home": false,
       "next_run": null,
       "last_run": null
+    },
+    {
+      "id": "f4",
+      "name": "one-time-backup",
+      "schedule": "2026-11-10 02:00",
+      "dir": "/home/u/work/backup",
+      "paused": false,
+      "paused_for_home": false,
+      "allow_home": false,
+      "next_run": null,
+      "last_run": {
+        "at": "2026-11-10T02:00:00Z",
+        "status": "missed",
+        "note": "no daemon was running at the scheduled time"
+      }
     }
   ]
 }
