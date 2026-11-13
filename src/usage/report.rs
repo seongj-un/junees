@@ -138,14 +138,7 @@ pub fn period(
                 let ts = i64::try_from(record.ts).unwrap_or(i64::MAX);
                 date(tz::split(zone.local(ts)).0)
             }
-            By::Model if record.kind == Kind::ClaudeCode => {
-                if record.model.is_empty() {
-                    "claude-code".to_string()
-                } else {
-                    format!("claude-code ({})", escape_hidden(&record.model))
-                }
-            }
-            By::Model => model_name(&record.model),
+            By::Model => model_key(&record),
             By::Folder => escape_hidden(&origin.cwd),
             By::Source => origin.source.clone(),
         };
@@ -194,6 +187,62 @@ pub fn period(
     out.push_str(&table(&rows, Some(&total)));
     out.push_str(&notes(&total, &stats, prices));
     Ok(out)
+}
+
+/// What a record's tokens are grouped under by model: the model's name,
+/// or `claude-code (<model>)` for a Claude Code turn.
+fn model_key(record: &Record) -> String {
+    if record.kind != Kind::ClaudeCode {
+        return model_name(&record.model);
+    }
+    if record.model.is_empty() {
+        "claude-code".to_string()
+    } else {
+        format!("claude-code ({})", escape_hidden(&record.model))
+    }
+}
+
+/// One row of [`daily`]: the tokens of one model on one day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayRow {
+    /// `YYYY-MM-DD` in `zone`.
+    pub date: String,
+    /// As `junees usage --by model` names it.
+    pub model: String,
+    pub totals: Totals,
+}
+
+/// The usage of the last `days` days in `zone` (today included), in every
+/// folder, by day and model: the oldest day first, and on each day the
+/// models by name.
+pub fn daily(
+    home: &Path,
+    days: u32,
+    prices: &Prices,
+    zone: &TimeZone,
+    now: u64,
+) -> anyhow::Result<Vec<DayRow>> {
+    let now = i64::try_from(now).unwrap_or(i64::MAX);
+    let (today, _) = tz::split(zone.local(now));
+    let first = today - i64::from(days.max(1) - 1);
+    let since = u64::try_from(zone.to_utc(first * 86_400)).unwrap_or(0);
+    let mut groups: BTreeMap<(String, String), Totals> = BTreeMap::new();
+    scan::scan(home, since, None, prices, &mut |_, record| {
+        let ts = i64::try_from(record.ts).unwrap_or(i64::MAX);
+        let day = date(tz::split(zone.local(ts)).0);
+        groups
+            .entry((day, model_key(&record)))
+            .or_default()
+            .add(&record, prices);
+    })?;
+    Ok(groups
+        .into_iter()
+        .map(|((date, model), totals)| DayRow {
+            date,
+            model,
+            totals,
+        })
+        .collect())
 }
 
 /// `YYYY-MM-DD` of a day number (days since 1970-01-01).

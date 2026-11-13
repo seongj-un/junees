@@ -21,6 +21,8 @@ pub struct Head {
     pub method: String,
     /// The path, without a query.
     pub path: String,
+    /// What follows the `?` of the target (up to a `#`), empty without one.
+    pub query: String,
     /// Names in lower case, in the order sent.
     pub headers: Vec<(String, String)>,
 }
@@ -61,6 +63,7 @@ pub fn reason(status: u16) -> &'static str {
         411 => "Length Required",
         413 => "Content Too Large",
         415 => "Unsupported Media Type",
+        421 => "Misdirected Request",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
@@ -74,6 +77,15 @@ pub fn reason(status: u16) -> &'static str {
 /// from where the last search stopped, so a client sending one byte at a
 /// time costs no more than one sending it all at once.
 pub async fn read_head<R: AsyncRead + Unpin>(io: &mut R, buf: &mut Vec<u8>) -> Result<Head, Error> {
+    read_head_within(io, buf, MAX_HEAD).await
+}
+
+/// [`read_head`] with a head of at most `max` bytes.
+pub async fn read_head_within<R: AsyncRead + Unpin>(
+    io: &mut R,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> Result<Head, Error> {
     let mut chunk = [0u8; 4096];
     // Where the search goes on: the end may start in the last 3 bytes.
     let mut searched = 0;
@@ -82,8 +94,8 @@ pub async fn read_head<R: AsyncRead + Unpin>(io: &mut R, buf: &mut Vec<u8>) -> R
             break searched + found;
         }
         searched = buf.len().saturating_sub(3);
-        if buf.len() >= MAX_HEAD {
-            return Err(error(431, "the request head is longer than 16 KiB"));
+        if buf.len() >= max {
+            return Err(error(431, "the request head is too long"));
         }
         let n = io
             .read(&mut chunk)
@@ -94,8 +106,8 @@ pub async fn read_head<R: AsyncRead + Unpin>(io: &mut R, buf: &mut Vec<u8>) -> R
         }
         buf.extend_from_slice(&chunk[..n]);
     };
-    if end + 4 > MAX_HEAD {
-        return Err(error(431, "the request head is longer than 16 KiB"));
+    if end + 4 > max {
+        return Err(error(431, "the request head is too long"));
     }
     let head = parse_head(&buf[..end])?;
     buf.drain(..end + 4);
@@ -118,11 +130,9 @@ fn parse_head(bytes: &[u8]) -> Result<Head, Error> {
     {
         return Err(error(400, "malformed request line"));
     }
-    let path = target
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default()
-        .to_string();
+    let target = target.split('#').next().unwrap_or_default();
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_string(), query.to_string());
     let mut headers = Vec::new();
     for line in lines {
         // A continuation line (obsolete folding) or a bare line is refused.
@@ -140,6 +150,7 @@ fn parse_head(bytes: &[u8]) -> Result<Head, Error> {
     Ok(Head {
         method: method.to_string(),
         path,
+        query,
         headers,
     })
 }

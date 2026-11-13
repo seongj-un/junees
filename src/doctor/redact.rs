@@ -113,7 +113,13 @@ impl Hidden {
     /// `text` without the quoted values and the secrets; `windows` from
     /// [`Hidden::windows`].
     fn cut(&self, text: &str, windows: &HashSet<&str>) -> String {
-        let text = without_quoted_values(text);
+        self.cut_secrets(&without_quoted_values(text), windows)
+    }
+
+    /// `text` without the secrets, its quoted values kept: for what a
+    /// user wrote, where ``got `x` `` is just text.
+    fn cut_secrets(&self, text: &str, windows: &HashSet<&str>) -> String {
+        let text = text.to_string();
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         for whole in &self.whole {
             ranges.extend(
@@ -230,6 +236,14 @@ pub(super) fn redact<'a>(hidden: &Hidden, texts: impl Iterator<Item = &'a mut St
     let windows = hidden.windows();
     for text in texts {
         *text = hidden.cut(text, &windows);
+    }
+}
+
+/// [`redact`] for what a user wrote: quoted values are kept.
+pub(super) fn redact_user_text<'a>(hidden: &Hidden, texts: impl Iterator<Item = &'a mut String>) {
+    let windows = hidden.windows();
+    for text in texts {
+        *text = hidden.cut_secrets(text, &windows);
     }
 }
 

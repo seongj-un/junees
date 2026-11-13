@@ -106,11 +106,12 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees sessions search <낱말>`: 세션 검색([세션 검색](docs/usage.md#세션-검색))
 - `junees usage`: 지난 며칠의 토큰과 비용([사용량과 비용](docs/usage.md#사용량과-비용))
 - `junees doctor`: 설치와 설정 점검([점검](docs/doctor.md))
+- `junees dashboard [--listen 127.0.0.1:7878] [--no-open]`: 브라우저로 보는 읽기 전용 대시보드([대시보드](docs/dashboard.md))
 - `junees plugin list|install|enable|disable|remove`: 플러그인([플러그인](docs/plugins.md))
 - `junees mcp login|logout <서버>`: MCP 서버 OAuth 로그인([OAuth 로그인](docs/mcp.md#oauth-로그인))
 - `junees update [--check] [--version vX.Y.Z]`: 최신 릴리스로 바꾸기([업데이트](docs/install.md#업데이트))
 
-명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `usage`, `plugin`, `plugins`, `mcp`, `update`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `dashboard`, `usage`, `plugin`, `plugins`, `mcp`, `update`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
 ## 기능
 
@@ -143,6 +144,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [실행 격리](docs/safety.md#실행-격리-landlock): `bash` 명령을 Linux Landlock으로 묶어 작업 폴더 밖 쓰기, 설정과 비밀 파일 읽기, (설정하면) TCP를 커널이 막는다.
 - [실행 전 승인](docs/safety.md#실행-전-승인): 대화 모드에서 위험할 수 있는 도구 호출을 먼저 묻는다.
 - [점검](docs/doctor.md): `junees doctor`로 설치와 설정을 점검한다(기본은 네트워크 없이).
+- [대시보드](docs/dashboard.md): `junees dashboard`가 이 컴퓨터의 브라우저에 상태, 세션, 사용량, 예약 작업, 웹훅, 점검 결과를 읽기 전용으로 보여 준다(루프백 주소와 실행마다 새 토큰만).
 - [설치와 업데이트](docs/install.md): `install.sh`, `junees update`(체크섬 확인, 한 번의 rename으로 교체), 태그로 만드는 릴리스.
 
 ## 문서
@@ -161,6 +163,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [docs/browser.md](docs/browser.md): 브라우저 도구
 - [docs/safety.md](docs/safety.md): 명령 정책, 실행 격리(Landlock), 실행 전 승인
 - [docs/doctor.md](docs/doctor.md): 점검(`junees doctor`)
+- [docs/dashboard.md](docs/dashboard.md): 웹 대시보드(`junees dashboard`)와 그 API 계약
 - [docs/architecture.md](docs/architecture.md): 구조(모듈 설명과 테스트 목록)
 - [docs/long-running.md](docs/long-running.md): 단계별 계획과 진행 장부(각 단계에서 무엇을 왜 그렇게 만들었는지, 리뷰 반영 기록)
 

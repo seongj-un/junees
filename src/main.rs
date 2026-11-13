@@ -133,6 +133,13 @@ async fn run() -> Result<ExitCode> {
             print!("{}", junees::usage::args::HELP);
             return Ok(ExitCode::SUCCESS);
         }
+        Command::DashboardHelp => {
+            print!("{}", junees::dashboard::HELP);
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Reads the settings and the state folder on each request; needs
+        // no API key.
+        Command::Dashboard(options) => return junees::dashboard::main(options).await,
         Command::UpdateHelp => {
             print!("{}", junees::update::HELP);
             return Ok(ExitCode::SUCCESS);
@@ -208,6 +215,8 @@ async fn run() -> Result<ExitCode> {
         | Command::DoctorHelp
         | Command::Usage(_)
         | Command::UsageHelp
+        | Command::Dashboard(_)
+        | Command::DashboardHelp
         | Command::Update(_)
         | Command::UpdateHelp => {
             unreachable!("handled above")

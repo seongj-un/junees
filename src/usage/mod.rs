@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 use crate::message::Usage;
 pub use prices::{PRICES_ENV, Prices};
-pub use report::{Live, period, session};
+pub use report::{DayRow, Live, daily, period, session};
 pub use scan::{Stats, read_session};
 
 /// What a usage record counts.

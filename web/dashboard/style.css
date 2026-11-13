@@ -1,0 +1,5 @@
+/* The page's styles come with the frontend work; this file keeps the path served. */
+body {
+  font-family: system-ui, sans-serif;
+  margin: 2rem;
+}
