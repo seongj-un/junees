@@ -1,0 +1,81 @@
+{
+  "sessions": [
+    {
+      "id": "20261113-0841-3f2a",
+      "title": "대시보드 사용량 화면 막대 그래프 정리",
+      "cwd": "/home/u/work/junees",
+      "updated_at": "2026-11-13T08:41:12Z",
+      "messages": 24,
+      "input_tokens": 182340,
+      "output_tokens": 21877,
+      "cost_usd": 0.8732,
+      "preview": "사용량 화면에서 날짜별 비용 막대가 90일일 때 너무 촘촘해 보여. 간격을 줄이고 축 레이블을 정리해 줘."
+    },
+    {
+      "id": "20261113-0310-b71c",
+      "title": "README 설치 절 맞춤법 확인",
+      "cwd": "/home/u/work/junees",
+      "updated_at": "2026-11-13T03:10:44Z",
+      "messages": 6,
+      "input_tokens": 18220,
+      "output_tokens": 2310,
+      "cost_usd": 0.0893,
+      "preview": "README의 설치 절에서 맞춤법과 띄어쓰기를 확인해 줘."
+    },
+    {
+      "id": "20261112-2214-0d9e",
+      "title": null,
+      "cwd": "/home/u/work/notes",
+      "updated_at": "2026-11-12T22:14:03Z",
+      "messages": 2,
+      "input_tokens": 1203,
+      "output_tokens": 88,
+      "cost_usd": 0.0049,
+      "preview": "오늘 회의 메모 정리"
+    },
+    {
+      "id": "20261112-1530-77aa",
+      "title": "<img src=x onerror=alert(1)> 제목에 HTML이 든 세션",
+      "cwd": "/home/u/work/x",
+      "updated_at": "2026-11-12T15:30:00Z",
+      "messages": 4,
+      "input_tokens": 5400,
+      "output_tokens": 620,
+      "cost_usd": 0.0255,
+      "preview": "<script>alert('xss')</script> 미리보기도 글자로만 보여야 합니다."
+    },
+    {
+      "id": "20261111-0920-1c4e",
+      "title": "cron 작업 실패 원인 찾기",
+      "cwd": "/home/u/work/very/long/path/that/keeps/going/and/going/project-with-a-long-name",
+      "updated_at": "2026-11-11T09:20:31Z",
+      "messages": 58,
+      "input_tokens": 912003,
+      "output_tokens": 88214,
+      "cost_usd": 4.1287,
+      "preview": "매일 아침 도는 daily-report 작업이 어제부터 실패해. 로그를 보고 원인을 찾아서 고쳐 줘. 실패 알림은 디스코드로 오고 있어."
+    },
+    {
+      "id": "20261108-1702-9ab0",
+      "title": "Slack 승인 버튼 테스트",
+      "cwd": "/home/u/work/junees",
+      "updated_at": "2026-11-08T17:02:55Z",
+      "messages": 12,
+      "input_tokens": 40211,
+      "output_tokens": 5120,
+      "cost_usd": 0.1975,
+      "preview": "Slack 게이트웨이에서 승인 버튼을 눌렀을 때 두 번 실행되는지 확인해 줘."
+    },
+    {
+      "id": "20261020-1100-55e1",
+      "title": "GitHub 흐름 첫 실행",
+      "cwd": "/home/u/work/site",
+      "updated_at": "2026-10-20T11:00:00Z",
+      "messages": 31,
+      "input_tokens": 301220,
+      "output_tokens": 30112,
+      "cost_usd": 1.3554,
+      "preview": null
+    }
+  ]
+}

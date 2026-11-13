@@ -1,16 +1,49 @@
 <!doctype html>
 <html lang="ko">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Junees 대시보드</title>
-<link rel="stylesheet" href="/style.css">
-<script type="module" src="/app.js"></script>
-</head>
-<body>
-<main id="app">
-<h1>Junees 대시보드</h1>
-<p id="placeholder">화면은 프론트엔드 작업에서 채웁니다.</p>
-</main>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Junees 대시보드</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#view-title">본문으로 건너뛰기</a>
+    <header class="topbar">
+      <p class="brand"><span class="brand-name">Junees</span><span class="brand-sub">대시보드</span></p>
+      <div class="topbar-actions">
+        <p class="updated" id="updated"></p>
+        <button type="button" class="button" id="refresh">새로고침</button>
+      </div>
+    </header>
+    <div class="layout">
+      <nav class="sidenav" aria-label="화면">
+        <ul>
+          <li><a href="#status" data-route="status">상태</a></li>
+          <li><a href="#sessions" data-route="sessions">세션</a></li>
+          <li><a href="#usage" data-route="usage">사용량</a></li>
+          <li><a href="#cron" data-route="cron">예약 작업</a></li>
+          <li><a href="#webhooks" data-route="webhooks">웹훅</a></li>
+          <li><a href="#doctor" data-route="doctor">점검</a></li>
+        </ul>
+      </nav>
+      <main class="main">
+        <div class="view-head">
+          <h1 id="view-title" tabindex="-1">Junees 대시보드</h1>
+          <div id="view-controls" class="view-controls"></div>
+        </div>
+        <div id="banner"></div>
+        <div id="view" aria-busy="true">
+          <p class="loading-text">불러오는 중입니다</p>
+        </div>
+        <noscript>
+          <p class="notice">이 대시보드는 JavaScript가 켜져 있어야 볼 수 있습니다.</p>
+        </noscript>
+      </main>
+    </div>
+    <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
+  </body>
 </html>

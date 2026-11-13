@@ -1,0 +1,22 @@
+{
+  "version": "0.3.0",
+  "home": "/home/u/.junees",
+  "backend": "api",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5",
+  "uptime_secs": 754,
+  "keys": {
+    "anthropic": {
+      "set": true,
+      "source": "env"
+    },
+    "openai": {
+      "set": false,
+      "source": null
+    }
+  },
+  "sandbox": {
+    "landlock": true,
+    "abi": 4
+  }
+}

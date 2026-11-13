@@ -1,0 +1,109 @@
+{
+  "sections": [
+    {
+      "name": "state folder",
+      "checks": [
+        {
+          "name": "state folder",
+          "status": "ok",
+          "detail": "/home/u/.junees (0700)"
+        }
+      ]
+    },
+    {
+      "name": "settings",
+      "checks": [
+        {
+          "name": "config.toml",
+          "status": "ok",
+          "detail": "/home/u/.junees/config.toml"
+        },
+        {
+          "name": "provider",
+          "status": "ok",
+          "detail": "anthropic (https://api.anthropic.com)"
+        }
+      ]
+    },
+    {
+      "name": "keys",
+      "checks": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "status": "ok",
+          "detail": "set in the environment"
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "status": "warn",
+          "detail": "not set (only needed for provider = \"openai\")"
+        }
+      ]
+    },
+    {
+      "name": "programs",
+      "checks": [
+        {
+          "name": "git",
+          "status": "ok",
+          "detail": "/usr/bin/git"
+        },
+        {
+          "name": "gh",
+          "status": "warn",
+          "detail": "not on PATH (optional: the agent's commands may use it; Junees's github tool does not)"
+        }
+      ]
+    },
+    {
+      "name": "sandbox",
+      "checks": [
+        {
+          "name": "landlock",
+          "status": "ok",
+          "detail": "ABI 4"
+        },
+        {
+          "name": "truncate",
+          "status": "ok",
+          "detail": "covered (ABI 3 or later)"
+        }
+      ]
+    },
+    {
+      "name": "cron",
+      "checks": [
+        {
+          "name": "home-cleanup",
+          "status": "fail",
+          "detail": "works in the home folder and is paused: run `junees cron allow-home c3` to accept this, or remove the job and add it again with --dir"
+        },
+        {
+          "name": "daily-report",
+          "status": "ok",
+          "detail": "next run 2026-11-14 09:00"
+        }
+      ]
+    },
+    {
+      "name": "webhooks",
+      "checks": [
+        {
+          "name": "legacy-hook",
+          "status": "warn",
+          "detail": "has no secret and no --no-secret: the server answers 403; remove it and add it again"
+        }
+      ]
+    },
+    {
+      "name": "sessions",
+      "checks": [
+        {
+          "name": "sessions folder",
+          "status": "ok",
+          "detail": "7 sessions, 2.1 MB"
+        }
+      ]
+    }
+  ]
+}
