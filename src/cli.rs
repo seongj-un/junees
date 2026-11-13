@@ -33,6 +33,9 @@ Usage:
   junees usage            tokens and estimated cost of the saved sessions
                           (--days N, --by day|model|folder|source, --all; see
                           `junees usage --help`)
+  junees dashboard        a read-only page about this Junees in the browser,
+                          on 127.0.0.1 (--listen, --no-open; see
+                          `junees dashboard --help`)
   junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
                           plugin install <folder> [--name <n>], enable <name> [--trust],
                           disable <name>, remove <name>
@@ -230,6 +233,10 @@ pub enum Command {
     Doctor(crate::doctor::Options),
     /// `junees doctor --help`.
     DoctorHelp,
+    /// `junees dashboard ...`: serve the read-only web dashboard.
+    Dashboard(crate::dashboard::Options),
+    /// `junees dashboard --help`.
+    DashboardHelp,
     /// `junees usage ...`.
     Usage(crate::usage::args::UsageArgs),
     /// `junees usage --help`.
@@ -361,6 +368,12 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Some("doctor") => {
             args.next();
             return Ok(crate::doctor::parse(args)?.map_or(Command::DoctorHelp, Command::Doctor));
+        }
+        Some("dashboard") => {
+            args.next();
+            return Ok(
+                crate::dashboard::parse(args)?.map_or(Command::DashboardHelp, Command::Dashboard)
+            );
         }
         Some("usage") => {
             args.next();
@@ -718,6 +731,18 @@ mod tests {
             })
         );
         assert_eq!(parse(&["doctor", "--help"]).unwrap(), Command::DoctorHelp);
+        assert_eq!(
+            parse(&["dashboard", "--no-open"]).unwrap(),
+            Command::Dashboard(crate::dashboard::Options {
+                listen: "127.0.0.1:7878".parse().unwrap(),
+                open: false,
+            })
+        );
+        assert_eq!(
+            parse(&["dashboard", "--help"]).unwrap(),
+            Command::DashboardHelp
+        );
+        assert!(parse(&["dashboard", "--listen", "0.0.0.0:7878"]).is_err());
         assert_eq!(
             parse(&["update", "--check"]).unwrap(),
             Command::Update(crate::update::Options {
