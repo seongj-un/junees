@@ -372,7 +372,7 @@ impl ApiEngine {
             Trigger::Cron => crate::github::register(&mut tools, &config.github, dir, false),
             // Reading only: the server's caller is another agent.
             Trigger::Mcp { .. } => {
-                crate::github::register_webhook(&mut tools, &config.github, dir, "mcp", &[], &[])
+                crate::github::register_read_only(&mut tools, &config.github, dir)
             }
             Trigger::Webhook {
                 route,

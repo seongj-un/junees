@@ -959,6 +959,32 @@ async fn without_a_question_only_the_allowed_writes_run() {
 }
 
 #[tokio::test]
+async fn mcp_runs_only_read_whatever_the_settings_allow() {
+    let fake = Fake::start(vec![(
+        "POST /repos/o/n/issues/7/comments",
+        vec![reply(201, json!({"id": 1}))],
+    )])
+    .await;
+    let tool = fake.tool(false, &Write::ALL).read_only();
+    for input in [
+        json!({"action": "pr_comment", "number": 7, "body": "hi"}),
+        json!({"action": "merge", "number": 7, "sha": HEAD}),
+    ] {
+        let output = run(&tool, input.clone()).await;
+        assert!(output.is_error, "{input}");
+        assert!(
+            output
+                .content
+                .contains("junees mcp serve` only reads GitHub"),
+            "{}",
+            output.content
+        );
+        assert!(!output.content.contains("webhook"), "{}", output.content);
+    }
+    assert!(fake.seen().is_empty());
+}
+
+#[tokio::test]
 async fn webhook_runs_write_only_what_the_route_and_the_settings_allow() {
     let fake = Fake::start(vec![
         (
