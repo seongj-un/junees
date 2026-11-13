@@ -4,7 +4,7 @@
 
 ### 새 기능
 
-- 대시보드 대화(`junees dashboard --chat [--dir <폴더>]`): 페이지에서 Junees와 대화하고, 승인 질문을 페이지 버튼으로 답한다. 응답은 이벤트 스트림(`GET /api/chat/<id>/events`, `after`로 다시 연결)으로 오고, 세션은 일반 세션으로 저장된다. 기본은 꺼져 있고, 켜면 페이지가 터미널 대화와 같은 권한을 가진다. api 백엔드만 지원한다. `/api/status`에 `chat`이 더해졌다 ([대화](docs/dashboard.md#대화---chat))
+- 대시보드 대화(`junees dashboard --chat [--dir <폴더>]`): 페이지에서 Junees와 대화하고, 승인 질문을 페이지 버튼으로 답한다. 응답은 이벤트 스트림(`GET /api/chat/<id>/events`, `after`로 다시 연결)으로 오고, 세션은 일반 세션으로 저장된다. 기본은 꺼져 있고, 켜면 페이지가 터미널 대화와 같은 권한을 가진다. `--chat`이면 브라우저를 열지 않고 `#token=` 주소만 출력한다(`--open`으로 열 수 있고, 그때는 일회용 코드 경합을 경고한다). 일회용 코드 교환은 `dashboard.log`에 남는다. api 백엔드만 지원한다. `/api/status`에 `chat`이 더해졌다 ([대화](docs/dashboard.md#대화---chat))
 
 ## 0.4.0 (2026-11-13)
 
