@@ -35,6 +35,48 @@ const REPLAY_MAX_MS = 1500;
 
 let mounts = 0;
 
+/** What the person approves, shown in full: the server cuts none of it. */
+const TARGET_LABEL = { bash: "실행할 명령", write_file: "쓸 파일", edit_file: "고칠 파일" };
+/** From this length on, say that the box scrolls, so the end is not missed. */
+const LONG_TARGET = 400;
+
+/**
+ * The parts of a question: its target (the command or path), why it is
+ * asked and what a file tool would write, from the fields the server sends,
+ * or its plain `summary` when it sends no `target`. Every part is shown
+ * whole, wrapping and scrolling in its box; a long one says how long it is.
+ */
+function approvalDetails(event, idBase) {
+  if (typeof event.target !== "string") {
+    return el("pre", { class: "approval-summary", tabindex: "0", "aria-label": "질문 내용" }, String(event.summary ?? ""));
+  }
+  const label = TARGET_LABEL[event.kind] ?? "대상";
+  const parts = [
+    el("p", { class: "approval-label", id: `${idBase}-target` }, label),
+    el("pre", { class: "approval-summary", tabindex: "0", "aria-labelledby": `${idBase}-target` }, event.target),
+  ];
+  if (event.target.length >= LONG_TARGET) {
+    parts.push(
+      el(
+        "p",
+        { class: "approval-long" },
+        `${formatInt(event.target.length)}자로 깁니다. 상자를 끝까지 내려 전부 확인한 뒤 답해 주세요.`,
+      ),
+    );
+  }
+  const reasons = Array.isArray(event.reasons) ? event.reasons.filter((r) => typeof r === "string" && r) : [];
+  if (reasons.length) {
+    parts.push(el("p", { class: "approval-label" }, "묻는 이유"), el("ul", { class: "approval-reasons" }, reasons.map((r) => el("li", null, r))));
+  }
+  if (typeof event.preview === "string" && event.preview) {
+    parts.push(
+      el("p", { class: "approval-label", id: `${idBase}-preview` }, "쓸 내용"),
+      el("pre", { class: "approval-summary", tabindex: "0", "aria-labelledby": `${idBase}-preview` }, event.preview),
+    );
+  }
+  return parts;
+}
+
 /** The 새 대화 link next to the title. */
 export function renderControls(root, ctx) {
   // replaceChildren would print a null as the text "null".
@@ -590,7 +632,7 @@ class ChatView {
       el(
         "div",
         { id: bodyId },
-        el("pre", { class: "approval-summary" }, String(event.summary ?? "")),
+        approvalDetails(event, `chat${this.n}-q${n}`),
         el(
           "p",
           { class: "approval-help", "data-open-only": "" },
