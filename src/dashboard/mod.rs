@@ -144,6 +144,7 @@ pub async fn main(options: Options) -> Result<ExitCode> {
         port: address.port(),
         env,
         started: Instant::now(),
+        sessions: Default::default(),
     });
     tokio::select! {
         served = serve(listener, context) => {

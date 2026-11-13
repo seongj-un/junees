@@ -8,6 +8,7 @@
 //! with secrets cut out ([`crate::doctor::hide_secrets`]).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -50,13 +51,16 @@ impl Failure {
 }
 
 /// The answer to `GET <path>?<query>` under `/api/`, once authorized.
-pub async fn answer(path: &str, query: &str, context: &Context) -> Answer {
+pub async fn answer(path: &str, query: &str, context: &Arc<Context>) -> Answer {
     let env = context.env.clone();
     let (settings, broken) = Settings::load_for_setup(move |key| env(key));
     let result = match path {
         "/api/status" => Ok(status(&settings, context)),
         "/api/sessions" => match number(query, "limit", SESSIONS_LIMIT) {
-            Ok(limit) => blocking(settings, move |settings| sessions(settings, limit)).await,
+            Ok(limit) => {
+                let context = context.clone();
+                blocking(settings, move |settings| sessions(settings, limit, &context)).await
+            }
             Err(err) => Err(err),
         },
         "/api/usage" => match number(query, "days", USAGE_DAYS) {
@@ -204,23 +208,86 @@ fn shown(settings: &Settings, text: &str, chars: usize) -> Value {
     Value::String(text.chars().take(chars).collect())
 }
 
-fn sessions(settings: &Settings, limit: u32) -> Result<Value, Failure> {
+/// The figures of one journal that take reading it whole.
+#[derive(Debug, Clone)]
+struct Counted {
+    modified: std::time::SystemTime,
+    len: u64,
+    messages: usize,
+    totals: crate::usage::Totals,
+}
+
+/// The [`Counted`] figures of the journals listed lately, by path, and the
+/// `prices` setting they were priced with: a journal is read again only
+/// once it changed, so the page asking every 30 seconds reads the
+/// sessions' first lines only.
+#[derive(Debug, Default)]
+pub struct SessionCache {
+    entries: std::collections::HashMap<std::path::PathBuf, Counted>,
+    prices: Option<String>,
+}
+
+/// Journals kept in [`SessionCache`]: the most a list shows, twice.
+const CACHED_SESSIONS: usize = 2 * SESSIONS_LIMIT.1 as usize;
+
+/// The [`Counted`] figures of the journal at `path`, from `cache` when it
+/// has not changed since.
+fn counted(
+    cache: &std::sync::Mutex<SessionCache>,
+    path: &Path,
+    prices: &crate::usage::Prices,
+) -> Counted {
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+    if let Some((modified, len)) = stamp
+        && let Some(found) = cache.lock().ok().and_then(|cache| cache.entries.get(path).cloned())
+        && found.modified == modified
+        && found.len == len
+    {
+        return found;
+    }
+    let mut totals = crate::usage::Totals::default();
+    if let Ok((records, _)) = crate::usage::read_session(path, prices) {
+        for record in &records {
+            totals.add(record, prices);
+        }
+    }
+    let (modified, len) = stamp.unwrap_or((std::time::UNIX_EPOCH, 0));
+    let counted = Counted {
+        modified,
+        len,
+        messages: crate::session::count_messages(path).unwrap_or(0),
+        totals,
+    };
+    if stamp.is_some()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.entries.insert(path.to_path_buf(), counted.clone());
+    }
+    counted
+}
+
+fn sessions(settings: &Settings, limit: u32, context: &Context) -> Result<Value, Failure> {
     let Some(home) = home(settings) else {
         return Ok(json!({ "sessions": [] }));
     };
+    let prices_setting = settings.get(crate::usage::PRICES_ENV);
     let prices = prices(settings)?;
+    if let Ok(mut cache) = context.sessions.lock()
+        && cache.prices != prices_setting
+    {
+        *cache = SessionCache {
+            entries: Default::default(),
+            prices: prices_setting,
+        };
+    }
     let list =
         crate::session::list_all(&home, limit as usize).map_err(|err| Failure::internal(&err))?;
     let sessions: Vec<Value> = list
         .iter()
-        .map(|summary| {
-            let path = crate::session::journal_path(&home, &summary.id);
-            let mut totals = crate::usage::Totals::default();
-            if let Ok((records, _)) = crate::usage::read_session(&path, &prices) {
-                for record in &records {
-                    totals.add(record, &prices);
-                }
-            }
+        .map(|(path, summary)| {
+            let counted = counted(&context.sessions, path, &prices);
             let first_line = summary
                 .first_input
                 .lines()
@@ -231,14 +298,21 @@ fn sessions(settings: &Settings, limit: u32) -> Result<Value, Failure> {
                 "title": shown(settings, first_line, TITLE_CHARS),
                 "cwd": summary.cwd,
                 "updated_at": time(i64::try_from(summary.updated).unwrap_or(i64::MAX)),
-                "messages": crate::session::count_messages(&path).unwrap_or(0),
-                "input_tokens": totals.usage.input_tokens,
-                "output_tokens": totals.usage.output_tokens,
-                "cost_usd": dollars(&totals),
+                "messages": counted.messages,
+                "input_tokens": counted.totals.usage.input_tokens,
+                "output_tokens": counted.totals.usage.output_tokens,
+                "cost_usd": dollars(&counted.totals),
                 "preview": shown(settings, &summary.first_input, PREVIEW_CHARS),
             })
         })
         .collect();
+    if let Ok(mut cache) = context.sessions.lock()
+        && cache.entries.len() > CACHED_SESSIONS
+    {
+        cache
+            .entries
+            .retain(|path, _| list.iter().any(|(listed, _)| listed == path));
+    }
     Ok(json!({ "sessions": sessions }))
 }
 

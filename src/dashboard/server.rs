@@ -64,6 +64,8 @@ pub struct Context {
     pub port: u16,
     pub env: Env,
     pub started: Instant,
+    /// What `/api/sessions` counted in each journal.
+    pub(crate) sessions: std::sync::Mutex<api::SessionCache>,
 }
 
 /// An answer: status, content type, body and headers beyond the usual.
@@ -129,7 +131,7 @@ pub async fn serve(listener: TcpListener, context: Arc<Context>) -> std::io::Res
     }
 }
 
-async fn connection(mut stream: TcpStream, context: &Context) {
+async fn connection(mut stream: TcpStream, context: &Arc<Context>) {
     let mut buf = Vec::new();
     let read = tokio::time::timeout(
         READ_TIME,
@@ -158,7 +160,7 @@ async fn send<W: AsyncWrite + Unpin>(io: &mut W, answer: &Answer) {
 }
 
 /// The answer to a request whose head was read.
-pub async fn answer(head: &Head, context: &Context) -> Answer {
+pub async fn answer(head: &Head, context: &Arc<Context>) -> Answer {
     let Some(host) = head
         .header("host")
         .filter(|host| own_host(host, context.ip, context.port))

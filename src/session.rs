@@ -1362,22 +1362,27 @@ pub fn find_by_prefix(home: &Path, prefix: &str) -> Result<PathBuf> {
 /// entry (the first user input) of each file are read, so long sessions do
 /// not slow the list down.
 pub fn list_recent(home: &Path, limit: usize) -> Result<Vec<Summary>> {
-    list(home, limit, Some(false))
+    Ok(summaries(list(home, limit, Some(false))?))
 }
 
 /// [`list_recent`] for the sessions of channels ([`Meta::source`]).
 pub fn list_channel_sessions(home: &Path, limit: usize) -> Result<Vec<Summary>> {
-    list(home, limit, Some(true))
+    Ok(summaries(list(home, limit, Some(true))?))
 }
 
-/// [`list_recent`] for every session: of the terminal and of channels.
-pub fn list_all(home: &Path, limit: usize) -> Result<Vec<Summary>> {
+/// [`list_recent`] for every session, of the terminal and of channels,
+/// each with the path of its journal.
+pub fn list_all(home: &Path, limit: usize) -> Result<Vec<(PathBuf, Summary)>> {
     list(home, limit, None)
+}
+
+fn summaries(list: Vec<(PathBuf, Summary)>) -> Vec<Summary> {
+    list.into_iter().map(|(_, summary)| summary).collect()
 }
 
 /// `channels`: `Some(true)` for the sessions of channels only,
 /// `Some(false)` for those of the terminal only, `None` for both.
-fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<Summary>> {
+fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<(PathBuf, Summary)>> {
     Ok(session_files(home)?
         .into_iter()
         .filter_map(|file| {
@@ -1390,7 +1395,7 @@ fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<Summary
                 Some(Entry::ClaudeTurn(turn)) => turn.input,
                 _ => String::new(),
             };
-            Some(Summary {
+            let summary = Summary {
                 id: meta.id,
                 updated: file
                     .modified
@@ -1402,15 +1407,11 @@ fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<Summary
                 backend: meta.backend,
                 source: meta.source,
                 channel: meta.channel,
-            })
+            };
+            Some((file.path, summary))
         })
         .take(limit)
         .collect())
-}
-
-/// The path of the journal of session `id` in the state folder `home`.
-pub fn journal_path(home: &Path, id: &str) -> PathBuf {
-    sessions_dir(home).join(format!("{id}.jsonl"))
 }
 
 /// How many messages the journal at `path` records: its user and
