@@ -15,7 +15,9 @@ what each message does). --approval-seconds shortens the 5-minute question
 timeout. GET /__dev/drop-streams ends every open event stream, to try the
 page's reconnection. Messages with 만들어 or 고쳐 write files and leave file
 checkpoints (stage 20); GET /__dev/edit?path=a.txt changes one from outside,
-as bash would, and --no-checkpoints answers as checkpoints = false.
+as bash would, GET /__dev/undo-late/35 answers undos 35 s after doing
+them (past the page's 30 s), and --no-checkpoints answers as
+checkpoints = false.
 
 Writes: POST /api/cron/<id>/pause|resume and /api/webhooks/<name>/pause|resume
 change the fixtures in memory (restart to reset). They need the token, an
@@ -315,7 +317,10 @@ class Handler(BaseHTTPRequestHandler):
             turn = body.get("turn")
             if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1 or not isinstance(body.get("force", False), bool):
                 return self.send_json(400, {"error": "bad_body", "message": "turn is a turn number from 1"})
-            return self.send_json(*chats.undo(chat, turn))
+            answer = chats.undo(chat, turn)
+            # GET /__dev/undo-late/<seconds>: the undo is done, its answer comes late (or never, for the page).
+            time.sleep(self.server.undo_late)
+            return self.send_json(*answer)
         return self.send_json(*chats.answer(chat, unquote(question_id), body.get("answer")))
 
     def trade_code(self, host):
@@ -367,6 +372,10 @@ class Handler(BaseHTTPRequestHandler):
             # A file changed from outside (a person or bash): no checkpoint.
             path = parse_qs(url.query).get("path", ["notes.md"])[0]
             return self.send_json(200, {"edited": self.server.chats.cp.edit(path)})
+
+        if url.path.startswith("/__dev/undo-late/"):
+            self.server.undo_late = int(url.path.rsplit("/", 1)[1] or 0)
+            return self.send_json(200, {"undo_late": self.server.undo_late})
 
         if url.path.startswith("/__dev/mode/"):
             mode = url.path.rsplit("/", 1)[1]
@@ -450,6 +459,7 @@ def main():
     server.token = args.token or secrets.token_urlsafe(32)
     server.mode = args.mode
     server.codes = {}
+    server.undo_late = 0
     server.fixtures = load_fixtures()
     if args.chat:
         server.chats = chat_sim.Chats(
