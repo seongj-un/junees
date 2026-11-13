@@ -117,7 +117,7 @@ fn apply(settings: &Settings, group: Group, key: &str, action: Action) -> Result
             if !store.path().exists() {
                 return Err(missing(group));
             }
-            let mut locked = store.lock().map_err(|err| Failure::internal(&err))?;
+            let mut locked = store.lock().map_err(|err| busy(&err))?;
             let index = locked
                 .jobs
                 .iter()
@@ -125,6 +125,9 @@ fn apply(settings: &Settings, group: Group, key: &str, action: Action) -> Result
                 .ok_or_else(|| missing(group))?;
             let job = &mut locked.jobs[index];
             match action {
+                // Already paused: left as it is, so a pause for the home
+                // folder keeps its mark (and the 409 of a resume).
+                Action::Pause if job.paused => return Ok(job_json(settings, job)),
                 Action::Pause => crate::cron::command::pause(job),
                 Action::Resume => {
                     if job.paused_for_home {
@@ -144,13 +147,16 @@ fn apply(settings: &Settings, group: Group, key: &str, action: Action) -> Result
             if !store.path().exists() {
                 return Err(missing(group));
             }
-            let mut locked = store.lock().map_err(|err| Failure::internal(&err))?;
+            let mut locked = store.lock().map_err(|err| busy(&err))?;
             let index = locked
                 .routes
                 .iter()
                 .position(|route| route.name == key)
                 .ok_or_else(|| missing(group))?;
             let route = &mut locked.routes[index];
+            if action == Action::Pause && route.paused {
+                return Ok(route_json(settings, route));
+            }
             if action == Action::Resume && route.paused_for_home {
                 return Err(home_conflict("route", key));
             }
@@ -159,6 +165,12 @@ fn apply(settings: &Settings, group: Group, key: &str, action: Action) -> Result
             Ok(route_json(settings, &locked.routes[index]))
         }
     }
+}
+
+/// 503 for a store whose lock another junees holds past the wait (10
+/// seconds): the CLI, the daemon or a run is writing it.
+fn busy(err: &anyhow::Error) -> Failure {
+    Failure::new(503, "busy", format!("{err:#}"))
 }
 
 fn missing(group: Group) -> Failure {
