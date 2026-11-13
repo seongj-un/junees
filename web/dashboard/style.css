@@ -289,8 +289,9 @@ ul {
   outline: none;
 }
 
+/* Focus lands here after a screen change; the heading is not a control. */
 .view-head h1:focus-visible {
-  outline: 2px solid var(--focus);
+  outline: none;
 }
 
 .view-controls:empty {
