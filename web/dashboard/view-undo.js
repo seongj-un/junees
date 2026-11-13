@@ -293,5 +293,5 @@ export function outcomeView(answer, cwd) {
   // The undo's own checkpoint goes here once the list has it ("이 되돌리기 취소").
   const slot = el("div", { class: "cp-slot" });
   parts.push(slot);
-  return { node: el("li", { class: "msg cp-result", tabindex: "-1" }, parts), headline: outcome.headline, slot, changed: outcome.restored.length > 0 };
+  return { node: el("li", { class: "msg cp-result", tabindex: "-1" }, parts), headline: outcome.headline, slot };
 }

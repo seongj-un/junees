@@ -134,12 +134,7 @@ class ChatView {
     /** The session's working folder, to show paths under it shortly. */
     this.cwd = null;
     this.historyShown = [];
-    /**
-     * Undos done from this tab: `Map(the undo's checkpoint -> checkpoints it
-     * undid)`, since the list does not say. `pendingUndo` waits for the
-     * undo's checkpoint to show up in the list.
-     */
-    this.undidHere = new Map();
+    /** An undo whose answer never came, until the list shows whether it was done. */
     this.pendingUndo = null;
     /** Checkpoints of an undo whose answer never came: no undo for them until the list tells. */
     this.unsure = new Set();
@@ -933,24 +928,18 @@ class ChatView {
     if (!this.alive || load !== this.cpLoads) return false;
     const pending = this.pendingUndo;
     if (pending) {
-      // The undo's own checkpoint, if it changed anything: the first one
-      // after the newest the list had before it.
-      const made = list.find((item) => item.turn > pending.newest);
-      if (made) {
-        this.undidHere.set(made.turn, pending.turns);
-        if (pending.slot) this.cpSlots.set(made.turn, pending.slot);
-      }
-      if (pending.unknown) {
-        const said = made
-          ? "답은 받지 못했지만 서버는 파일을 되돌렸습니다. 파일 변경 기록에서 결과를 확인해 주세요."
-          : "서버에 새 되돌리기 기록이 없어, 되돌린 파일이 없는 것으로 확인했습니다.";
-        this.setStatus(said, made ? "warn" : "neutral");
-        this.ctx.announce(said);
-        this.unsure.clear();
-      }
+      // The undo's own checkpoint, if it changed anything: one made after
+      // the click whose `undid` is the checkpoints it was asked to undo.
+      const want = [...pending.turns].sort((a, b) => a - b).join(",");
+      const made = list.find((item) => item.turn > pending.newest && [...item.undid].sort((a, b) => a - b).join(",") === want);
+      const said = made
+        ? "답은 받지 못했지만 서버는 파일을 되돌렸습니다. 파일 변경 기록에서 결과를 확인해 주세요."
+        : "서버에 새 되돌리기 기록이 없어, 되돌린 파일이 없는 것으로 확인했습니다.";
+      this.setStatus(said, made ? "warn" : "neutral");
+      this.ctx.announce(said);
+      this.unsure.clear();
       this.pendingUndo = null;
     }
-    for (const item of list) if (!item.undid.length && this.undidHere.has(item.turn)) item.undid = this.undidHere.get(item.turn);
     this.checkpoints = list;
     if (this.cwd === null && list.length) {
       // A new chat: its working folder comes with the session.
@@ -1064,9 +1053,11 @@ class ChatView {
     if (!this.alive) return;
     switch (result.outcome) {
       case "done": {
-        const { node, headline, slot, changed } = outcomeView(result.answer, this.cwd);
-        // An undo that changed files is a checkpoint too; it shows up after `newest`.
-        if (changed) this.pendingUndo = { newest, turns, slot };
+        const { node, headline, slot } = outcomeView(result.answer, this.cwd);
+        // An undo that changed files left a checkpoint of its own; its
+        // "이 되돌리기 취소" goes in the result.
+        const made = result.answer?.checkpoint;
+        if (Number.isSafeInteger(made) && made > 0) this.cpSlots.set(made, slot);
         this.log.append(node);
         this.empty.hidden = true;
         node.focus({ preventScroll: true });
@@ -1094,7 +1085,7 @@ class ChatView {
         // until the list shows whether the undo left its own checkpoint.
         for (const t of turns) this.unsure.add(t);
         this.unsureTries = 0;
-        this.pendingUndo = { newest, turns, slot: null, unknown: true };
+        this.pendingUndo = { newest, turns };
         this.setStatus("되돌리기의 답을 받지 못했습니다. 파일을 이미 되돌렸을 수 있어 확인하는 중입니다.", "warn");
         this.renderCheckpoints();
         this.refreshCheckpoints();

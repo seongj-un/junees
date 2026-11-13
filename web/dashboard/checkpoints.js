@@ -26,8 +26,8 @@ export function relPath(path, cwd) {
 /**
  * The checkpoint list as the server sent it, checked and oldest first:
  * `[{ turn, createdAt, files: [{ path, change, restorable }], undid }]`.
- * Items without a usable number are dropped. `undid` is the list of turns
- * an undo undid, when the server says so; this server version does not.
+ * Items without a usable number are dropped. `undid` is the checkpoints
+ * an undo put back (`[]` for a model's turn).
  */
 export function parseCheckpoints(body) {
   if (!Array.isArray(body)) return [];
