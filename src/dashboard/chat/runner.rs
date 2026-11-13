@@ -64,6 +64,8 @@ pub struct Shared {
     pub home: Option<PathBuf>,
     pub model: String,
     pub settings: Arc<Settings>,
+    /// How long a question waits ([`super::APPROVAL_TIME`]).
+    pub approval_time: std::time::Duration,
     /// Cleared when a turn ends, before its `turn_end`.
     pub running: Arc<Mutex<Option<String>>>,
 }
@@ -332,16 +334,18 @@ fn send_text(shared: &Shared, room: &Room, text: String) {
 
 /// Asks the page: an `approval` event, then the answer the page posts,
 /// or a decline after [`super::APPROVAL_TIME`] or a cancel.
-struct ChatAsk {
+pub(super) struct ChatAsk {
     room: Arc<Room>,
     settings: Arc<Settings>,
+    time: std::time::Duration,
 }
 
 impl ChatAsk {
-    fn new(room: &Arc<Room>, shared: &Shared) -> Self {
+    pub(super) fn new(room: &Arc<Room>, shared: &Shared) -> Self {
         Self {
             room: Arc::clone(room),
             settings: Arc::clone(&shared.settings),
+            time: shared.approval_time,
         }
     }
 }
@@ -396,11 +400,11 @@ impl Ask for ChatAsk {
         };
         tokio::select! {
             answer = answer => answer.unwrap_or(Answer::No),
-            () = tokio::time::sleep(super::APPROVAL_TIME) => {
+            () = tokio::time::sleep(self.time) => {
                 let _ = room.close(&id, "n", "timeout");
                 Answer::NoBecause(format!(
-                    "no answer on the dashboard within {} minutes",
-                    super::APPROVAL_TIME.as_secs() / 60
+                    "no answer on the dashboard within {} seconds",
+                    self.time.as_secs()
                 ))
             }
             () = room.cancel.cancelled() => {

@@ -336,6 +336,7 @@ impl Chat {
                 home: setup.home.clone(),
                 model: setup.model,
                 settings: Arc::new(setup.settings),
+                approval_time: APPROVAL_TIME,
                 running: Arc::clone(&running),
             },
         );
