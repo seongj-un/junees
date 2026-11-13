@@ -458,7 +458,7 @@ impl Settings {
     fn first(&self, name: &str) -> Option<(String, Origin)> {
         self.overridden(name)
             .or_else(|| self.env(name).map(|value| (value, Origin::Env)))
-            .or_else(|| self.from_file(name))
+            .or_else(|| self.in_file(name))
     }
 
     fn overridden(&self, name: &str) -> Option<(String, Origin)> {
@@ -466,7 +466,7 @@ impl Settings {
         Some((value.clone(), Origin::Override))
     }
 
-    fn from_file(&self, name: &str) -> Option<(String, Origin)> {
+    fn in_file(&self, name: &str) -> Option<(String, Origin)> {
         let value = self.file.env_value(name)?;
         Some((value.to_string(), Origin::File))
     }
@@ -484,7 +484,7 @@ impl Settings {
             Some(Origin::Env) => self
                 .overridden(key)
                 .or_else(|| self.env(key).map(|value| (value, Origin::Env))),
-            Some(Origin::File) => self.overridden(key).or_else(|| self.from_file(key)),
+            Some(Origin::File) => self.overridden(key).or_else(|| self.in_file(key)),
         }
     }
 
