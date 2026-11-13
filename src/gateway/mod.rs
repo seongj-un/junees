@@ -112,6 +112,9 @@ pub struct Gateway {
     pub timing: Timing,
     pub typing_every: Duration,
     pub log: Log,
+    /// Turns voice messages into text; `None` (the default) leaves
+    /// transcription off.
+    pub transcriber: Option<Arc<crate::transcribe::Transcriber>>,
 }
 
 impl Gateway {
@@ -132,6 +135,7 @@ impl Gateway {
             timing: Timing::default(),
             typing_every: Duration::from_secs(8),
             log: stderr_log(),
+            transcriber: None,
         }
     }
 
@@ -173,6 +177,7 @@ impl Gateway {
             typing_every: self.typing_every,
             log: Arc::clone(&self.log),
             closing: AtomicBool::new(false),
+            transcriber: self.transcriber.clone(),
         });
         let (events, mut received) = mpsc::unbounded_channel();
         let stop_shard = Cancel::new();

@@ -611,6 +611,16 @@ fn start(
     home: Option<PathBuf>,
     cwd: &Path,
 ) -> Running {
+    start_voice(config, engines, home, cwd, None)
+}
+
+fn start_voice(
+    config: SlackConfig,
+    engines: Arc<dyn Engines>,
+    home: Option<PathBuf>,
+    cwd: &Path,
+    transcriber: Option<Arc<junees::transcribe::Transcriber>>,
+) -> Running {
     let timing = Timing {
         ping_every: Duration::from_secs(30),
         idle: Duration::from_secs(60),
@@ -618,7 +628,7 @@ fn start(
         backoff_start: Duration::from_millis(50),
         backoff_max: Duration::from_millis(200),
     };
-    start_timed(config, engines, home, cwd, timing, CLOSE_IDLE)
+    start_timed(config, engines, home, cwd, timing, CLOSE_IDLE, transcriber)
 }
 
 fn start_timed(
@@ -628,6 +638,7 @@ fn start_timed(
     cwd: &Path,
     timing: Timing,
     close_idle: Duration,
+    transcriber: Option<Arc<junees::transcribe::Transcriber>>,
 ) -> Running {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&lines);
@@ -641,6 +652,7 @@ fn start_timed(
         timing,
         close_idle,
         log,
+        transcriber,
     };
     let stop = Cancel::new();
     let cancel = stop.clone();
@@ -827,7 +839,15 @@ async fn a_silent_connection_is_dropped_although_pings_go_out() {
         backoff_max: Duration::from_millis(50),
     };
     s.state.mute.store(true, Ordering::SeqCst);
-    let running = start_timed(slack(&s, &[]), fake(), None, dir.path(), timing, CLOSE_IDLE);
+    let running = start_timed(
+        slack(&s, &[]),
+        fake(),
+        None,
+        dir.path(),
+        timing,
+        CLOSE_IDLE,
+        None,
+    );
     // No `hello`: given up after the connect timeout, then tried again.
     s.until("two silent connections", || {
         s.state.muted.load(Ordering::SeqCst) >= 2
@@ -1425,6 +1445,7 @@ async fn idle_threads_close_and_open_their_session_again() {
         cwd.path(),
         timing,
         Duration::from_millis(200),
+        None,
     );
     s.wait_connections(1).await;
     let asked = mention(USER, "remember the word kiwi", None);

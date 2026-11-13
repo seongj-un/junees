@@ -78,6 +78,9 @@ pub struct SlackGateway {
     /// See [`CLOSE_IDLE`].
     pub close_idle: Duration,
     pub log: Log,
+    /// Turns voice messages into text; `None` (the default) leaves
+    /// transcription off.
+    pub transcriber: Option<Arc<crate::transcribe::Transcriber>>,
 }
 
 impl SlackGateway {
@@ -98,6 +101,7 @@ impl SlackGateway {
             timing: Timing::default(),
             close_idle: CLOSE_IDLE,
             log: stderr_log(),
+            transcriber: None,
         }
     }
 
@@ -149,6 +153,7 @@ impl SlackGateway {
             typing_every: Duration::from_secs(3600),
             log: Arc::clone(&self.log),
             closing: AtomicBool::new(false),
+            transcriber: self.transcriber.clone(),
         });
         let socket = Socket::new(
             api,

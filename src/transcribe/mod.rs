@@ -131,6 +131,17 @@ impl Settings {
     }
 }
 
+/// The note for an audio file over `transcribe_max_bytes`.
+pub fn too_large(name: &str, len: u64, limit: u64) -> String {
+    use crate::images::human_bytes;
+    format!(
+        "{name}: the audio is {}; voice messages are transcribed up to {} \
+         (transcribe_max_bytes)",
+        human_bytes(len),
+        human_bytes(limit)
+    )
+}
+
 /// A voice message or audio file, downloaded.
 pub struct Audio {
     /// The MIME type the platform gave (`audio/ogg`).
