@@ -8,7 +8,7 @@
   - 예약 작업, 웹훅 경로, GitHub 흐름(`add-github`)의 작업 폴더가 홈 자체이거나 홈을 품은 폴더(`/home`, `/`)면, 추가할 때 거절하고 이미 있는 것은 처음 실행할 때 실패로 기록하고 전달한 뒤 멈춥니다(`paused`. 일정이나 요청마다 실패가 다시 오지 않습니다). 막을 경로 목록(셸 시작 파일, systemd, `~/.ssh` 등)으로는 파이썬 `.pth`, 에디터 설정, 다른 저장소의 git 훅 같은 나중에 실행되는 파일을 다 막을 수 없기 때문입니다.
   - 올리기 전에 `junees doctor`를 돌려 `job <이름> folder`, `route <이름> folder` 경고가 있는지 봅니다. `junees cron list`와 `junees webhook list`의 폴더 줄로도 확인할 수 있습니다.
   - 고치는 법(권장): 작업을 지우고 프로젝트 폴더로 다시 추가합니다. `junees cron rm <id>` 뒤 `junees cron add "<일정>" "<프롬프트>" --dir ~/work/<프로젝트>`.
-  - 홈에서 계속 돌려야 하면 `--allow-home`을 붙여 다시 추가합니다. 웹훅 경로는 `--secret-file ~/.junees/secrets/webhook-<이름>`(또는 전에 쓰던 `--secret-env`)을 주면 GitHub에 넣은 시크릿을 바꾸지 않아도 됩니다. `add-github`는 다시 추가하면 시크릿을 새로 만들므로 GitHub 웹훅 설정의 Secret도 새 파일 내용으로 바꿔야 합니다.
+  - 홈에서 계속 돌려야 하면 지우지 말고 `junees cron allow-home <id>`, `junees webhook allow-home <이름>`으로 허용 표시를 붙입니다(#89). 홈 폴더 때문에 멈춘 작업과 경로는 이 명령이 다시 시작하고, id, 일정, 웹훅 시크릿이 그대로라 GitHub의 Secret도 바꾸지 않아도 됩니다. `junees cron pause`로 직접 멈춘 것은 멈춘 채 둡니다. 허용을 거두려면 `disallow-home`을 씁니다(작업 폴더가 홈이면 바로 멈춥니다).
   - `XDG_CONFIG_HOME`이 홈 아래의 경로로 있으면(홈 자체는 제외) 무인 실행이 `$XDG_CONFIG_HOME/systemd`, `environment.d`, `autostart`, `git`, `fish`에도 쓰지 못합니다(`~/.config` 아래와 같은 규칙).
 - **`OPENAI_API_KEY`를 bash에서 숨김 (OpenAI 호환 provider)**
   - `OPENAI_API_KEY`는 이제 Junees가 읽는 자격 증명이라 `ANTHROPIC_API_KEY`처럼 bash 도구, MCP 서버, 플러그인, `claude` 자식의 환경에서 지웁니다. 모델이 실행하는 스크립트가 이 변수를 쓰고 있었다면 그 스크립트가 직접 읽도록 바꿔야 합니다.
@@ -42,6 +42,7 @@
 - `junees setup`의 Slack 단계(봇 토큰, 앱 토큰, 허용할 member id) (#80)
 - 웹훅 실행 전용 읽기 설정 `webhook_sandbox_read` (#78)
 - 예약 작업과 웹훅 경로의 `--allow-home`: 홈(또는 홈을 품은 폴더)을 작업 폴더로 쓰는 것을 작업마다 명시적으로 허용 (#84)
+- `junees cron allow-home`/`disallow-home`, `junees webhook allow-home`/`disallow-home`: 이미 있는 작업과 경로에 `--allow-home` 표시를 붙이거나 거둔다. 붙이면 홈 폴더 때문에 멈춘 것을 다시 시작하고, 거두면 작업 폴더가 홈일 때 바로 멈춘다. 모델이 bash로 `allow-home`을 실행하면 "항상 허용"과 상관없이 매번 승인을 묻는다 (#89)
 
 ## 0.2.0 (2026-11-12)
 
