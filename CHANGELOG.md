@@ -1,6 +1,6 @@
 # 변경 기록
 
-## 다음 버전 (미출시)
+## 0.3.0 (2026-11-13)
 
 ### 업그레이드할 때 확인할 것
 
@@ -22,7 +22,6 @@
   - `XDG_CONFIG_HOME`이 홈 아래의 경로로 있으면(홈 자체는 제외) 무인 실행이 `$XDG_CONFIG_HOME/systemd`, `environment.d`, `autostart`, `git`, `fish`에도 쓰지 못합니다(`~/.config` 아래와 같은 규칙).
 - **`OPENAI_API_KEY`를 bash에서 숨김 (OpenAI 호환 provider)**
   - `OPENAI_API_KEY`는 이제 Junees가 읽는 자격 증명이라 `ANTHROPIC_API_KEY`처럼 bash 도구, MCP 서버, 플러그인, `claude` 자식의 환경에서 지웁니다. 모델이 실행하는 스크립트가 이 변수를 쓰고 있었다면 그 스크립트가 직접 읽도록 바꿔야 합니다.
-
 - **웹훅 실행의 파일 도구와 `sandbox_read` (#77)**
   - 웹훅 실행(GitHub 흐름의 단계 포함)의 파일 도구(`read_file`)는 이제 `sandbox_read`를 받지 않습니다. 작업 폴더, 임시 폴더, `sandbox_write`, 그리고 새 설정 `webhook_sandbox_read`(`JUNEES_WEBHOOK_SANDBOX_READ`, 기본은 없음)의 폴더만 읽습니다.
   - 그래서 예약 작업용으로 설정 파일에 `sandbox_read = "/, ~/.ssh"`를 적어도, 웹훅 실행의 `read_file`은 디스크 전체를 읽지 않습니다. 0.2.0에서 안내한 "`JUNEES_SANDBOX_READ`는 예약 작업 데몬의 환경에만" 우회는 더 필요 없습니다.
@@ -53,6 +52,11 @@
 - 웹훅 실행 전용 읽기 설정 `webhook_sandbox_read` (#78)
 - 예약 작업과 웹훅 경로의 `--allow-home`: 홈(또는 홈을 품은 폴더)을 작업 폴더로 쓰는 것을 작업마다 명시적으로 허용 (#84)
 - `junees cron allow-home`/`disallow-home`, `junees webhook allow-home`/`disallow-home`: 이미 있는 작업과 경로에 `--allow-home` 표시를 붙이거나 거둔다. 붙이면 홈 폴더 때문에 멈춘 것을 다시 시작하고, 거두면 작업 폴더가 홈일 때 바로 멈춘다. 모델이 bash로 `allow-home`을 실행하면 "항상 허용"과 상관없이 매번 승인을 묻는다 (#89)
+
+### 고친 것
+
+- Rust 1.100에서 `unused ExitCode` 경고로 빌드가 깨지던 것 (#87)
+- 가끔 실패하던 claude-code 취소 테스트: 죽은 프로세스(`X` 상태)를 실행 중으로 보던 판정 (#90, #94)
 
 ## 0.2.0 (2026-11-12)
 
