@@ -313,6 +313,15 @@ impl Default for Probe {
     }
 }
 
+/// Cuts out of `texts` what the report cuts out of its checks: the values
+/// of the secret settings and variables `settings` knows of, and anything
+/// [`crate::secrets::find_secret`] takes for a credential.
+pub fn hide_secrets<'a>(settings: &Settings, texts: impl Iterator<Item = &'a mut String>) {
+    let mut hidden = redact::Hidden::default();
+    hidden.add_settings(settings);
+    redact::redact(&hidden, texts);
+}
+
 /// Runs every check on `settings`. `broken` is why the settings file could
 /// not be read, if it could not (the checks then go on without it).
 pub async fn run(settings: &Settings, broken: Option<&anyhow::Error>, online: bool) -> Report {

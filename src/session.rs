@@ -1362,20 +1362,27 @@ pub fn find_by_prefix(home: &Path, prefix: &str) -> Result<PathBuf> {
 /// entry (the first user input) of each file are read, so long sessions do
 /// not slow the list down.
 pub fn list_recent(home: &Path, limit: usize) -> Result<Vec<Summary>> {
-    list(home, limit, false)
+    list(home, limit, Some(false))
 }
 
 /// [`list_recent`] for the sessions of channels ([`Meta::source`]).
 pub fn list_channel_sessions(home: &Path, limit: usize) -> Result<Vec<Summary>> {
-    list(home, limit, true)
+    list(home, limit, Some(true))
 }
 
-fn list(home: &Path, limit: usize, channels: bool) -> Result<Vec<Summary>> {
+/// [`list_recent`] for every session: of the terminal and of channels.
+pub fn list_all(home: &Path, limit: usize) -> Result<Vec<Summary>> {
+    list(home, limit, None)
+}
+
+/// `channels`: `Some(true)` for the sessions of channels only,
+/// `Some(false)` for those of the terminal only, `None` for both.
+fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<Summary>> {
     Ok(session_files(home)?
         .into_iter()
         .filter_map(|file| {
             let (meta, mut rest) = read_head(&file.path)?;
-            if meta.source.is_some() != channels {
+            if channels.is_some_and(|channels| meta.source.is_some() != channels) {
                 return None;
             }
             let first_input = match read_entry(&mut rest) {
@@ -1399,6 +1406,38 @@ fn list(home: &Path, limit: usize, channels: bool) -> Result<Vec<Summary>> {
         })
         .take(limit)
         .collect())
+}
+
+/// The path of the journal of session `id` in the state folder `home`.
+pub fn journal_path(home: &Path, id: &str) -> PathBuf {
+    sessions_dir(home).join(format!("{id}.jsonl"))
+}
+
+/// How many messages the journal at `path` records: its user and
+/// assistant messages, two for a Claude Code turn (the input and the
+/// reply). Lines that do not read are skipped; the summary of a
+/// compaction is not counted.
+pub fn count_messages(path: &Path) -> Result<usize> {
+    let file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut reader = io::BufReader::new(file);
+    let mut count = 0usize;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match io::BufRead::read_line(&mut reader, &mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("cannot read {}", path.display()));
+            }
+        }
+        match serde_json::from_str::<LineIn>(&line).map(|line| line.entry) {
+            Ok(Entry::Message(_)) => count += 1,
+            Ok(Entry::ClaudeTurn(_)) => count += 2,
+            _ => {}
+        }
+    }
+    Ok(count)
 }
 
 fn unix_now() -> u64 {
