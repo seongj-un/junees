@@ -88,6 +88,43 @@ export function postJson(path, options = {}) {
   return request("POST", path, options);
 }
 
+/**
+ * Opens a `text/event-stream` GET with the Bearer header (EventSource cannot
+ * send one) and returns the response for its body to be read. Throws
+ * {@link ApiError} like {@link getJson} when it does not open; aborting
+ * `signal` ends it. There is no time limit: the stream stays open.
+ */
+export async function openStream(path, { signal } = {}) {
+  const token = getToken();
+  if (!token) throw new ApiError("unauthorized", "no token");
+  let response;
+  try {
+    response = await fetch(path, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+      cache: "no-store",
+      credentials: "omit",
+      signal,
+    });
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    throw new ApiError("network", "network error");
+  }
+  if (response.status === 401) throw new ApiError("unauthorized", "unauthorized", { status: 401 });
+  if (!response.ok || !response.body) {
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {
+      // Not JSON: the status says enough.
+    }
+    const code = typeof body?.error === "string" ? body.error : null;
+    const message = typeof body?.message === "string" ? body.message : "";
+    throw new ApiError("http", message, { status: response.status, code });
+  }
+  return response;
+}
+
 async function request(method, path, { signal, timeoutMs = DEFAULT_TIMEOUT_MS, auth = true, payload = {} } = {}) {
   const token = auth ? getToken() : null;
   if (auth && !token) throw new ApiError("unauthorized", "no token");
