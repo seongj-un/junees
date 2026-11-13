@@ -136,10 +136,18 @@ impl Settings {
     /// Whether the address is Azure OpenAI's v1 API:
     /// `https://<resource>.openai.azure.com/openai/v1` or
     /// `https://<resource>.services.ai.azure.com/openai/v1` (Azure
-    /// OpenAI's API version lifecycle page).
+    /// OpenAI's API version lifecycle page), or
+    /// `https://<resource>.cognitiveservices.azure.com/openai/v1`, the
+    /// endpoint the Azure portal shows for newer resources.
     pub fn is_azure(&self) -> bool {
         self.host().is_some_and(|host| {
-            host.ends_with(".openai.azure.com") || host.ends_with(".services.ai.azure.com")
+            [
+                ".openai.azure.com",
+                ".services.ai.azure.com",
+                ".cognitiveservices.azure.com",
+            ]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
         })
     }
 
@@ -565,6 +573,7 @@ mod tests {
             "https://US.API.OPENAI.COM/v1",
             "https://my-res.openai.azure.com/openai/v1/",
             "https://my-res.services.ai.azure.com/openai/v1",
+            "https://my-res.cognitiveservices.azure.com/openai/v1",
         ] {
             assert!(field(&[(BASE_URL_ENV, completion)]), "{completion}");
         }
@@ -574,6 +583,7 @@ mod tests {
             "https://api.openai.com.example/v1",
             "https://notapi.openai.com/v1",
             "https://openai.azure.com.example/v1",
+            "https://cognitiveservices.azure.com.example/v1",
         ] {
             assert!(!field(&[(BASE_URL_ENV, plain)]), "{plain}");
         }
