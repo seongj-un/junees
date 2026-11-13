@@ -140,11 +140,19 @@ fn block_json(settings: &Settings, block: &ContentBlock) -> Value {
             put_text(&mut out, "input_preview", &input_text(input), PREVIEW_CHARS);
         }
         ContentBlock::ToolResult {
-            content, is_error, ..
+            content,
+            is_error,
+            images,
+            ..
         } => {
             out.insert("type".into(), json!("tool_result"));
             out.insert("is_error".into(), Value::Bool(*is_error));
             put_text(&mut out, "text_preview", content, PREVIEW_CHARS);
+            // Screenshots and the like: their kind only, as image blocks.
+            if !images.is_empty() {
+                let kinds: Vec<&str> = images.iter().map(|image| image.media_type.as_str()).collect();
+                out.insert("images".into(), json!(kinds));
+            }
         }
         ContentBlock::Image(image) => {
             out.insert("type".into(), json!("image"));
