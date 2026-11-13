@@ -1,6 +1,8 @@
-// 예약 작업 and 웹훅: whether each one runs, when, and how it last went.
+// 예약 작업 and 웹훅: whether each one runs, when, and how it last went,
+// with a pause/resume button per item.
 
-import { badge, code, dataTable, el, notice, pathCode, whenCell } from "./dom.js";
+import { ACTION_TEXT, TARGETS, actionFor, runAction } from "./actions.js";
+import { badge, code, dataTable, el, notice, pathCode, tableRow, whenCell } from "./dom.js";
 import { formatInt, parseTime } from "./format.js";
 
 const RUN_STATUS = {
@@ -23,7 +25,7 @@ function lastRunCell(lastRun, now) {
   ];
 }
 
-function stateCell(item, command) {
+function stateCell(item, command, button) {
   const parts = [];
   if (item.paused_for_home) parts.push(badge("멈춤: 홈 폴더", "warn"));
   else if (item.paused) parts.push(badge("멈춤", "neutral"));
@@ -32,8 +34,14 @@ function stateCell(item, command) {
   return [
     el("span", { class: "inline" }, parts),
     item.paused_for_home
-      ? el("span", { class: "row-sub" }, "작업 폴더가 홈이라 멈췄습니다. 홈에서 돌려도 되면 다음 명령으로 다시 켭니다.", el("span", { class: "command" }, code(command)))
+      ? el(
+          "span",
+          { class: "row-sub" },
+          "작업 폴더가 홈이라 멈췄습니다. 홈에서 돌려도 되면 터미널에서 다음 명령으로 다시 켭니다.",
+          el("span", { class: "command" }, code(command)),
+        )
       : null,
+    button,
   ];
 }
 
@@ -44,10 +52,68 @@ function nameCell(item, sub) {
 function summary(items, noun) {
   const paused = items.filter((item) => item.paused || item.paused_for_home).length;
   const text = `${noun} ${formatInt(items.length)}개`;
-  return el("p", { class: "summary" }, paused ? `${text} · 멈춤 ${formatInt(paused)}개` : text);
+  return el("p", { class: "summary", "data-summary": "" }, paused ? `${text} · 멈춤 ${formatInt(paused)}개` : text);
 }
 
-export function renderCron(root, data, { now }) {
+/**
+ * A list with a pause/resume button per item. A successful action redraws
+ * only that item's row (and the count above the table) from the server's
+ * answer, and keeps the cached list in step for the next full render.
+ */
+function renderList(root, data, ctx, { target, field, noun, caption, columns }) {
+  const t = TARGETS[target];
+  const items = Array.isArray(data[field]) ? data[field] : [];
+
+  const actionButton = (item) => {
+    const action = actionFor(item);
+    if (!action) return null;
+    const button = el(
+      "button",
+      {
+        type: "button",
+        class: "button button-secondary button-small row-action",
+        // An id keeps focus on the button across the 30-second refresh.
+        id: `action-${target}-${t.key(item)}`,
+        "data-action-key": t.key(item),
+        "aria-label": `${t.label(item)} ${t.noun} ${ACTION_TEXT[action].verb}`,
+      },
+      ACTION_TEXT[action].verb,
+    );
+    button.addEventListener("click", () => act(item, action, button));
+    return button;
+  };
+
+  const cols = columns(ctx.now, actionButton);
+  const rowKey = (item) => t.key(item);
+
+  const act = async (item, action, button) => {
+    const result = await runAction({ target, item, action, opener: button });
+    if (result.outcome === "lock") return ctx.lock();
+    if (result.outcome === "reload") return ctx.reload();
+    if (result.outcome === "failed") {
+      ctx.announce(result.message);
+      button.focus();
+      return;
+    }
+    if (result.outcome !== "done") {
+      button.focus();
+      return;
+    }
+    const index = items.findIndex((other) => t.key(other) === t.key(item));
+    const changed = result.item && typeof result.item === "object" ? result.item : item;
+    if (index >= 0) items[index] = changed;
+    const key = CSS.escape(String(t.key(item)));
+    root.querySelector(`tr[data-key="${key}"]`)?.replaceWith(tableRow(cols, changed, rowKey));
+    root.querySelector("[data-summary]")?.replaceWith(summary(items, noun));
+    const next = root.querySelector(`[data-action-key="${key}"]`);
+    (next ?? root.querySelector(`tr[data-key="${key}"] th`))?.focus();
+    ctx.announce(`${t.label(item)} ${t.object} ${ACTION_TEXT[action].done}.`);
+  };
+
+  root.replaceChildren(summary(items, noun), dataTable({ caption, rowKey, rows: items, columns: cols }));
+}
+
+export function renderCron(root, data, ctx) {
   const jobs = Array.isArray(data.jobs) ? data.jobs : [];
   if (jobs.length === 0) {
     root.replaceChildren(
@@ -58,33 +124,35 @@ export function renderCron(root, data, { now }) {
     );
     return;
   }
-  root.replaceChildren(
-    summary(jobs, "예약 작업"),
-    dataTable({
-      caption: "예약 작업",
-      rowKey: (job) => job.id,
-      rows: jobs,
-      columns: [
-        { label: "작업", cell: (job) => nameCell(job, job.id && job.name ? `ID ${job.id}` : null), className: "col-main" },
-        { label: "일정", cell: (job) => code(job.schedule), className: "col-nowrap" },
-        { label: "폴더", cell: (job) => pathCode(job.dir), className: "col-path" },
-        { label: "상태", className: "col-state", cell: (job) => stateCell(job, `junees cron allow-home ${job.id || job.name}`) },
-        {
-          label: "다음 실행",
-          className: "col-time",
-          // A paused job keeps its next time on the server but does not run.
-          cell: (job) =>
-            job.paused || job.paused_for_home
-              ? el("span", { class: "muted" }, "멈춰 있음")
-              : whenCell(parseTime(job.next_run), now, "예정 없음"),
-        },
-        { label: "마지막 실행", cell: (job) => lastRunCell(job.last_run, now), className: "col-last" },
-      ],
-    }),
-  );
+  renderList(root, data, ctx, {
+    target: "cron",
+    field: "jobs",
+    noun: "예약 작업",
+    caption: "예약 작업",
+    columns: (now, button) => [
+      { label: "작업", cell: (job) => nameCell(job, job.id && job.name ? `ID ${job.id}` : null), className: "col-main" },
+      { label: "일정", cell: (job) => code(job.schedule), className: "col-nowrap" },
+      { label: "폴더", cell: (job) => pathCode(job.dir), className: "col-path" },
+      {
+        label: "상태",
+        className: "col-state",
+        cell: (job) => stateCell(job, `junees cron allow-home ${job.id || job.name}`, button(job)),
+      },
+      {
+        label: "다음 실행",
+        className: "col-time",
+        // A paused job keeps its next time on the server but does not run.
+        cell: (job) =>
+          job.paused || job.paused_for_home
+            ? el("span", { class: "muted" }, "멈춰 있음")
+            : whenCell(parseTime(job.next_run), now, "예정 없음"),
+      },
+      { label: "마지막 실행", cell: (job) => lastRunCell(job.last_run, now), className: "col-last" },
+    ],
+  });
 }
 
-export function renderWebhooks(root, data, { now }) {
+export function renderWebhooks(root, data, ctx) {
   const routes = Array.isArray(data.routes) ? data.routes : [];
   if (routes.length === 0) {
     root.replaceChildren(
@@ -95,25 +163,24 @@ export function renderWebhooks(root, data, { now }) {
     );
     return;
   }
-  root.replaceChildren(
-    summary(routes, "웹훅 경로"),
-    dataTable({
-      caption: "웹훅 경로",
-      rowKey: (route) => route.name,
-      rows: routes,
-      columns: [
-        { label: "경로", cell: (route) => nameCell(route, KINDS[route.kind] ?? route.kind), className: "col-main" },
-        { label: "폴더", cell: (route) => pathCode(route.dir), className: "col-path" },
-        { label: "상태", className: "col-state", cell: (route) => stateCell(route, `junees webhook allow-home ${route.name}`) },
-        {
-          label: "시크릿",
-          cell: (route) =>
-            route.has_secret
-              ? badge("있음", "ok")
-              : badge("없음", "warn"),
-        },
-        { label: "마지막 실행", cell: (route) => lastRunCell(route.last_run, now), className: "col-last" },
-      ],
-    }),
-  );
+  renderList(root, data, ctx, {
+    target: "webhooks",
+    field: "routes",
+    noun: "웹훅 경로",
+    caption: "웹훅 경로",
+    columns: (now, button) => [
+      { label: "경로", cell: (route) => nameCell(route, KINDS[route.kind] ?? route.kind), className: "col-main" },
+      { label: "폴더", cell: (route) => pathCode(route.dir), className: "col-path" },
+      {
+        label: "상태",
+        className: "col-state",
+        cell: (route) => stateCell(route, `junees webhook allow-home ${route.name}`, button(route)),
+      },
+      {
+        label: "시크릿",
+        cell: (route) => (route.has_secret ? badge("있음", "ok") : badge("없음", "warn")),
+      },
+      { label: "마지막 실행", cell: (route) => lastRunCell(route.last_run, now), className: "col-last" },
+    ],
+  });
 }
