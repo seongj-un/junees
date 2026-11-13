@@ -50,3 +50,11 @@ node --test web/dashboard/dev/test/
 - `GET /__dev/drop-streams`는 열린 이벤트 스트림을 모두 끊습니다. 화면이 `after`로 다시 연결하는지 볼 때 씁니다.
 - 세션 화면의 "이 세션 이어서 대화"는 fixtures에 있는 세션만 이어 갈 수 있습니다. 다른 id는 404입니다.
 
+
+## 파일 되돌리기 (20단계)
+
+- `--chat`의 대본에서 메시지에 `만들어`나 `고쳐`가 있으면 메시지에 적힌 파일(`a.txt`, `b.md` 등, 없으면 `notes.md`)을 `write_file`이나 `edit_file`로 씁니다. 파일은 메모리에만 있고(`/home/me/work/junees` 아래), 그 턴의 `turn_end`에 `checkpoint` 번호가 붙습니다.
+- `GET /api/chat/<id>/checkpoints`와 `POST /api/chat/<id>/undo`는 실제 서버(#112)와 같은 모양으로 답합니다. 번호는 파일을 바꾼 턴만 세고, `restorable`은 그 기록부터 되돌릴 때 기준이며, 되돌리기도 기록으로 남고(목록의 `undid`, 응답의 `checkpoint`, #118), 다음 메시지 앞에 `[되돌림]` 줄이 붙습니다. 턴이 돌고 있으면 409 `turn_running`입니다.
+- `GET /__dev/edit?path=a.txt`는 bash처럼 밖에서 파일을 고칩니다(기록 없음). 건너뜀과 부분 되돌림을 볼 때 씁니다.
+- `GET /__dev/undo-late/35`는 되돌리기를 한 뒤 35초 늦게 답합니다. 화면은 30초에서 기다림을 끝내므로, 답을 받지 못한 되돌리기를 볼 때 씁니다. `/__dev/undo-late/0`으로 되돌립니다.
+- `--no-checkpoints`로 띄우면 `checkpoints = false`처럼 목록은 빈 배열이고 되돌리기는 409 `checkpoints_off`입니다.

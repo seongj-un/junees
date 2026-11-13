@@ -13,7 +13,11 @@ Chat (stage 19): with --chat, /api/status says "chat": true and the
 /api/chat endpoints answer from chat_sim.py, a scripted agent (see there for
 what each message does). --approval-seconds shortens the 5-minute question
 timeout. GET /__dev/drop-streams ends every open event stream, to try the
-page's reconnection.
+page's reconnection. Messages with 만들어 or 고쳐 write files and leave file
+checkpoints (stage 20); GET /__dev/edit?path=a.txt changes one from outside,
+as bash would, GET /__dev/undo-late/35 answers undos 35 s after doing
+them (past the page's 30 s), and --no-checkpoints answers as
+checkpoints = false.
 
 Writes: POST /api/cron/<id>/pause|resume and /api/webhooks/<name>/pause|resume
 change the fixtures in memory (restart to reset). They need the token, an
@@ -51,11 +55,13 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 MODES = {"ok", "empty", "error", "slow", "hang", "unauthorized", "forbidden", "conflict", "busy"}
 SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ACTION = re.compile(r"/api/(cron|webhooks)/([^/]+)/(pause|resume)")
-CHAT = re.compile(r"/api/chat(?:/([^/]+)/(messages|cancel|approvals/([^/]+)))?")
+CHAT = re.compile(r"/api/chat(?:/([^/]+)/(messages|cancel|undo|approvals/([^/]+)))?")
 CHAT_EVENTS = re.compile(r"/api/chat/([^/]+)/events")
+CHAT_CHECKPOINTS = re.compile(r"/api/chat/([^/]+)/checkpoints")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import chat_sim  # noqa: E402  (next to this file)
+import checkpoint_sim  # noqa: E402
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
 }
@@ -307,6 +313,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(*chats.send(chat, text))
         if what == "cancel":
             return self.send_json(*chats.cancel(chat))
+        if what == "undo":
+            turn = body.get("turn")
+            if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1 or not isinstance(body.get("force", False), bool):
+                return self.send_json(400, {"error": "bad_body", "message": "turn is a turn number from 1"})
+            answer = chats.undo(chat, turn)
+            # GET /__dev/undo-late/<seconds>: the undo is done, its answer comes late (or never, for the page).
+            time.sleep(self.server.undo_late)
+            return self.send_json(*answer)
         return self.send_json(*chats.answer(chat, unquote(question_id), body.get("answer")))
 
     def trade_code(self, host):
@@ -354,6 +368,15 @@ class Handler(BaseHTTPRequestHandler):
                         chat.cond.notify_all()
             return self.send_json(200, {"dropped": True})
 
+        if url.path == "/__dev/edit" and self.server.chats is not None:
+            # A file changed from outside (a person or bash): no checkpoint.
+            path = parse_qs(url.query).get("path", ["notes.md"])[0]
+            return self.send_json(200, {"edited": self.server.chats.cp.edit(path)})
+
+        if url.path.startswith("/__dev/undo-late/"):
+            self.server.undo_late = int(url.path.rsplit("/", 1)[1] or 0)
+            return self.send_json(200, {"undo_late": self.server.undo_late})
+
         if url.path.startswith("/__dev/mode/"):
             mode = url.path.rsplit("/", 1)[1]
             if mode not in MODES:
@@ -400,6 +423,12 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as err:
                 return self.send_json(400, {"error": "bad_query", "message": str(err)})
             return chat_sim.stream(self, chat, after, self.server.chats)
+        checkpoints = CHAT_CHECKPOINTS.fullmatch(url.path)
+        if checkpoints:
+            chat = self.server.chats.get(unquote(checkpoints.group(1))) if self.server.chats else None
+            if chat is None:
+                return self.send_json(404, {"error": "not_found", "message": "no such chat"})
+            return self.send_json(200, self.server.chats.cp.listing(chat.id))
         try:
             status, body = api_body(
                 url.path[len("/api/"):], parse_qs(url.query), mode, self.server.fixtures, self.server.chats is not None
@@ -423,15 +452,19 @@ def main():
     parser.add_argument("--token", help="fixed token instead of a random one")
     parser.add_argument("--chat", action="store_true", help="turn chat on, as junees dashboard --chat")
     parser.add_argument("--approval-seconds", type=int, default=chat_sim.APPROVAL_SECONDS)
+    parser.add_argument("--no-checkpoints", action="store_true", help="as checkpoints = false: no list, undo answers 409")
     args = parser.parse_args()
 
     server = DevServer(("127.0.0.1", args.port), Handler)
     server.token = args.token or secrets.token_urlsafe(32)
     server.mode = args.mode
     server.codes = {}
+    server.undo_late = 0
     server.fixtures = load_fixtures()
     if args.chat:
-        server.chats = chat_sim.Chats(server.fixtures["session_details"], args.approval_seconds)
+        server.chats = chat_sim.Chats(
+            server.fixtures["session_details"], args.approval_seconds, checkpoint_sim.Checkpoints(on=not args.no_checkpoints)
+        )
     base = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"{base}#token={server.token}", flush=True)
     print(f"{base}#code={server.new_code()}  (one-time, 60 s; GET /__dev/code for another)", flush=True)
