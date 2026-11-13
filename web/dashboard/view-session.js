@@ -2,6 +2,7 @@
 
 import { code, el, notice, pathCode, timeEl } from "./dom.js";
 import { formatDateTime, formatInt, parseTime } from "./format.js";
+import { chatHash } from "./routes.js";
 
 export const PAGE = 100;
 
@@ -71,14 +72,14 @@ export function isHiddenBlock(text) {
 const HIDDEN_NOTE = "비밀 값으로 보이는 내용이 있어 서버가 이 내용을 가렸습니다.";
 
 /** The body of a folded tool block: the text, or a note when it was hidden. */
-function toolBody(text) {
+export function toolBody(text) {
   return isHiddenBlock(text)
     ? el("p", { class: "tool-body tool-hidden" }, HIDDEN_NOTE)
     : el("pre", { class: "tool-body" }, text ?? "");
 }
 
 /** The hint on a folded block's line. */
-function peek(text) {
+export function peek(text) {
   return isHiddenBlock(text) ? "가린 내용" : firstLine(text);
 }
 
@@ -157,7 +158,7 @@ function blockView(block, messageIndex, n) {
   }
 }
 
-function messageView(message, now) {
+export function messageView(message, now) {
   const at = parseTime(message.at);
   const role = roleLabel(message);
   const tone = role === "도구 결과" ? "tool" : message.role === "user" ? "user" : message.role === "assistant" ? "assistant" : "other";
@@ -180,8 +181,11 @@ function messageView(message, now) {
 }
 
 /** The "back to the list" link shown next to the title. */
-export function renderControls(root) {
-  root.replaceChildren(el("a", { class: "button button-secondary", href: "#/sessions" }, "세션 목록으로"));
+export function renderControls(root, ctx) {
+  root.replaceChildren(
+    ctx?.chat === true && ctx.args?.id ? el("a", { class: "button", href: chatHash(ctx.args.id) }, "이 세션 이어서 대화") : null,
+    el("a", { class: "button button-secondary", href: "#/sessions" }, "세션 목록으로"),
+  );
 }
 
 export function render(root, data, ctx) {
