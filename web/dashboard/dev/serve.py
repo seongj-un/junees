@@ -16,7 +16,8 @@ timeout. GET /__dev/drop-streams ends every open event stream, to try the
 page's reconnection. Messages with 만들어 or 고쳐 write files and leave file
 checkpoints (stage 20); GET /__dev/edit?path=a.txt changes one from outside,
 as bash would, GET /__dev/undo-late/35 answers undos 35 s after doing
-them (past the page's 30 s), and --no-checkpoints answers as
+them (past the page's 30 s), GET /__dev/undo-slow/35 takes 35 s to do them
+(the page gives up first and must look again), and --no-checkpoints answers as
 checkpoints = false.
 
 Writes: POST /api/cron/<id>/pause|resume and /api/webhooks/<name>/pause|resume
@@ -372,6 +373,10 @@ class Handler(BaseHTTPRequestHandler):
             # A file changed from outside (a person or bash): no checkpoint.
             path = parse_qs(url.query).get("path", ["notes.md"])[0]
             return self.send_json(200, {"edited": self.server.chats.cp.edit(path)})
+
+        if url.path.startswith("/__dev/undo-slow/") and self.server.chats is not None:
+            self.server.chats.undo_slow = int(url.path.rsplit("/", 1)[1] or 0)
+            return self.send_json(200, {"undo_slow": self.server.chats.undo_slow})
 
         if url.path.startswith("/__dev/undo-late/"):
             self.server.undo_late = int(url.path.rsplit("/", 1)[1] or 0)
