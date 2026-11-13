@@ -545,14 +545,28 @@ mod tests {
         assert_eq!(session.transcript.claude_session.as_deref(), Some("c-7"));
     }
 
-    /// Whether a process is gone (a zombie counts as gone).
+    /// Whether a process is gone. A killed process shows as a zombie
+    /// (`Z`) until its parent reaps it, and as `X` (dead) while the reap
+    /// is under way, before its `/proc` entry goes: all three count as
+    /// gone. Taking `X` as running made a check after a `Z` fail.
     fn gone(pid: &str) -> bool {
         match std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
             Err(_) => true,
             Ok(stat) => stat
                 .rsplit_once(')')
-                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with(['Z', 'X', 'x'])),
         }
+    }
+
+    /// Waits up to five seconds for `pid` to be [`gone`]; whether it went.
+    async fn wait_gone(pid: &str) -> bool {
+        for _ in 0..100 {
+            if gone(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
     }
 
     async fn wait_for(path: &Path) -> String {
@@ -599,15 +613,11 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.downcast_ref::<Cancelled>().is_some(), "{err:#}");
         let pid = std::fs::read_to_string(&pid_file).unwrap();
-        for _ in 0..100 {
-            if gone(&pid) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        // One answer: a second look could see the process at another stage.
         assert!(
-            gone(&pid),
-            "the command Claude Code started is still running"
+            wait_gone(&pid).await,
+            "the command Claude Code started is still running: {:?}",
+            std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
         );
 
         cancel.reset();
