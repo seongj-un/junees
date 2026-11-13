@@ -397,6 +397,59 @@ pub(super) fn telegram(report: &mut Report, settings: &Settings) {
     }
 }
 
+/// Voice message transcription for the gateways: off, or where it goes
+/// and whether a key is set (never the key).
+pub(super) fn transcribe(report: &mut Report, settings: &Settings) {
+    use crate::transcribe as voice;
+    const AREA: &str = "transcription";
+    const NAME: &str = "voice messages";
+    match voice::Settings::read(|key| settings.get(key)) {
+        Ok(None) => report.skip(
+            AREA,
+            NAME,
+            "off (the gateways answer voice messages with a note; set transcribe_base_url \
+             to turn it on)",
+        ),
+        Ok(Some(set)) => {
+            let key = if set.has_key() {
+                format!("key set ({})", source(settings, voice::API_KEY_ENV))
+            } else {
+                "no key (a server on this machine)".to_string()
+            };
+            let language = set
+                .language
+                .as_deref()
+                .map_or(String::new(), |code| format!(", language {code}"));
+            report.ok(
+                AREA,
+                NAME,
+                format!(
+                    "{} ({}), model {}{language}, files up to {}, timeout {} s, {key}",
+                    set.endpoint(),
+                    source(settings, voice::BASE_URL_ENV),
+                    set.model,
+                    crate::images::human_bytes(set.max_bytes),
+                    set.timeout.as_secs()
+                ),
+            );
+        }
+        Err(err) => {
+            let away = if settings.key_away_from_address(voice::API_KEY_ENV) {
+                "; the key is set, but not where the address is (config.toml's \
+                 transcribe_api_key goes with transcribe_base_url, the variable with the variable)"
+            } else {
+                ""
+            };
+            report.fail(
+                AREA,
+                NAME,
+                format!("{err:#}{away}"),
+                "fix the transcribe_* settings (docs/gateways.md, 음성 메시지)",
+            );
+        }
+    }
+}
+
 /// The Slack gateway's tokens and allowed users. Offline: the tokens'
 /// shapes are checked; `--online` asks `auth.test` ([`super::online::slack`]).
 pub(super) fn slack(report: &mut Report, settings: &Settings) {

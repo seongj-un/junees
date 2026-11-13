@@ -40,6 +40,7 @@ src/
     landlock.rs        Landlock 시스템 호출(libc 직접), 접근 권리와 ABI별 처리, 보호 경로를 뺀 하위 항목별 규칙(grant_except), no_new_privs + restrict_self
     tests.rs           실제 커널 Landlock으로 쓰기/읽기/비밀/네트워크 제한과 가짜 ABI의 auto/require
   tools/             도구 트레이트, 레지스트리, bash/read_file/write_file/edit_file, bash 명령 정책과 주의 등급, 작업 폴더 판단(policy.rs), 도구와 정책이 설정 파일(config.toml, mcp.json), 시크릿 폴더(secrets)와 쓰기 금지 데이터 폴더(memory, projects, skills, cron, plugins, webhooks, flows)를 알아보는 판단(settings_file.rs), 명령 안의 Junees 상태 변경 하위 명령 표와 판단(self_command.rs), 명령 안의 `gh` GitHub 쓰기 표와 판단(gh_command.rs), 웹훅 실행의 지침 파일 이름 쓰기 거절(instruction_files.rs), 도구 호출 전 훅 PreTool, 테스트 전용: 테스트 bash의 sandbox(bash.rs의 `testing::confine`, 환경 변수 수준이라 절대 경로와 프록시를 무시하는 프로그램은 막지 못함)와 테스트 코드가 홈 삭제나 origin push를 실제 셸로 돌리지 않는지, sandbox 밖(바이너리 테스트, 모델 응답으로 부르는 bash)에서는 원격과 상관없는 모든 `git push`, `.`/`..`/`/`/`*`의 재귀 삭제, `git reset --hard`, `git clean -f`도 돌리지 않는지, `Command::new("git")` 인자에 `push`가 있으면 임시 폴더의 bare 저장소로만 미는 헬퍼(SAFE_PUSH)를 거치는지, sandbox 밖 실제 bash 테스트가 허용 목록(파일과 모듈 경로까지 맞춘 테스트, 무해한 명령 또는 명령 없음)만 쓰는지 보는 소스 스캔(test_scan.rs)
+  transcribe/        음성 메시지 받아쓰기: 설정(주소 검사, 주소와 한 쌍인 키, 모델, 언어, 크기 한도), OpenAI 호환 /audio/transcriptions 클라이언트(직접 만든 multipart, 리다이렉트 안 따름, 429/5xx 재시도, 401/403 안내), 모델에게 갈 글. tests.rs: 루프백 가짜 API
   mcp/               MCP 클라이언트 (stdio, Streamable HTTP)와 서버 (junees mcp serve)
     serve/             Junees를 MCP 서버로: mod.rs는 stdio JSON-RPC 줄 읽기(4 MiB 상한)와 한 곳에서만 쓰는 stdout, initialize 버전 협상, ping/tools/list/tools/call, 취소, 호출 하나씩 순서대로. tools.rs는 junees_run(Trigger::Mcp 무인 실행, 세션 새로/이어 가기, 진행 알림, 사용량과 비용, 비밀 값 가림), junees_sessions, junees_session(--dir의 세션만, 대시보드 session_view 재사용)
     config.rs          $JUNEES_HOME/mcp.json 읽기와 검사 (0600, 자기 소유, 값을 되풀이하지 않는 오류, command와 url 중 하나, 숨길 헤더 변수 목록)
@@ -114,8 +115,8 @@ src/
   cli.rs             인자 파싱(위치 인자 질문, task/status/setup/gateway/cron/webhook/doctor 하위 명령, 예전 플래그), 도움말, 출력 보조 함수
   gateway/           디스코드 게이트웨이 (junees gateway)와 게이트웨이 공통 엔진
     mod.rs             Gateway::run: Get Gateway Bot, 연결 태스크, 채널 LocalSet, 종료 처리, 로그(Log), 게이트웨이 잠금(lock_file)
-    platform.rs        Platform 트레이트: 엔진이 플랫폼에 바라는 것(보내기, 타이핑, 이미지 받기, 명령/도구 줄/승인 질문 표기)
-    channels.rs        공통 엔진: 채널별 작업자(대기열, 동시 실행 상한, 타이핑, 도구 줄 묶기, 취소), 명령 실행(new/stop/status/memory/...), 첨부 받기, 세션 열기
+    platform.rs        Platform 트레이트: 엔진이 플랫폼에 바라는 것(보내기, 타이핑, 이미지 받기, 오디오 받기(fetch_audio), 첨부 종류(Kind: Image/Audio), 명령/도구 줄/승인 질문 표기)
+    channels.rs        공통 엔진: 채널별 작업자(대기열, 동시 실행 상한, 타이핑, 도구 줄 묶기, 취소), 명령 실행(new/stop/status/memory/...), 첨부 받기, 음성 받아쓰기(꺼져 있거나 실패하면 모델을 부르지 않음), 세션 열기
     config.rs          discord_* 설정 (토큰 Token은 Debug에서 숨김, 허용 사용자 필수, https/wss 확인)
     shard.rs           Gateway v10 WebSocket: Hello/Identify/Ready, 하트비트(지터, ACK 누락), Resume, Reconnect, Invalid Session, 닫힘 코드, 지수 대기
     rest.rs            REST: Get Gateway Bot, Create Message(allowed_mentions 없음), 타이핑, 경로별 레이트 리밋과 429 재시도
@@ -129,7 +130,7 @@ src/
     config.rs          telegram_* 설정 (토큰 모양 검사와 Debug 숨김, 숫자 사용자 id 필수, API 주소는 api.telegram.org 또는 루프백)
     api.rs             Bot API: getMe/getUpdates/sendMessage/sendChatAction/getFile/파일 받기, URL과 토큰 없는 오류, 429 retry_after, 중복 전송 없는 재시도, 응답과 파일 크기 상한
     bot.rs             메시지 고르기(허용 사용자, 개인/그룹 멘션/답장/승인 답, 포럼 토픽), /명령 읽기(@봇, 멘션 뒤 명령, 다른 봇, /start, 캡션과 전달은 명령 아님), 전달 표시, 앨범 묶기와 나뉘어 온 그룹 앨범
-    platform.rs        Platform 구현(Telegram): 평문 4096자, 타이핑, 사진/이미지 문서 고르기와 받기, 평문 승인 질문, 도움말
+    platform.rs        Platform 구현(Telegram): 평문 4096자, 타이핑, 사진/이미지 문서와 voice/audio/오디오 문서 고르기와 받기, 평문 승인 질문, 도움말
   slack/             슬랙 게이트웨이 (junees gateway slack)
     mod.rs             SlackGateway::run: auth.test, Socket Mode 연결과 라우터를 LocalSet에서, 종료 처리
     config.rs          slack_* 설정 (xoxb-/xapp- 토큰 모양 검사와 Debug 숨김, member id 필수, API/파일 주소는 슬랙 또는 루프백)
@@ -137,7 +138,7 @@ src/
     socket.rs          Socket Mode: 연결 주소 받기와 wss://*.slack.com 확인, hello, 봉투마다 즉시 ack(events_api와 interactive를 라우터로), disconnect/끊김/무응답이면 다시 연결, ping, 지수 대기
     bot.rs             이벤트 고르기(허용 사용자, DM/채널 멘션/봇 스레드, subtype과 봇 메시지 거르기, event_id와 메시지 중복 제거), ! 명령, 승인 버튼 누름(block_actions: 허용 사용자, 대화 키와 메시지 ts, 받지 않은 누름은 chat.postEphemeral 안내)
     format.rs          Markdown -> mrkdwn 변환과 이스케이프(멘션 막기), 들어온 슬랙 표기를 평문으로
-    platform.rs        Platform 구현(Slack): 3800자 나누기, 대화 키(DM 또는 채널:스레드), 이미지 파일 고르기와 받기, 승인 질문(Block Kit section + actions 버튼, section 3000자에 맞게 나누기, 끝나면 chat.update로 버튼 없애고 결과), 도움말
+    platform.rs        Platform 구현(Slack): 3800자 나누기, 대화 키(DM 또는 채널:스레드), 이미지와 오디오 파일 고르기와 받기, 승인 질문(Block Kit section + actions 버튼, section 3000자에 맞게 나누기, 끝나면 chat.update로 버튼 없애고 결과), 도움말
   cron/              예약 작업 (junees cron)
     tz.rs              시스템 시간대 파일(TZif)과 POSIX TZ 규칙 읽기, 현지 시각 <-> UTC(건너뛴/두 번 오는 시각), 날짜 계산
     schedule.rs        일정 문법(every, in, daily, weekdays, cron 식, ISO 시각)과 다음 실행 시각

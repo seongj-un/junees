@@ -117,6 +117,9 @@ pub struct TelegramGateway {
     /// How often typing is shown during a turn (it lasts 5 seconds).
     pub typing_every: Duration,
     pub log: Log,
+    /// Turns voice messages into text; `None` (the default) leaves
+    /// transcription off.
+    pub transcriber: Option<Arc<crate::transcribe::Transcriber>>,
 }
 
 impl TelegramGateway {
@@ -137,6 +140,7 @@ impl TelegramGateway {
             timing: Timing::default(),
             typing_every: Duration::from_secs(4),
             log: stderr_log(),
+            transcriber: None,
         }
     }
 
@@ -182,6 +186,7 @@ impl TelegramGateway {
             typing_every: self.typing_every,
             log: Arc::clone(&self.log),
             closing: AtomicBool::new(false),
+            transcriber: self.transcriber.clone(),
         });
         let mut poller = Poller::new(Arc::clone(&api), self.timing, Arc::clone(&self.log));
         let log = Arc::clone(&self.log);

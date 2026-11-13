@@ -199,6 +199,14 @@ impl Platform for Discord {
         attached::fetch_all(&self.fetcher, attachments).await
     }
 
+    async fn fetch_audio(
+        &self,
+        attachment: &Attachment,
+        limit: u64,
+    ) -> Result<Vec<u8>, Result<u64, String>> {
+        self.fetcher.bytes(attachment, limit).await
+    }
+
     fn command(&self, word: &str) -> String {
         format!("`!{word}`")
     }
