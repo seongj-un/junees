@@ -3,14 +3,18 @@
 import { ApiError, describeError, forgetToken, getJson, getToken, takeTokenFromAddress } from "./api.js";
 import { el, notice, skeleton } from "./dom.js";
 import { formatClock } from "./format.js";
+import { parseHash } from "./routes.js";
 import * as automation from "./view-automation.js";
 import * as doctor from "./view-doctor.js";
+import * as session from "./view-session.js";
 import * as sessions from "./view-sessions.js";
 import * as status from "./view-status.js";
 import * as usage from "./view-usage.js";
 
 const REFRESH_MS = 30000;
 
+// `id` names the screen (and its nav link unless `nav` says otherwise);
+// `url` gets the screen's params and the arguments from its address.
 const ROUTES = [
   { id: "status", title: "상태", url: () => "/api/status", render: status.render },
   {
@@ -38,6 +42,17 @@ const ROUTES = [
     // Every call runs the checks again on the server; only on request.
     autoRefresh: false,
   },
+  {
+    id: "session",
+    nav: "sessions",
+    title: "세션",
+    url: (_p, args) => `/api/sessions/${encodeURIComponent(args.id)}?offset=0&limit=${session.PAGE}`,
+    render: session.render,
+    renderControls: session.renderControls,
+    describeError: session.describeLoadError,
+    // Refreshing would only reload the first page; the button does that.
+    autoRefresh: false,
+  },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -54,6 +69,8 @@ const ui = {
 
 const state = {
   route: null,
+  /** Arguments from the address, such as a session id. */
+  args: {},
   params: {},
   savedParams: {},
   /** url -> { data, at } */
@@ -75,7 +92,32 @@ function announce(text) {
 }
 
 function ctx() {
-  return { now: new Date(), params: state.params, setParams };
+  return {
+    now: new Date(),
+    params: state.params,
+    setParams,
+    announce,
+    lock,
+    reload: () => load({ manual: true }),
+    setTitle: (text) => {
+      ui.title.textContent = text;
+      document.title = `${text} - Junees 대시보드`;
+    },
+    describeError,
+    /** A GET from inside a screen; a refused token locks the page. */
+    fetchJson: (url) => getJson(url),
+    isUnauthorized: (err) => {
+      if (err instanceof ApiError && err.kind === "unauthorized") {
+        lock();
+        return true;
+      }
+      return false;
+    },
+  };
+}
+
+function currentUrl() {
+  return state.route.url(state.params, state.args);
 }
 
 function setParams(next) {
@@ -112,7 +154,7 @@ function retryButton(label = "다시 시도") {
 function paint() {
   if (state.locked) return;
   const route = state.route;
-  const entry = state.cache.get(route.url(state.params));
+  const entry = state.cache.get(currentUrl());
   ui.banner.replaceChildren();
 
   if (entry) {
@@ -151,7 +193,7 @@ function paint() {
     ui.view.replaceChildren(
       notice({
         title: "불러오지 못했습니다",
-        body: describeError(state.error),
+        body: route.describeError?.(state.error) ?? describeError(state.error),
         tone: "fail",
         action: retryButton(),
       }),
@@ -164,7 +206,7 @@ function paint() {
 async function load({ manual = false } = {}) {
   if (state.locked || !state.route) return;
   const route = state.route;
-  const url = route.url(state.params);
+  const url = currentUrl();
   state.controller?.abort();
   const controller = new AbortController();
   state.controller = controller;
@@ -217,8 +259,8 @@ function lock() {
 
 /** A new token arrived in the address: start over with it, on the same screen. */
 function acceptToken() {
-  const keep = state.route?.id;
-  if (keep) window.history.replaceState(null, "", `#${keep}`);
+  const keep = state.hash;
+  if (keep) window.history.replaceState(null, "", keep);
   state.locked = false;
   state.route = null;
   state.cache.clear();
@@ -231,16 +273,25 @@ function acceptToken() {
 
 function route(fromUser) {
   if (state.locked) return;
-  const id = window.location.hash.replace(/^#/, "");
-  const next = ROUTES.find((r) => r.id === id) ?? ROUTES[0];
-  if (id && next.id !== id) window.history.replaceState(null, "", `#${next.id}`);
-  if (next === state.route) return;
+  const where = parseHash(window.location.hash);
+  if (window.location.hash !== where.canonical) {
+    window.history.replaceState(null, "", where.canonical);
+  }
+  const next = ROUTES.find((r) => r.id === where.name) ?? ROUTES[0];
+  const sameArgs = JSON.stringify(where.args) === JSON.stringify(state.args);
+  if (state.route === next && sameArgs) return;
 
+  const previous = state.route;
+  const openedSession = previous?.id === "session" ? state.args.id : null;
   state.route = next;
+  state.args = where.args;
+  state.hash = where.canonical;
   state.params = { ...next.params, ...state.savedParams[next.id] };
   state.error = null;
+  const navId = next.nav ?? next.id;
   for (const link of ui.nav) {
-    if (link.dataset.route === next.id) link.setAttribute("aria-current", "page");
+    // On a session's own screen the 세션 link is the section, not the page.
+    if (link.dataset.route === navId) link.setAttribute("aria-current", next.nav ? "true" : "page");
     else link.removeAttribute("aria-current");
   }
   ui.title.textContent = next.title;
@@ -249,7 +300,11 @@ function route(fromUser) {
   else ui.controls.replaceChildren();
   paint();
   load();
-  if (fromUser) ui.title.focus();
+  if (!fromUser) return;
+  // Back from a session: return to its row, not the top of the page.
+  const row = openedSession && next.id === "sessions" ? ui.view.querySelector(`[data-session-link="${CSS.escape(openedSession)}"]`) : null;
+  if (row) row.focus();
+  else ui.title.focus();
 }
 
 function start() {
