@@ -5,14 +5,17 @@
 //!
 //! 1. the head reads, within [`MAX_HEAD`] bytes and [`READ_TIME`] (400,
 //!    431, or the connection is closed);
-//! 2. `Host` names this server: `127.0.0.1`, `localhost` or `[::1]` with
-//!    its port (421), so a page of another site whose name was pointed at
-//!    127.0.0.1 (DNS rebinding) is refused;
+//! 2. `Host` names this server: `127.0.0.1`, `localhost`, `[::1]` or the
+//!    address it listens on, with its port (421), so a page of another
+//!    site whose name was pointed at 127.0.0.1 (DNS rebinding) is refused;
 //! 3. `Origin`, when sent, is this server (403): no other site's script
 //!    reads the answers, and no CORS headers are sent;
-//! 4. the method is `GET` (405), with a body of at most [`MAX_BODY`] bytes
-//!    (413), which is never read;
-//! 5. under `/api/`, `Authorization: Bearer <token>` holds this run's
+//! 4. the method is `GET`, or `POST` on a write path
+//!    ([`super::actions`]) only (405); a body of at most [`MAX_BODY`]
+//!    bytes (413), read for a `POST` only;
+//! 5. a write carries an `Origin` (403), a JSON `Content-Type` if any
+//!    (415), and no body but `{}` (400);
+//! 6. under `/api/`, `Authorization: Bearer <token>` holds this run's
 //!    token, compared in constant time (401).
 //!
 //! Every answer carries [`SECURITY_HEADERS`].
@@ -22,11 +25,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
-use super::{api, assets};
+use super::{actions, api, assets};
 use crate::webhook::http::{self, Head};
 
 /// The request line and the headers together.
@@ -70,6 +73,8 @@ pub struct Context {
     pub(crate) sessions: std::sync::Mutex<api::SessionCache>,
     /// One `/api/doctor` at a time.
     pub(crate) doctor: Arc<Semaphore>,
+    /// The code an opened browser trades for `token`.
+    pub(crate) codes: std::sync::Mutex<super::code::Codes>,
 }
 
 impl Context {
@@ -82,6 +87,7 @@ impl Context {
             started: Instant::now(),
             sessions: Default::default(),
             doctor: Arc::new(Semaphore::new(1)),
+            codes: Default::default(),
         }
     }
 }
@@ -176,9 +182,51 @@ async fn connection(mut stream: TcpStream, context: &Arc<Context>) {
             };
             Answer::error(err.status, code, err.message)
         }
-        Ok(Ok(head)) => answer(&head, context).await,
+        Ok(Ok(head)) => match read_body(&mut stream, &head, buf).await {
+            Ok(body) => answer(&head, &body, context).await,
+            Err(answer) => answer,
+        },
     };
     send(&mut stream, &answer).await;
+}
+
+/// The body of a `POST`, which `Content-Length` announces and
+/// [`MAX_BODY`] limits; `rest` is what was read past the head. Other
+/// methods' bodies are not read. A body that is too long, chunked, or
+/// does not arrive in [`READ_TIME`] is answered at once.
+async fn read_body(
+    stream: &mut TcpStream,
+    head: &Head,
+    mut rest: Vec<u8>,
+) -> Result<Vec<u8>, Answer> {
+    if head.method != "POST" {
+        return Ok(Vec::new());
+    }
+    // Refused in order by `answer`, after the Host check.
+    if body_refused(head).is_some() {
+        return Ok(Vec::new());
+    }
+    let length = head
+        .header("content-length")
+        .and_then(|length| length.parse::<usize>().ok())
+        .unwrap_or(0);
+    if rest.len() > length {
+        rest.truncate(length);
+    }
+    let missing = length - rest.len();
+    if missing > 0 {
+        let mut more = vec![0u8; missing];
+        let read = tokio::time::timeout(READ_TIME, stream.read_exact(&mut more)).await;
+        if !matches!(read, Ok(Ok(_))) {
+            return Err(Answer::error(
+                400,
+                "bad_request",
+                "the request body ended early",
+            ));
+        }
+        rest.extend_from_slice(&more);
+    }
+    Ok(rest)
 }
 
 async fn send<W: AsyncWrite + Unpin>(io: &mut W, answer: &Answer) {
@@ -186,8 +234,8 @@ async fn send<W: AsyncWrite + Unpin>(io: &mut W, answer: &Answer) {
     let _ = io.shutdown().await;
 }
 
-/// The answer to a request whose head was read.
-pub async fn answer(head: &Head, context: &Arc<Context>) -> Answer {
+/// The answer to a request whose head (and, for a `POST`, body) was read.
+pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer {
     let Some(host) = head
         .header("host")
         .filter(|host| own_host(host, context.ip, context.port))
@@ -207,12 +255,27 @@ pub async fn answer(head: &Head, context: &Arc<Context>) -> Answer {
             "requests from other sites are refused",
         );
     }
-    if head.method != "GET" {
-        return Answer::error(405, "method_not_allowed", "only GET is served")
-            .with_header("allow", "GET");
+    let trade = head.path == TOKEN_PATH;
+    let write = trade || actions::is_write_path(&head.path);
+    match (head.method.as_str(), write) {
+        ("GET", false) | ("POST", true) => {}
+        (_, false) => {
+            return Answer::error(405, "method_not_allowed", "only GET is served here")
+                .with_header("allow", "GET");
+        }
+        (_, true) => {
+            return Answer::error(405, "method_not_allowed", "only POST is served here")
+                .with_header("allow", "POST");
+        }
     }
     if let Some(answer) = body_refused(head) {
         return answer;
+    }
+    if write && let Some(answer) = write_refused(head, body, trade) {
+        return answer;
+    }
+    if trade {
+        return trade_code(body, context);
     }
     if head.path == "/api" || head.path.starts_with("/api/") {
         if !authorized(head.header("authorization"), &context.token) {
@@ -222,6 +285,9 @@ pub async fn answer(head: &Head, context: &Arc<Context>) -> Answer {
                 "open the address `junees dashboard` printed",
             )
             .with_header("www-authenticate", "Bearer");
+        }
+        if write {
+            return actions::write(&head.path, context).await;
         }
         return api::answer(&head.path, &head.query, context).await;
     }
@@ -233,6 +299,80 @@ pub async fn answer(head: &Head, context: &Arc<Context>) -> Answer {
             headers: Vec::new(),
         },
         None => Answer::error(404, "not_found", "there is nothing at this path"),
+    }
+}
+
+/// Why a write is refused before its token is checked: it must carry an
+/// `Origin` (the same origin was checked already), so only this page's
+/// script can send it; a `Content-Type`, when given, must be JSON; the
+/// body must be empty or `{}`.
+fn write_refused(head: &Head, body: &[u8], trade: bool) -> Option<Answer> {
+    if head.header("origin").is_none() {
+        return Some(Answer::error(
+            403,
+            "forbidden_origin",
+            "a write needs an Origin header from this page",
+        ));
+    }
+    if let Some(kind) = head.header("content-type") {
+        let essence = kind.split(';').next().unwrap_or_default().trim();
+        if !essence.eq_ignore_ascii_case("application/json") {
+            return Some(Answer::error(
+                415,
+                "unsupported_media_type",
+                "a write's body is JSON (application/json)",
+            ));
+        }
+    }
+    let fits = match std::str::from_utf8(body).map(str::trim) {
+        Ok(text) if trade => serde_json::from_str::<CodeBody>(text).is_ok(),
+        Ok("") => true,
+        Ok(text) => serde_json::from_str::<serde_json::Map<String, Value>>(text)
+            .is_ok_and(|object| object.is_empty()),
+        Err(_) => false,
+    };
+    if !fits {
+        let message = if trade {
+            "the body is {\"code\": \"<code>\"}"
+        } else {
+            "a write takes no body, or `{}`"
+        };
+        return Some(Answer::error(400, "bad_body", message));
+    }
+    None
+}
+
+/// Where an opened browser trades its one-time code for the token.
+pub const TOKEN_PATH: &str = "/api/token";
+
+/// The body of [`TOKEN_PATH`].
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeBody {
+    code: String,
+}
+
+/// The answer to a `POST` of [`TOKEN_PATH`] that passed the write checks:
+/// the token for the current one-time code ([`super::code`]), or 401
+/// `bad_code`. It needs no bearer token: it is how the page gets one.
+fn trade_code(body: &[u8], context: &Context) -> Answer {
+    let given = std::str::from_utf8(body)
+        .ok()
+        .and_then(|text| serde_json::from_str::<CodeBody>(text.trim()).ok())
+        .map(|body| body.code)
+        .unwrap_or_default();
+    let traded = context
+        .codes
+        .lock()
+        .is_ok_and(|mut codes| codes.redeem(&given, Instant::now()));
+    if traded {
+        Answer::json(200, &json!({ "token": context.token }))
+    } else {
+        Answer::error(
+            401,
+            "bad_code",
+            "the code is wrong, used or expired; run `junees dashboard` again",
+        )
     }
 }
 
@@ -305,7 +445,7 @@ pub fn authorized(header: Option<&str>, token: &str) -> bool {
 
 /// `a == b`, taking as long whatever byte differs. The length is not
 /// hidden: every token has 43 characters.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

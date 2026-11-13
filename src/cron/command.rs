@@ -93,10 +93,7 @@ pub async fn main(command: CronCommand, settings: Settings) -> Result<ExitCode> 
         CronCommand::Pause(key) => {
             let mut locked = store.lock()?;
             let index = locked.find(&key)?;
-            let job = &mut locked.jobs[index];
-            job.paused = true;
-            // The user's pause now: `allow-home` does not undo it.
-            job.paused_for_home = false;
+            pause(&mut locked.jobs[index]);
             locked.save()?;
             println!("paused job {}", locked.jobs[index].id);
         }
@@ -332,10 +329,17 @@ async fn run_now(
     })
 }
 
+/// Pauses `job` as `junees cron pause` (and the dashboard) do: the pause
+/// is the user's now, so `allow-home` does not undo it.
+pub fn pause(job: &mut Job) {
+    job.paused = true;
+    job.paused_for_home = false;
+}
+
 /// Resumes `job`: not paused, and its next run the next time of its
 /// schedule from now. That time, in the job's zone. Fails, changing
 /// nothing, for a one-time job whose time has passed.
-fn resume(job: &mut Job, tz: &TimeZone) -> Result<String> {
+pub fn resume(job: &mut Job, tz: &TimeZone) -> Result<String> {
     let tz = job.zone(tz);
     let next = job.schedule.next_after(unix_now(), &tz).with_context(|| {
         format!(

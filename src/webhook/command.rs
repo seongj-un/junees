@@ -108,10 +108,7 @@ pub async fn main(command: WebhookCommand, settings: Settings) -> Result<ExitCod
             let pause = matches!(command, WebhookCommand::Pause(_));
             let mut locked = store.lock()?;
             let index = locked.find(name)?;
-            let route = &mut locked.routes[index];
-            route.paused = pause;
-            // A pause by hand is the user's; a resume ends either kind.
-            route.paused_for_home = false;
+            set_paused(&mut locked.routes[index], pause);
             locked.save()?;
             let word = if pause { "paused" } else { "resumed" };
             println!("{word} route {}", locked.routes[index].name);
@@ -546,6 +543,14 @@ fn disallow_home(store: &Store, lookup: &Lookup, name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Pauses or resumes `route` as `junees webhook pause|resume` (and the
+/// dashboard) do. A pause by hand is the user's; a resume ends either
+/// kind.
+pub fn set_paused(route: &mut super::store::Route, pause: bool) {
+    route.paused = pause;
+    route.paused_for_home = false;
 }
 
 /// Pauses route `name` after [`check_home_folder`] refused its run, so

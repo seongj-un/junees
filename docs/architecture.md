@@ -187,11 +187,15 @@ src/
     fetch.rs           릴리스 주소(GitHub, 테스트용 루프백 JUNEES_DOWNLOAD_BASE), latest 리다이렉트 읽기, GitHub 파일 호스트로만 가는 리다이렉트, 크기 상한 내려받기
     install.rs         타깃 이름, SHA256SUMS 읽기와 확인, 시스템 tar로 바이너리 하나 꺼내기(일반 파일만), 같은 폴더 임시 파일 + rename 교체, cargo 설치와 돌고 있는 게이트웨이/cron/웹훅 안내
     tests.rs           루프백 가짜 릴리스 서버로 최신 확인, 교체(링크 따라가기, 권한 유지, 임시 파일 없음), 체크섬 불일치, 다른 호스트 리다이렉트 거절, 크기 상한, 쓸 수 없는 폴더, install.sh(테스트 샌드박스의 bash로: 최신/버전 지정 설치, 체크섬 불일치, 모르는 CPU, 루프백 아닌 주소)
-  dashboard/         읽기 전용 웹 대시보드 (junees dashboard, docs/dashboard.md)
-    mod.rs             인자(--listen 루프백만, --no-open), 실행마다 만드는 토큰, # 뒤에 토큰을 단 주소, 브라우저 열기
-    server.rs          연결마다 요청 하나: Host(421), Origin(403), GET만(405), 머리 8KB와 본문 1KB, 상수 시간 Bearer 비교(401), 보안 헤더, 시간과 동시 연결 제한
+  dashboard/         로컬 웹 대시보드: 보기와, 예약 작업과 웹훅의 멈춤/재개 (junees dashboard, docs/dashboard.md)
+    mod.rs             인자(--listen 루프백만, --no-open), 실행마다 만드는 토큰, 브라우저에는 #code= 일회용 코드 주소, 브라우저를 띄우지 못했거나 --no-open이면 #token= 주소 출력
+    code.rs            일회용 코드(60초, 한 번만, 틀린 코드 5번이면 무효, 상수 시간 비교), POST /api/token이 토큰과 바꿈
+    server.rs          연결마다 요청 하나: Host(421), Origin(403), GET과 쓰기 경로의 POST만(405), 머리 8KB와 본문 1KB(POST만 읽음), 쓰기의 Origin 필수와 JSON, 상수 시간 Bearer 비교(401), 보안 헤더, 시간과 동시 연결 제한
     api.rs             /api/status, sessions, usage, cron, webhooks, doctor의 JSON(계약), 쿼리 검사, 미리보기의 비밀 값 가리기, doctor는 별도 런타임
-    assets.rs          web/dashboard 파일(include_bytes!)과 Content-Type
+    session_view.rs    /api/sessions/<id>: 기록된 대화를 페이지로(id 형식 검사, 링크 거절, 가린 뒤 자르기, 이미지와 thinking은 종류만)
+    actions.rs         POST 멈춤과 재개(CLI와 같은 함수와 잠금, 정확한 id, 홈 폴더 때문에 멈춘 항목은 409, dashboard.log)
+    assets.rs          build.rs가 만든 web/dashboard 파일 목록(include_bytes!), import와 링크가 모두 서빙되는지 검사
+    page_files.rs      서빙할 파일 판정(확장자별 Content-Type, 숨김 파일과 편집기 백업은 건너뜀, 모르는 확장자는 빌드 중단과 고치는 법), build.rs와 함께 씀
   doctor/            설치와 설정 점검 (junees doctor, /doctor)
     mod.rs             인자, 점검 결과(ok/warn/fail/skip, 고치는 방법), 텍스트와 JSON 출력, 비밀 값 지우기, 점검 순서
     files.rs           상태 폴더와 비공개 파일 권한, secrets/, 세션 폴더 크기
@@ -237,7 +241,7 @@ tests/
   browser.rs           실제 바이너리 -p와 가짜 API, 실제 Chromium(없으면 건너뜀)으로 루프백 페이지 열기(페이지 글 표시), evaluate 거절, 스크린샷 블록, 긴 JUNEES_HOME과 TMPDIR(프로필은 $JUNEES_HOME/browser, Chrome의 임시 폴더는 /tmp로), 끝난 뒤 브라우저 프로세스와 프로필, 임시 폴더 없음 검증
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
   doctor.rs            실제 바이너리로 junees doctor 출력과 종료 코드(권한 실패면 1), --json 형식, 깨진 설정 파일도 점검 결과로, --help와 잘못된 인자, 대화의 /doctor(대화 중에 깨진 설정 파일을 다시 읽음), 비밀 값이 출력되지 않음 검증
-  dashboard.rs         실제 바이너리 junees dashboard --no-open --listen 127.0.0.1:0에 원시 HTTP로: 401, 421, 403, 405, 413, 431, 400, 404, 보안 헤더, 정적 파일 Content-Type, API마다 계약 필드, 키와 시크릿과 토큰과 대화에 붙인 키가 어떤 응답에도 없음, 루프백 아닌 주소 거절 검증
+  dashboard.rs         실제 바이너리 junees dashboard --no-open --listen 127.0.0.1:0에 원시 HTTP로: 401, 421, 403, 405, 413, 431, 400, 404, 보안 헤더, 정적 파일 Content-Type, API마다 계약 필드, 키와 시크릿과 토큰과 대화에 붙인 키가 어떤 응답에도 없음, 루프백 아닌 주소 거절, 세션 상세와 멈춤/재개와 쓰기 로그, 가짜 xdg-open으로 일회용 코드 교환, 여는 프로그램이 없으면 토큰 주소 출력 검증
   update.rs            실제 바이너리로 junees update --check(가짜 릴리스 서버), --help와 잘못된 인자, 루프백 아닌 JUNEES_DOWNLOAD_BASE 거절, 대화의 /update(바이너리는 바꾸지 않는다)
   usage.rs             실제 바이너리와 가짜 API로 대화의 /usage(호출, /model 전환 뒤 다른 가격, 합계), 기록 줄의 모델, junees usage(모델별, 날짜별, prices 덮어쓰기, 폴더 범위와 --all, 도움말과 오류) 검증
   session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
