@@ -1998,3 +1998,25 @@ a.button {
     width: 100%;
   }
 }
+
+.cp-state {
+  flex: none;
+  align-self: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.cp-entry .cp-state {
+  margin-top: 8px;
+}
+
+/* Scrolled into view above the sticky message box, not under it. */
+.cp-result {
+  scroll-margin-bottom: 240px;
+}
+
+@media (max-width: 720px) {
+  .cp-result {
+    scroll-margin-bottom: 16px;
+  }
+}

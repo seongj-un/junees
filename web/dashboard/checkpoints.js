@@ -196,3 +196,17 @@ export function splitUndoNotes(text) {
   while (lines.length && lines[0] === "") lines.shift();
   return { notes, rest: lines.join("\n") };
 }
+
+/**
+ * Which checkpoints an undo has put back and not been undone itself:
+ * `Map(checkpoint -> the undo's checkpoint)`. Newest first, so undoing an
+ * undo brings its turns back.
+ */
+export function undoneBy(list) {
+  const by = new Map();
+  for (const item of [...list].sort((a, b) => b.turn - a.turn)) {
+    if (by.has(item.turn)) continue;
+    for (const turn of item.undid) if (turn < item.turn && !by.has(turn)) by.set(turn, item.turn);
+  }
+  return by;
+}

@@ -22,7 +22,7 @@ import {
 } from "./chat-stream.js";
 import { code, el, notice } from "./dom.js";
 import { formatInt, formatUsd } from "./format.js";
-import { linkHistory, parseCheckpoints } from "./checkpoints.js";
+import { linkHistory, parseCheckpoints, undoneBy, undoPlan } from "./checkpoints.js";
 import { chatHash, sessionHash } from "./routes.js";
 import { messageView, peek, toolBody } from "./view-session.js";
 import { changePanel, confirmUndo, outcomeView, turnFooter } from "./view-undo.js";
@@ -134,6 +134,13 @@ class ChatView {
     /** The session's working folder, to show paths under it shortly. */
     this.cwd = null;
     this.historyShown = [];
+    /**
+     * Undos done from this tab: `Map(the undo's checkpoint -> checkpoints it
+     * undid)`, since the list does not say. `pendingUndo` waits for the
+     * undo's checkpoint to show up in the list.
+     */
+    this.undidHere = new Map();
+    this.pendingUndo = null;
   }
 
   // ---- lifecycle ----
@@ -917,6 +924,16 @@ class ChatView {
       return;
     }
     if (!this.alive || load !== this.cpLoads) return;
+    const pending = this.pendingUndo;
+    if (pending) {
+      const made = list.find((item) => item.turn > pending.newest && !pending.turns.includes(item.turn));
+      if (made) {
+        this.undidHere.set(made.turn, pending.turns);
+        this.cpSlots.set(made.turn, pending.slot);
+      }
+      this.pendingUndo = null;
+    }
+    for (const item of list) if (!item.undid.length && this.undidHere.has(item.turn)) item.undid = this.undidHere.get(item.turn);
     this.checkpoints = list;
     if (this.cwd === null && list.length) {
       // A new chat: its working folder comes with the session.
@@ -934,7 +951,7 @@ class ChatView {
   /** Draws the change list and the end of every turn that left a checkpoint. */
   renderCheckpoints() {
     const list = this.checkpoints;
-    const onUndo = this.cpOff ? null : (turn, button) => this.undo(turn, button);
+    const actions = this.cpOff ? null : { onUndo: (turn, button) => this.undo(turn, button), list, by: undoneBy(list) };
     // Keep what the person opened across the redraw.
     const open = new Set([...this.root.querySelectorAll(".cp-files[open]")].map((d) => d.id));
     const panelOpen = Boolean(this.cpPanel.querySelector("details[open]"));
@@ -958,11 +975,11 @@ class ChatView {
     }
     for (const [turn, slot] of slots) {
       const item = list.find((cp) => cp.turn === turn);
-      if (item) slot.append(turnFooter(item, this.cwd, onUndo));
+      if (item) slot.append(turnFooter(item, this.cwd, actions));
     }
     for (const id of open) document.getElementById(id)?.setAttribute("open", "");
 
-    this.cpPanel.replaceChildren(...(list.length ? [changePanel(list, this.cwd, onUndo, panelOpen)] : []));
+    this.cpPanel.replaceChildren(...(list.length ? [changePanel(list, this.cwd, actions, panelOpen)] : []));
     this.updateUndoButtons();
     if (focused) this.root.querySelector(`.cp-slot [data-undo="${focused}"]`)?.focus();
   }
@@ -978,6 +995,8 @@ class ChatView {
     this.undoing = true;
     this.updateUndoButtons();
     this.sendButton.disabled = true;
+    const newest = Math.max(0, ...this.checkpoints.map((item) => item.turn));
+    const turns = undoPlan(this.checkpoints, turn).turns.map((item) => item.turn);
     const result = await confirmUndo({
       chatId: this.id,
       list: this.checkpoints,
@@ -992,13 +1011,17 @@ class ChatView {
     if (!this.alive) return;
     switch (result.outcome) {
       case "done": {
-        const { node, headline } = outcomeView(result.answer, this.cwd);
+        const { node, headline, slot, changed } = outcomeView(result.answer, this.cwd);
+        // An undo that changed files is a checkpoint too; it shows up after `newest`.
+        if (changed) this.pendingUndo = { newest, turns, slot };
         this.log.append(node);
         this.empty.hidden = true;
         node.focus({ preventScroll: true });
-        node.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+        const show = () => node.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+        show();
         this.ctx.announce(headline);
-        this.refreshCheckpoints();
+        // The undo's own checkpoint then comes into the card; keep it all in view.
+        this.refreshCheckpoints().then(() => node.isConnected && show());
         break;
       }
       case "failed":

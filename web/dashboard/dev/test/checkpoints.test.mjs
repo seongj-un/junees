@@ -10,6 +10,7 @@ import {
   partialText,
   relPath,
   splitUndoNotes,
+  undoneBy,
   undoOutcome,
   undoPlan,
 } from "../../checkpoints.js";
@@ -151,4 +152,15 @@ test("the undo lines before a message are taken apart from it", () => {
   });
   assert.deepEqual(splitUndoNotes("그냥 [되돌림] 글"), { notes: [], rest: "그냥 [되돌림] 글" });
   assert.deepEqual(splitUndoNotes(undefined), { notes: [], rest: "" });
+});
+
+test("an undo marks the checkpoints it put back, until it is undone itself", () => {
+  const list = (items) => parseCheckpoints(items.map(([turn, undid]) => ({ turn, files: [], undid })));
+  assert.deepEqual([...undoneBy(list([[1], [2], [3, [2, 1]]]))], [
+    [2, 3],
+    [1, 3],
+  ]);
+  // Undoing the undo (4 undid 3) brings 1 and 2 back.
+  assert.deepEqual([...undoneBy(list([[1], [2], [3, [2, 1]], [4, [3]]]))], [[3, 4]]);
+  assert.equal(undoneBy(list([[1], [2]])).size, 0);
 });

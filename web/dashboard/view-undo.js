@@ -3,6 +3,19 @@
 
 import { postJson } from "./api.js";
 import { changeLabel, describeUndoError, relPath, undoOutcome, undoPlan } from "./checkpoints.js";
+
+/**
+ * What a checkpoint offers: "되돌리기" (or "이 되돌리기 취소" for an undo),
+ * a note that a later undo put it back, or that nothing in it can come
+ * back. `actions` is `{ onUndo, list, by }`, or null where undo is off.
+ */
+function undoAction(item, actions, label) {
+  if (!actions) return null;
+  const undone = actions.by.get(item.turn);
+  if (undone !== undefined) return el("p", { class: "cp-state" }, `되돌리기(변경 기록 ${undone})에 포함됐습니다.`);
+  if (undoPlan(actions.list, item.turn).back === 0) return el("p", { class: "cp-state" }, "되돌릴 수 있는 파일이 없습니다.");
+  return undoButton(item, item.undid.length ? "이 되돌리기 취소" : label, actions.onUndo);
+}
 import { badge, el, pathCode } from "./dom.js";
 import { formatDateTime, parseTime } from "./format.js";
 
@@ -22,7 +35,7 @@ export function fileList(files, cwd, { plan = false } = {}) {
         { class: "cp-file" },
         el("span", { class: `cp-change cp-change-${file.change}` }, changeLabel(file.change)),
         pathCode(relPath(file.path, cwd)),
-        file.restorable ? (plan ? badge("되돌림", "ok") : null) : badge(plan ? "그대로 둠" : "되돌릴 수 없음", "warn"),
+        file.restorable ? null : badge(plan ? "그대로 둠" : "되돌릴 수 없음", "warn"),
       ),
     ),
   );
@@ -44,9 +57,9 @@ function undoButton(item, label, onUndo) {
 
 /**
  * The end of a turn that changed files: "파일 N개 바뀜" (open it for the
- * paths) and "이 턴부터 되돌리기". `undo` is null where undo is not offered.
+ * paths) and "이 턴부터 되돌리기" (see undoAction for `actions`).
  */
-export function turnFooter(item, cwd, onUndo) {
+export function turnFooter(item, cwd, actions) {
   const cannot = item.files.filter((file) => !file.restorable).length;
   const parts = [
     el(
@@ -65,7 +78,7 @@ export function turnFooter(item, cwd, onUndo) {
         : null,
     ),
   ];
-  if (onUndo) parts.push(undoButton(item, item.undid.length ? "이 되돌리기 취소" : "이 턴부터 되돌리기", onUndo));
+  parts.push(undoAction(item, actions, "이 턴부터 되돌리기"));
   return el("div", { class: "cp", "data-checkpoint": String(item.turn) }, parts);
 }
 
@@ -73,7 +86,7 @@ export function turnFooter(item, cwd, onUndo) {
  * Every checkpoint of the chat, newest first, folded above the chat: the
  * ones older than the shown history, and undos, have no turn to sit on.
  */
-export function changePanel(list, cwd, onUndo, open) {
+export function changePanel(list, cwd, actions, open) {
   const items = [...list].reverse();
   return el(
     "details",
@@ -99,7 +112,7 @@ export function changePanel(list, cwd, onUndo, open) {
             time ? el("span", { class: "cp-entry-time" }, time) : null,
           ),
           fileList(item.files, cwd),
-          onUndo ? undoButton(item, item.undid.length ? "이 되돌리기 취소" : "여기부터 되돌리기", onUndo) : null,
+          undoAction(item, actions, "여기부터 되돌리기"),
         );
       }),
     ),
@@ -124,7 +137,8 @@ export function confirmUndo({ chatId, list, from, cwd, opener, isUnauthorized })
     ? `변경 기록 ${from}부터 ${plan.turns[0].turn}까지 ${plan.turns.length}개를 최근 것부터 되돌립니다. 그 뒤에 파일을 바꾼 턴도 함께 되돌아갑니다.`
     : "아래 파일을 이 턴 전의 내용으로 되돌립니다.";
   const error = el("div", { class: "dialog-error", role: "alert", hidden: true });
-  const cancel = el("button", { type: "button", class: "button button-secondary" }, "취소");
+  // Cancel takes the first focus, not the scrolling list before it.
+  const cancel = el("button", { type: "button", class: "button button-secondary", autofocus: true }, "취소");
   const confirm = el("button", { type: "button", class: "button" }, "되돌리기");
   const notes = [el("p", null, scope)];
   for (const item of plan.turns) {
@@ -251,7 +265,12 @@ export function outcomeView(answer, cwd) {
         "ul",
         { class: "cp-list" },
         outcome.restored.map((file) =>
-          el("li", { class: "cp-file" }, pathCode(relPath(file.path, cwd)), file.partial ? el("p", { class: "cp-partial" }, file.partial) : null),
+          el(
+            "li",
+            { class: "cp-file" },
+            pathCode(relPath(file.path, cwd)),
+            file.partial ? [badge("일부만 되돌림", "warn"), el("p", { class: "cp-partial" }, file.partial)] : null,
+          ),
         ),
       ),
     );
@@ -267,5 +286,8 @@ export function outcomeView(answer, cwd) {
     );
   }
   parts.push(el("p", { class: "msg-note" }, "다음 메시지를 보낼 때 이 결과를 Junees에게 함께 알립니다."));
-  return { node: el("li", { class: "msg cp-result", tabindex: "-1" }, parts), headline: outcome.headline };
+  // The undo's own checkpoint goes here once the list has it ("이 되돌리기 취소").
+  const slot = el("div", { class: "cp-slot" });
+  parts.push(slot);
+  return { node: el("li", { class: "msg cp-result", tabindex: "-1" }, parts), headline: outcome.headline, slot, changed: outcome.restored.length > 0 };
 }
