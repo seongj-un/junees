@@ -125,6 +125,11 @@ impl Settings {
         self.api_key.is_some()
     }
 
+    /// The key, for a request to [`Settings::base_url`] only.
+    pub(crate) fn key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
     /// Where requests go.
     pub fn endpoint(&self) -> String {
         format!("{}/audio/transcriptions", self.base_url)

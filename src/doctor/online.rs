@@ -304,3 +304,62 @@ pub(super) async fn openai_models(report: &mut Report, settings: &Settings) {
         ),
     }
 }
+
+/// With `--online` and transcription on, `GET <base>/models`: a warning
+/// at most, since a whisper server on this machine may not have it.
+pub(super) async fn transcribe(report: &mut Report, settings: &Settings) {
+    const NAME: &str = "transcription API";
+    let Ok(Some(voice)) = crate::transcribe::Settings::read(|key| settings.get(key)) else {
+        return;
+    };
+    let url = format!("{}/models", voice.base_url);
+    let host = reqwest::Url::parse(&url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "the API".to_string());
+    let Ok(client) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(TIMEOUT)
+        .build()
+    else {
+        report.warn(AREA, NAME, "cannot set up the HTTP client", "try again");
+        return;
+    };
+    let mut request = client.get(&url);
+    if let Some(key) = voice.key() {
+        request = request.bearer_auth(key);
+    }
+    let fix = "check transcribe_base_url and transcribe_api_key; a local whisper server may \
+               not answer GET /models, and voice messages can still work";
+    match request.send().await {
+        Err(err) => report.warn(
+            AREA,
+            NAME,
+            format!(
+                "no answer from {host}: {}",
+                crate::notify::describe(err, TIMEOUT)
+            ),
+            fix,
+        ),
+        Ok(response) => {
+            let status = response.status().as_u16();
+            if matches!(status, 401 | 403) {
+                report.warn(
+                    AREA,
+                    NAME,
+                    format!("{host} refused the key (HTTP {status})"),
+                    fix,
+                );
+            } else if (200..300).contains(&status) {
+                report.ok(AREA, NAME, format!("{host} answers GET /models"));
+            } else {
+                report.warn(
+                    AREA,
+                    NAME,
+                    format!("{host} answered HTTP {status} to GET /models"),
+                    fix,
+                );
+            }
+        }
+    }
+}
