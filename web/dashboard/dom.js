@@ -109,25 +109,28 @@ export function dataTable({ caption, columns, rows, rowKey }) {
   const body = el(
     "tbody",
     null,
-    rows.map((row) =>
-      el(
-        "tr",
-        { "data-key": rowKey ? rowKey(row) : null },
-        columns.map((col, index) =>
-          el(
-            index === 0 ? "th" : "td",
-            { class: col.className, scope: index === 0 ? "row" : null },
-            index === 0 ? null : el("span", { class: "cell-label", "aria-hidden": "true" }, col.label),
-            el("div", { class: "cell-value" }, col.cell(row)),
-          ),
-        ),
-      ),
-    ),
+    rows.map((row) => tableRow(columns, row, rowKey)),
   );
   return el(
     "div",
     { class: "table-wrap" },
     el("table", { class: "data-table" }, el("caption", { class: "sr-only" }, caption), head, body),
+  );
+}
+
+/** One `<tr>` of {@link dataTable}, also used to redraw a single row. */
+export function tableRow(columns, row, rowKey) {
+  return el(
+    "tr",
+    { "data-key": rowKey ? rowKey(row) : null },
+    columns.map((col, index) =>
+      el(
+        index === 0 ? "th" : "td",
+        { class: col.className, scope: index === 0 ? "row" : null },
+        index === 0 ? null : el("span", { class: "cell-label", "aria-hidden": "true" }, col.label),
+        el("div", { class: "cell-value" }, col.cell(row)),
+      ),
+    ),
   );
 }
 

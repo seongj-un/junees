@@ -48,7 +48,20 @@ export function forgetToken(win = window) {
  * GETs `path` and returns the parsed JSON body.
  * Throws {@link ApiError}; a 401 or a missing token is `unauthorized`.
  */
-export async function getJson(path, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export function getJson(path, options = {}) {
+  return request("GET", path, options);
+}
+
+/**
+ * POSTs an empty JSON object to `path` (the dashboard's write requests take
+ * no body) and returns the parsed answer. The browser adds `Origin`, which
+ * the server requires on writes. Throws like {@link getJson}.
+ */
+export function postJson(path, options = {}) {
+  return request("POST", path, options);
+}
+
+async function request(method, path, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const token = getToken();
   if (!token) throw new ApiError("unauthorized", "no token");
 
@@ -68,8 +81,13 @@ export async function getJson(path, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } =
     let response;
     try {
       response = await fetch(path, {
-        method: "GET",
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+          ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+        },
+        body: method === "POST" ? "{}" : undefined,
         cache: "no-store",
         credentials: "omit",
         signal: controller.signal,
