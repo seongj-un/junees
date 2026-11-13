@@ -7,6 +7,9 @@ What the scripted turn does depends on the message:
     contains 오류                 ends the turn with an error event
     contains 한도                 stops at the step limit (stop_reason max_turns)
     contains 긴                   asks about a 2,100-character command ending in `| sh`
+    contains 만들어 or 고쳐         writes the files it names (a.txt, b.md, ...; notes.md
+                                 if none) with write_file or edit_file, leaving a
+                                 checkpoint (stage 20, see checkpoint_sim.py)
     anything else                reads a file, then answers
 The events follow #109: no user text in turn_start, questions with
 target, reasons, preview and expires_at, approval_closed by "cancel" when a turn is cancelled while it
@@ -17,9 +20,12 @@ Every turn streams its answer in small pieces so the page shows it growing.
 """
 
 import json
+import re
 import secrets
 import threading
 import time
+
+from checkpoint_sim import Checkpoints
 
 APPROVAL_SECONDS = 300
 KEEP_EVENTS = 1000
@@ -71,7 +77,7 @@ class Chat:
 class Chats:
     """Every chat of one dev server, and what its scripted turns do."""
 
-    def __init__(self, journal, approval_seconds=APPROVAL_SECONDS):
+    def __init__(self, journal, approval_seconds=APPROVAL_SECONDS, checkpoints=None):
         # The fixtures' session details, by id: turns are written here as the
         # real server writes the session file, so the session API (and the
         # history the chat screen shows on returning) has them.
@@ -85,6 +91,7 @@ class Chats:
         self.streams = 0
         # One turn at a time for the whole dashboard, as #109.
         self.turn_running = False
+        self.cp = checkpoints or Checkpoints()
 
     def close(self, chat):
         """Closes a chat (to keep 16 open); its streams end."""
@@ -160,6 +167,18 @@ class Chats:
             chat.cond.notify_all()
         return 200, {"question_id": question_id, "answer": answer}
 
+    def undo(self, chat, turn):
+        """(status, body) for POST /api/chat/<id>/undo: none while any turn runs."""
+        with self.lock:
+            if self.turn_running:
+                return 409, {"error": "turn_running", "message": "a turn of this chat is running; wait for it or cancel it"}
+            self.turn_running = True
+        try:
+            return self.cp.undo(chat.id, turn)
+        finally:
+            with self.lock:
+                self.turn_running = False
+
     def cancel(self, chat):
         with chat.cond:
             running = chat.running
@@ -228,7 +247,10 @@ class Chats:
 
     def run_turn(self, chat, turn, text):
         chat.emit({"type": "turn_start", "turn": turn})
-        self.record(chat, "user", [{"type": "text", "text": text}])
+        # After an undo the next message carries its [되돌림] lines, as the session file has it.
+        notes = self.cp.take_notes(chat.id)
+        self.record(chat, "user", [{"type": "text", "text": "\n".join(notes) + "\n\n" + text if notes else text}])
+        checkpoint = None
         chat.reply = []
         time.sleep(0.3)
         ok = self.stream_text(chat, "요청을 확인했습니다. 먼저 작업 폴더를 살펴보겠습니다.")
@@ -265,6 +287,21 @@ class Chats:
                 else:
                     chat.emit({"type": "tool_result", "name": "bash", "is_error": True, "text_preview": "the person did not approve this command"})
                     ok = self.stream_text(chat, "명령을 실행하지 않았습니다. 다른 방법이 필요하면 알려 주세요.")
+        elif ok and ("만들어" in text or "고쳐" in text):
+            tool = "edit_file" if "고쳐" in text else "write_file"
+            paths = re.findall(r"[\w./-]+\.(?:txt|md|rs|toml)", text) or ["notes.md"]
+            ok = self.stream_text(chat, "파일을 쓰겠습니다.")
+            written = {}
+            for path in paths:
+                if not ok or chat.cancelled:
+                    break
+                chat.emit({"type": "tool_use", "name": tool, "input_preview": json.dumps({"path": path}, ensure_ascii=False)})
+                time.sleep(0.3)
+                written[path] = f"턴 {turn}에서 쓴 내용 ({path})"
+                chat.emit({"type": "tool_result", "name": tool, "is_error": False, "text_preview": f"wrote {path}"})
+            checkpoint = self.cp.write(chat.id, written)
+            if ok and written:
+                ok = self.stream_text(chat, f"파일 {len(written)}개를 썼습니다.")
         elif ok and "파일" in text:
             ok = self.stream_text(chat, "작업 폴더 밖에 파일을 써야 해서 허락이 필요합니다.")
             if ok:
@@ -279,7 +316,10 @@ class Chats:
         elif ok:
             ok = self.stream_text(chat, "README에 설치 방법과 사용법이 정리되어 있습니다. 더 알고 싶은 부분이 있으면 말씀해 주세요.")
         chat.emit({"type": "usage", "input_tokens": 1830 + 400 * turn, "output_tokens": 212, "cost_usd": 0.0087})
-        chat.emit({"type": "turn_end", "turn": turn, "stop_reason": "cancelled" if chat.cancelled else "end_turn"})
+        end = {"type": "turn_end", "turn": turn, "stop_reason": "cancelled" if chat.cancelled else "end_turn"}
+        if checkpoint is not None:
+            end["checkpoint"] = checkpoint
+        chat.emit(end)
 
 
 def stream(handler, chat, after, chats):
