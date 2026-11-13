@@ -191,6 +191,8 @@ src/
     mod.rs             인자(--listen 루프백만, --no-open), 실행마다 만드는 토큰, # 뒤에 토큰을 단 주소, 브라우저 열기
     server.rs          연결마다 요청 하나: Host(421), Origin(403), GET만(405), 머리 8KB와 본문 1KB, 상수 시간 Bearer 비교(401), 보안 헤더, 시간과 동시 연결 제한
     api.rs             /api/status, sessions, usage, cron, webhooks, doctor의 JSON(계약), 쿼리 검사, 미리보기의 비밀 값 가리기, doctor는 별도 런타임
+    session_view.rs    /api/sessions/<id>: 기록된 대화를 페이지로(id 형식 검사, 링크 거절, 가린 뒤 자르기, 이미지와 thinking은 종류만)
+    actions.rs         POST 멈춤과 재개(CLI와 같은 함수와 잠금, 정확한 id, 홈 폴더 때문에 멈춘 항목은 409, dashboard.log)
     assets.rs          web/dashboard 파일(include_bytes!)과 Content-Type
   doctor/            설치와 설정 점검 (junees doctor, /doctor)
     mod.rs             인자, 점검 결과(ok/warn/fail/skip, 고치는 방법), 텍스트와 JSON 출력, 비밀 값 지우기, 점검 순서
