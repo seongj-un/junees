@@ -134,6 +134,13 @@ function blockView(block, messageIndex, n) {
           ),
         ),
         toolBody(block.text_preview),
+        Array.isArray(block.images) && block.images.length
+          ? el(
+              "p",
+              { class: "tool-images" },
+              `이미지 ${block.images.length}개(${block.images.join(", ")})가 함께 있었습니다. 대시보드에는 이미지 내용을 보내지 않습니다.`,
+            )
+          : null,
       );
     case "image":
       return el("p", { class: "msg-note" }, `이미지${block.media_type ? ` (${block.media_type})` : ""}. 대시보드에는 이미지 내용을 보내지 않습니다.`);
@@ -224,6 +231,8 @@ export function render(root, data, ctx) {
   };
 
   button.addEventListener("click", async () => {
+    // Twice while loading, or after the last page: nothing to ask for.
+    if (button.disabled || button.hidden) return;
     const offset = more.next;
     button.disabled = true;
     button.textContent = "불러오는 중";
@@ -243,7 +252,7 @@ export function render(root, data, ctx) {
       update();
       // Keyboard and screen reader users land on the first new message.
       if (added.length) list.querySelector(`[data-index="${added[0].index}"]`)?.focus();
-      ctx.announce(`메시지 ${formatInt(added.length)}개를 더 불러왔습니다.`);
+      if (list.isConnected) ctx.announce(`메시지 ${formatInt(added.length)}개를 더 불러왔습니다.`);
     } catch (err) {
       button.disabled = false;
       update();
