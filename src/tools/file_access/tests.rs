@@ -471,6 +471,26 @@ fn unattended_no_write_follows_a_config_folder_moved_inside_home() {
         assert!(paths.contains(&moved.join(name)), "{name}: {paths:?}");
     }
     assert!(paths.contains(&home.join(".config/systemd")), "{paths:?}");
+    // The home folder itself (also through a link or with a trailing
+    // `/`): `~/git` and `~/fish` are not refused, `~/.config` still is.
+    std::fs::create_dir_all(&home).unwrap();
+    std::os::unix::fs::symlink(&home, home.join("cfg")).unwrap();
+    for config in [
+        home.clone(),
+        PathBuf::from(format!("{}/", home.display())),
+        home.join("cfg"),
+    ] {
+        let paths = super::unattended_no_write(&home, Some(config.as_os_str()));
+        for name in ["git", "fish", "systemd", "autostart", "environment.d"] {
+            assert!(
+                !paths.contains(&home.join(name)) && !paths.contains(&config.join(name)),
+                "{}: {name}: {paths:?}",
+                config.display()
+            );
+        }
+        assert!(paths.contains(&home.join(".config/git")), "{paths:?}");
+        assert!(paths.contains(&home.join(".config/fish")), "{paths:?}");
+    }
     // Outside the home folder, relative or not plainly named: not added.
     for config in [
         layout.path("outside/config"),

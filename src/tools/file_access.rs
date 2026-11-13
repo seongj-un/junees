@@ -128,7 +128,9 @@ const XDG_CONFIG_NO_WRITE: &[&str] = &["fish", "systemd", "environment.d", "auto
 /// The paths under `home` an unattended run may not change, as written:
 /// [`UNATTENDED_NO_WRITE`], the same folders of `~/.config` in
 /// `xdg_config` (`$XDG_CONFIG_HOME`) when that is a plainly named folder
-/// inside `home`, and every other entry of `~/.ssh` but
+/// strictly inside `home` (not `home` itself, where `~/git` or `~/fish`
+/// would be refused, and with them every working folder in one), and
+/// every other entry of `~/.ssh` but
 /// [`SSH_WRITABLE`] (ssh's `config` may `Include` a file there or run a
 /// script there as `ProxyCommand`, and sshd reads any
 /// `authorized_keys*` its settings name). The program folders are apart
@@ -142,6 +144,7 @@ pub fn unattended_no_write(home: &Path, xdg_config: Option<&OsStr>) -> Vec<PathB
         config.is_absolute()
             && !config.components().any(|c| c == Component::ParentDir)
             && within_home(config, home)
+            && !same_folder(config, home)
     }) {
         out.extend(XDG_CONFIG_NO_WRITE.iter().map(|name| config.join(name)));
     }
@@ -194,6 +197,13 @@ fn within_home(path: &Path, home: &Path) -> bool {
     [path, real_path.as_path()]
         .iter()
         .any(|path| path.starts_with(home) || path.starts_with(&real_home))
+}
+
+/// Whether `a` and `b` are the same folder, as written or with links
+/// resolved.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    a == b || real(a) == real(b)
 }
 
 /// Whether `dir` is the home folder `home` or a folder holding it (`/`,
