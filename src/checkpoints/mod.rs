@@ -488,11 +488,43 @@ fn folder_size(dir: &Path) -> io::Result<(u64, SystemTime)> {
 pub struct Undone {
     /// The turns undone, newest first.
     pub turns: Vec<u64>,
+    /// Every file the undo changed, once each: the ones in [`Undone::partial`]
+    /// too.
     pub restored: Vec<String>,
-    /// `(path, reason)`.
+    /// `(path, reason)`: files left as they were, once each (the first
+    /// reason).
     pub skipped: Vec<(String, String)>,
+    /// Files put back through some turns and then skipped at an older one:
+    /// changed, but not to before every undone turn.
+    pub partial: Vec<Partial>,
     /// The turn that recorded the undo, when it changed anything.
     pub checkpoint: Option<u64>,
+}
+
+/// One file's outcome at each undone turn, newest first: `Err` holds why
+/// it was skipped.
+type Outcomes = Vec<(u64, Result<(), String>)>;
+
+/// A file an undo put back only part of the way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Partial {
+    pub path: String,
+    /// The oldest turn whose change to it was undone: it is now as it was
+    /// before that turn.
+    pub until_turn: u64,
+    /// The newest turn whose change was skipped, and why.
+    pub skipped_turn: u64,
+    pub reason: String,
+}
+
+impl Partial {
+    /// "턴 4까지 되돌림, 턴 3은 건너뜀: <이유>".
+    pub fn text(&self) -> String {
+        format!(
+            "턴 {}까지 되돌림, 턴 {}은 건너뜀: {}",
+            self.until_turn, self.skipped_turn, self.reason
+        )
+    }
 }
 
 impl Undone {
@@ -508,10 +540,18 @@ impl Undone {
         let mut note = if self.restored.is_empty() {
             format!("[되돌림] 턴 {turns}의 파일 변경을 되돌리지 못했습니다")
         } else {
-            format!(
-                "[되돌림] 턴 {turns}의 파일 변경을 되돌렸습니다: {}",
-                self.restored.join(", ")
-            )
+            let restored = self
+                .restored
+                .iter()
+                .map(
+                    |path| match self.partial.iter().find(|part| part.path == *path) {
+                        Some(part) => format!("{path} ({})", part.text()),
+                        None => path.clone(),
+                    },
+                )
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[되돌림] 턴 {turns}의 파일 변경을 되돌렸습니다: {restored}")
         };
         if !self.skipped.is_empty() {
             let skipped = self
@@ -646,27 +686,47 @@ impl SessionStore {
         };
         let recorder = Turn::new(self.clone());
         recorder.set_undid(undone.turns.clone());
+        // Per file, in the order first met: (turn, outcome), newest first.
+        let mut outcomes: Vec<(String, Outcomes)> = Vec::new();
         for manifest in &turns {
             let dir = self.dir.join(manifest.turn.to_string());
             for file in manifest.files.iter().rev() {
-                match self.restore_one(&dir, file, force, access, &recorder) {
-                    Ok(()) => {
-                        if !undone.restored.contains(&file.path) {
-                            undone.restored.push(file.path.clone());
-                        }
-                    }
-                    Err(reason) => undone.skipped.push((file.path.clone(), reason)),
+                let outcome = self.restore_one(&dir, file, force, access, &recorder);
+                match outcomes.iter_mut().find(|(path, _)| *path == file.path) {
+                    Some((_, list)) => list.push((manifest.turn, outcome)),
+                    None => outcomes.push((file.path.clone(), vec![(manifest.turn, outcome)])),
                 }
             }
         }
         undone.checkpoint = recorder.number();
         recorder.finish();
-        // One line per file: a file skipped at some turn did not get back
-        // to before the undone turns, so it is reported skipped only (with
-        // the first reason), even when a later turn's change was undone.
-        let mut seen = std::collections::HashSet::new();
-        undone.skipped.retain(|(path, _)| seen.insert(path.clone()));
-        undone.restored.retain(|path| !seen.contains(path));
+        // One entry per file: changed at all (restored, and partial when a
+        // turn was skipped), or left as it was (skipped, first reason).
+        for (path, list) in outcomes {
+            let until = list
+                .iter()
+                .filter(|(_, outcome)| outcome.is_ok())
+                .map(|(turn, _)| *turn)
+                .min();
+            let skip = list.iter().find_map(|(turn, outcome)| match outcome {
+                Err(reason) => Some((*turn, reason.clone())),
+                Ok(()) => None,
+            });
+            match (until, skip) {
+                (Some(_), None) => undone.restored.push(path),
+                (Some(until_turn), Some((skipped_turn, reason))) => {
+                    undone.restored.push(path.clone());
+                    undone.partial.push(Partial {
+                        path,
+                        until_turn,
+                        skipped_turn,
+                        reason,
+                    });
+                }
+                (None, Some((_, reason))) => undone.skipped.push((path, reason)),
+                (None, None) => {}
+            }
+        }
         Ok(undone)
     }
 

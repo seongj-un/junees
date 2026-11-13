@@ -260,6 +260,69 @@ async fn turns_are_listed_rewound_and_told_to_the_conversation() {
 }
 
 #[tokio::test]
+async fn a_file_undone_part_of_the_way_is_reported_as_changed() {
+    let home = Home::new();
+    let c = home.work.join("c.txt");
+    // Turn 1 makes c.txt; something outside changes it; turn 2 changes it.
+    let (url, server) = fake_api(vec![
+        (200, tool_call(vec![write_file("t1", &c, "C1\n")])),
+        (200, text_reply("made")),
+        (200, tool_call(vec![write_file("t2", &c, "C2\n")])),
+        (200, text_reply("changed")),
+    ])
+    .await;
+    let mut child = home.command(&url, &[]).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"make it\n").await.unwrap();
+    // Wait for turn 1's file before changing it by hand.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while read(&c).as_deref() != Some("C1\n") {
+        assert!(tokio::time::Instant::now() < deadline, "turn 1 never wrote");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    std::fs::write(&c, "C1x\n").unwrap();
+    stdin.write_all(b"change it\n/exit\n").await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(WAIT, child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    server.await.unwrap();
+    let id = home.session_id();
+
+    let (url, _) = fake_api(Vec::new()).await;
+    let undone = home
+        .run(
+            &url,
+            &["rewind", "--session", &id, "--turn", "1", "--yes"],
+            "",
+        )
+        .await;
+    let said = text(&undone);
+    assert_eq!(read(&c).as_deref(), Some("C1x\n"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "partly   {} (턴 2까지 되돌림, 턴 1은 건너뜀: ",
+            c.display()
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("skipped  "), "{said}");
+
+    let (url, server) = fake_api(vec![(200, text_reply("noted"))]).await;
+    home.run(&url, &["--resume", &id, "-p", "next"], "").await;
+    let first = last_user_text(&server.await.unwrap()[0]);
+    assert!(
+        first.starts_with(&format!(
+            "[되돌림] 턴 1, 2의 파일 변경을 되돌렸습니다: {} (턴 2까지 되돌림, 턴 1은 건너뜀: ",
+            c.display()
+        )),
+        "{first}"
+    );
+}
+
+#[tokio::test]
 async fn the_setting_turns_recording_off() {
     let home = Home::new();
     let a = home.work.join("a.txt");
@@ -486,7 +549,7 @@ async fn the_chat_serves_checkpoints_and_undo() {
     assert_eq!(status, 200, "{answer}");
     assert_eq!(
         answer,
-        json!({"restored": [made.display().to_string()], "skipped": []})
+        json!({"restored": [made.display().to_string()], "skipped": [], "partial": []})
     );
     assert!(!made.exists());
     let log = std::fs::read_to_string(home.state().join("dashboard.log")).unwrap();

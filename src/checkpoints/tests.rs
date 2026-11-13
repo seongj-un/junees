@@ -344,34 +344,53 @@ fn the_setting_turns_recording_off() {
 async fn a_change_between_two_turns_makes_the_older_one_not_restorable() {
     let (_home, _store, session) = session();
     let work = tempfile::tempdir().unwrap();
+    // Turns 1 and 2 change another file; turn 3 makes c.txt, something
+    // outside changes it, turn 4 changes it again; then an undo from 3.
+    let other = work.path().join("a.txt");
+    turn_writing(&session, &other, "a1").await;
+    turn_writing(&session, &other, "a2").await;
     let file = work.path().join("c.txt");
-    turn_writing(&session, &file, "made").await;
-    // bash changes it, then turn 2 changes it again.
-    fs::write(&file, "by bash").unwrap();
-    turn_writing(&session, &file, "turn 2").await;
+    assert_eq!(turn_writing(&session, &file, "C1").await, 3);
+    fs::write(&file, "C1x").unwrap();
+    assert_eq!(turn_writing(&session, &file, "C2").await, 4);
 
     let list = session.list().unwrap();
-    assert!(list[1].files[0].restorable, "turn 2 alone goes back");
-    assert!(
-        !list[0].files[0].restorable,
-        "turn 1 would find bash's text"
-    );
+    assert!(list[3].files[0].restorable, "turn 4 alone goes back");
+    assert!(!list[2].files[0].restorable, "turn 3 would find C1x");
 
-    let undone = session.undo(1, false, &FileAccess::default()).unwrap();
-    // Turn 2 put back "by bash"; turn 1's file was then skipped: reported
-    // once, as skipped.
-    assert!(undone.restored.is_empty(), "{undone:?}");
+    let undone = session.undo(3, false, &FileAccess::default()).unwrap();
+    // Turn 4 put back C1x, then turn 3 was skipped: the file changed, so
+    // it is restored, part of the way.
+    assert_eq!(fs::read_to_string(&file).unwrap(), "C1x");
+    let path = file.display().to_string();
+    assert_eq!(undone.restored, vec![path.clone()], "{undone:?}");
+    assert!(undone.skipped.is_empty(), "{undone:?}");
     assert_eq!(
-        undone.skipped,
-        vec![(file.display().to_string(), reason::KEPT_CREATED.to_string())]
+        undone.partial,
+        vec![Partial {
+            path: path.clone(),
+            until_turn: 4,
+            skipped_turn: 3,
+            reason: reason::KEPT_CREATED.to_string(),
+        }]
     );
-    assert_eq!(
-        undone.note().matches("c.txt").count(),
-        1,
-        "{}",
-        undone.note()
+    let note = undone.note();
+    assert!(
+        note.starts_with(&format!(
+            "[되돌림] 턴 3, 4의 파일 변경을 되돌렸습니다: {path} (턴 4까지 되돌림, 턴 3은 건너뜀: {})",
+            reason::KEPT_CREATED
+        )),
+        "{note}"
     );
-    assert_eq!(fs::read_to_string(&file).unwrap(), "by bash");
+    assert_eq!(note.matches("c.txt").count(), 1, "{note}");
+    // Left alone at every turn: skipped, once. (Turn 5 is the undo.)
+    fs::write(&file, "by hand").unwrap();
+    let undone = session.undo(5, false, &FileAccess::default()).unwrap();
+    assert!(
+        undone.restored.is_empty() && undone.partial.is_empty(),
+        "{undone:?}"
+    );
+    assert_eq!(undone.skipped, vec![(path, reason::CHANGED.to_string())]);
 }
 
 #[tokio::test]

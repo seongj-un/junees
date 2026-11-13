@@ -223,10 +223,11 @@ junees dashboard --chat [--dir <폴더>]
   - **`turn`은 체크포인트 번호입니다.** 대화의 턴 번호(`turn_start`, `turn_end`의 `turn`)와 다릅니다. 체크포인트 번호는 세션에서 파일을 바꾼 턴만 1부터 세고, 대화를 다시 열어도 이어집니다. 대화의 턴이 체크포인트를 남겼으면 그 턴의 `turn_end`에 `checkpoint`로 옵니다. `created_at`은 그 턴이 처음 파일을 바꾼 시각(RFC 3339 UTC)입니다.
   - 이 대화(세션)에서 `write_file`, `edit_file`로 파일을 바꾼 턴들이고, 오래된 턴이 먼저입니다. 체크포인트가 꺼져 있으면 `[]`입니다.
   - `restorable`은 그 턴부터 되돌리면(뒤의 턴을 먼저 되돌린 뒤) 그 파일이 그대로 되돌아가는지입니다. 그 뒤에 사람이나 bash가 파일을 바꿨거나(턴 사이에 바뀐 것 포함), 너무 커서 기록하지 않은 파일은 `false`입니다([파일 체크포인트](checkpoints.md)).
-- `POST /api/chat/<id>/undo` `{"turn": n, "force"?: bool}` → 200 `{"restored": [path, ...], "skipped": [{"path", "reason"}]}`
+- `POST /api/chat/<id>/undo` `{"turn": n, "force"?: bool}` → 200 `{"restored": [path, ...], "skipped": [{"path", "reason"}], "partial": [{"path", "until_turn", "skipped_turn", "reason"}]}`
   - 체크포인트 `n`과 그 뒤의 모든 체크포인트를 최근 것부터 되돌립니다(`n`은 대화의 턴 번호가 아니라 `turn_end.checkpoint`, `GET .../checkpoints`의 `turn`입니다). 규칙은 `junees rewind --turn n`과 같습니다.
   - `reason`은 `바뀐 뒤 수정됨`, `너무 커서 기록하지 않음`, `심볼릭 링크로 바뀜`, `일반 파일이 아님`, `쓰기 정책이 막음`, `턴이 만든 파일이 그 뒤 수정되어 지우지 않음`, `쓰지 못함`(쓰거나 지우다 실패), `기록이 올바르지 않음`(manifest의 경로나 내용 파일 이름이 기록할 때의 모양이 아님) 중 하나입니다.
-  - 파일 하나는 한 번만 나옵니다. 여러 턴을 되돌리다 어느 턴에서 건너뛴 파일은 `skipped`에만(처음 이유로) 들어갑니다. 되돌리기 전 상태로 돌아가지 못했기 때문입니다.
+  - `restored`는 내용이 바뀐 파일 전부이고, `skipped`는 그대로 둔 파일입니다. 파일 하나는 둘 중 한 곳에만 한 번 나옵니다.
+  - 여러 턴을 되돌리다 뒤 턴은 되돌리고 앞 턴에서 건너뛴 파일은 `restored`에 들어가고, `partial`에 어디까지 되돌렸는지가 함께 옵니다. `until_turn`은 되돌린 가장 오래된 턴(파일이 그 턴 전의 내용입니다), `skipped_turn`은 건너뛴 가장 최근 턴, `reason`은 그 이유입니다. 예: 턴 3이 만들고 밖에서 고친 뒤 턴 4가 고친 파일을 턴 3부터 되돌리면 `{"until_turn": 4, "skipped_turn": 3, "reason": "턴이 만든 파일이 그 뒤 수정되어 지우지 않음"}`입니다. 대화에 남는 줄에도 `c.txt (턴 4까지 되돌림, 턴 3은 건너뜀: …)`로 적힙니다.
   - 어느 대화든 턴이 돌고 있으면 409 `turn_running`이고, 되돌리는 동안에는 새 턴을 받지 않습니다(409 `turn_running`).
   - `n`이 1보다 작거나 숫자가 아니면 400 `bad_body`, `n` 이후에 체크포인트가 없으면 404 `not_found`, 체크포인트가 꺼져 있으면 409 `checkpoints_off`입니다.
   - 되돌린 뒤 이 대화의 다음 메시지 앞에 `[되돌림] …` 한 줄이 붙습니다. `dashboard.log`에 `chat <id> undo from turn <n>: <k> restored, <m> skipped`를 남깁니다(경로는 남기지 않습니다).

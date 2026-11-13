@@ -126,7 +126,10 @@ pub fn from_turn(manifests: &[Manifest], from: u64) -> Vec<Manifest> {
 pub fn report(undone: &Undone) -> String {
     let mut text = String::new();
     for path in &undone.restored {
-        text.push_str(&format!("  undone   {path}\n"));
+        match undone.partial.iter().find(|part| part.path == *path) {
+            Some(part) => text.push_str(&format!("  partly   {path} ({})\n", part.text())),
+            None => text.push_str(&format!("  undone   {path}\n")),
+        }
     }
     for (path, reason) in &undone.skipped {
         text.push_str(&format!("  skipped  {path} ({reason})\n"));

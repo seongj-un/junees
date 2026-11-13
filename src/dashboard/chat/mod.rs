@@ -767,10 +767,14 @@ impl Chat {
         match done {
             Ok(Ok(Some(undone))) => {
                 self.log(&format!(
-                    "chat {id} undo from turn {}{}: {} restored, {} skipped",
+                    "chat {id} undo from turn {}{}: {} restored{}, {} skipped",
                     wanted.turn,
                     if wanted.force { " (forced)" } else { "" },
                     undone.restored.len(),
+                    match undone.partial.len() {
+                        0 => String::new(),
+                        partly => format!(" ({partly} partly)"),
+                    },
                     undone.skipped.len()
                 ));
                 Answer::json(
@@ -780,6 +784,12 @@ impl Chat {
                         "skipped": undone.skipped.iter().map(|(path, reason)| {
                             json!({ "path": path, "reason": reason })
                         }).collect::<Vec<_>>(),
+                        "partial": undone.partial.iter().map(|part| json!({
+                            "path": part.path,
+                            "until_turn": part.until_turn,
+                            "skipped_turn": part.skipped_turn,
+                            "reason": part.reason,
+                        })).collect::<Vec<_>>(),
                     }),
                 )
             }
