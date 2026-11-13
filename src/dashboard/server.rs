@@ -197,10 +197,15 @@ async fn connection(mut stream: TcpStream, context: &Arc<Context>) {
         http::read_head_within(&mut stream, &mut buf, MAX_HEAD),
     )
     .await;
+    // Whether the client may still be sending what this answer leaves
+    // unread: a body refused from its head, or a head refused before its
+    // end.
+    let unread;
     let reply = match read {
         // Too slow: closed without an answer.
         Err(_) => return,
         Ok(Err(err)) => {
+            unread = true;
             let code = if err.status == 431 {
                 "head_too_large"
             } else {
@@ -208,19 +213,26 @@ async fn connection(mut stream: TcpStream, context: &Arc<Context>) {
             };
             Answer::error(err.status, code, err.message).into()
         }
-        Ok(Ok(head)) => match read_body(&mut stream, &head, buf).await {
-            Ok(body) => {
-                match tokio::time::timeout(CONNECTION_TIME, respond(&head, &body, context)).await {
-                    Ok(reply) => reply,
-                    Err(_) => return,
+        Ok(Ok(head)) => {
+            unread = body_unread(&head);
+            match read_body(&mut stream, &head, buf).await {
+                Ok(body) => {
+                    let respond = respond(&head, &body, context);
+                    match tokio::time::timeout(CONNECTION_TIME, respond).await {
+                        Ok(reply) => reply,
+                        Err(_) => return,
+                    }
                 }
+                Err(answer) => answer.into(),
             }
-            Err(answer) => answer.into(),
-        },
+        }
     };
     match reply {
         Reply::Whole(answer) => {
             let _ = tokio::time::timeout(CONNECTION_TIME, send(&mut stream, &answer)).await;
+            if unread {
+                http::drain_unread(&mut stream).await;
+            }
         }
         Reply::Events(events) => {
             let (mut input, mut output) = stream.split();
@@ -267,6 +279,19 @@ async fn read_body(
         rest.extend_from_slice(&more);
     }
     Ok(rest)
+}
+
+/// Whether [`read_body`] leaves a body the client sends unread: a `POST`
+/// body refused from its head (too large, chunked, a bad length), or a
+/// body on another method.
+fn body_unread(head: &Head) -> bool {
+    if head.method == "POST" {
+        return body_refused(head).is_some();
+    }
+    head.header("transfer-encoding").is_some()
+        || head
+            .header("content-length")
+            .is_some_and(|length| length.trim() != "0")
 }
 
 async fn send<W: AsyncWrite + Unpin>(io: &mut W, answer: &Answer) {

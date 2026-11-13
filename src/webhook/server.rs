@@ -237,6 +237,7 @@ impl Server {
 
     async fn connection<S: AsyncRead + AsyncWrite + Unpin>(self: Arc<Self>, mut stream: S) {
         let read = tokio::time::timeout(self.read_timeout, self.read_request(&mut stream)).await;
+        let unread = matches!(read, Ok(Err(_)));
         let (answer, what) = match read {
             Err(_) => (answer(408, "the request took too long"), String::new()),
             Ok(Err(refused)) => refused,
@@ -252,6 +253,12 @@ impl Server {
             escape_hidden(&answer.text)
         ));
         http::respond(&mut stream, answer.status, &answer.text).await;
+        // A refusal can come before the body was read (unknown route, too
+        // large, unsigned): let the sender finish writing it and read the
+        // answer, rather than meet a reset.
+        if unread {
+            http::drain_unread(&mut stream).await;
+        }
     }
 
     /// Reads a request for a route. What can be checked without the body

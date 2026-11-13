@@ -8,6 +8,8 @@
 //! requests with a length; a full HTTP server (`hyper`) would add more
 //! code to trust than this.
 
+use std::time::Duration;
+
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// The request line and the headers together.
@@ -229,6 +231,32 @@ pub async fn read_body<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Writes a plain-text answer and closes the connection's sending side.
+/// What [`drain_unread`] reads and drops at most.
+pub const MAX_DRAIN: usize = 4 * 1024 * 1024;
+/// How long [`drain_unread`] goes on at most.
+pub const DRAIN_TIME: Duration = Duration::from_secs(2);
+
+/// After answering (and shutting down the write side of) a request whose
+/// body was not read, reads and drops what the client still sends, up to
+/// [`MAX_DRAIN`] bytes for [`DRAIN_TIME`], before the socket closes.
+/// Closing a socket with unread input sends a reset, and a client still
+/// writing its body then sees a broken pipe instead of the refusal it was
+/// sent (a page over the body limit, GitHub delivering to a route that is
+/// gone). A body past the limits is cut off as before.
+pub async fn drain_unread<S: AsyncRead + Unpin>(io: &mut S) {
+    let drain = async {
+        let mut chunk = [0u8; 16 * 1024];
+        let mut left = MAX_DRAIN;
+        while left > 0 {
+            match io.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => left = left.saturating_sub(read),
+            }
+        }
+    };
+    let _ = tokio::time::timeout(DRAIN_TIME, drain).await;
+}
+
 pub async fn respond<W: AsyncWrite + Unpin>(io: &mut W, status: u16, body: &str) {
     let _ = io.write_all(render(status, body).as_bytes()).await;
     let _ = io.shutdown().await;
@@ -254,6 +282,44 @@ pub fn render(status: u16, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal sent before a large body was read reaches a client that
+    /// is still writing it: the server drains the rest instead of closing
+    /// on unread input (a reset, and a broken pipe for the client).
+    #[tokio::test]
+    async fn a_refused_body_is_drained_so_the_sender_reads_the_answer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let head = read_head(&mut stream, &mut buf).await.unwrap();
+            assert_eq!(body_length(&head).unwrap_err().status, 413);
+            respond(&mut stream, 413, "too large").await;
+            drain_unread(&mut stream).await;
+        });
+        let body = vec![b'x'; 3 * 1024 * 1024];
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let head = format!(
+            "POST /hooks/a HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        client.write_all(head.as_bytes()).await.unwrap();
+        // Slower than the server's answer, as a real upload is.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        client
+            .write_all(&body)
+            .await
+            .expect("the server reset the upload");
+        let mut answer = Vec::new();
+        client.read_to_end(&mut answer).await.unwrap();
+        assert!(
+            answer.starts_with(b"HTTP/1.1 413 "),
+            "{}",
+            String::from_utf8_lossy(&answer)
+        );
+        server.await.unwrap();
+    }
 
     /// Reads a whole request from `input` (written up front, then closed).
     async fn read(input: &[u8]) -> (Result<(Head, Vec<u8>), Error>, Vec<u8>) {
