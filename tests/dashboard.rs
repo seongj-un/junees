@@ -644,3 +644,309 @@ async fn an_address_off_loopback_is_refused() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("loopback"), "{stderr}");
 }
+
+/// `POST path` with `headers` (lines without the final blank) and `body`.
+async fn post(dashboard: &Dashboard, path: &str, headers: &str, body: &str) -> Reply {
+    let mut stream = TcpStream::connect(("127.0.0.1", dashboard.port))
+        .await
+        .unwrap();
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n",
+        dashboard.host(),
+        body.len()
+    );
+    for line in headers.lines().filter(|line| !line.is_empty()) {
+        request.push_str(line);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(60), stream.read_to_end(&mut bytes))
+        .await
+        .expect("no answer")
+        .unwrap();
+    Reply::parse(&bytes)
+}
+
+/// The headers of a write from the page: its Origin and the token.
+fn from_page(dashboard: &Dashboard) -> String {
+    format!(
+        "Origin: http://{}\nAuthorization: Bearer {}",
+        dashboard.host(),
+        dashboard.token
+    )
+}
+
+#[tokio::test]
+async fn a_session_reads_page_by_page_without_secrets_or_thinking() {
+    let home = Home::new();
+    let id = "20261113-010203-abcd";
+    home.journal(
+        id,
+        &[
+            json!({"type": "message", "role": "user", "ts": 1_763_000_000u64,
+                   "content": [{"type": "text", "text": format!("Fix the login bug\nkey {PASTED_KEY}")}]}),
+            json!({"type": "message", "role": "assistant", "ts": 1_763_000_010u64, "content": [
+                {"type": "thinking", "thinking": "a private plan", "signature": "sig"},
+                {"type": "text", "text": "z".repeat(9_000)},
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls -la"}}]}),
+            json!({"type": "message", "role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "e".repeat(3_000), "is_error": true}]}),
+            assistant("Done."),
+        ],
+    );
+    let dashboard = Dashboard::start(&home).await;
+
+    let page = dashboard.json(&format!("/api/sessions/{id}")).await;
+    assert_eq!(page["id"], id);
+    assert_eq!(page["title"], "Fix the login bug");
+    assert_eq!(page["cwd"], home.work.to_str().unwrap());
+    assert!(page["updated_at"].as_str().unwrap().ends_with('Z'));
+    assert_eq!((&page["total"], &page["offset"]), (&json!(4), &json!(0)));
+    let messages = page["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["at"], "2025-11-13T02:13:20Z");
+    assert_eq!(messages[3]["at"], Value::Null);
+    let text = messages[0]["blocks"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Fix the login bug\nkey "), "{text}");
+    assert!(text.contains("[hidden]"), "{text}");
+    let blocks = messages[1]["blocks"].as_array().unwrap();
+    assert_eq!(blocks[0], json!({"type": "thinking"}));
+    assert_eq!(blocks[1]["text"].as_str().unwrap().chars().count(), 8_000);
+    assert_eq!(blocks[1]["truncated"], true);
+    assert_eq!(
+        blocks[2],
+        json!({"type": "tool_use", "name": "bash", "input_preview": "ls -la"})
+    );
+    let result = &messages[2]["blocks"][0];
+    assert_eq!(result["type"], "tool_result");
+    assert_eq!(result["is_error"], true);
+    assert_eq!(result["text_preview"].as_str().unwrap().len(), 2_000);
+    assert_eq!(result["truncated"], true);
+    assert!(messages[3]["blocks"][0].get("truncated").is_none());
+    let body = dashboard.get(&format!("/api/sessions/{id}")).await.body;
+    assert!(
+        !body.contains(PASTED_KEY) && !body.contains(&PASTED_KEY[..16]),
+        "{body}"
+    );
+    assert!(!body.contains("a private plan"), "{body}");
+
+    let page = dashboard
+        .json(&format!("/api/sessions/{id}?offset=1&limit=2"))
+        .await;
+    let indexes: Vec<&Value> = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| &message["index"])
+        .collect();
+    assert_eq!(indexes, [&json!(1), &json!(2)]);
+    assert_eq!((&page["total"], &page["offset"]), (&json!(4), &json!(1)));
+    let page = dashboard
+        .json(&format!("/api/sessions/{id}?offset=9"))
+        .await;
+    assert_eq!(page["messages"], json!([]));
+
+    for (path, status, code) in [
+        ("/api/sessions/nope-1234", 404, "not_found"),
+        ("/api/sessions/..%2Fconfig", 400, "bad_id"),
+        ("/api/sessions/../config.toml", 400, "bad_id"),
+        ("/api/sessions/a.jsonl", 400, "bad_id"),
+        (&format!("/api/sessions/{id}?limit=201"), 400, "bad_query"),
+        (&format!("/api/sessions/{id}?offset=-1"), 400, "bad_query"),
+    ] {
+        let reply = dashboard.get(path).await;
+        assert_eq!(
+            (reply.status, reply.error()),
+            (status, json!(code)),
+            "{path}"
+        );
+    }
+    // A link in the sessions folder is not followed.
+    std::os::unix::fs::symlink(
+        home.state.join("config.toml"),
+        home.state.join("sessions/linked.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(dashboard.get("/api/sessions/linked").await.status, 404);
+}
+
+#[tokio::test]
+async fn pause_and_resume_need_the_page_and_change_the_stores() {
+    let home = Home::new();
+    let work = home.work.to_str().unwrap().to_string();
+    home.run(&[
+        "cron", "add", "every 2h", "check", "--name", "daily", "--dir", &work,
+    ])
+    .await;
+    home.run(&[
+        "webhook",
+        "add",
+        "gh",
+        "--prompt",
+        "x",
+        "--secret-env",
+        HOOK_SECRET_ENV,
+        "--dir",
+        &work,
+    ])
+    .await;
+    let jobs_path = home.state.join("cron/jobs.json");
+    let read_jobs = || -> Value {
+        serde_json::from_str(&std::fs::read_to_string(&jobs_path).unwrap()).unwrap()
+    };
+    let id = read_jobs()["jobs"][0]["id"].as_str().unwrap().to_string();
+    let dashboard = Dashboard::start(&home).await;
+    let pause = format!("/api/cron/{id}/pause");
+    let page = from_page(&dashboard);
+
+    // The guards, none of which writes or logs.
+    let token = format!("Authorization: Bearer {}", dashboard.token);
+    let reply = post(&dashboard, &pause, &token, "").await;
+    assert_eq!(
+        (reply.status, reply.error()),
+        (403, json!("forbidden_origin"))
+    );
+    let reply = post(
+        &dashboard,
+        &pause,
+        &format!("Origin: http://evil.example\n{token}"),
+        "",
+    )
+    .await;
+    assert_eq!(
+        (reply.status, reply.error()),
+        (403, json!("forbidden_origin"))
+    );
+    let reply = post(
+        &dashboard,
+        &pause,
+        &format!("Origin: http://{}", dashboard.host()),
+        "",
+    )
+    .await;
+    assert_eq!((reply.status, reply.error()), (401, json!("unauthorized")));
+    let reply = post(
+        &dashboard,
+        &pause,
+        &format!("{page}\nContent-Type: text/plain"),
+        "",
+    )
+    .await;
+    assert_eq!(
+        (reply.status, reply.error()),
+        (415, json!("unsupported_media_type"))
+    );
+    let reply = post(&dashboard, &pause, &page, "{\"paused\":true}").await;
+    assert_eq!((reply.status, reply.error()), (400, json!("bad_body")));
+    let reply = dashboard.get(&pause).await;
+    assert_eq!((reply.status, reply.header("allow")), (405, Some("POST")));
+    let reply = post(&dashboard, "/api/cron", &page, "").await;
+    assert_eq!((reply.status, reply.header("allow")), (405, Some("GET")));
+    assert_eq!(read_jobs()["jobs"][0]["paused"], false);
+    assert!(!home.state.join("dashboard.log").exists());
+
+    // Pause and resume.
+    let reply = post(
+        &dashboard,
+        &pause,
+        &format!("{page}\nContent-Type: application/json"),
+        "{}",
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    has_security_headers(&reply, "pause");
+    let job: Value = serde_json::from_str(&reply.body).unwrap();
+    assert_eq!((&job["id"], &job["paused"]), (&json!(id), &json!(true)));
+    assert_eq!(job["schedule"], "every 2h");
+    assert_eq!(read_jobs()["jobs"][0]["paused"], true);
+    let reply = post(&dashboard, &format!("/api/cron/{id}/resume"), &page, "").await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let job: Value = serde_json::from_str(&reply.body).unwrap();
+    assert_eq!(job["paused"], false);
+    assert!(job["next_run"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(read_jobs()["jobs"][0]["paused"], false);
+    let reply = post(&dashboard, "/api/webhooks/gh/pause", &page, "").await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let route: Value = serde_json::from_str(&reply.body).unwrap();
+    assert_eq!(
+        (&route["name"], &route["paused"], &route["has_secret"]),
+        (&json!("gh"), &json!(true), &json!(true))
+    );
+
+    // Paused for the home folder: not resumed here.
+    let mut jobs = read_jobs();
+    jobs["jobs"][0]["paused"] = json!(true);
+    jobs["jobs"][0]["paused_for_home"] = json!(true);
+    std::fs::write(&jobs_path, jobs.to_string()).unwrap();
+    let reply = post(&dashboard, &format!("/api/cron/{id}/resume"), &page, "").await;
+    assert_eq!((reply.status, reply.error()), (409, json!("conflict")));
+    let message: Value = serde_json::from_str(&reply.body).unwrap();
+    assert!(
+        message["message"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("junees cron allow-home {id}")),
+        "{message}"
+    );
+    assert_eq!(read_jobs()["jobs"][0]["paused"], true);
+    let routes_path = home.state.join("webhooks/routes.json");
+    let mut routes: Value =
+        serde_json::from_str(&std::fs::read_to_string(&routes_path).unwrap()).unwrap();
+    routes["routes"][0]["paused_for_home"] = json!(true);
+    std::fs::write(&routes_path, routes.to_string()).unwrap();
+    let reply = post(&dashboard, "/api/webhooks/gh/resume", &page, "").await;
+    assert_eq!((reply.status, reply.error()), (409, json!("conflict")));
+    assert!(
+        reply.body.contains("junees webhook allow-home gh"),
+        "{}",
+        reply.body
+    );
+
+    for (path, status, code) in [
+        ("/api/cron/ffffffff/pause", 404, "not_found"),
+        ("/api/webhooks/nope/resume", 404, "not_found"),
+        ("/api/cron/a.b/pause", 400, "bad_id"),
+    ] {
+        let reply = post(&dashboard, path, &page, "").await;
+        assert_eq!(
+            (reply.status, reply.error()),
+            (status, json!(code)),
+            "{path}"
+        );
+    }
+
+    // One line per write that reached its target, and no token.
+    let log = std::fs::read_to_string(home.state.join("dashboard.log")).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 7, "{log}");
+    assert!(lines[0].ends_with(&format!(" pause cron {id} ok")), "{log}");
+    assert!(
+        lines[1].ends_with(&format!(" resume cron {id} ok")),
+        "{log}"
+    );
+    assert!(lines[2].ends_with(" pause webhook gh ok"), "{log}");
+    assert!(
+        lines[3].ends_with(&format!(" resume cron {id} 409 conflict")),
+        "{log}"
+    );
+    assert!(
+        lines[4].ends_with(" resume webhook gh 409 conflict"),
+        "{log}"
+    );
+    assert!(
+        lines[5].ends_with(" pause cron ffffffff 404 not_found"),
+        "{log}"
+    );
+    assert!(lines[0].split(' ').next().unwrap().ends_with('Z'), "{log}");
+    assert!(!log.contains(&dashboard.token));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(home.state.join("dashboard.log"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
