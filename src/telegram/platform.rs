@@ -20,7 +20,7 @@ use crate::approval::{Request, render};
 use crate::gateway::ask::{
     Choice, Question, WITH_BUTTONS, button_data, fence_safe, human, without_buttons,
 };
-use crate::gateway::platform::Platform;
+use crate::gateway::platform::{Attached, Kind, Platform};
 use crate::gateway::split::{length, split_plain};
 use crate::images::{Image, MAX_IMAGE_BYTES, too_large};
 use crate::prompt_text::escape_hidden;
@@ -104,21 +104,67 @@ fn in_url_path(before: &str) -> bool {
     })
 }
 
-/// An image attached to a message: a photo, or a document that is an
-/// image.
+/// A file attached to a message: a photo or a document that is an image,
+/// or a voice message, audio file or document that is audio.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramFile {
-    /// How the file is named in notes: the document's file name (hidden
-    /// characters escaped), or `photo`.
+    /// How the file is named in notes: the document's or audio's file
+    /// name (hidden characters escaped), `photo` or `voice message`.
     pub name: String,
     pub file_id: String,
     /// Bytes, as Telegram reports them (0 when it does not).
     pub size: u64,
+    pub kind: Kind,
+}
+
+impl Attached for TelegramFile {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn kind(&self) -> &Kind {
+        &self.kind
+    }
+}
+
+/// The voice message or audio file of `message` (`voice`, `audio`), if
+/// any. Sizes are checked against the transcription limit when its turn
+/// starts.
+fn audio_file(message: &Value, notes: &mut Vec<String>) -> Option<TelegramFile> {
+    let (key, item) = ["voice", "audio"]
+        .into_iter()
+        .find_map(|key| Some((key, message.get(key)?)))?;
+    let text = |name: &str| item.get(name).and_then(Value::as_str);
+    let name = match key {
+        "voice" => "voice message".to_string(),
+        _ => escape_hidden(text("file_name").unwrap_or("audio file")),
+    };
+    let Some(file_id) = text("file_id") else {
+        notes.push(format!("the {name} has no file id"));
+        return None;
+    };
+    let mime = text("mime_type").unwrap_or(match key {
+        "voice" => "audio/ogg",
+        _ => "audio/mpeg",
+    });
+    Some(TelegramFile {
+        name,
+        file_id: file_id.to_string(),
+        size: item.get("file_size").and_then(Value::as_u64).unwrap_or(0),
+        kind: Kind::Audio {
+            mime: mime.to_string(),
+        },
+    })
 }
 
 /// The image of `message` (`photo`, or a `document` with an image MIME
-/// type), and a note for what is left out: a document that is no image,
-/// a file over [`MAX_IMAGE_BYTES`], or other media.
+/// type) or its audio (`voice`, `audio`, or a `document` with an audio
+/// MIME type), and a note for what is left out: a document that is
+/// neither, an image over [`MAX_IMAGE_BYTES`], or other media.
 pub fn attachments(message: &Value) -> (Vec<TelegramFile>, Vec<String>) {
     let mut files = Vec::new();
     let mut notes = Vec::new();
@@ -135,6 +181,7 @@ pub fn attachments(message: &Value) -> (Vec<TelegramFile>, Vec<String>) {
                 name: "photo".to_string(),
                 file_id: file_id.to_string(),
                 size: size_of(size).unwrap_or(0),
+                kind: Kind::Image,
             }),
             None => {
                 let largest = sizes.iter().filter_map(size_of).max().unwrap_or(0);
@@ -156,8 +203,19 @@ pub fn attachments(message: &Value) -> (Vec<TelegramFile>, Vec<String>) {
             .get("file_size")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        let audio = text("mime_type").filter(|kind| kind.starts_with("audio/"));
         match (image, text("file_id")) {
-            (false, _) => notes.push(format!("\"{name}\" is not an image; only images are read")),
+            (false, Some(file_id)) if audio.is_some() => files.push(TelegramFile {
+                name,
+                file_id: file_id.to_string(),
+                size,
+                kind: Kind::Audio {
+                    mime: audio.unwrap_or_default().to_string(),
+                },
+            }),
+            (false, _) => notes.push(format!(
+                "\"{name}\" is not an image or audio; only those are read"
+            )),
             (true, _) if size > MAX_IMAGE_BYTES => {
                 notes.push(format!("\"{name}\": {}", too_large(size)))
             }
@@ -166,21 +224,21 @@ pub fn attachments(message: &Value) -> (Vec<TelegramFile>, Vec<String>) {
                 name,
                 file_id: file_id.to_string(),
                 size,
+                kind: Kind::Image,
             }),
         }
     }
+    files.extend(audio_file(message, &mut notes));
     for (key, what) in [
         ("video", "a video"),
         ("animation", "an animation"),
-        ("audio", "an audio file"),
-        ("voice", "a voice message"),
         ("video_note", "a video message"),
         ("sticker", "a sticker"),
     ] {
         // An animation also comes as a document; one note is enough.
         if message.get(key).is_some() && !(key == "animation" && message.get("document").is_some())
         {
-            notes.push(format!("{what} is not read; only images are"));
+            notes.push(format!("{what} is not read; only images and audio are"));
         }
     }
     (files, notes)
@@ -366,33 +424,43 @@ impl Telegram {
     }
 
     async fn fetch(&self, file: &TelegramFile) -> Result<Image, String> {
-        let name = if file.name == "photo" {
-            "the photo".to_string()
-        } else {
-            format!("\"{}\"", file.name)
+        let name = Self::named(file);
+        let bytes = match self.bytes(file, MAX_IMAGE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(Ok(len)) => return Err(format!("{name}: {}", too_large(len))),
+            Err(Err(why)) => return Err(why),
         };
+        let (image, _) = Image::from_bytes(&bytes).map_err(|err| format!("{name}: {err}"))?;
+        Ok(image)
+    }
+
+    /// How `file` is named in notes.
+    fn named(file: &TelegramFile) -> String {
+        match file.name.as_str() {
+            "photo" | "voice message" => format!("the {}", file.name),
+            name => format!("\"{name}\""),
+        }
+    }
+
+    /// The file's bytes ([`Platform::fetch_audio`]'s answer). The Bot API
+    /// gives out files up to 20 MB.
+    async fn bytes(&self, file: &TelegramFile, limit: u64) -> Result<Vec<u8>, Result<u64, String>> {
+        let name = Self::named(file);
         let failed = |why: String| format!("{name} could not be downloaded: {why}");
         let info = self
             .api
             .get_file(&file.file_id)
             .await
-            .map_err(|err| failed(err.to_string()))?;
+            .map_err(|err| Err(failed(err.to_string())))?;
         if let Some(size) = info.size
-            && size > MAX_IMAGE_BYTES
+            && size > limit
         {
-            return Err(format!("{name}: {}", too_large(size)));
+            return Err(Ok(size));
         }
-        let bytes = match self
-            .api
-            .download(&info.path, MAX_IMAGE_BYTES, DOWNLOAD_TIMEOUT)
+        self.api
+            .download(&info.path, limit, DOWNLOAD_TIMEOUT)
             .await
-        {
-            Ok(bytes) => bytes,
-            Err(Ok(len)) => return Err(format!("{name}: {}", too_large(len))),
-            Err(Err(why)) => return Err(failed(why)),
-        };
-        let (image, _) = Image::from_bytes(&bytes).map_err(|err| format!("{name}: {err}"))?;
-        Ok(image)
+            .map_err(|err| err.map_err(failed))
     }
 }
 
@@ -431,6 +499,14 @@ impl Platform for Telegram {
             .typing(Self::target(channel)?)
             .await
             .map_err(Into::into)
+    }
+
+    async fn fetch_audio(
+        &self,
+        attachment: &TelegramFile,
+        limit: u64,
+    ) -> Result<Vec<u8>, Result<u64, String>> {
+        self.bytes(attachment, limit).await
     }
 
     async fn fetch_all(&self, attachments: &[TelegramFile]) -> (Vec<Image>, Vec<String>) {
@@ -663,7 +739,7 @@ mod tests {
         assert!(files.is_empty());
         assert!(notes[0].contains("\\u{202e}") && notes[0].contains("not an image"));
 
-        let message = json!({"sticker": {"file_id": "s"}, "voice": {"file_id": "v"}});
+        let message = json!({"sticker": {"file_id": "s"}, "video": {"file_id": "v"}});
         let (files, notes) = attachments(&message);
         assert!(files.is_empty());
         assert_eq!(notes.len(), 2, "{notes:?}");
@@ -694,5 +770,40 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("<b>") && !html.contains("<code>"), "{html}");
+    }
+
+    #[test]
+    fn voice_messages_audio_and_audio_documents_are_audio() {
+        let audio = |mime: &str| Kind::Audio { mime: mime.into() };
+        let message = json!({"sticker": {"file_id": "s"},
+            "voice": {"file_id": "v", "mime_type": "audio/ogg", "file_size": 2048}});
+        let (files, notes) = attachments(&message);
+        assert_eq!(notes, ["a sticker is not read; only images and audio are"]);
+        assert_eq!(
+            files,
+            [TelegramFile {
+                name: "voice message".into(),
+                file_id: "v".into(),
+                size: 2048,
+                kind: audio("audio/ogg"),
+            }]
+        );
+        let (files, _) = attachments(&json!({"voice": {"file_id": "v"}}));
+        assert_eq!(files[0].kind, audio("audio/ogg"));
+        let (files, _) =
+            attachments(&json!({"audio": {"file_id": "a", "file_name": "memo\u{202e}.m4a"}}));
+        assert_eq!(files[0].kind, audio("audio/mpeg"));
+        assert!(files[0].name.contains("\\u{202e}"), "{}", files[0].name);
+        // Over the image limit, still kept: transcription has its own.
+        let (files, notes) = attachments(&json!({"document": {"file_id": "d",
+            "file_name": "rec.wav", "mime_type": "audio/wav", "file_size": 99_000_000u64}}));
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            (files[0].size, &files[0].kind),
+            (99_000_000, &audio("audio/wav"))
+        );
+        let (files, notes) = attachments(&json!({"voice": {"duration": 3}}));
+        assert!(files.is_empty());
+        assert_eq!(notes, ["the voice message has no file id"]);
     }
 }

@@ -22,11 +22,31 @@ use super::ask::Question;
 use crate::approval::Request;
 use crate::images::Image;
 
+/// What an attachment the gateway reads holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Kind {
+    /// A picture, for the model.
+    Image,
+    /// A voice message or audio file, transcribed ([`crate::transcribe`]);
+    /// `mime` as the platform gave it.
+    Audio { mime: String },
+}
+
+/// What the channel engine reads of an attachment.
+pub trait Attached {
+    /// How it is named in notes, hidden characters escaped.
+    fn name(&self) -> &str;
+    /// Bytes, as the platform reports them (0 when it does not).
+    fn size(&self) -> u64;
+    fn kind(&self) -> &Kind;
+}
+
 #[async_trait]
 pub trait Platform: Send + Sync + 'static {
-    /// An image attached to a message, as the platform names it; it is
-    /// downloaded when its turn starts.
-    type Attachment: Send + 'static;
+    /// An image or audio file attached to a message, as the platform names
+    /// it; it is downloaded when its turn starts, and audio only when
+    /// transcription is on.
+    type Attachment: Attached + Send + Sync + 'static;
 
     /// What a conversation's place is called in replies and log lines
     /// (`channel`, `chat`).
@@ -53,6 +73,16 @@ pub trait Platform: Send + Sync + 'static {
     /// Downloads `attachments` one after the other: the images that came,
     /// and a note for each that did not.
     async fn fetch_all(&self, attachments: &[Self::Attachment]) -> (Vec<Image>, Vec<String>);
+
+    /// Downloads an audio attachment ([`Kind::Audio`]) from the platform's
+    /// own hosts: its bytes, `Err(Ok(len))` when it holds more than
+    /// `limit` (`len` as far as known), or `Err(Err(why))` in words that
+    /// name the file but never its URL.
+    async fn fetch_audio(
+        &self,
+        attachment: &Self::Attachment,
+        limit: u64,
+    ) -> Result<Vec<u8>, Result<u64, String>>;
 
     /// How a gateway command is written in a reply (`` `!new` ``, `/new`).
     fn command(&self, word: &str) -> String;

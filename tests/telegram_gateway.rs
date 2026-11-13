@@ -658,6 +658,16 @@ fn start(
     home: Option<PathBuf>,
     cwd: &Path,
 ) -> Running {
+    start_voice(config, engines, home, cwd, None)
+}
+
+fn start_voice(
+    config: TelegramConfig,
+    engines: Arc<dyn Engines>,
+    home: Option<PathBuf>,
+    cwd: &Path,
+    transcriber: Option<Arc<junees::transcribe::Transcriber>>,
+) -> Running {
     let (log, lines) = capture();
     let gateway = TelegramGateway {
         config,
@@ -673,6 +683,7 @@ fn start(
         },
         typing_every: Duration::from_secs(3600),
         log,
+        transcriber,
     };
     let stop = Cancel::new();
     let cancel = stop.clone();
@@ -1711,7 +1722,7 @@ async fn photos_and_albums_reach_the_model() {
         "file_name": "notes.txt", "mime_type": "text/plain", "file_size": 10});
     bot.push(document);
     bot.wait_post(&me, |p| {
-        p == "(attachments left out: \"notes.txt\" is not an image; only images are read)"
+        p == "(attachments left out: \"notes.txt\" is not an image or audio; only those are read)"
     })
     .await;
     // Both parts of the album in one batch: hold the poll until both are

@@ -629,6 +629,17 @@ fn start_with(
     cwd: &Path,
     memory: Option<Memory>,
 ) -> Running {
+    start_with_voice(config, engines, home, cwd, memory, None)
+}
+
+fn start_with_voice(
+    config: DiscordConfig,
+    engines: Arc<dyn Engines>,
+    home: Option<PathBuf>,
+    cwd: &Path,
+    memory: Option<Memory>,
+    transcriber: Option<Arc<junees::transcribe::Transcriber>>,
+) -> Running {
     let (log, lines) = capture();
     let gateway = Gateway {
         config,
@@ -639,6 +650,7 @@ fn start_with(
         timing: timing(),
         typing_every: Duration::from_secs(3600),
         log,
+        transcriber,
     };
     let stop = Cancel::new();
     let cancel = stop.clone();
@@ -2213,7 +2225,7 @@ async fn attached_images_reach_the_model() {
     );
     assert!(
         posts.contains(
-            &"(attachments left out: `notes.txt` is not an image; only images are read)"
+            &"(attachments left out: `notes.txt` is not an image or audio; only those are read)"
                 .to_string()
         ),
         "{posts:#?}"

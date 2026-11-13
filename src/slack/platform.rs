@@ -29,7 +29,7 @@ use crate::approval::{Request, render};
 use crate::gateway::ask::{
     Choice, Question, WITH_BUTTONS, button_data, fence_safe, human, without_buttons,
 };
-use crate::gateway::platform::Platform;
+use crate::gateway::platform::{Attached, Kind, Platform};
 use crate::gateway::split::{length, split_message};
 use crate::images::{Image, MAX_IMAGE_BYTES, too_large};
 use crate::prompt_text::escape_hidden;
@@ -49,7 +49,7 @@ pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Image types Junees reads.
 const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
-/// An image file attached to a message.
+/// An image or audio file attached to a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlackFile {
     /// The file name, hidden characters escaped.
@@ -58,10 +58,26 @@ pub struct SlackFile {
     pub url: String,
     /// Bytes, as Slack reports them (0 when it does not).
     pub size: u64,
+    pub kind: Kind,
 }
 
-/// The images in `event`'s `files`, and a note for what is left out: a
-/// file that is no image, one over [`MAX_IMAGE_BYTES`], a remote file
+impl Attached for SlackFile {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn kind(&self) -> &Kind {
+        &self.kind
+    }
+}
+
+/// The images and audio files (`mimetype` `audio/*`, sizes checked when
+/// the turn starts) in `event`'s `files`, and a note for what is left
+/// out: a file that is neither, an image over [`MAX_IMAGE_BYTES`], a remote file
 /// (its URL may point anywhere: "Never send Slack credentials to a host
 /// outside Slack"), one Slack does not give out (`file_access`), and any
 /// past [`MAX_ATTACHMENTS`].
@@ -81,27 +97,36 @@ pub fn attachments(event: &Value) -> (Vec<SlackFile>, Vec<String>) {
             || file.get("is_external").and_then(Value::as_bool) == Some(true)
             || text("filetype") == Some("remote");
         let url = text("url_private_download").or(text("url_private"));
-        let image = text("mimetype").is_some_and(|kind| IMAGE_TYPES.contains(&kind));
+        let kind = match text("mimetype") {
+            Some(mime) if IMAGE_TYPES.contains(&mime) => Some(Kind::Image),
+            Some(mime) if mime.starts_with("audio/") => Some(Kind::Audio {
+                mime: mime.to_string(),
+            }),
+            _ => None,
+        };
         if remote {
             notes.push(format!(
                 "\"{name}\" is stored outside Slack; not downloaded"
             ));
         } else if text("file_access").is_some_and(|access| access != "visible") {
             notes.push(format!("\"{name}\" is not available to the bot"));
-        } else if !image {
-            notes.push(format!("\"{name}\" is not an image; only images are read"));
-        } else if size > MAX_IMAGE_BYTES {
+        } else if kind.is_none() {
+            notes.push(format!(
+                "\"{name}\" is not an image or audio; only those are read"
+            ));
+        } else if kind == Some(Kind::Image) && size > MAX_IMAGE_BYTES {
             notes.push(format!("\"{name}\": {}", too_large(size)));
         } else if let Some(url) = url {
             if files.len() == MAX_ATTACHMENTS {
                 notes.push(format!(
-                    "\"{name}\" left out: at most {MAX_ATTACHMENTS} images per message"
+                    "\"{name}\" left out: at most {MAX_ATTACHMENTS} files per message"
                 ));
             } else {
                 files.push(SlackFile {
                     name,
                     url: url.to_string(),
                     size,
+                    kind: kind.unwrap_or(Kind::Image),
                 });
             }
         } else {
@@ -252,6 +277,19 @@ impl Platform for Slack {
 
     async fn typing(&self, _channel: &str) -> Result<()> {
         Ok(())
+    }
+
+    async fn fetch_audio(
+        &self,
+        attachment: &SlackFile,
+        limit: u64,
+    ) -> Result<Vec<u8>, Result<u64, String>> {
+        self.api
+            .download(&attachment.url, limit, DOWNLOAD_TIMEOUT)
+            .await
+            .map_err(|err| {
+                err.map_err(|why| format!("\"{}\" could not be downloaded: {why}", attachment.name))
+            })
     }
 
     async fn fetch_all(&self, attachments: &[SlackFile]) -> (Vec<Image>, Vec<String>) {
@@ -578,5 +616,31 @@ mod tests {
         );
         assert!(text.contains("within 5m"), "{text}");
         assert!(!text.contains("**"), "{text}");
+    }
+
+    #[test]
+    fn audio_files_are_kept_for_transcription() {
+        let event = json!({"files": [
+            {"name": "clip.webm", "mimetype": "audio/webm", "size": 90_000_000u64,
+             "url_private_download": "https://files.slack.com/files-pri/T-F/clip.webm"},
+            {"name": "notes.txt", "mimetype": "text/plain", "size": 3,
+             "url_private_download": "https://files.slack.com/files-pri/T-F/notes.txt"}
+        ]});
+        let (files, notes) = attachments(&event);
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            (files[0].name.as_str(), files[0].size, &files[0].kind),
+            (
+                "clip.webm",
+                90_000_000,
+                &Kind::Audio {
+                    mime: "audio/webm".into()
+                }
+            )
+        );
+        assert_eq!(
+            notes,
+            ["\"notes.txt\" is not an image or audio; only those are read"]
+        );
     }
 }
