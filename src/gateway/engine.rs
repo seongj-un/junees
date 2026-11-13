@@ -241,6 +241,23 @@ impl Engines for ApiEngines {
     }
 
     fn open(&self, ask: Box<dyn Ask>, cancel: Cancel) -> Result<Box<dyn Conversation>> {
+        Ok(Box::new(ApiConversation {
+            agent: self.agent(ask, cancel)?,
+            config: Arc::clone(&self.config),
+            cwd: self.cwd.clone(),
+            plugins: Arc::clone(&self.plugins),
+            note: self.note,
+        }))
+    }
+}
+
+impl ApiEngines {
+    /// The agent of a new conversation, with the tools, memory, skills,
+    /// MCP servers and plugins of the terminal conversation, asking `ask`
+    /// before risky calls (unless approval is off) and stopping on
+    /// `cancel`. [`Engines::open`] wraps it; the dashboard's chat drives it
+    /// itself for the events it streams.
+    pub fn agent(&self, ask: Box<dyn Ask>, cancel: Cancel) -> Result<Agent> {
         let config = &self.config;
         let memory = memory(config, &self.cwd);
         // With a gate, Junees's own state-changing commands go to its
@@ -300,13 +317,7 @@ impl Engines for ApiEngines {
         if let Some(after_turn) = self.plugins.after_turn() {
             agent = agent.with_after_turn(after_turn);
         }
-        Ok(Box::new(ApiConversation {
-            agent,
-            config: Arc::clone(config),
-            cwd: self.cwd.clone(),
-            plugins: Arc::clone(&self.plugins),
-            note: self.note,
-        }))
+        Ok(agent)
     }
 }
 

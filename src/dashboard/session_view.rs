@@ -13,7 +13,7 @@ use crate::message::{ContentBlock, Role};
 const PAGE: (u32, u32) = (100, 200);
 /// Characters of a text block, and of a tool call's input or a result.
 const TEXT_CHARS: usize = 8_000;
-const PREVIEW_CHARS: usize = 2_000;
+pub(super) const PREVIEW_CHARS: usize = 2_000;
 /// Characters kept past a cut before secrets are hidden: a secret that
 /// crosses the cut is whole within it, so it is found and hidden.
 const SECRET_MARGIN: usize = 512;
@@ -195,7 +195,7 @@ fn block_json(settings: &Settings, block: &ContentBlock) -> Value {
 
 /// A tool call's input as text: the command of a `bash` call (or the
 /// only string of an input with one field), else its JSON.
-fn input_text(input: &Value) -> String {
+pub(super) fn input_text(input: &Value) -> String {
     if let Some(object) = input.as_object() {
         if let Some(command) = object.get("command").and_then(Value::as_str) {
             return command.to_string();
@@ -212,7 +212,7 @@ fn input_text(input: &Value) -> String {
 /// The first `chars` characters of `text` with its secrets hidden, and
 /// whether it was cut. Secrets are hidden before the cut, in what lies
 /// up to [`SECRET_MARGIN`] past it.
-fn cut(settings: &Settings, text: &str, chars: usize) -> (String, bool) {
+pub(super) fn cut(settings: &Settings, text: &str, chars: usize) -> (String, bool) {
     let mut near: String = text.chars().take(chars + SECRET_MARGIN).collect();
     crate::doctor::hide_secrets_in_user_text(settings, std::iter::once(&mut near));
     let truncated = text.chars().nth(chars).is_some();

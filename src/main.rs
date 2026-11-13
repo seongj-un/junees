@@ -144,7 +144,13 @@ async fn run() -> Result<ExitCode> {
         }
         // Reads the settings and the state folder on each request; needs
         // no API key.
-        Command::Dashboard(options) => return junees::dashboard::main(options).await,
+        Command::Dashboard(options) => {
+            let chat = match options.chat {
+                true => Some(dashboard_chat(options.dir.as_deref()).await?),
+                false => None,
+            };
+            return junees::dashboard::main(options, chat).await;
+        }
         Command::UpdateHelp => {
             print!("{}", junees::update::HELP);
             return Ok(ExitCode::SUCCESS);
@@ -955,6 +961,47 @@ async fn gateway_engines(settings: &Settings, note: &'static str) -> Result<Gate
         engines,
         config,
         cwd,
+        mcp,
+    })
+}
+
+/// What `junees dashboard --chat` talks with: Junees's own agent on the
+/// API in `dir` (default: the current folder), with the MCP servers and
+/// plugins of a terminal conversation there. The claude-code backend runs
+/// its commands without Junees's approval questions, so it is refused.
+async fn dashboard_chat(dir: Option<&Path>) -> Result<junees::dashboard::chat::Setup> {
+    let settings = Settings::from_env()?;
+    let backend = Backend::from_lookup(|key| settings.get(key))?;
+    if matches!(backend, Backend::ClaudeCode) {
+        anyhow::bail!(
+            "junees dashboard --chat talks with Junees's own agent on the API only: the \
+             claude-code backend runs commands without Junees's approval questions, so the page \
+             could not answer them (set backend = \"api\", or JUNEES_BACKEND=api)"
+        );
+    }
+    let dir = match dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("--dir {}: no such folder", dir.display()))?;
+    if !dir.is_dir() {
+        anyhow::bail!("--dir {} is not a folder", dir.display());
+    }
+    std::env::set_current_dir(&dir).with_context(|| format!("cannot work in {}", dir.display()))?;
+    let config = conversation_config(&settings, backend)?;
+    let mcp = start_mcp(&config, &dir).await;
+    let engines = ApiEngines::new(config.clone(), dir.clone())
+        .with_mcp(Arc::clone(&mcp))
+        .with_plugins(load_plugins(&config, &dir))
+        .with_note(junees::dashboard::chat::DASHBOARD_NOTE);
+    Ok(junees::dashboard::chat::Setup {
+        engines,
+        dir,
+        home: config.home.clone(),
+        model: config.model.clone(),
+        settings,
         mcp,
     })
 }
