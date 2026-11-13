@@ -219,6 +219,14 @@ junees dashboard --chat [--dir <폴더>]
   - 없는 질문은 404, 이미 닫힌 질문은 409 `conflict`입니다. `a`를 내놓지 않은 질문에 `a`를 보내면 400 `bad_body`입니다.
 - `POST /api/chat/<id>/cancel` → 200 `{"cancelled": true|false}`
   - 이 대화의 턴이 돌고 있으면 취소하고(Ctrl-C와 같음) `true`, 아니면 아무것도 하지 않고 `false`입니다.
+- `GET /api/chat/<id>/checkpoints` → 200 `[{"turn": n, "files": [{"path", "change": "created"|"modified"|"deleted", "restorable": bool}]}]`
+  - 이 대화(세션)에서 `write_file`, `edit_file`로 파일을 바꾼 턴들이고, 오래된 턴이 먼저입니다. 체크포인트가 꺼져 있으면 `[]`입니다.
+  - `restorable`은 지금 되돌리면 그대로 되돌아가는지입니다. 그 뒤에 파일이 바뀌었거나 너무 커서 기록하지 않은 파일은 `false`입니다([파일 체크포인트](checkpoints.md)).
+- `POST /api/chat/<id>/undo` `{"turn": n, "force"?: bool}` → 200 `{"restored": [path, ...], "skipped": [{"path", "reason"}]}`
+  - `n`번째 턴과 그 뒤의 모든 턴을 최근 것부터 되돌립니다. 규칙은 `junees rewind --turn n`과 같습니다. `reason`은 `바뀐 뒤 수정됨`, `너무 커서 기록하지 않음`, `심볼릭 링크로 바뀜`, `일반 파일이 아님`, `쓰기 정책이 막음`, `turn이 만든 파일이 그 뒤 수정되어 지우지 않음` 중 하나입니다.
+  - 어느 대화든 턴이 돌고 있으면 409 `turn_running`이고, 되돌리는 동안에는 새 턴을 받지 않습니다(409 `turn_running`).
+  - `n`이 1보다 작거나 숫자가 아니면 400 `bad_body`, `n` 이후에 체크포인트가 없으면 404 `not_found`, 체크포인트가 꺼져 있으면 409 `checkpoints_off`입니다.
+  - 되돌린 뒤 이 대화의 다음 메시지 앞에 `[되돌림] …` 한 줄이 붙습니다. `dashboard.log`에 `chat <id> undo from turn <n>: <k> restored, <m> skipped`를 남깁니다(경로는 남기지 않습니다).
 - 없는 대화 id는 404입니다.
 
 ### 이벤트
@@ -246,7 +254,8 @@ junees dashboard --chat [--dir <폴더>]
 - 400 `bad_body`, `bad_query`(`after`가 0 이상의 정수가 아님)
 - 404 `not_found`: `--chat`이 아님, 없는 대화·질문·세션
 - 405: `GET /api/chat` 등 메서드가 다름
-- 409 `turn_running`, `session_busy`, `conflict`(닫힌 질문, claude-code 세션)
+- 409 `turn_running`, `session_busy`, `conflict`(닫힌 질문, claude-code 세션), `checkpoints_off`
+- 500 `checkpoints_unreadable`, `undo_failed`: 체크포인트 폴더를 읽지 못함
 - 413 `body_too_large`: 메시지 본문이 512KB보다 큼
 - 429 `too_many_streams`
 - 503 `chat_unavailable`(에이전트를 만들지 못함), `chat_stopped`(대화 스레드가 멈춤. 대시보드를 다시 띄웁니다)
