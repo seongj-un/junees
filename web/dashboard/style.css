@@ -1547,6 +1547,11 @@ a.button {
   background: var(--warn-soft);
 }
 
+/* Scrolled into view above the sticky message box, not under it. */
+.approval {
+  scroll-margin-bottom: 240px;
+}
+
 .approval:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
@@ -1698,9 +1703,14 @@ a.button {
 }
 
 @media (max-width: 720px) {
+  /* A sticky box would cover half of a phone screen and the question's buttons. */
   .chat-form {
-    bottom: 8px;
+    position: static;
     padding: 12px;
+  }
+
+  .approval {
+    scroll-margin-bottom: 16px;
   }
 
   .chat-hint {

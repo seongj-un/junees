@@ -80,7 +80,7 @@ test("answers keep the y, a, n order and offer a only when sent", () => {
 });
 
 test("closed questions, stop reasons and tool names read naturally", () => {
-  assert.match(closedText("n", "timeout"), /5분/);
+  assert.match(closedText("n", "timeout"), /시간 안에 답이 없어/);
   assert.equal(closedText("y", "browser"), "허용했습니다.");
   assert.match(closedText("a", "browser"), /다시 묻지 않습니다/);
   assert.equal(stopReasonText("end_turn"), null);

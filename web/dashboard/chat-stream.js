@@ -107,7 +107,7 @@ export function answerChoices(options) {
 
 /** What became of a question, from `approval_closed`. */
 export function closedText(answer, by) {
-  if (by === "timeout") return "5분 동안 답이 없어 거절했습니다.";
+  if (by === "timeout") return "정해진 시간 안에 답이 없어 거절했습니다.";
   switch (answer) {
     case "y":
       return "허용했습니다.";

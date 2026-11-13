@@ -36,3 +36,14 @@ DOM을 쓰지 않는 함수(`format.js`, `usage.js`, `routes.js`, 오류 문구�
 ```sh
 node --test web/dashboard/dev/test/
 ```
+
+## 대화 (19단계)
+
+- `--chat`으로 띄우면 `/api/status`가 `"chat": true`를 돌려주고 `/api/chat` API가 켜집니다. 답은 `chat_sim.py`의 정해진 대본으로 만듭니다.
+  - 메시지에 `정리`, `지워`, `승인`이 있으면 bash 명령 승인(허용, 항상 허용, 거절)을 묻습니다.
+  - `파일`이 있으면 작업 폴더 밖 쓰기 승인(허용, 거절)을 묻습니다.
+  - `오류`가 있으면 `error` 이벤트로 끝납니다.
+- `--approval-seconds 30`처럼 주면 승인 질문이 그 시간 뒤 거절로 닫힙니다(기본 300초).
+- `GET /__dev/drop-streams`는 열린 이벤트 스트림을 모두 끊습니다. 화면이 `after`로 다시 연결하는지 볼 때 씁니다.
+- 세션 화면의 "이 세션 이어서 대화"는 fixtures에 있는 세션만 이어 갈 수 있습니다. 다른 id는 404입니다.
+

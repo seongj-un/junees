@@ -182,10 +182,11 @@ export function messageView(message, now) {
 
 /** The "back to the list" link shown next to the title. */
 export function renderControls(root, ctx) {
-  root.replaceChildren(
-    ctx?.chat === true && ctx.args?.id ? el("a", { class: "button", href: chatHash(ctx.args.id) }, "이 세션 이어서 대화") : null,
-    el("a", { class: "button button-secondary", href: "#/sessions" }, "세션 목록으로"),
-  );
+  // replaceChildren would print a null as the text "null".
+  const links = [];
+  if (ctx?.chat === true && ctx.args?.id) links.push(el("a", { class: "button", href: chatHash(ctx.args.id) }, "이 세션 이어서 대화"));
+  links.push(el("a", { class: "button button-secondary", href: "#/sessions" }, "세션 목록으로"));
+  root.replaceChildren(...links);
 }
 
 export function render(root, data, ctx) {

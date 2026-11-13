@@ -135,7 +135,10 @@ class Chats:
                 chat.cond.wait(timeout=max(0.1, expires - time.time()))
             answer, by = (question["answer"], "browser") if question["answer"] else ("n", "timeout")
             question["closed"] = True
-        chat.emit({"type": "approval_closed", "question_id": question_id, "answer": answer, "by": by})
+        # The contract names no `by` for a cancelled turn; the turn_end that
+        # follows closes the card on the page.
+        if not (chat.cancelled and question["answer"] is None):
+            chat.emit({"type": "approval_closed", "question_id": question_id, "answer": answer, "by": by})
         return answer
 
     def run_turn(self, chat, turn, text):

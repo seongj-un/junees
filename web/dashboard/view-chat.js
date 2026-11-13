@@ -30,9 +30,9 @@ let mounts = 0;
 
 /** The 새 대화 link next to the title. */
 export function renderControls(root, ctx) {
-  root.replaceChildren(
-    ctx.args?.id ? el("a", { class: "button button-secondary", href: chatHash(null) }, "새 대화") : null,
-  );
+  // replaceChildren would print a null as the text "null".
+  if (ctx.args?.id) root.replaceChildren(el("a", { class: "button button-secondary", href: chatHash(null) }, "새 대화"));
+  else root.replaceChildren();
 }
 
 /**
@@ -172,6 +172,12 @@ class ChatView {
   updateCount() {
     const length = this.input.value.length;
     this.count.textContent = length > 30000 ? `${formatInt(length)} / 32,000자` : "";
+  }
+
+  /** "Waiting for your answer" while a question is open, else "making the answer". */
+  updateRunningNote() {
+    const waiting = [...this.questions.values()].some((q) => !q.closed);
+    this.runningNote.lastChild.textContent = waiting ? "승인을 기다리는 중입니다" : "답을 만드는 중입니다";
   }
 
   setRunning(running) {
@@ -479,10 +485,10 @@ class ChatView {
         el("pre", { class: "approval-summary" }, String(event.summary ?? "")),
         el(
           "p",
-          { class: "approval-help" },
+          { class: "approval-help", "data-open-only": "" },
           buttons.length === 3
-            ? "항상 허용을 고르면 이 대화에서는 같은 종류를 다시 묻지 않습니다. 답하지 않으면 거절합니다."
-            : "답하지 않으면 거절합니다.",
+            ? "항상 허용을 고르면 이 대화에서는 같은 종류를 다시 묻지 않습니다. 시간 안에 답하지 않으면 거절합니다."
+            : "시간 안에 답하지 않으면 거절합니다.",
         ),
       ),
       clock,
@@ -493,17 +499,21 @@ class ChatView {
     const question = { card, clock, status, buttons, deadline, closed: false };
     this.questions.set(qid, question);
     this.updateClock(question, Date.now());
+    this.updateRunningNote();
     // Bring it into view and to the keyboard, but on the card, not on a
     // button: an Enter meant for the message box must not answer it.
-    if (this.connected) {
+    // After the rest of this piece of the stream: a replayed question that
+    // closed right after it must not take the focus.
+    this.later(() => {
+      if (question.closed) return;
       card.focus({ preventScroll: true });
       card.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
-    }
+    }, 0);
   }
 
   updateClock(question, now) {
     if (question.closed) return;
-    question.clock.textContent = `${formatRemaining(question.deadline, now)} · 5분 안에 답하지 않으면 거절합니다`;
+    question.clock.textContent = formatRemaining(question.deadline, now);
   }
 
   updateClocks() {
@@ -514,6 +524,8 @@ class ChatView {
   async answer(qid, answer) {
     const question = this.questions.get(qid);
     if (!question || question.closed) return;
+    // Keep focus in the card: a disabled, then removed, button would drop it to the page.
+    question.card.focus({ preventScroll: true });
     for (const button of question.buttons) button.disabled = true;
     question.status.textContent = `${ANSWER_LABEL[answer]} 답을 보내는 중입니다`;
     try {
@@ -546,10 +558,12 @@ class ChatView {
     question.card.classList.add("approval-closed", event.answer === "n" || event.by === "timeout" ? "approval-no" : "approval-yes");
     question.clock.remove();
     question.buttons[0]?.parentElement?.remove();
+    question.card.querySelector("[data-open-only]")?.remove();
     const said = closedText(event.answer, event.by);
     question.status.textContent = said;
     if (hadFocus) question.card.focus({ preventScroll: true });
-    this.ctx.announce(`승인 질문: ${said}`);
+    this.updateRunningNote();
+    // question.status is a live region already; no second announcement.
   }
 
   usage(event) {
@@ -572,7 +586,10 @@ class ChatView {
         question.closed = true;
         question.clock.remove();
         question.buttons[0]?.parentElement?.remove();
-        question.status.textContent = "답을 받기 전에 이 답이 끝났습니다.";
+        question.card.querySelector("[data-open-only]")?.remove();
+        question.card.setAttribute("role", "group");
+        question.card.classList.add("approval-closed", "approval-no");
+        question.status.textContent = "답하기 전에 이 답이 끝나서 실행하지 않았습니다.";
       }
     }
     this.current = null;
