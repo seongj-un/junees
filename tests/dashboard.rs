@@ -146,6 +146,8 @@ impl Dashboard {
             .strip_prefix("Junees dashboard: http://127.0.0.1:")
             .unwrap_or_else(|| panic!("not an address: {line}"));
         let (port, token) = url.split_once("/#token=").unwrap();
+        // Read the rest, so the dashboard never writes to a closed pipe.
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
         Self {
             child,
             port: port.parse().unwrap(),
@@ -558,6 +560,38 @@ async fn the_dashboard_serves_the_contract_and_guards_it() {
         assert!(!body.contains(&dashboard.token), "{path} shows the token");
     }
     drop(dashboard.child);
+}
+
+#[tokio::test]
+async fn a_closed_stdout_does_not_stop_the_dashboard() {
+    let home = Home::new();
+    let mut child = home
+        .command(&["dashboard", "--no-open", "--listen", "127.0.0.1:0"])
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    // Closed before the dashboard prints anything.
+    drop(child.stdout.take());
+    let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
+    let line = tokio::time::timeout(Duration::from_secs(30), stderr.next_line())
+        .await
+        .expect("no warning printed")
+        .unwrap()
+        .expect("the dashboard exited");
+    let address = line
+        .strip_prefix("Cannot print the dashboard's address; it serves on ")
+        .and_then(|rest| rest.strip_suffix('.'))
+        .unwrap_or_else(|| panic!("not the warning: {line}"))
+        .to_string();
+    let mut stream = TcpStream::connect(&address).await.unwrap();
+    stream
+        .write_all(format!("GET / HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(Reply::parse(&bytes).status, 200);
+    assert!(child.try_wait().unwrap().is_none(), "the dashboard exited");
 }
 
 #[tokio::test]

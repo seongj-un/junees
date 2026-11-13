@@ -12,6 +12,7 @@ mod api;
 mod assets;
 pub mod server;
 
+use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -118,8 +119,21 @@ pub async fn main(options: Options) -> Result<ExitCode> {
         .local_addr()
         .context("cannot read the address it listens on")?;
     let url = page_url(address, &token);
-    println!("Junees dashboard: {url}");
-    println!("Read-only. The address holds a token for this run; Ctrl-C stops it.");
+    // Not println!: it panics when stdout is closed (`| head -1`, a closed
+    // terminal), and the server goes on without anyone reading it.
+    let mut out = std::io::stdout();
+    if writeln!(out, "Junees dashboard: {url}")
+        .and_then(|()| {
+            writeln!(
+                out,
+                "Read-only. The address holds a token for this run; Ctrl-C stops it."
+            )
+        })
+        .and_then(|()| out.flush())
+        .is_err()
+    {
+        eprintln!("Cannot print the dashboard's address; it serves on {address}.");
+    }
     if options.open {
         open_browser(&url);
     }
