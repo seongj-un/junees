@@ -90,7 +90,6 @@ impl Dashboard {
 
     /// A request with `headers` (lines without the end) and `body`.
     async fn send(&self, method: &str, path: &str, headers: &str, body: &str) -> (u16, Value) {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).await.unwrap();
         let mut request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n",
             self.host(),
@@ -102,12 +101,7 @@ impl Dashboard {
         }
         request.push_str("\r\n");
         request.push_str(body);
-        stream.write_all(request.as_bytes()).await.unwrap();
-        let mut bytes = Vec::new();
-        tokio::time::timeout(WAIT, stream.read_to_end(&mut bytes))
-            .await
-            .expect("no answer")
-            .unwrap();
+        let bytes = common::exchange(("127.0.0.1", self.port), request.as_bytes(), WAIT).await;
         let text = String::from_utf8_lossy(&bytes).to_string();
         let (head, body) = text.split_once("\r\n\r\n").expect("no head");
         let status = head.split(' ').nth(1).unwrap().parse().unwrap();

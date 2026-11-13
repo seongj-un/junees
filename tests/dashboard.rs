@@ -162,16 +162,13 @@ impl Dashboard {
     /// Sends `head` (the request line and headers, without the blank line)
     /// and reads the whole answer.
     async fn raw(&self, head: &str) -> Reply {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).await.unwrap();
-        stream
-            .write_all(format!("{head}\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
-        let mut bytes = Vec::new();
-        tokio::time::timeout(Duration::from_secs(60), stream.read_to_end(&mut bytes))
-            .await
-            .expect("no answer")
-            .unwrap();
+        let request = format!("{head}\r\n\r\n");
+        let bytes = common::exchange(
+            ("127.0.0.1", self.port),
+            request.as_bytes(),
+            Duration::from_secs(60),
+        )
+        .await;
         Reply::parse(&bytes)
     }
 
@@ -647,9 +644,6 @@ async fn an_address_off_loopback_is_refused() {
 
 /// `POST path` with `headers` (lines without the final blank) and `body`.
 async fn post(dashboard: &Dashboard, path: &str, headers: &str, body: &str) -> Reply {
-    let mut stream = TcpStream::connect(("127.0.0.1", dashboard.port))
-        .await
-        .unwrap();
     let mut request = format!(
         "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n",
         dashboard.host(),
@@ -661,12 +655,12 @@ async fn post(dashboard: &Dashboard, path: &str, headers: &str, body: &str) -> R
     }
     request.push_str("\r\n");
     request.push_str(body);
-    stream.write_all(request.as_bytes()).await.unwrap();
-    let mut bytes = Vec::new();
-    tokio::time::timeout(Duration::from_secs(60), stream.read_to_end(&mut bytes))
-        .await
-        .expect("no answer")
-        .unwrap();
+    let bytes = common::exchange(
+        ("127.0.0.1", dashboard.port),
+        request.as_bytes(),
+        Duration::from_secs(60),
+    )
+    .await;
     Reply::parse(&bytes)
 }
 

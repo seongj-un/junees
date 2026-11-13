@@ -83,6 +83,43 @@ pub fn outside_the_crate(path: &Path) -> bool {
     path.is_dir() && !path.starts_with(&crate_dir) && !crate_dir.starts_with(&path)
 }
 
+/// Sends `request` on a new connection to `address` and reads the whole
+/// answer (the server closes after it), within `wait`.
+///
+/// A server may answer a request it refuses (a body over its limit, a
+/// body it does not read) before reading all of it and then close. Writing
+/// the rest of the request then fails with a broken pipe or a reset, and
+/// a reset can also end the read after the answer arrived. Neither is a
+/// failure here: the answer is what the test checks, and it is read.
+pub async fn exchange(
+    address: impl tokio::net::ToSocketAddrs,
+    request: &[u8],
+    wait: Duration,
+) -> Vec<u8> {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionReset};
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    match stream.write_all(request).await {
+        Ok(()) => {}
+        Err(err) if matches!(err.kind(), BrokenPipe | ConnectionReset) => {}
+        Err(err) => panic!("cannot send the request: {err}"),
+    }
+    let mut bytes = Vec::new();
+    let read = async {
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            match stream.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Err(err) if err.kind() == ConnectionReset && !bytes.is_empty() => break,
+                Err(err) => panic!("cannot read the answer: {err}"),
+            }
+        }
+    };
+    tokio::time::timeout(wait, read).await.expect("no answer");
+    assert!(!bytes.is_empty(), "the server closed without an answer");
+    bytes
+}
+
 /// Serves the given (status, body) pairs to consecutive connections and
 /// returns every raw request it received. Error responses carry
 /// `retry-after: 0` so retries do not slow the tests down. Status 0 closes
