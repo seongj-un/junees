@@ -306,6 +306,12 @@ impl Sandbox {
             let sessions = state.as_deref().map(crate::session::sessions_dir);
             if tools.webhook {
                 hidden.extend(sessions);
+                // The old content of files other runs changed.
+                if let Some(state) = &state {
+                    let checkpoints = state.join(crate::checkpoints::FOLDER);
+                    read_only.retain(|path| *path != checkpoints);
+                    hidden.push(checkpoints);
+                }
             } else {
                 read_only.extend(sessions);
             }

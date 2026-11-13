@@ -269,6 +269,19 @@ async fn webhook_runs_do_not_read_saved_sessions() {
         "{}",
         output.content
     );
+    // Nor the old content of files in the file checkpoints.
+    let old = home.join(".junees/checkpoints/s/1/0.bin");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, "OLD_ENV_SECRET=1\n").unwrap();
+    let output = ReadFile::with_settings(&webhook)
+        .run(json!({"path": old}))
+        .await;
+    assert!(output.is_error, "{}", output.content);
+    assert!(
+        !output.content.contains("OLD_ENV_SECRET"),
+        "{}",
+        output.content
+    );
     // A scheduled job (the user's own prompt) still may.
     let cron = crate::cron::run::Trigger::Cron.tool_settings(&settings);
     let output = ReadFile::with_settings(&cron)

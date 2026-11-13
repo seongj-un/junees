@@ -562,6 +562,17 @@ impl Target {
     /// caller on one blocking thread cannot be stopped between creating
     /// the temporary file and renaming or removing it.
     pub fn replace(&self, bytes: &[u8], in_place: bool) -> io::Result<()> {
+        self.replace_as(bytes, in_place, None)
+    }
+
+    /// [`Target::replace`] through a temporary file whose permission bits
+    /// are set to `mode` before the rename (an undo putting back the bits a
+    /// file had), instead of the existing file's.
+    pub fn replace_with_mode(&self, bytes: &[u8], mode: Option<u32>) -> io::Result<()> {
+        self.replace_as(bytes, false, mode)
+    }
+
+    fn replace_as(&self, bytes: &[u8], in_place: bool, bits: Option<u32>) -> io::Result<()> {
         if let Some(stat) = &self.existing {
             writable_at(&self.dir, &self.name)?;
             if in_place && stat.nlink > 1 && self.links_in_place {
@@ -609,9 +620,11 @@ impl Target {
             // Keep the group where the owner may give it (a member of it),
             // before the mode: changing the group can clear setgid.
             let _ = chgrp(&file, stat.gid);
-            // The creation mode went through the umask; set the original
-            // exactly.
-            file.set_permissions(std::fs::Permissions::from_mode(stat.mode & 0o7777))?;
+        }
+        // The creation mode went through the umask; set the original (or
+        // the one asked for) exactly.
+        if let Some(bits) = bits.or(self.existing.as_ref().map(|stat| stat.mode & 0o7777)) {
+            file.set_permissions(std::fs::Permissions::from_mode(bits))?;
         }
         file.sync_all()?;
         drop(file);
@@ -719,6 +732,8 @@ impl Scope {
                 .and_then(SettingsFile::folder)
             {
                 scope.denied.push(crate::session::sessions_dir(&state));
+                // Nor the old content of files other runs changed.
+                scope.denied.push(state.join(crate::checkpoints::FOLDER));
             }
         }
         Some(scope)
@@ -776,8 +791,8 @@ impl Scope {
         };
         if let Some(denied) = within(&self.denied) {
             return Err(Refusal::Denied(format!(
-                "{shown} is a credential file or folder, a private Junees path or saved sessions \
-                 ({}). This run is unattended (a scheduled job or a webhook), and its file tools \
+                "{shown} is a credential file or folder, a private Junees path, saved sessions or \
+                 file checkpoints ({}). This run is unattended (a scheduled job or a webhook), and its file tools \
                  neither read nor change it.",
                 denied.display()
             )));

@@ -52,6 +52,11 @@ pub const TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// The setting that turns recording off (`checkpoints = false`).
 pub const ENV: &str = "JUNEES_CHECKPOINTS";
+/// The folder under `$JUNEES_HOME`. The model may not write it (it is one
+/// of the tools' data folders: a forged manifest would be written back by
+/// a person's undo) and a webhook run may not read it (it holds the old
+/// content of files, secrets included).
+pub const FOLDER: &str = "checkpoints";
 
 const MANIFEST: &str = "manifest.json";
 const TURNS: &str = "turns";
@@ -147,20 +152,32 @@ fn mkdir(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
-/// Writes `bytes` to `path` (0600) through a temporary file and a rename.
+/// Writes `bytes` to `path` (0600) through a new temporary file next to
+/// it (made with `O_EXCL | O_NOFOLLOW`, so a planted file or link there is
+/// never written through) and a rename.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temp = path.with_extension("tmp");
-    {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let written = (|| {
         let mut file = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    fs::rename(&temp, path)
+    written
 }
 
 fn now_text() -> String {
@@ -237,6 +254,9 @@ pub struct Recorded {
     /// The size, for `too_large`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// SHA-256 of what was there before the turn, for `content`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_sha256: Option<String>,
     /// SHA-256 of what the turn left; `None`: the turn removed it.
     pub after_sha256: Option<String>,
     pub at: String,
@@ -329,7 +349,7 @@ pub struct SessionStore {
 impl Store {
     pub fn new(home: &Path) -> Self {
         Self {
-            root: home.join("checkpoints"),
+            root: home.join(FOLDER),
         }
     }
 
@@ -514,7 +534,9 @@ pub mod reason {
     pub const LINK: &str = "심볼릭 링크로 바뀜";
     pub const NOT_FILE: &str = "일반 파일이 아님";
     pub const REFUSED: &str = "쓰기 정책이 막음";
-    pub const KEPT_CREATED: &str = "turn이 만든 파일이 그 뒤 수정되어 지우지 않음";
+    pub const KEPT_CREATED: &str = "턴이 만든 파일이 그 뒤 수정되어 지우지 않음";
+    pub const WRITE_FAILED: &str = "쓰지 못함";
+    pub const BAD_RECORD: &str = "기록이 올바르지 않음";
 }
 
 impl SessionStore {
@@ -548,15 +570,24 @@ impl SessionStore {
     /// that later turn's change is.
     pub fn list(&self) -> io::Result<Vec<Manifest>> {
         let mut manifests = self.read_manifests()?;
-        let mut later: HashMap<String, bool> = HashMap::new();
+        // Per path, the nearest later turn's (restorable, what it found).
+        let mut later: HashMap<String, (bool, Option<String>)> = HashMap::new();
         for manifest in manifests.iter_mut().rev() {
             for file in manifest.files.iter_mut().rev() {
                 file.restorable = file.before != "too_large"
                     && match later.get(&file.path) {
-                        Some(&chain) => chain,
+                        // Undone first, that turn leaves what it found;
+                        // this one goes back only if that is what it left
+                        // (nothing, bash included, changed it between).
+                        Some((chain, found)) => *chain && *found == file.after_sha256,
                         None => file.restorable_now(),
                     };
-                later.insert(file.path.clone(), file.restorable);
+                let found = match file.before.as_str() {
+                    "absent" => None,
+                    // Unknown (a manifest of an older build): never equal.
+                    _ => Some(file.before_sha256.clone().unwrap_or_default()),
+                };
+                later.insert(file.path.clone(), (file.restorable, found));
             }
         }
         Ok(manifests)
@@ -630,6 +661,12 @@ impl SessionStore {
         }
         undone.checkpoint = recorder.number();
         recorder.finish();
+        // One line per file: a file skipped at some turn did not get back
+        // to before the undone turns, so it is reported skipped only (with
+        // the first reason), even when a later turn's change was undone.
+        let mut seen = std::collections::HashSet::new();
+        undone.skipped.retain(|(path, _)| seen.insert(path.clone()));
+        undone.restored.retain(|path| !seen.contains(path));
         Ok(undone)
     }
 
@@ -643,6 +680,18 @@ impl SessionStore {
         recorder: &Turn,
     ) -> Result<(), String> {
         let path = Path::new(&file.path);
+        // Only the absolute, plain path a file tool wrote; it passes the
+        // write rules below again, as now configured.
+        let plain = path.is_absolute()
+            && path.components().all(|part| {
+                matches!(
+                    part,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            });
+        if !plain {
+            return Err(reason::BAD_RECORD.into());
+        }
         if file.before == "too_large" {
             return Err(reason::TOO_LARGE.into());
         }
@@ -672,28 +721,36 @@ impl SessionStore {
                 recorder.before(target.real(), before);
                 let removed = target.remove();
                 recorder.after_disk(target.real());
-                removed.map_err(|err| err.to_string())
+                removed.map_err(|_| reason::WRITE_FAILED.to_string())
             }
             _ => {
                 if !unchanged && !force {
                     return Err(reason::CHANGED.into());
                 }
                 let name = file.content.as_deref().unwrap_or_default();
-                if name.is_empty() || name.contains('/') {
-                    return Err(reason::NOT_FILE.into());
+                let valid = name.strip_suffix(".bin").is_some_and(|stem| {
+                    !stem.is_empty() && stem.bytes().all(|byte| byte.is_ascii_digit())
+                });
+                if !valid {
+                    return Err(reason::BAD_RECORD.into());
                 }
-                let bytes = fs::read(dir.join(name)).map_err(|err| err.to_string())?;
+                let bytes = Before::read(&dir.join(name))
+                    .ok()
+                    .and_then(|before| match before {
+                        Before::Content(bytes, _) => Some(bytes),
+                        _ => None,
+                    })
+                    .ok_or_else(|| reason::BAD_RECORD.to_string())?;
                 let target = access
                     .open_write(&file.path, true)
                     .map_err(|refusal| refused(&refusal))?;
                 recorder.before(target.real(), before);
-                if let Err(err) = target.replace(&bytes, false) {
+                // The bits it had go on the temporary file before the
+                // rename: the path is never opened again.
+                let mode = file.mode.map(|mode| mode & 0o7777);
+                if target.replace_with_mode(&bytes, mode).is_err() {
                     recorder.after_disk(target.real());
-                    return Err(err.to_string());
-                }
-                if let Some(mode) = file.mode {
-                    // The rename left a new inode: set the bits it had.
-                    let _ = fs::set_permissions(target.real(), fs::Permissions::from_mode(mode));
+                    return Err(reason::WRITE_FAILED.into());
                 }
                 recorder.after(target.real(), Some(&bytes));
                 Ok(())
@@ -704,8 +761,10 @@ impl SessionStore {
 
 fn refused(refusal: &Refusal) -> String {
     match refusal {
+        Refusal::Denied(_) => reason::REFUSED.into(),
+        Refusal::NotRegular => reason::NOT_FILE.into(),
         Refusal::Io(err) if err.kind() == io::ErrorKind::NotFound => reason::NOT_FILE.into(),
-        _ => reason::REFUSED.into(),
+        Refusal::Io(_) => reason::WRITE_FAILED.into(),
     }
 }
 
@@ -797,6 +856,10 @@ impl Turn {
             },
             size: match &before {
                 Before::TooLarge(size) => Some(*size),
+                _ => None,
+            },
+            before_sha256: match &before {
+                Before::Content(bytes, _) => Some(sha256(bytes)),
                 _ => None,
             },
             after_sha256: None,
