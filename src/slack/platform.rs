@@ -136,6 +136,17 @@ pub fn attachments(event: &Value) -> (Vec<SlackFile>, Vec<String>) {
     (files, notes)
 }
 
+/// Whether a download is an HTML page rather than a file.
+fn looks_like_html(bytes: &[u8]) -> bool {
+    let start: Vec<u8> = bytes
+        .iter()
+        .skip_while(|byte| byte.is_ascii_whitespace())
+        .take(15)
+        .map(u8::to_ascii_lowercase)
+        .collect();
+    start.starts_with(b"<!doctype html") || start.starts_with(b"<html")
+}
+
 /// What the commands do, for `!help`.
 pub const HELP: &str = "\
 `!new` start a new conversation here
@@ -284,12 +295,22 @@ impl Platform for Slack {
         attachment: &SlackFile,
         limit: u64,
     ) -> Result<Vec<u8>, Result<u64, String>> {
-        self.api
+        let name = &attachment.name;
+        let bytes = self
+            .api
             .download(&attachment.url, limit, DOWNLOAD_TIMEOUT)
             .await
             .map_err(|err| {
-                err.map_err(|why| format!("\"{}\" could not be downloaded: {why}", attachment.name))
-            })
+                err.map_err(|why| format!("\"{name}\" could not be downloaded: {why}"))
+            })?;
+        // Without files:read, Slack answers 200 with its sign-in page.
+        if looks_like_html(&bytes) {
+            return Err(Err(format!(
+                "\"{name}\" could not be downloaded: Slack answered with a web page, not the \
+                 file (does the app have the files:read scope?)"
+            )));
+        }
+        Ok(bytes)
     }
 
     async fn fetch_all(&self, attachments: &[SlackFile]) -> (Vec<Image>, Vec<String>) {
@@ -642,5 +663,13 @@ mod tests {
             notes,
             ["\"notes.txt\" is not an image or audio; only those are read"]
         );
+    }
+
+    #[test]
+    fn a_sign_in_page_is_no_audio() {
+        assert!(looks_like_html(b"\n  <!DOCTYPE html><html>"));
+        assert!(looks_like_html(b"<HTML lang=en>"));
+        assert!(!looks_like_html(b"\x1aE\xdf\xa3 webm"));
+        assert!(!looks_like_html(b"OggS"));
     }
 }

@@ -2003,15 +2003,40 @@ async fn voice_messages_are_transcribed_for_the_model() {
 }
 
 #[tokio::test]
-async fn voice_messages_get_a_note_when_transcription_is_off() {
+async fn with_transcription_off_audio_is_named_and_the_text_still_runs() {
     let cwd = tempfile::tempdir().unwrap();
     let bot = FakeBot::start().await;
     bot.file("vo1", "voice/file_1.oga", b"OggS".to_vec());
     let running = start(telegram(&bot.url, &[]), fake(), None, cwd.path());
-    bot.push(voice(USER, "vo1", 4, Some("hello")));
-    bot.wait_post(&USER.to_string(), |p| p.contains("transcription is off"))
+    let me = USER.to_string();
+    // Audio alone: the note only, no turn.
+    bot.push(voice(USER, "vo1", 4, None));
+    bot.wait_post(&me, |p| p.contains("transcription is off"))
+        .await;
+    // Audio with a caption: the caption runs, with the note beside it.
+    let mut song = private(USER, "");
+    song.as_object_mut().unwrap().remove("text");
+    song["audio"] = json!({"file_id": "au1", "file_unique_id": "au1", "duration": 9,
+        "file_name": "song.mp3", "mime_type": "audio/mpeg", "file_size": 40});
+    song["caption"] = json!("summarize the lyrics");
+    bot.push(song);
+    let posts = bot
+        .wait_post(&me, |p| p.starts_with("reply 1: summarize the lyrics"))
         .await;
     running.stop().await;
+    assert!(
+        posts.iter().any(|p| p
+            == "(attachments left out: song.mp3: audio is not read, transcription is off \
+                (set transcribe_base_url to an OpenAI-compatible transcription API; see \
+                docs/gateways.md))"),
+        "{posts:#?}"
+    );
+    assert!(
+        !posts
+            .iter()
+            .any(|p| p.starts_with("reply") && !p.contains("summarize")),
+        "the audio alone started a turn: {posts:#?}"
+    );
     assert!(bot.calls("getFile").is_empty());
 }
 
@@ -2076,4 +2101,41 @@ async fn the_binary_answers_and_stops_on_sigterm() {
     let last = bot.calls("getUpdates").pop().unwrap();
     assert_eq!(last.body["offset"], pushed + 1);
     assert_eq!(last.body["timeout"], 0);
+}
+
+#[tokio::test]
+async fn audio_past_the_bot_api_download_limit_is_named_as_such() {
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let (transcriber, heard) = common::fake_transcriber(vec![], &[]).await;
+    let running = start_voice(
+        telegram(&bot.url, &[]),
+        fake(),
+        None,
+        cwd.path(),
+        Some(transcriber),
+    );
+    // Under transcribe_max_bytes (25 MB), over what a bot may download.
+    bot.push(voice(USER, "vo1", 21 * 1024 * 1024, None));
+    let posts = bot
+        .wait_post(&USER.to_string(), |p| {
+            p.contains("could not be transcribed")
+        })
+        .await;
+    running.stop().await;
+    assert!(
+        posts.iter().any(|p| p.contains(
+            "voice message: the audio is 21.0 MB; Telegram lets bots download files only up \
+             to 20 MB (up to 20.0 MB)"
+        )),
+        "{posts:#?}"
+    );
+    assert!(bot.calls("getFile").is_empty());
+    assert!(
+        tokio::time::timeout(WAIT, heard)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
 }

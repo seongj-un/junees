@@ -104,6 +104,9 @@ fn in_url_path(before: &str) -> bool {
     })
 }
 
+/// The largest file the Bot API gives a bot (`getFile`).
+pub const BOT_DOWNLOAD_LIMIT: u64 = 20 * 1024 * 1024;
+
 /// A file attached to a message: a photo or a document that is an image,
 /// or a voice message, audio file or document that is audio.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,9 +150,11 @@ fn audio_file(message: &Value, notes: &mut Vec<String>) -> Option<TelegramFile> 
         notes.push(format!("the {name} has no file id"));
         return None;
     };
+    // A voice message is always OGG/Opus; an audio file without a type
+    // is named by its file name's extension ([`crate::transcribe::file_name`]).
     let mime = text("mime_type").unwrap_or(match key {
         "voice" => "audio/ogg",
-        _ => "audio/mpeg",
+        _ => "",
     });
     Some(TelegramFile {
         name,
@@ -501,6 +506,14 @@ impl Platform for Telegram {
             .map_err(Into::into)
     }
 
+    /// "Bots can download files of up to 20MB in size" (Bot API, getFile).
+    fn download_limit(&self) -> Option<(u64, &'static str)> {
+        Some((
+            BOT_DOWNLOAD_LIMIT,
+            "Telegram lets bots download files only up to 20 MB",
+        ))
+    }
+
     async fn fetch_audio(
         &self,
         attachment: &TelegramFile,
@@ -792,7 +805,7 @@ mod tests {
         assert_eq!(files[0].kind, audio("audio/ogg"));
         let (files, _) =
             attachments(&json!({"audio": {"file_id": "a", "file_name": "memo\u{202e}.m4a"}}));
-        assert_eq!(files[0].kind, audio("audio/mpeg"));
+        assert_eq!(files[0].kind, audio(""));
         assert!(files[0].name.contains("\\u{202e}"), "{}", files[0].name);
         // Over the image limit, still kept: transcription has its own.
         let (files, notes) = attachments(&json!({"document": {"file_id": "d",
