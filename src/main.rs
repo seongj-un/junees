@@ -169,6 +169,8 @@ async fn run() -> Result<ExitCode> {
                 .context("neither JUNEES_HOME nor HOME is set, so there are no checkpoints")?;
             let config = Config::from_lookup_without_key(|key| settings.get(key))?;
             let access = junees::tools::FileAccess::new(&config.tools);
+            // Old checkpoints go first, as when a conversation starts.
+            junees::checkpoints::configure(|key| settings.get(key));
             junees::checkpoints::cli::run(
                 &options,
                 &home,
@@ -1776,7 +1778,7 @@ impl Repl {
 
     /// `/undo [N]`: the last `count` turns that changed files, after
     /// asking; returns whether SIGTERM came meanwhile.
-    async fn undo(&mut self, count: usize) -> bool {
+    async fn undo(&mut self, count: Option<usize>) -> bool {
         let Some(session) = self.checkpoints() else {
             return false;
         };
@@ -1791,11 +1793,11 @@ impl Repl {
             println!("(no file changes recorded in this session yet; bash's changes never are)");
             return false;
         }
-        let from = list[list.len().saturating_sub(count)].turn;
+        let Some(from) = junees::checkpoints::cli::undo_from(&list, count) else {
+            println!("(no file changes recorded in this session yet; bash's changes never are)");
+            return false;
+        };
         let chosen = junees::checkpoints::cli::from_turn(&list, from);
-        if count > chosen.len() {
-            println!("(only {} turns changed files)", chosen.len());
-        }
         println!("undo these changes, newest turn first:");
         print!("{}", junees::checkpoints::cli::render(&chosen));
         print!("undo? [y/N] ");

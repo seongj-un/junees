@@ -140,18 +140,60 @@ pub fn report(undone: &Undone) -> String {
     text
 }
 
-/// Undoes from `from`, leaves the conversation its line and says what
-/// happened.
+/// Undoes from `from` and leaves the conversation its line. The files are
+/// changed by then, so a line that cannot be written is a warning on
+/// stderr, not a failure.
 pub fn undo(session: &SessionStore, from: u64, force: bool, access: &FileAccess) -> Result<Undone> {
     let undone = session
         .undo(from, force, access)
         .context("cannot read the file checkpoints")?;
-    if !undone.turns.is_empty() {
-        session
-            .add_note(&undone.note())
-            .context("cannot leave the conversation a note of the undo")?;
+    if !undone.turns.is_empty()
+        && let Err(err) = session.add_note(&undone.note())
+    {
+        eprintln!(
+            "  !! the files were undone, but the conversation could not be told \
+             (cannot write {}): {err}",
+            session.dir().join("notes").display()
+        );
     }
     Ok(undone)
+}
+
+/// Where `/undo` starts: with no count, the last turn that changed files
+/// (an undo too, so `/undo` again undoes the undo); with `count`, the
+/// count-th last turn that is not an undo (the undos between are undone
+/// with it). `None` when there are no such turns.
+pub fn undo_from(manifests: &[Manifest], count: Option<usize>) -> Option<u64> {
+    match count {
+        None => manifests.last().map(|manifest| manifest.turn),
+        Some(count) => {
+            let own: Vec<u64> = manifests
+                .iter()
+                .filter(|manifest| manifest.undid.is_empty())
+                .map(|manifest| manifest.turn)
+                .collect();
+            own.len()
+                .checked_sub(count.max(1))
+                .map(|index| own[index])
+                .or_else(|| own.first().copied())
+        }
+    }
+}
+
+/// Refuses a session a running Junees is writing (its journal locked):
+/// its next turn could change the files while they are put back.
+fn check_not_in_use(home: &Path, id: &str) -> Result<()> {
+    let journal = crate::session::sessions_dir(home).join(format!("{id}.jsonl"));
+    let Ok(file) = std::fs::File::open(&journal) else {
+        return Ok(());
+    };
+    if !crate::flock::try_exclusive(&file).context("cannot check the session's lock")? {
+        bail!(
+            "session {id} is in use by another Junees; finish it (or use /undo there) and \
+             run this again"
+        );
+    }
+    Ok(())
 }
 
 /// `junees rewind`: lists, or undoes after asking on `input`.
@@ -178,6 +220,7 @@ pub fn run(
         write!(out, "{}", render(&manifests))?;
         return Ok(());
     }
+    check_not_in_use(home, &options.session)?;
     let from = options.turn.unwrap_or(last.turn);
     let chosen = from_turn(&manifests, from);
     if chosen.is_empty() {
@@ -210,6 +253,39 @@ mod tests {
 
     fn args(list: &[&str]) -> Result<Option<Options>, String> {
         parse(list.iter().map(|arg| arg.to_string()))
+    }
+
+    fn turn(number: u64, undid: &[u64]) -> Manifest {
+        Manifest {
+            turn: number,
+            undid: undid.to_vec(),
+            ..Manifest::default()
+        }
+    }
+
+    #[test]
+    fn undo_counts_skip_undo_turns() {
+        // Turns 1, 2, 3; turn 4 undid 3.
+        let list = [turn(1, &[]), turn(2, &[]), turn(3, &[]), turn(4, &[3])];
+        assert_eq!(undo_from(&list, None), Some(4), "/undo undoes the undo");
+        assert_eq!(undo_from(&list, Some(1)), Some(3));
+        assert_eq!(undo_from(&list, Some(2)), Some(2));
+        assert_eq!(undo_from(&list, Some(9)), Some(1), "all there are");
+        assert_eq!(undo_from(&[], None), None);
+        assert_eq!(undo_from(&[turn(1, &[])][..0], Some(1)), None);
+    }
+
+    #[test]
+    fn a_session_in_use_is_not_rewound() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = crate::session::sessions_dir(home.path());
+        std::fs::create_dir_all(&sessions).unwrap();
+        let journal = std::fs::File::create(sessions.join("s1.jsonl")).unwrap();
+        assert!(check_not_in_use(home.path(), "s1").is_ok());
+        assert!(crate::flock::try_exclusive(&journal).unwrap());
+        let err = check_not_in_use(home.path(), "s1").unwrap_err().to_string();
+        assert!(err.contains("in use by another Junees"), "{err}");
+        assert!(check_not_in_use(home.path(), "s2").is_ok(), "no journal");
     }
 
     #[test]
