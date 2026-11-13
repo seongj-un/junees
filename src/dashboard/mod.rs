@@ -1,18 +1,25 @@
-//! `junees dashboard`: a read-only web page about this Junees (settings,
-//! sessions, usage, scheduled jobs, webhooks, doctor), served on a
-//! loopback address to the browser of this computer.
+//! `junees dashboard`: a web page about this Junees (settings, sessions
+//! and their conversations, usage, scheduled jobs, webhooks, doctor),
+//! served on a loopback address to the browser of this computer. Its only
+//! writes pause and resume jobs and routes.
 //!
 //! - [`server`]: the HTTP side and its guards (bearer token, `Host`,
 //!   `Origin`, size and time limits, security headers).
 //! - [`api`]: the JSON of `/api/*`, built from the modules that own the
 //!   data. The contract is in `docs/dashboard.md`.
+//! - [`session_view`]: one session's conversation, a page at a time.
+//! - [`actions`]: pause and resume, logged to `dashboard.log`.
+//! - [`code`]: the one-time code an opened browser trades for the token.
 //! - [`assets`]: the page itself, `web/dashboard/`, built into the binary.
 
+mod actions;
 mod api;
 mod assets;
+mod code;
 #[cfg(test)]
 mod page_files;
 pub mod server;
+mod session_view;
 
 use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
@@ -32,18 +39,21 @@ const TOKEN_BYTES: usize = 32;
 pub const HELP: &str = "\
 Usage: junees dashboard [--listen 127.0.0.1:7878] [--no-open]
 
-Serves a read-only dashboard of this Junees (settings, sessions, usage,
-scheduled jobs, webhooks, doctor) to the browser of this computer, until
-Ctrl-C.
+Serves a dashboard of this Junees (settings, sessions and their
+conversations, usage, scheduled jobs, webhooks, doctor) to the browser of
+this computer, until Ctrl-C. Its only changes pause and resume scheduled
+jobs and webhook routes.
 
   --listen <ip:port>  where to listen; a loopback address only
                       (127.0.0.1 or ::1). Port 0 picks a free one.
-  --no-open           print the address without opening a browser
+  --no-open           print an address to paste instead of opening a
+                      browser
 
-The address it prints holds a token made for this run; the page needs it.
-Anyone who can read the address can read the dashboard. On a computer
-other users log in to, use --no-open: the opened browser's command line,
-which they can list, holds the address.
+The page needs a token made for this run. An opened browser gets a code
+that trades for it once, within a minute, and keeps the token in that tab
+only; the token itself is printed only with --no-open, or when no browser
+can be started. Anyone who can read that address can use the
+dashboard.
 ";
 
 /// The arguments of `junees dashboard`.
@@ -97,14 +107,24 @@ pub fn listen_address(text: &str) -> Result<SocketAddr> {
     Ok(address)
 }
 
-/// The address the browser opens: the dashboard with the token after `#`,
-/// which the browser does not send to the server or put in `Referer`.
-pub fn page_url(address: SocketAddr, token: &str) -> String {
+/// `http://<address>/`.
+pub fn base_url(address: SocketAddr) -> String {
     let host = match address.ip() {
         IpAddr::V4(ip) => format!("{ip}:{}", address.port()),
         IpAddr::V6(ip) => format!("[{ip}]:{}", address.port()),
     };
-    format!("http://{host}/#token={token}")
+    format!("http://{host}/")
+}
+
+/// The page with `name=value` after `#`, which the browser does not send
+/// to the server or put in `Referer`.
+fn fragment_url(address: SocketAddr, name: &str, value: &str) -> String {
+    format!("{}#{name}={value}", base_url(address))
+}
+
+/// The address to paste: the page with the token after `#`.
+pub fn page_url(address: SocketAddr, token: &str) -> String {
+    fragment_url(address, "token", token)
 }
 
 /// A new random token for one run.
@@ -121,27 +141,54 @@ pub async fn main(options: Options) -> Result<ExitCode> {
     let address = listener
         .local_addr()
         .context("cannot read the address it listens on")?;
-    let url = page_url(address, &token);
+    let env: Env = Arc::new(|key: &str| std::env::var(key).ok());
+    let context = Arc::new(Context::new(
+        token.clone(),
+        address.ip(),
+        address.port(),
+        env,
+    ));
     // Not println!: it panics when stdout is closed (`| head -1`, a closed
     // terminal), and the server goes on without anyone reading it.
     let mut out = std::io::stdout();
-    if writeln!(out, "Junees dashboard: {url}")
+    // The browser's command line, which other processes can read, gets a
+    // one-time code; the token is printed only when no browser was started.
+    let opened = options.open && {
+        let code = new_token()?;
+        if let Ok(mut codes) = context.codes.lock() {
+            codes.issue(code.clone(), std::time::Instant::now());
+        }
+        let started = open_browser(&fragment_url(address, "code", &code));
+        if !started && let Ok(mut codes) = context.codes.lock() {
+            // On no command line: the code ends, the token is printed.
+            codes.clear();
+        }
+        started
+    };
+    let printed = if opened {
+        writeln!(
+            out,
+            "Junees dashboard: opening {} in the browser; Ctrl-C stops it.",
+            base_url(address)
+        )
         .and_then(|()| {
             writeln!(
                 out,
-                "Read-only. The address holds a token for this run; Ctrl-C stops it."
+                "If no browser opens within a minute, stop it and run `junees dashboard --no-open` \
+                 for an address to paste."
             )
         })
-        .and_then(|()| out.flush())
-        .is_err()
-    {
+    } else {
+        writeln!(out, "Junees dashboard: {}", page_url(address, &token)).and_then(|()| {
+            writeln!(
+                out,
+                "The address holds a token for this run; Ctrl-C stops it."
+            )
+        })
+    };
+    if printed.and_then(|()| out.flush()).is_err() {
         eprintln!("Cannot print the dashboard's address; it serves on {address}.");
     }
-    if options.open {
-        open_browser(&url);
-    }
-    let env: Env = Arc::new(|key: &str| std::env::var(key).ok());
-    let context = Arc::new(Context::new(token, address.ip(), address.port(), env));
     tokio::select! {
         served = serve(listener, context) => {
             served.context("the dashboard stopped serving")?;
@@ -153,7 +200,10 @@ pub async fn main(options: Options) -> Result<ExitCode> {
 
 /// Opens `url` in the default browser, if a way to is found; the address
 /// is printed either way.
-fn open_browser(url: &str) {
+/// Whether the opener started: `xdg-open` (`open` on macOS) with `url`.
+/// When it cannot run (no desktop, an SSH session), says so; the caller
+/// prints an address to paste instead.
+fn open_browser(url: &str) -> bool {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
@@ -168,8 +218,11 @@ fn open_browser(url: &str) {
     match spawned {
         // Not waited for: xdg-open may stay with the browser it starts.
         // The child is reaped when Junees exits.
-        Ok(_) => {}
-        Err(_) => eprintln!("Cannot run `{opener}`; open the address above in a browser."),
+        Ok(_) => true,
+        Err(_) => {
+            eprintln!("Cannot run `{opener}`; printing an address to paste instead.");
+            false
+        }
     }
 }
 

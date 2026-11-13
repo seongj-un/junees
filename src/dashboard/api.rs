@@ -26,14 +26,22 @@ const TITLE_CHARS: usize = 80;
 
 /// What answers a request for an API path.
 #[derive(Debug)]
-struct Failure {
-    status: u16,
-    code: &'static str,
-    message: String,
+pub(super) struct Failure {
+    pub(super) status: u16,
+    pub(super) code: &'static str,
+    pub(super) message: String,
 }
 
 impl Failure {
-    fn bad_query(message: String) -> Self {
+    pub(super) fn new(status: u16, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub(super) fn bad_query(message: String) -> Self {
         Self {
             status: 400,
             code: "bad_query",
@@ -41,7 +49,7 @@ impl Failure {
         }
     }
 
-    fn internal(err: &anyhow::Error) -> Self {
+    pub(super) fn internal(err: &anyhow::Error) -> Self {
         Self {
             status: 500,
             code: "internal",
@@ -73,10 +81,28 @@ pub async fn answer(path: &str, query: &str, context: &Arc<Context>) -> Answer {
         "/api/cron" => blocking(settings, cron).await,
         "/api/webhooks" => blocking(settings, webhooks).await,
         "/api/doctor" => run_doctor(settings, broken, context).await,
-        _ => {
-            return Answer::error(404, "not_found", "there is no such API path");
-        }
+        _ => match path.strip_prefix("/api/sessions/") {
+            Some(id) => {
+                let id = id.to_string();
+                match super::session_view::paging(query) {
+                    Ok((offset, limit)) => {
+                        blocking(settings, move |settings| {
+                            super::session_view::detail(settings, &id, offset, limit)
+                        })
+                        .await
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            None => return Answer::error(404, "not_found", "there is no such API path"),
+        },
     };
+    finish(result, context)
+}
+
+/// The answer for `result`: 200 with its JSON, or its failure with the
+/// secrets cut out of the message.
+pub(super) fn finish(result: Result<Value, Failure>, context: &Context) -> Answer {
     match result {
         Ok(value) => Answer::json(200, &value),
         Err(failure) => {
@@ -91,7 +117,7 @@ pub async fn answer(path: &str, query: &str, context: &Arc<Context>) -> Answer {
 }
 
 /// Runs `work` off the async threads: it reads files.
-async fn blocking(
+pub(super) async fn blocking(
     settings: Settings,
     work: impl FnOnce(&Settings) -> Result<Value, Failure> + Send + 'static,
 ) -> Result<Value, Failure> {
@@ -105,7 +131,7 @@ async fn blocking(
 
 /// The value of `name` in `query`: a whole number in `1..=most`, `default`
 /// when it is not given. Other names are ignored.
-fn number(query: &str, name: &str, (default, most): (u32, u32)) -> Result<u32, Failure> {
+pub(super) fn number(query: &str, name: &str, (default, most): (u32, u32)) -> Result<u32, Failure> {
     let mut value = None;
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, text) = pair.split_once('=').unwrap_or((pair, ""));
@@ -125,12 +151,12 @@ fn number(query: &str, name: &str, (default, most): (u32, u32)) -> Result<u32, F
 }
 
 /// The state folder the settings name.
-fn home(settings: &Settings) -> Option<std::path::PathBuf> {
+pub(super) fn home(settings: &Settings) -> Option<std::path::PathBuf> {
     crate::config_file::home_dir(|key| settings.get(key))
 }
 
 /// RFC 3339 in UTC; `null` before 1970.
-fn time(unix_secs: i64) -> Value {
+pub(super) fn time(unix_secs: i64) -> Value {
     u64::try_from(unix_secs).map_or(Value::Null, |secs| {
         Value::String(crate::session::format_utc_seconds(secs))
     })
@@ -396,27 +422,26 @@ fn cron(settings: &Settings) -> Result<Value, Failure> {
     let jobs = read_store(&crate::cron::store::Store::new(&home).path(), |path| {
         crate::cron::store::read(path)
     })?;
-    let jobs: Vec<Value> = jobs
-        .iter()
-        .map(|job| {
-            json!({
-                "id": job.id,
-                "name": job.name,
-                "schedule": job.text,
-                "dir": job.dir.display().to_string(),
-                "paused": job.paused,
-                "paused_for_home": job.paused_for_home,
-                "allow_home": job.allow_home,
-                "next_run": job.next_run.map_or(Value::Null, time),
-                "last_run": last_run(settings, job.last.as_ref()),
-            })
-        })
-        .collect();
+    let jobs: Vec<Value> = jobs.iter().map(|job| job_json(settings, job)).collect();
     Ok(json!({ "jobs": jobs }))
 }
 
+/// A job as `/api/cron` lists it (and a pause or resume answers it).
+pub(super) fn job_json(settings: &Settings, job: &crate::cron::store::Job) -> Value {
+    json!({
+        "id": job.id,
+        "name": job.name,
+        "schedule": job.text,
+        "dir": job.dir.display().to_string(),
+        "paused": job.paused,
+        "paused_for_home": job.paused_for_home,
+        "allow_home": job.allow_home,
+        "next_run": job.next_run.map_or(Value::Null, time),
+        "last_run": last_run(settings, job.last.as_ref()),
+    })
+}
+
 fn webhooks(settings: &Settings) -> Result<Value, Failure> {
-    use crate::webhook::store::Kind;
     let Some(home) = home(settings) else {
         return Ok(json!({ "routes": [] }));
     };
@@ -425,23 +450,28 @@ fn webhooks(settings: &Settings) -> Result<Value, Failure> {
     })?;
     let routes: Vec<Value> = routes
         .iter()
-        .map(|route| {
-            json!({
-                "name": route.name,
-                "kind": match route.kind {
-                    Kind::Github => "github",
-                    Kind::Generic => "generic",
-                },
-                "dir": route.dir.display().to_string(),
-                "paused": route.paused,
-                "paused_for_home": route.paused_for_home,
-                "allow_home": route.allow_home,
-                "has_secret": route.secret.is_some(),
-                "last_run": last_run(settings, route.last.as_ref()),
-            })
-        })
+        .map(|route| route_json(settings, route))
         .collect();
     Ok(json!({ "routes": routes }))
+}
+
+/// A route as `/api/webhooks` lists it (and a pause or resume answers
+/// it).
+pub(super) fn route_json(settings: &Settings, route: &crate::webhook::store::Route) -> Value {
+    use crate::webhook::store::Kind;
+    json!({
+        "name": route.name,
+        "kind": match route.kind {
+            Kind::Github => "github",
+            Kind::Generic => "generic",
+        },
+        "dir": route.dir.display().to_string(),
+        "paused": route.paused,
+        "paused_for_home": route.paused_for_home,
+        "allow_home": route.allow_home,
+        "has_secret": route.secret.is_some(),
+        "last_run": last_run(settings, route.last.as_ref()),
+    })
 }
 
 /// A store's entries; none when its file is not there yet.
