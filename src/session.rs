@@ -254,8 +254,8 @@ struct LineOut<'a> {
 struct LineIn {
     #[serde(flatten)]
     entry: Entry,
+    /// Unix seconds; read by [`read_conversation`].
     #[serde(default)]
-    #[allow(dead_code)] // Kept in the format for time budgets and status views.
     ts: Option<u64>,
 }
 
@@ -1414,14 +1414,24 @@ fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<(PathBu
         .collect())
 }
 
-/// How many messages the journal at `path` records: its user and
-/// assistant messages, two for a Claude Code turn (the input and the
-/// reply). Lines that do not read are skipped; the summary of a
-/// compaction is not counted.
-pub fn count_messages(path: &Path) -> Result<usize> {
+/// One message of a journal as it was written, and when (Unix seconds;
+/// `None` for lines from before journals stamped them).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Logged {
+    pub message: Message,
+    pub at: Option<u64>,
+}
+
+/// The conversation the journal at `path` records, every message as it
+/// was written: compactions and cleared tool results do not shorten it,
+/// as they do the history the model sees ([`Transcript`]). Appended input
+/// joins the user message before it, as on replay; a Claude Code turn is
+/// two messages (the input and the reply). Lines that do not read are
+/// skipped.
+pub fn read_conversation(path: &Path) -> Result<Vec<Logged>> {
     let file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut reader = io::BufReader::new(file);
-    let mut count = 0usize;
+    let mut messages: Vec<Logged> = Vec::new();
     let mut line = String::new();
     loop {
         line.clear();
@@ -1432,13 +1442,46 @@ pub fn count_messages(path: &Path) -> Result<usize> {
                 return Err(err).with_context(|| format!("cannot read {}", path.display()));
             }
         }
-        match serde_json::from_str::<LineIn>(&line).map(|line| line.entry) {
-            Ok(Entry::Message(_)) => count += 1,
-            Ok(Entry::ClaudeTurn(_)) => count += 2,
+        let Ok(LineIn { entry, ts }) = serde_json::from_str::<LineIn>(&line) else {
+            continue;
+        };
+        let mut append = |content: Vec<ContentBlock>| match messages.last_mut() {
+            Some(last) if last.message.role == Role::User => last.message.content.extend(content),
+            _ => messages.push(Logged {
+                message: Message {
+                    role: Role::User,
+                    content,
+                },
+                at: ts,
+            }),
+        };
+        match entry {
+            Entry::Message(message) => messages.push(Logged { message, at: ts }),
+            Entry::AppendText { text } => append(vec![ContentBlock::text(text)]),
+            Entry::AppendContent { content } => append(content),
+            Entry::ClaudeTurn(turn) => {
+                messages.push(Logged {
+                    message: Message::user_text(turn.input),
+                    at: ts,
+                });
+                messages.push(Logged {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::text(turn.text)],
+                    },
+                    at: ts,
+                });
+            }
             _ => {}
         }
     }
-    Ok(count)
+    Ok(messages)
+}
+
+/// How many messages the journal at `path` records
+/// ([`read_conversation`]).
+pub fn count_messages(path: &Path) -> Result<usize> {
+    Ok(read_conversation(path)?.len())
 }
 
 fn unix_now() -> u64 {
@@ -3416,5 +3459,50 @@ mod tests {
         let list = list_recent(home.path(), 10).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].first_input, "first");
+    }
+
+    #[test]
+    fn read_conversation_keeps_what_compaction_and_clearing_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let lines = [
+            r#"{"type":"meta","id":"s","format":8,"created_at":1,"cwd":"/w","model":"m","version":"0"}"#,
+            r#"{"type":"message","role":"user","content":[{"type":"text","text":"first"}],"ts":10}"#,
+            r#"{"type":"append_text","text":"more","ts":11}"#,
+            r#"{"type":"message","role":"assistant","content":[{"type":"text","text":"reply"}],"ts":12}"#,
+            r#"{"type":"clear_tool_results","upto":2}"#,
+            r#"{"type":"compact","summary":"sum","keep_from":2}"#,
+            r#"{"type":"append_content","content":[{"type":"text","text":"after"}]}"#,
+            r#"{"type":"claude_turn","input":"q","text":"a","usage":{"input_tokens":1,"output_tokens":1},"end":"end_turn","ts":20}"#,
+            "not json",
+        ];
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let messages = read_conversation(&path).unwrap();
+        let shown: Vec<(Role, Vec<String>, Option<u64>)> = messages
+            .iter()
+            .map(|logged| {
+                let texts = logged
+                    .message
+                    .content
+                    .iter()
+                    .map(|block| match block {
+                        ContentBlock::Text { text, .. } => text.clone(),
+                        _ => String::new(),
+                    })
+                    .collect();
+                (logged.message.role, texts, logged.at)
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (Role::User, vec!["first".into(), "more".into()], Some(10)),
+                (Role::Assistant, vec!["reply".into()], Some(12)),
+                (Role::User, vec!["after".into()], None),
+                (Role::User, vec!["q".into()], Some(20)),
+                (Role::Assistant, vec!["a".into()], Some(20)),
+            ]
+        );
+        assert_eq!(count_messages(&path).unwrap(), 5);
     }
 }
