@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::provider::openai::{API_KEY_ENV, BASE_URL_ENV};
+
 /// The file's name inside the state folder.
 pub const FILE_NAME: &str = "config.toml";
 
@@ -26,6 +28,8 @@ pub const KEYS: &[(&str, &str)] = &[
     ("provider", "JUNEES_PROVIDER"),
     ("openai_base_url", "OPENAI_BASE_URL"),
     ("openai_api_key", "OPENAI_API_KEY"),
+    ("openai_max_tokens_field", "JUNEES_OPENAI_MAX_TOKENS_FIELD"),
+    ("openai_reasoning_effort", "JUNEES_OPENAI_REASONING_EFFORT"),
     ("model", "JUNEES_MODEL"),
     ("prices", "JUNEES_PRICES"),
     ("task_max_time", "JUNEES_TASK_MAX_TIME"),
@@ -361,6 +365,15 @@ fn quote(value: &str) -> String {
 
 type Lookup = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// Where a setting's value comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// Changed for this process only (`/model`, `/backend`).
+    Override,
+    Env,
+    File,
+}
+
 /// Where settings come from, first match wins: changes made for this
 /// process only (`/model`, `/backend`), the environment, then the file.
 /// Not `Debug`, like the file.
@@ -423,15 +436,56 @@ impl Settings {
     }
 
     /// The value of the environment variable `name`, from the first source
-    /// that sets it to something other than blanks.
+    /// that sets it to something other than blanks; `OPENAI_API_KEY` only
+    /// from the place the address comes from ([`Settings::openai_key`]).
     pub fn get(&self, name: &str) -> Option<String> {
-        let set = |value: &String| !value.trim().is_empty();
-        if let Some((_, value)) = self.overrides.iter().find(|(key, _)| key == name) {
-            return Some(value.clone());
+        self.lookup(name).map(|(value, _)| value)
+    }
+
+    /// Where [`Settings::get`]'s value of `name` comes from.
+    pub fn origin(&self, name: &str) -> Option<Origin> {
+        self.lookup(name).map(|(_, origin)| origin)
+    }
+
+    fn lookup(&self, name: &str) -> Option<(String, Origin)> {
+        if name == API_KEY_ENV {
+            return self.openai_key();
         }
-        (self.env)(name)
-            .filter(set)
-            .or_else(|| self.file.env_value(name).map(str::to_string))
+        self.first(name)
+    }
+
+    /// The first source's value of `name`, by the plain order.
+    fn first(&self, name: &str) -> Option<(String, Origin)> {
+        self.overridden(name)
+            .or_else(|| self.env(name).map(|value| (value, Origin::Env)))
+            .or_else(|| self.in_file(name))
+    }
+
+    fn overridden(&self, name: &str) -> Option<(String, Origin)> {
+        let (_, value) = self.overrides.iter().find(|(key, _)| key == name)?;
+        Some((value.clone(), Origin::Override))
+    }
+
+    fn in_file(&self, name: &str) -> Option<(String, Origin)> {
+        let value = self.file.env_value(name)?;
+        Some((value.to_string(), Origin::File))
+    }
+
+    /// The OpenAI key goes with its address: from the file when
+    /// `openai_base_url` comes from the file, from the environment when
+    /// `OPENAI_BASE_URL` does. Taken key by key, an `OPENAI_API_KEY`
+    /// exported for other tools would go to the file's server (OpenRouter,
+    /// a proxy), or the file's key to an exported address. With the
+    /// default address either one is taken, the environment first.
+    fn openai_key(&self) -> Option<(String, Origin)> {
+        let key = API_KEY_ENV;
+        match self.first(BASE_URL_ENV).map(|(_, origin)| origin) {
+            None | Some(Origin::Override) => self.first(key),
+            Some(Origin::Env) => self
+                .overridden(key)
+                .or_else(|| self.env(key).map(|value| (value, Origin::Env))),
+            Some(Origin::File) => self.overridden(key).or_else(|| self.in_file(key)),
+        }
     }
 
     /// Only the environment's value of `name`.
@@ -646,6 +700,93 @@ mod tests {
             Some(std::time::Duration::from_secs(7200))
         );
         assert_eq!(settings.env("ANTHROPIC_API_KEY"), None);
+    }
+
+    #[test]
+    fn the_openai_settings_follow_the_same_order() {
+        use crate::provider::openai::LimitField;
+        let mut file = ConfigFile::default();
+        file.set("provider", "openai");
+        file.set("model", "file-model");
+        file.set("openai_base_url", "https://openrouter.ai/api/v1");
+        file.set("openai_api_key", "file-key");
+        file.set("openai_reasoning_effort", "low");
+        file.set("openai_max_tokens_field", "max_tokens");
+        let settings = Settings::new(
+            env(&[
+                ("OPENAI_BASE_URL", " "),
+                ("OPENAI_API_KEY", " "),
+                ("JUNEES_OPENAI_REASONING_EFFORT", "high"),
+                ("HOME", "/home/u"),
+            ]),
+            file,
+            None,
+            true,
+        );
+        let openai = Config::from_lookup(|key| settings.get(key))
+            .unwrap()
+            .openai
+            .unwrap();
+        // Each variable wins over its key, one by one.
+        assert_eq!(openai.reasoning_effort.as_deref(), Some("high"));
+        // A blank variable does not hide the file.
+        assert_eq!(openai.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(openai.api_key.as_deref(), Some("file-key"));
+        assert_eq!(openai.limit_field, LimitField::MaxTokens);
+        assert!(!openai.uses_max_completion_tokens());
+    }
+
+    #[test]
+    fn the_openai_key_comes_from_where_the_address_does() {
+        const KEY: &str = "OPENAI_API_KEY";
+        let settings = |env_pairs: &[(&str, &str)], file_pairs: &[(&str, &str)]| {
+            let mut file = ConfigFile::default();
+            for (key, value) in file_pairs {
+                file.set(key, *value);
+            }
+            Settings::new(env(env_pairs), file, None, true)
+        };
+        let file_server = ("openai_base_url", "https://openrouter.ai/api/v1");
+        let env_server = ("OPENAI_BASE_URL", "https://proxy.example/v1");
+
+        // A key exported for other tools does not go to the file's server.
+        let both = settings(
+            &[(KEY, "env-key")],
+            &[file_server, ("openai_api_key", "file-key")],
+        );
+        assert_eq!(both.get(KEY).as_deref(), Some("file-key"));
+        assert_eq!(both.origin(KEY), Some(Origin::File));
+        let file_address_only = settings(&[(KEY, "env-key")], &[file_server]);
+        assert_eq!(file_address_only.get(KEY), None);
+        assert_eq!(file_address_only.env(KEY).as_deref(), Some("env-key"));
+
+        // Nor the file's key to an exported address.
+        let env_address = settings(&[env_server], &[("openai_api_key", "file-key")]);
+        assert_eq!(env_address.get(KEY), None);
+        let env_pair = settings(
+            &[env_server, (KEY, "env-key")],
+            &[file_server, ("openai_api_key", "file-key")],
+        );
+        assert_eq!(env_pair.get(KEY).as_deref(), Some("env-key"));
+        assert_eq!(env_pair.origin(KEY), Some(Origin::Env));
+
+        // The default address takes either, the environment first.
+        let default = settings(&[(KEY, "env-key")], &[("openai_api_key", "file-key")]);
+        assert_eq!(default.get(KEY).as_deref(), Some("env-key"));
+        let default = settings(&[], &[("openai_api_key", "file-key")]);
+        assert_eq!(default.get(KEY).as_deref(), Some("file-key"));
+
+        // Starting refuses a remote address without its own key.
+        let mut file = ConfigFile::default();
+        file.set("provider", "openai");
+        file.set("model", "m");
+        file.set("openai_base_url", "https://openrouter.ai/api/v1");
+        let settings = Settings::new(env(&[(KEY, "env-key")]), file, None, true);
+        let err = Config::from_lookup(|key| settings.get(key))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("same place"), "{err}");
     }
 
     #[test]

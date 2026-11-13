@@ -93,7 +93,13 @@ Environment (each also a key of config.toml, named in brackets):
                       (Chat Completions: OpenAI, OpenRouter, Ollama, vLLM, LM Studio)
   OPENAI_BASE_URL     [openai_base_url] its address (default https://api.openai.com/v1;
                       plain http only on localhost)
-  OPENAI_API_KEY      [openai_api_key] its key (a server on localhost may need none)
+  OPENAI_API_KEY      [openai_api_key] its key, read from where the address is set
+                      (a server on localhost may need none)
+  JUNEES_OPENAI_REASONING_EFFORT  [openai_reasoning_effort] reasoning_effort of a
+                      reasoning model (low, medium, high, ...; not sent unless set)
+  JUNEES_OPENAI_MAX_TOKENS_FIELD  [openai_max_tokens_field] auto (default:
+                      max_completion_tokens for OpenAI and Azure), max_tokens or
+                      max_completion_tokens
   JUNEES_MODEL        [model] model id (default claude-sonnet-4-6; needed with openai)
   JUNEES_PRICES       [prices] model prices for cost estimates, replacing the built-in
                       table: \"<model>=<input>/<output>, ...\" in $ per million tokens

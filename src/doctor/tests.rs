@@ -1936,6 +1936,32 @@ async fn the_provider_and_its_settings() {
         "provider = openai does not need it",
     );
 
+    // The file's server does not get a key from the environment.
+    let mut paired = Fixture::new();
+    paired.set("OPENAI_API_KEY", "sk-fake");
+    paired.config(
+        "provider = \"openai\"\nopenai_base_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m\"\n",
+    );
+    let report = paired.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "OpenAI API key",
+        Status::Fail,
+        "set, but not where the address is set",
+    );
+    paired.config(
+        "provider = \"openai\"\nopenai_base_url = \"https://openrouter.ai/api/v1\"\nmodel = \"m\"\nopenai_api_key = \"sk-fake-file\"\n",
+    );
+    let report = paired.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "OpenAI API key",
+        Status::Ok,
+        "set (config.toml)",
+    );
+
     // A server on this machine needs no key.
     fixture.config(
         "provider = \"openai\"\nopenai_base_url = \"http://localhost:11434/v1\"\nmodel = \"llama\"\n",
