@@ -230,7 +230,6 @@ pub async fn read_body<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(buf)
 }
 
-/// Writes a plain-text answer and closes the connection's sending side.
 /// What [`drain_unread`] reads and drops at most.
 pub const MAX_DRAIN: usize = 4 * 1024 * 1024;
 /// How long [`drain_unread`] goes on at most.
@@ -257,6 +256,7 @@ pub async fn drain_unread<S: AsyncRead + Unpin>(io: &mut S) {
     let _ = tokio::time::timeout(DRAIN_TIME, drain).await;
 }
 
+/// Writes a plain-text answer and closes the connection's sending side.
 pub async fn respond<W: AsyncWrite + Unpin>(io: &mut W, status: u16, body: &str) {
     let _ = io.write_all(render(status, body).as_bytes()).await;
     let _ = io.shutdown().await;
