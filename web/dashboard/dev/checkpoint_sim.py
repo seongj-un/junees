@@ -3,7 +3,8 @@ them: the files a scripted turn writes live in memory, every turn that
 changes one leaves a checkpoint, and GET .../checkpoints and POST .../undo
 answer as src/dashboard/chat/mod.rs does (numbers count only the turns
 that changed files, `restorable` is worked out for undoing from that
-checkpoint, an undo is recorded too and leaves a [되돌림] line for the
+checkpoint, an undo is recorded too (`undid` in the list, `checkpoint` in
+its answer, as #118) and leaves a [되돌림] line for the
 next message). GET /__dev/edit?path=<file> changes a file the way bash
 would, without a checkpoint.
 """
@@ -91,6 +92,7 @@ class Checkpoints:
             out.append({
                 "turn": manifest["turn"],
                 "created_at": manifest["created_at"],
+                "undid": manifest["undid"],
                 "files": [
                     {
                         "path": f["path"],
@@ -126,23 +128,27 @@ class Checkpoints:
                 partial.append({"path": path, "until_turn": min(done), "skipped_turn": miss[0], "reason": miss[1]})
             else:
                 skipped.append({"path": path, "reason": miss[1]})
+        made = None
         if restored:
             changed = [{"path": p, "before": before.get(p), "after": self.files.get(p)} for p in restored]
-            self.record(session_id, changed, sorted(turns, reverse=True))
+            made = self.record(session_id, changed, sorted(turns, reverse=True))
         listed = ", ".join(str(t) for t in sorted(turns))
         if restored:
             names = ", ".join(
-                next((f"{p} (턴 {x['until_turn']}까지 되돌림, 턴 {x['skipped_turn']}은 건너뜀: {x['reason']})" for x in partial if x["path"] == p), p)
+                next((f"{p} (변경 기록 {x['until_turn']}까지 되돌림, 변경 기록 {x['skipped_turn']}은 건너뜀: {x['reason']})" for x in partial if x["path"] == p), p)
                 for p in restored
             )
-            note = f"[되돌림] 턴 {listed}의 파일 변경을 되돌렸습니다: {names}"
+            note = f"[되돌림] 변경 기록 {listed}의 파일 변경을 되돌렸습니다: {names}"
         else:
-            note = f"[되돌림] 턴 {listed}의 파일 변경을 되돌리지 못했습니다"
+            note = f"[되돌림] 변경 기록 {listed}의 파일 변경을 되돌리지 못했습니다"
         if skipped:
             note += " (건너뜀: " + "; ".join(f"{s['path']}, {s['reason']}" for s in skipped) + ")"
         note += ". bash로 바꾼 파일은 기록되지 않아 되돌리지 않았습니다."
         self.notes.setdefault(session_id, []).append(note)
-        return 200, {"restored": restored, "skipped": skipped, "partial": partial}
+        body = {"restored": restored, "skipped": skipped, "partial": partial}
+        if made is not None:
+            body["checkpoint"] = made
+        return 200, body
 
     def take_notes(self, session_id):
         return self.notes.pop(session_id, [])
