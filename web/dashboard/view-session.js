@@ -59,6 +59,29 @@ export function firstLine(text) {
   );
 }
 
+/**
+ * Whether the server replaced a whole block with its `[hidden: ...]` line
+ * (a block that looks like it holds a credential, as in `junees doctor`).
+ * A `[hidden]` inside other text is left as it is.
+ */
+export function isHiddenBlock(text) {
+  return /^\[hidden(: [^\]\n]*)?\]$/.test(String(text ?? "").trim());
+}
+
+const HIDDEN_NOTE = "비밀 값으로 보이는 내용이 있어 서버가 이 내용을 가렸습니다.";
+
+/** The body of a folded tool block: the text, or a note when it was hidden. */
+function toolBody(text) {
+  return isHiddenBlock(text)
+    ? el("p", { class: "tool-body tool-hidden" }, HIDDEN_NOTE)
+    : el("pre", { class: "tool-body" }, text ?? "");
+}
+
+/** The hint on a folded block's line. */
+function peek(text) {
+  return isHiddenBlock(text) ? "가린 내용" : firstLine(text);
+}
+
 function cut(block) {
   return block.truncated
     ? el("span", { class: "badge badge-neutral", title: "서버가 긴 내용을 잘라서 보냈습니다." }, "잘림")
@@ -70,6 +93,7 @@ function blockView(block, messageIndex, n) {
   const id = `blk-${messageIndex}-${n}`;
   switch (block.type) {
     case "text":
+      if (isHiddenBlock(block.text)) return el("p", { class: "msg-note" }, HIDDEN_NOTE);
       return el(
         "div",
         { class: "msg-text" },
@@ -89,10 +113,10 @@ function blockView(block, messageIndex, n) {
             el("span", { class: "tool-kind" }, "도구 호출"),
             code(block.name ?? "-"),
             cut(block),
-            el("span", { class: "tool-peek" }, firstLine(block.input_preview)),
+            el("span", { class: "tool-peek" }, peek(block.input_preview)),
           ),
         ),
-        el("pre", { class: "tool-body" }, block.input_preview ?? ""),
+        toolBody(block.input_preview),
       );
     case "tool_result":
       return el(
@@ -106,10 +130,10 @@ function blockView(block, messageIndex, n) {
             { class: "tool-sum" },
             el("span", { class: "tool-kind" }, block.is_error ? "오류" : "출력"),
             cut(block),
-            el("span", { class: "tool-peek" }, firstLine(block.text_preview)),
+            el("span", { class: "tool-peek" }, peek(block.text_preview)),
           ),
         ),
-        el("pre", { class: "tool-body" }, block.text_preview ?? ""),
+        toolBody(block.text_preview),
       );
     case "image":
       return el("p", { class: "msg-note" }, `이미지${block.media_type ? ` (${block.media_type})` : ""}. 대시보드에는 이미지 내용을 보내지 않습니다.`);

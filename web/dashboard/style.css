@@ -1030,6 +1030,12 @@ a.button {
   overflow-wrap: anywhere;
 }
 
+.tool-hidden {
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
 .more {
   display: flex;
   flex-direction: column;

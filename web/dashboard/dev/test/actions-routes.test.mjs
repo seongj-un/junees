@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { actionFor, describeActionError } from "../../actions.js";
 import { ApiError } from "../../api.js";
 import { parseHash, sessionHash } from "../../routes.js";
-import { firstLine, mergePages, pageEnd, roleLabel } from "../../view-session.js";
+import { firstLine, isHiddenBlock, mergePages, pageEnd, roleLabel } from "../../view-session.js";
 
 test("parseHash reads screens, old links and session addresses", () => {
   assert.deepEqual(parseHash(""), { name: "status", args: {}, canonical: "#/status" });
@@ -86,4 +86,12 @@ test("pageEnd counts messages from the page's offset, not from index", () => {
   assert.equal(pageEnd({ offset: 100, messages: [{ index: 7 }, { index: 9 }] }, 0), 102);
   assert.equal(pageEnd({ messages: [{ index: 0 }] }, 200), 201);
   assert.equal(pageEnd({ offset: 300, messages: [] }, 300), 300);
+});
+
+test("isHiddenBlock spots a block the server replaced, not a [hidden] inside text", () => {
+  assert.equal(isHiddenBlock("[hidden: it looks like it holds a credential]"), true);
+  assert.equal(isHiddenBlock("  [hidden]\n"), true);
+  assert.equal(isHiddenBlock("my key is [hidden], use it"), false);
+  assert.equal(isHiddenBlock("[hidden: a]\nmore"), false);
+  assert.equal(isHiddenBlock(null), false);
 });
