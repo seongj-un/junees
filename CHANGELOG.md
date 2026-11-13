@@ -1,6 +1,12 @@
 # 변경 기록
 
-## 다음 버전 (미출시)
+## 0.4.0 (2026-11-13)
+
+### 업그레이드할 때 확인할 것
+
+- 기존 설정의 동작이 바뀌는 변경은 없습니다. 새 기능은 모두 켜야 동작합니다(`junees dashboard`, `junees mcp serve`, `transcribe_base_url`).
+- 받아쓰기 키 `JUNEES_TRANSCRIBE_API_KEY`(`transcribe_api_key`)는 Junees가 읽는 자격 증명이라, 다른 키처럼 bash 도구, MCP 서버, 플러그인, `claude` 자식의 환경에서 지웁니다.
+- `junees dashboard`를 웹훅을 받는 컴퓨터에서 띄울 때는 [docs/dashboard.md](docs/dashboard.md)의 보안 절을 확인합니다. 무인 실행의 bash는 루프백에 접속할 수 있습니다.
 
 ### 새 기능
 
