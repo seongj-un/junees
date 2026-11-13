@@ -16,6 +16,15 @@ use crate::tools::{SettingsFile, ToolSettings};
 use crate::web_search::WebSearch;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+
+/// The names of the Anthropic address and key, for
+/// [`crate::provider::check_base_url`].
+pub const ANTHROPIC_ADDRESS: crate::provider::AddressNames = crate::provider::AddressNames {
+    env: "ANTHROPIC_BASE_URL",
+    setting: "base_url",
+    key_env: "ANTHROPIC_API_KEY",
+    key_setting: "api_key",
+};
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 pub const DEFAULT_MAX_TURNS: usize = 50;
@@ -166,6 +175,16 @@ impl Config {
                 String::new()
             }
         };
+        // The api backend sends the key there; the claude-code backend
+        // does not use it (`claude` reads ANTHROPIC_BASE_URL on its own).
+        if need_key && openai.is_none() {
+            crate::provider::check_base_url(
+                get("ANTHROPIC_BASE_URL")
+                    .as_deref()
+                    .unwrap_or(DEFAULT_BASE_URL),
+                &ANTHROPIC_ADDRESS,
+            )?;
+        }
         let max_tokens = parse_or(
             get("JUNEES_MAX_TOKENS"),
             "JUNEES_MAX_TOKENS",
@@ -356,6 +375,45 @@ mod tests {
             pairs.push(("HOME", "/home/tester"));
         }
         lookup(&pairs)
+    }
+
+    #[test]
+    fn the_anthropic_address_is_https_or_on_this_machine() {
+        let key = ("ANTHROPIC_API_KEY", "k");
+        for good in [
+            "https://proxy.example",
+            "http://localhost:8080",
+            "http://127.0.0.1:9/",
+            "http://[::1]:8080",
+        ] {
+            let config = config(&[key, ("ANTHROPIC_BASE_URL", good)]).unwrap();
+            assert_eq!(config.base_url, good);
+        }
+        for (bad, wanted) in [
+            ("http://proxy.example", "must use https"),
+            ("http://10.1.2.3:8080", "must use https"),
+            ("ftp://proxy.example", "not ftp:"),
+            ("proxy.example", "is not a URL"),
+            ("https://u:hunter2@proxy.example", "user name or password"),
+            ("hunter2@x", "is not a URL: `(not shown)`"),
+        ] {
+            let err = config(&[key, ("ANTHROPIC_BASE_URL", bad)])
+                .err()
+                .unwrap_or_else(|| panic!("{bad}"))
+                .to_string();
+            assert!(
+                err.starts_with("ANTHROPIC_BASE_URL (`base_url`)"),
+                "{bad}: {err}"
+            );
+            assert!(err.contains(wanted), "{bad}: {err}");
+            assert!(!err.contains("hunter2"), "{bad}: {err}");
+        }
+        // The claude-code backend does not use it (`claude` may read it).
+        let config = Config::from_lookup_without_key(|name| {
+            (name == "ANTHROPIC_BASE_URL").then(|| "http://proxy.example".to_string())
+        })
+        .unwrap();
+        assert_eq!(config.base_url, "http://proxy.example");
     }
 
     #[test]

@@ -39,8 +39,12 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(api_key: String, base_url: String, model: String) -> anyhow::Result<Self> {
-        // Timeouts are set per request: a stream has no overall one.
+        // Timeouts are set per request: a stream has no overall one. No
+        // redirects: reqwest keeps `x-api-key` on a hop to another host
+        // (it drops only the standard auth headers), so a proxy answering
+        // 3xx would lead the key away from the address it was paired with.
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build HTTP client")?;
         Ok(Self {

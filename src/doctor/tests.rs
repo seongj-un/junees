@@ -1939,6 +1939,16 @@ async fn the_anthropic_key_and_its_address() {
         Status::Ok,
         "set (environment)",
     );
+    // An address that would send the key in plain text is a failure.
+    fixture.config("base_url = \"http://proxy.example\"\napi_key = \"sk-fake-file\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Fail,
+        "must use https unless the server is on this machine",
+    );
     // The claude-code backend needs no key.
     fixture.config("backend = \"claude-code\"\nbase_url = \"https://proxy.example\"\n");
     let report = fixture.run(false).await;

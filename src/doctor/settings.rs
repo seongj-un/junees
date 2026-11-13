@@ -137,6 +137,18 @@ pub(super) fn provider(report: &mut Report, settings: &Settings, read: &Read) {
             let base = settings
                 .get("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|| crate::config::DEFAULT_BASE_URL.to_string());
+            if let Err(err) =
+                crate::provider::check_base_url(&base, &crate::config::ANTHROPIC_ADDRESS)
+            {
+                report.fail(
+                    AREA,
+                    NAME,
+                    format!("anthropic: {err:#}"),
+                    "set base_url to an https:// URL, or http:// on localhost for a server on \
+                     this machine",
+                );
+                return;
+            }
             report.ok(
                 AREA,
                 NAME,
