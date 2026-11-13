@@ -304,7 +304,7 @@ junees gateway slack
 
 ### 설정
 
-`transcribe_base_url`을 적어야 켜진다. 없으면 꺼져 있고, 음성 메시지에는 켜는 법을 짧게 안내하고 모델은 부르지 않는다.
+`transcribe_base_url`을 적어야 켜진다. 꺼져 있으면 오디오는 내려받지 않고 `(attachments left out: ...)`에 "audio is not read, transcription is off"로 이름만 알린다. 같은 메시지의 글과 이미지는 이전처럼 실행하고(모델에게도 그 안내 줄이 붙는다), 오디오만 왔으면 안내만 보내고 턴은 돌지 않는다.
 
 ```toml
 transcribe_base_url = "https://api.openai.com/v1"   # JUNEES_TRANSCRIBE_BASE_URL
@@ -312,6 +312,7 @@ transcribe_api_key = "sk-..."                        # JUNEES_TRANSCRIBE_API_KEY
 transcribe_model = "whisper-1"                       # 기본 whisper-1
 transcribe_language = "ko"                           # 선택, ISO-639-1 두 글자
 transcribe_max_bytes = 26214400                      # 기본 25 MB(OpenAI 한도)
+transcribe_timeout = 120                             # 요청 하나의 시간(초), 10~3600, 기본 120
 ```
 
 - Groq: `transcribe_base_url = "https://api.groq.com/openai/v1"`, `transcribe_model = "whisper-large-v3-turbo"`(또는 `whisper-large-v3`), 키는 Groq 키.
@@ -323,8 +324,8 @@ transcribe_max_bytes = 26214400                      # 기본 25 MB(OpenAI 한�
 ### 받는 것
 
 - 디스코드: 음성 메시지(메시지 `flags`의 `IS_VOICE_MESSAGE`, 8192)의 첨부와 `content_type`이 `audio/*`인 첨부. 디스코드 CDN에서만 이미지와 같은 규칙으로 받는다.
-- 텔레그램: `voice`, `audio`, MIME이 `audio/*`인 `document`. `getFile`과 파일 URL로 받는다. 봇 API가 내주는 파일은 20 MB까지다.
-- 슬랙: `files` 가운데 `mimetype`이 `audio/*`인 것. 이미지와 같이 `https://files.slack.com`에서만 봇 토큰으로 받는다.
+- 텔레그램: `voice`, `audio`, MIME이 `audio/*`인 `document`. `getFile`과 파일 URL로 받는다. 봇 API가 내주는 파일은 20 MB까지라서, 텔레그램에서는 `transcribe_max_bytes`와 20 MB 중 작은 쪽이 한도다(넘으면 그 이유를 안내한다). `audio`에 `mime_type`이 없으면 파일 이름의 확장자로 형식을 정한다.
+- 슬랙: `files` 가운데 `mimetype`이 `audio/*`인 것. 이미지와 같이 `https://files.slack.com`에서만 봇 토큰으로 받는다. 앱에 `files:read`가 없으면 슬랙이 파일 대신 로그인 페이지(HTML)를 주는데, 이것은 받아쓰기로 보내지 않고 권한을 확인하라고 안내한다.
 - 허용된 사용자 검사는 지금처럼 받는 단계에서 먼저 한다. 허용되지 않은 사용자의 오디오는 내려받지 않는다.
 - 크기: 플랫폼이 알려 준 크기가 `transcribe_max_bytes`보다 크면 내려받지 않고, 알려 주지 않았으면 받는 중에 한도를 넘는 순간 멈춘다.
 
@@ -334,8 +335,9 @@ transcribe_max_bytes = 26214400                      # 기본 25 MB(OpenAI 한�
 - 요청은 `multipart/form-data`로 `model`, `language`(정했으면), `response_format=json`, `file`을 보낸다. 파일 이름은 형식에 맞춘 `audio.ogg`, `audio.mp3`처럼 보내고, 사용자가 붙인 파일 이름은 보내지 않는다. 응답의 `text`를 쓴다.
 - 오디오는 메모리에만 두고 디스크에 쓰지 않는다.
 - 모델에게 가는 글은 `[음성 메시지 받아쓰기]` 다음 줄에 받아쓴 글이다. 같은 메시지에 글(캡션)이 있으면 그 글을 먼저 두고 빈 줄 뒤에 받아쓴 글을 둔다. 오디오가 여럿이면 하나씩 이어 붙인다. 이미지가 함께 오면 이미지도 지금처럼 함께 간다.
-- 실패 처리: 429와 5xx, 연결 실패는 세 번까지 다시 보낸다(`Retry-After`를 따르되 30초까지). 401과 403은 키 문제로 안내하고 다시 보내지 않는다. 그 밖의 4xx는 서비스가 준 짧은 이유(비밀 값으로 보이면 빼고 200자까지)를 붙인다. 한 번의 요청은 120초까지 기다린다.
-- 꺼져 있거나, 너무 크거나, 받지 못했거나, 받아쓰지 못했거나, 말소리가 없으면(빈 글) 모델을 부르지 않는다. 대화방에는 짧은 안내만 보내고, 로그에 이유를 남긴다. 로그에는 오디오 크기와 받아쓴 글의 글자 수만 남기고 내용은 남기지 않는다.
+- 실패 처리: 429와 5xx, 연결이 열리지 않은 경우는 세 번까지 다시 보낸다(`Retry-After`를 따르되 30초까지). 보낸 요청이 `transcribe_timeout`(기본 120초) 안에 답하지 않으면 다시 보내지 않는다. 서버는 아직 받아쓰는 중일 수 있어서, 같은 파일을 또 보내면 같은 일을 겹쳐 시키고(유료 API면 과금도) 대화방만 오래 멈추기 때문이다. 이때는 시간이 모자랐다고 안내한다(느린 로컬 서버에서 긴 녹음이면 `transcribe_timeout`을 늘린다).
+- 안내에는 원인을 담는다. 401과 403은 키 문제, 3xx는 리다이렉트를 따르지 않으니 주소를 확인하라는 안내, 404와 405는 주소에 `/v1`이 빠졌는지 확인하라는 안내, 결제 한도(OpenAI의 429 `insufficient_quota`)는 다시 보내지 않고 한도 안내로 끝낸다. 서비스가 준 짧은 이유(비밀 값으로 보이면 빼고 200자까지)가 있으면 붙인다. 세 번 모두 실패하면 마지막 응답의 이유를 붙인다.
+- 켜져 있는데 너무 크거나, 받지 못했거나, 받아쓰지 못했거나, 말소리가 없으면(빈 글) 그 메시지는 실행하지 않는다(모델이 듣지 못한 말에 답하지 않게). 대화방에는 "this message was not run"과 이유를 보내고, 로그에도 이유를 남긴다. 로그에는 오디오 크기와 받아쓴 글의 글자 수만 남기고 내용은 남기지 않는다.
 - 음성 메시지는 승인 질문의 답(`y`, `n`)으로 쓰이지 않는다. 받아쓴 글은 새 입력으로 간다.
 
 ### 범위 밖, 한계
