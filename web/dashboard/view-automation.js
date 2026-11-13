@@ -10,7 +10,8 @@ const RUN_STATUS = {
   // A one-time job whose time passed while nothing was running to start it.
   missed: ["놓침", "warn"],
 };
-const KINDS = { github: "GitHub", generic: "일반" };
+// The request format a route accepts (headers and signature), not where it comes from.
+const KINDS = { github: "GitHub 형식", generic: "일반 형식" };
 
 function lastRunCell(lastRun, now) {
   if (!lastRun) return el("span", { class: "muted" }, "아직 실행하지 않음");
@@ -71,7 +72,11 @@ export function renderCron(root, data, { now }) {
         {
           label: "다음 실행",
           className: "col-time",
-          cell: (job) => whenCell(parseTime(job.next_run), now, job.paused || job.paused_for_home ? "멈춰 있음" : "예정 없음"),
+          // A paused job keeps its next time on the server but does not run.
+          cell: (job) =>
+            job.paused || job.paused_for_home
+              ? el("span", { class: "muted" }, "멈춰 있음")
+              : whenCell(parseTime(job.next_run), now, "예정 없음"),
         },
         { label: "마지막 실행", cell: (job) => lastRunCell(job.last_run, now), className: "col-last" },
       ],
