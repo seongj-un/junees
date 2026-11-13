@@ -108,7 +108,9 @@ async fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         // Needs no API key, and writes nothing.
-        Command::Task(TaskCommand::Status { json }) => return task_status(json),
+        Command::Task(TaskCommand::Status { json }) => {
+            return task_status(json).map(|()| ExitCode::SUCCESS);
+        }
         Command::Plugin(command) => {
             let home = junees::config_file::home_dir(|key| std::env::var(key).ok());
             print!("{}", plugins::manage::run(&command, home.as_deref())?);
@@ -917,7 +919,7 @@ async fn gateway_engines(settings: &Settings, note: &'static str) -> Result<Gate
 }
 
 /// `junees status`, for the git repository the current folder is in.
-fn task_status(json: bool) -> Result<ExitCode> {
+fn task_status(json: bool) -> Result<()> {
     let root = task::git::toplevel(&std::env::current_dir()?)?;
     let status = task::status::load(&root)?;
     if json {
@@ -925,7 +927,7 @@ fn task_status(json: bool) -> Result<ExitCode> {
     } else {
         print!("{}", status.to_text());
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
 /// SIGINT (Ctrl-C) and SIGTERM, taken over from their default action of
