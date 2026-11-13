@@ -46,6 +46,9 @@ pub const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-
 
 /// The longest line read from the client: a prompt fits many times over.
 pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+/// Reads of stdin that may fail in a row before the server stops: a stdin
+/// that cannot be read (a folder, a hung-up terminal) fails every time.
+pub const MAX_READ_FAILURES: u32 = 3;
 
 pub const HELP: &str = "\
 Usage: junees mcp serve [--dir <folder>] [--allow-write] [--allow-bash] [--allow-home]
@@ -160,21 +163,49 @@ pub async fn main(options: &Options, settings: Settings) -> Result<ExitCode> {
             .join(", ")
     );
     let local = tokio::task::LocalSet::new();
-    local
+    let ended = local
         .run_until(serve(server, tokio::io::stdin(), std::io::stdout()))
         .await;
-    eprintln!("junees mcp serve: stdin closed, stopped");
-    Ok(ExitCode::SUCCESS)
+    Ok(match ended {
+        Ended::Closed => {
+            eprintln!("junees mcp serve: stdin closed, stopped");
+            ExitCode::SUCCESS
+        }
+        Ended::Unreadable => {
+            eprintln!("junees mcp serve: stopped, stdin cannot be read");
+            ExitCode::FAILURE
+        }
+    })
 }
 
-/// Answers the messages read from `input` on `output` until `input` ends;
-/// then stops the running call and the MCP servers. Runs on a
+/// Why [`serve`] stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// stdin ended: the client is done (`basic/lifecycle.md`, stdio
+    /// shutdown).
+    Closed,
+    /// [`MAX_READ_FAILURES`] reads of stdin failed in a row.
+    Unreadable,
+}
+
+/// A line [`read_line`] could not give.
+#[derive(Debug, PartialEq, Eq)]
+enum ReadError {
+    /// The line was read and dropped (too long, not UTF-8): read on.
+    Dropped(String),
+    /// stdin itself failed.
+    Io(String),
+}
+
+/// Answers the messages read from `input` on `output` until `input` ends
+/// or keeps failing; then stops the running call without an answer, drops
+/// the waiting ones, and stops the MCP servers. Runs on a
 /// [`tokio::task::LocalSet`] (the agent's futures are not `Send`).
 pub async fn serve(
     server: tools::Server,
     input: impl AsyncRead + Unpin,
     output: impl Write + Send + 'static,
-) {
+) -> Ended {
     let (out, mut lines) = mpsc::unbounded_channel::<Value>();
     // The only writer of stdout.
     let writer = tokio::task::spawn_blocking(move || {
@@ -202,16 +233,28 @@ pub async fn serve(
     ));
     let mut reader = BufReader::new(input);
     let mut initialized = false;
-    loop {
+    let mut failures = 0;
+    let ended = loop {
         let line = match read_line(&mut reader).await {
             Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(why) => {
+            Ok(None) => break Ended::Closed,
+            Err(ReadError::Dropped(why)) => {
                 eprintln!("junees mcp serve: {why}");
                 error(&out, &Value::Null, -32700, &why);
                 continue;
             }
+            // Not the client's message: stderr only, and stop when it lasts.
+            Err(ReadError::Io(why)) => {
+                eprintln!("junees mcp serve: {why}");
+                failures += 1;
+                if failures >= MAX_READ_FAILURES {
+                    break Ended::Unreadable;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
         };
+        failures = 0;
         if line.trim().is_empty() {
             continue;
         }
@@ -223,13 +266,17 @@ pub async fn serve(
             }
         };
         handle(&server, &queue, &wake, &out, &mut initialized, message);
-    }
+    };
     {
         let mut queue = queue.borrow_mut();
         queue.closed = true;
-        queue.waiting.clear();
-        if let Some((_, cancel)) = &queue.running {
+        let dropped = std::mem::take(&mut queue.waiting).len();
+        if let Some((id, cancel)) = &queue.running {
+            eprintln!("junees mcp serve: stopping the running call {id} (no answer is sent)");
             cancel.cancel();
+        }
+        if dropped > 0 {
+            eprintln!("junees mcp serve: {dropped} waiting call(s) dropped");
         }
     }
     wake.notify_one();
@@ -237,6 +284,7 @@ pub async fn serve(
     server.shutdown().await;
     drop(out);
     let _ = writer.await;
+    ended
 }
 
 /// One message from the client.
@@ -360,14 +408,16 @@ async fn work(server: Rc<tools::Server>, queue: Rc<RefCell<Queue>>, wake: Rc<Not
 
 /// The next line of `reader` without its line end; `None` at the end. A
 /// line over [`MAX_LINE_BYTES`] is read to its end and refused.
-async fn read_line(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Result<Option<String>, String> {
+async fn read_line(
+    reader: &mut (impl AsyncBufReadExt + Unpin),
+) -> Result<Option<String>, ReadError> {
     let mut line = Vec::new();
     let mut too_long = false;
     loop {
         let buffer = reader
             .fill_buf()
             .await
-            .map_err(|err| format!("cannot read stdin: {err}"))?;
+            .map_err(|err| ReadError::Io(format!("cannot read stdin: {err}")))?;
         if buffer.is_empty() {
             if line.is_empty() && !too_long {
                 return Ok(None);
@@ -391,11 +441,13 @@ async fn read_line(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Result<Option
         }
     }
     if too_long {
-        return Err(format!("a message over {MAX_LINE_BYTES} bytes was dropped"));
+        return Err(ReadError::Dropped(format!(
+            "a message over {MAX_LINE_BYTES} bytes was dropped"
+        )));
     }
     String::from_utf8(line)
         .map(|line| Some(line.trim_end_matches(['\n', '\r']).to_string()))
-        .map_err(|_| "a message that is not UTF-8 was dropped".to_string())
+        .map_err(|_| ReadError::Dropped("a message that is not UTF-8 was dropped".into()))
 }
 
 /// Where the server works: `--dir` or the current folder, which must be a

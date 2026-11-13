@@ -129,8 +129,9 @@ impl Served {
 
     /// Closes stdin and waits for the exit; stdout must hold nothing but
     /// protocol messages to its end.
-    async fn close(mut self) -> (std::process::ExitStatus, String) {
+    async fn close(mut self) -> (std::process::ExitStatus, String, Vec<Value>) {
         drop(self.stdin.take());
+        let mut rest = Vec::new();
         while let Ok(Some(line)) = tokio::time::timeout(WAIT, self.stdout.next_line())
             .await
             .unwrap()
@@ -138,6 +139,7 @@ impl Served {
             let message: Value = serde_json::from_str(&line)
                 .unwrap_or_else(|_| panic!("stdout holds a line that is not JSON: {line}"));
             assert_eq!(message["jsonrpc"], "2.0");
+            rest.push(message);
         }
         let output = tokio::time::timeout(WAIT, self.child.wait_with_output())
             .await
@@ -146,6 +148,7 @@ impl Served {
         (
             output.status,
             String::from_utf8_lossy(&output.stderr).into_owned(),
+            rest,
         )
     }
 }
@@ -224,6 +227,12 @@ async fn a_run_round_trip_continues_its_session_and_shows_it() {
     assert_eq!(content["output_tokens"], 3);
     assert_eq!(result["content"][0]["text"], "Done: the answer is 42.");
     let session_id = content["session_id"].as_str().unwrap().to_string();
+    // The other fields reach clients that read `content` only.
+    let fields: Value =
+        serde_json::from_str(result["content"][1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(fields["session_id"], content["session_id"], "{run}");
+    assert_eq!(fields["stop_reason"], "end_turn");
+    assert!(fields.get("text").is_none(), "{fields}");
     let progress: Vec<&Value> = server
         .seen
         .iter()
@@ -246,6 +255,9 @@ async fn a_run_round_trip_continues_its_session_and_shows_it() {
         again["result"]["structuredContent"]["session_id"],
         json!(session_id)
     );
+    // This call's usage, not the session's total.
+    assert_eq!(again["result"]["structuredContent"]["input_tokens"], 3);
+    assert_eq!(again["result"]["structuredContent"]["output_tokens"], 1);
 
     let sessions = server.call(8, "junees_sessions", json!({})).await;
     let listed = &sessions["result"]["structuredContent"]["sessions"];
@@ -261,7 +273,7 @@ async fn a_run_round_trip_continues_its_session_and_shows_it() {
         .call(10, "junees_session", json!({"session_id": "nope"}))
         .await;
     assert_eq!(missing["result"]["isError"], true);
-    let (status, stderr) = server.close().await;
+    let (status, stderr, _) = server.close().await;
     assert!(status.success(), "{stderr}");
     assert!(stderr.contains("stdin closed"), "{stderr}");
 
@@ -327,7 +339,7 @@ async fn tools_follow_the_flags_and_versions_are_negotiated() {
         .send(json!({"jsonrpc": "2.0", "id": 5, "method": "resources/list"}))
         .await;
     assert_eq!(server.answer(5).await["error"]["code"], -32601);
-    let (status, _) = server.close().await;
+    let (status, _, _) = server.close().await;
     assert!(status.success());
 }
 
@@ -371,7 +383,7 @@ async fn a_cancelled_run_stops_and_gets_no_answer() {
         listed["result"]["structuredContent"]["sessions"].is_array(),
         "{listed}"
     );
-    let (status, stderr) = server.close().await;
+    let (status, stderr, _) = server.close().await;
     assert!(status.success(), "{stderr}");
     assert!(stderr.contains("cancelled by the client"), "{stderr}");
 }
@@ -402,4 +414,67 @@ async fn the_home_folder_and_claude_code_are_refused() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("claude-code backend"));
+}
+
+/// An API that takes requests and never answers; the receiver hears of
+/// each connection.
+async fn silent_api() -> (String, tokio::sync::mpsc::UnboundedReceiver<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let (asked, asked_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            let _ = asked.send(());
+            held.push(stream);
+        }
+    });
+    (api, asked_rx)
+}
+
+#[tokio::test]
+async fn closing_stdin_stops_the_running_call_without_an_answer() {
+    let (home, work) = home();
+    let (api, mut asked) = silent_api().await;
+    let mut server = Served::start(home.path(), &work, &api, &[]);
+    server.initialize("2025-06-18").await;
+    server
+        .send(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                     "params": {"name": "junees_run", "arguments": {"prompt": "slow"}}}))
+        .await;
+    server
+        .send(json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                     "params": {"name": "junees_sessions", "arguments": {}}}))
+        .await;
+    tokio::time::timeout(WAIT, asked.recv()).await.unwrap();
+    let (status, stderr, rest) = server.close().await;
+    assert!(status.success(), "{stderr}");
+    assert!(
+        rest.iter().all(|message| message.get("id").is_none()),
+        "{rest:?}"
+    );
+    assert!(stderr.contains("stopping the running call 7"), "{stderr}");
+    assert!(stderr.contains("1 waiting call(s) dropped"), "{stderr}");
+    assert!(stderr.contains("stdin closed"), "{stderr}");
+}
+
+#[tokio::test]
+async fn an_unreadable_stdin_stops_the_server() {
+    let (home, work) = home();
+    // Reading a folder fails every time (EISDIR).
+    let folder = std::fs::File::open(&work).unwrap();
+    let output = tokio::time::timeout(
+        WAIT,
+        command(home.path(), &work, "http://127.0.0.1:9", &[])
+            .stdin(Stdio::from(folder))
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("cannot read stdin").count(), 3, "{stderr}");
+    assert!(stderr.contains("stdin cannot be read"), "{stderr}");
 }
