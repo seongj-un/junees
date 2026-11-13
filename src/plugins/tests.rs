@@ -284,9 +284,9 @@ fn the_model_cannot_install_or_enable_plugins_on_its_own() {
     assert_eq!(
         request.reasons,
         [
-            "`junees plugin install` installs a plugin (programs Junees runs) (Junees's own state)",
-            "`junees plugin enable` enables a plugin (its tools and hooks run in later sessions) \
-             (Junees's own state)",
+            "`junees plugin install`: 플러그인을 설치합니다(Junees가 실행할 프로그램) (Junees 자체 상태)",
+            "`junees plugin enable`: 플러그인을 켭니다(다음 세션부터 그 도구와 훅이 실행됩니다) \
+             (Junees 자체 상태)",
         ]
     );
     for command in [
@@ -322,12 +322,12 @@ async fn plugin_tools_are_asked_about_unless_trusted() {
     let risky = gate(&plugins, &asker, &home.work);
     let input = json!({"x": 1});
     let request = risky.request("plugin__plain__t", &input).unwrap();
-    assert_eq!(request.target, "tool `t` of the plugin `plain`");
+    assert_eq!(request.target, "플러그인 `plain`의 도구 `t`");
     assert_eq!(
         request.reasons,
         [
-            "an external tool: the plugin `plain` runs it with these arguments, outside \
-          Junees's command rules"
+            "외부 도구입니다(플러그인 `plain`). Junees의 명령 규칙을 거치지 않고 이 인자로 \
+             실행됩니다"
         ]
     );
     assert_eq!(request.kinds, ["plugin__plain__t: external tool"]);
@@ -725,7 +725,7 @@ async fn subagents_borrow_plugin_tools_and_hooks() {
     // and the plugin's hook refused its second call.
     let asked = asker.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 2);
-    assert_eq!(asked[0].reasons[0], "asked by subagent [1] alpha");
+    assert_eq!(asked[0].reasons[0], "서브에이전트 [1] alpha의 요청입니다");
     let results = routes.results.lock().unwrap().clone();
     let child: Vec<&ContentBlock> = results
         .iter()

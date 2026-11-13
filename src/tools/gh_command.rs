@@ -24,8 +24,10 @@
 pub struct GhWrite {
     /// The command as matched: `gh pr merge`, `gh api -X PUT`.
     pub command: String,
-    /// What it does, for messages: "merges a pull request".
+    /// What it does, for messages to the model: "merges a pull request".
     pub does: &'static str,
+    /// The same for the person's approval question, in Korean.
+    pub asks: &'static str,
     /// Whether it merges, so it is asked about every time.
     pub merges: bool,
 }
@@ -37,62 +39,203 @@ pub const KIND: &str = "write to GitHub through gh";
 pub const MERGE_KIND: &str = "merge on GitHub through gh (asked every time)";
 
 /// `gh <group> <subcommand>` pairs that write, with what they do.
-const WRITES: &[(&str, &str, &str)] = &[
-    ("pr", "merge", "merges a pull request"),
+const WRITES: &[(&str, &str, &str, &str)] = &[
+    (
+        "pr",
+        "merge",
+        "merges a pull request",
+        "pull request를 merge합니다",
+    ),
     (
         "pr",
         "review",
         "submits a review (approval, change request or comment)",
+        "리뷰를 제출합니다(승인, 변경 요청 또는 코멘트)",
     ),
-    ("pr", "close", "closes a pull request"),
-    ("pr", "comment", "posts a comment"),
-    ("pr", "create", "opens a pull request"),
-    ("pr", "edit", "edits a pull request"),
-    ("pr", "reopen", "reopens a pull request"),
-    ("pr", "ready", "marks a pull request ready for review"),
-    ("pr", "lock", "locks a conversation"),
-    ("pr", "unlock", "unlocks a conversation"),
-    ("issue", "create", "opens an issue"),
-    ("issue", "comment", "posts a comment"),
-    ("issue", "close", "closes an issue"),
-    ("issue", "reopen", "reopens an issue"),
-    ("issue", "edit", "edits an issue"),
-    ("issue", "delete", "deletes an issue"),
-    ("issue", "transfer", "moves an issue to another repository"),
-    ("issue", "lock", "locks a conversation"),
-    ("issue", "unlock", "unlocks a conversation"),
-    ("issue", "pin", "pins an issue"),
-    ("issue", "unpin", "unpins an issue"),
-    ("release", "create", "publishes a release"),
-    ("release", "edit", "edits a release"),
-    ("release", "delete", "deletes a release"),
-    ("release", "upload", "uploads release assets"),
-    ("release", "delete-asset", "deletes a release asset"),
-    ("repo", "create", "creates a repository"),
-    ("repo", "delete", "deletes a repository"),
-    ("repo", "edit", "changes repository settings"),
-    ("repo", "rename", "renames a repository"),
-    ("repo", "archive", "archives a repository"),
-    ("repo", "unarchive", "unarchives a repository"),
-    ("repo", "fork", "forks a repository"),
-    ("repo", "sync", "updates a branch on GitHub"),
-    ("workflow", "run", "starts a workflow"),
-    ("workflow", "enable", "enables a workflow"),
-    ("workflow", "disable", "disables a workflow"),
-    ("run", "rerun", "reruns a workflow run"),
-    ("run", "cancel", "cancels a workflow run"),
-    ("run", "delete", "deletes a workflow run"),
-    ("secret", "set", "sets a secret"),
-    ("secret", "delete", "deletes a secret"),
-    ("variable", "set", "sets a variable"),
-    ("variable", "delete", "deletes a variable"),
-    ("label", "create", "creates a label"),
-    ("label", "edit", "edits a label"),
-    ("label", "delete", "deletes a label"),
-    ("label", "clone", "copies labels into a repository"),
-    ("gist", "create", "creates a gist"),
-    ("gist", "edit", "edits a gist"),
-    ("gist", "delete", "deletes a gist"),
+    (
+        "pr",
+        "close",
+        "closes a pull request",
+        "pull request를 닫습니다",
+    ),
+    ("pr", "comment", "posts a comment", "코멘트를 답니다"),
+    (
+        "pr",
+        "create",
+        "opens a pull request",
+        "pull request를 엽니다",
+    ),
+    (
+        "pr",
+        "edit",
+        "edits a pull request",
+        "pull request를 고칩니다",
+    ),
+    (
+        "pr",
+        "reopen",
+        "reopens a pull request",
+        "pull request를 다시 엽니다",
+    ),
+    (
+        "pr",
+        "ready",
+        "marks a pull request ready for review",
+        "pull request를 리뷰 준비 상태로 바꿉니다",
+    ),
+    ("pr", "lock", "locks a conversation", "대화를 잠급니다"),
+    (
+        "pr",
+        "unlock",
+        "unlocks a conversation",
+        "대화 잠금을 풉니다",
+    ),
+    ("issue", "create", "opens an issue", "이슈를 엽니다"),
+    ("issue", "comment", "posts a comment", "코멘트를 답니다"),
+    ("issue", "close", "closes an issue", "이슈를 닫습니다"),
+    ("issue", "reopen", "reopens an issue", "이슈를 다시 엽니다"),
+    ("issue", "edit", "edits an issue", "이슈를 고칩니다"),
+    ("issue", "delete", "deletes an issue", "이슈를 지웁니다"),
+    (
+        "issue",
+        "transfer",
+        "moves an issue to another repository",
+        "이슈를 다른 저장소로 옮깁니다",
+    ),
+    ("issue", "lock", "locks a conversation", "대화를 잠급니다"),
+    (
+        "issue",
+        "unlock",
+        "unlocks a conversation",
+        "대화 잠금을 풉니다",
+    ),
+    ("issue", "pin", "pins an issue", "이슈를 고정합니다"),
+    ("issue", "unpin", "unpins an issue", "이슈 고정을 풉니다"),
+    (
+        "release",
+        "create",
+        "publishes a release",
+        "릴리스를 게시합니다",
+    ),
+    ("release", "edit", "edits a release", "릴리스를 고칩니다"),
+    (
+        "release",
+        "delete",
+        "deletes a release",
+        "릴리스를 지웁니다",
+    ),
+    (
+        "release",
+        "upload",
+        "uploads release assets",
+        "릴리스 파일을 올립니다",
+    ),
+    (
+        "release",
+        "delete-asset",
+        "deletes a release asset",
+        "릴리스 파일을 지웁니다",
+    ),
+    (
+        "repo",
+        "create",
+        "creates a repository",
+        "저장소를 만듭니다",
+    ),
+    (
+        "repo",
+        "delete",
+        "deletes a repository",
+        "저장소를 지웁니다",
+    ),
+    (
+        "repo",
+        "edit",
+        "changes repository settings",
+        "저장소 설정을 바꿉니다",
+    ),
+    (
+        "repo",
+        "rename",
+        "renames a repository",
+        "저장소 이름을 바꿉니다",
+    ),
+    (
+        "repo",
+        "archive",
+        "archives a repository",
+        "저장소를 보관(archive)합니다",
+    ),
+    (
+        "repo",
+        "unarchive",
+        "unarchives a repository",
+        "저장소 보관을 풉니다",
+    ),
+    ("repo", "fork", "forks a repository", "저장소를 fork합니다"),
+    (
+        "repo",
+        "sync",
+        "updates a branch on GitHub",
+        "GitHub의 브랜치를 갱신합니다",
+    ),
+    (
+        "workflow",
+        "run",
+        "starts a workflow",
+        "워크플로를 시작합니다",
+    ),
+    (
+        "workflow",
+        "enable",
+        "enables a workflow",
+        "워크플로를 켭니다",
+    ),
+    (
+        "workflow",
+        "disable",
+        "disables a workflow",
+        "워크플로를 끕니다",
+    ),
+    (
+        "run",
+        "rerun",
+        "reruns a workflow run",
+        "워크플로 실행을 다시 돌립니다",
+    ),
+    (
+        "run",
+        "cancel",
+        "cancels a workflow run",
+        "워크플로 실행을 취소합니다",
+    ),
+    (
+        "run",
+        "delete",
+        "deletes a workflow run",
+        "워크플로 실행 기록을 지웁니다",
+    ),
+    ("secret", "set", "sets a secret", "시크릿을 설정합니다"),
+    ("secret", "delete", "deletes a secret", "시크릿을 지웁니다"),
+    ("variable", "set", "sets a variable", "변수를 설정합니다"),
+    (
+        "variable",
+        "delete",
+        "deletes a variable",
+        "변수를 지웁니다",
+    ),
+    ("label", "create", "creates a label", "라벨을 만듭니다"),
+    ("label", "edit", "edits a label", "라벨을 고칩니다"),
+    ("label", "delete", "deletes a label", "라벨을 지웁니다"),
+    (
+        "label",
+        "clone",
+        "copies labels into a repository",
+        "라벨을 저장소로 복사합니다",
+    ),
+    ("gist", "create", "creates a gist", "gist를 만듭니다"),
+    ("gist", "edit", "edits a gist", "gist를 고칩니다"),
+    ("gist", "delete", "deletes a gist", "gist를 지웁니다"),
 ];
 
 /// Options of these groups that take a value as the next word, so the
@@ -116,7 +259,7 @@ impl GhWrite {
 
     /// What the approval question says about it.
     pub fn caution(&self) -> String {
-        format!("`{}` {} on GitHub as you", self.command, self.does)
+        format!("`{}`: 내 GitHub 계정으로 {}", self.command, self.asks)
     }
 }
 
@@ -144,12 +287,13 @@ pub fn find(words: &[String]) -> Option<GhWrite> {
         }
     }
     let subcommand = subcommand?;
-    let &(_, _, does) = WRITES
+    let &(_, _, does, asks) = WRITES
         .iter()
-        .find(|(g, s, _)| *g == group && *s == subcommand)?;
+        .find(|(g, s, _, _)| *g == group && *s == subcommand)?;
     Some(GhWrite {
         command: format!("gh {group} {subcommand}"),
         does,
+        asks,
         merges: group == "pr" && subcommand == "merge",
     })
 }
@@ -197,6 +341,11 @@ fn api_write(args: &[String]) -> Option<GhWrite> {
             "merges through the REST or GraphQL API"
         } else {
             "sends a write request to the API"
+        },
+        asks: if merges {
+            "REST나 GraphQL API로 merge합니다"
+        } else {
+            "API에 쓰기 요청을 보냅니다"
         },
         merges,
     })
@@ -304,7 +453,7 @@ mod tests {
         );
         assert_eq!(
             merge.caution(),
-            "`gh pr merge` merges a pull request on GitHub as you"
+            "`gh pr merge`: 내 GitHub 계정으로 pull request를 merge합니다"
         );
         assert!(MERGE_KIND.ends_with(crate::approval::ASKED_EVERY_TIME));
     }

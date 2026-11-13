@@ -354,7 +354,7 @@ async fn gateway_channels_ask_before_untrusted_mcp_tools() {
     );
     let asked = asked.0.lock().unwrap().clone();
     assert_eq!(asked.len(), 1);
-    assert_eq!(asked[0].target, "tool `echo` of the MCP server `fake`");
+    assert_eq!(asked[0].target, "MCP 서버 `fake`의 도구 `echo`");
     mcp.shutdown().await;
 }
 
