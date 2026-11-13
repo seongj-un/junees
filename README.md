@@ -194,7 +194,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 17. 음성 메시지: 디스코드, 텔레그램, Slack 게이트웨이의 음성 메시지와 오디오 첨부를 OpenAI 호환 받아쓰기 API(OpenAI, Groq, 로컬 whisper 서버)로 글로 바꿔 처리 ([docs/gateways.md](docs/gateways.md)) (완료)
 18. MCP 서버: `junees mcp serve`(stdio)로 다른 에이전트(Claude Desktop, Claude Code, Hermes, Cursor)가 Junees에 일을 맡기기, 웹훅과 같은 무인 실행 규칙 ([docs/mcp.md](docs/mcp.md#junees를-mcp-서버로)) (완료)
 19. 대시보드 대화: `junees dashboard --chat`으로 페이지에서 Junees와 대화하고, 승인 질문을 버튼으로 답하기(이벤트 스트림, 터미널과 같은 신뢰 수준, [docs/dashboard.md](docs/dashboard.md#대화---chat)) (완료)
-20. 파일 체크포인트: `write_file`, `edit_file`이 바꾼 파일을 턴 단위로 기록하고 `/undo`, `junees rewind`, 대시보드 API로 되돌리기 ([docs/checkpoints.md](docs/checkpoints.md))
+20. 파일 체크포인트: `write_file`, `edit_file`이 바꾼 파일을 턴 단위로 기록하고 `/undo`, `junees rewind`, 대시보드 API로 되돌리기 ([docs/checkpoints.md](docs/checkpoints.md)) (완료)
 
 ## 개발
 
