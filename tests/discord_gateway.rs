@@ -2156,6 +2156,57 @@ async fn a_turn_downloading_its_attachments_can_be_stopped() {
 }
 
 #[tokio::test]
+async fn voice_messages_are_transcribed_for_the_model() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let gateway = FakeGateway::bind().await;
+    let rest = FakeRest::start(&gateway.url).await;
+    let sound = b"OggS discord voice".to_vec();
+    let (cdn, asked) = fake_cdn(sound.clone()).await;
+    let (transcriber, heard) =
+        common::fake_transcriber(vec![(200, json!({"text": "내일 배포해 줘"}))], &[]).await;
+    let (api, served) = common::fake_api(vec![(200, common::text_reply("Will do."))]).await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let cdn_base = format!("{cdn}/attachments/");
+    let running = start_with_voice(
+        discord(&rest.url, &[("JUNEES_DISCORD_CDN_URL", &cdn_base)]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+        None,
+        Some(transcriber),
+    );
+    let mut conn = gateway.accept().await;
+    conn.start(&gateway.url).await;
+    // A voice message: flag 8192, one audio/ogg file.
+    let mut said = with_attachments(
+        message("505", USER, "", false, &[]),
+        json!([{"id": "1", "filename": "voice-message.ogg", "content_type": "audio/ogg",
+                "size": sound.len(), "duration_secs": 1.5, "waveform": "AAAA",
+                "url": format!("{cdn_base}1/2/voice-message.ogg?ex=1&hm=signed")}]),
+    );
+    said["flags"] = json!(8192);
+    conn.dispatch("MESSAGE_CREATE", said).await;
+    rest.wait_post("505", |p| p == "Will do.").await;
+    running.stop().await;
+
+    assert_eq!(
+        asked.lock().unwrap().clone(),
+        ["/attachments/1/2/voice-message.ogg?ex=1&hm=signed"]
+    );
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(
+        common::first_text(&requests[0]),
+        "[음성 메시지 받아쓰기]\n내일 배포해 줘"
+    );
+    let heard = tokio::time::timeout(WAIT, heard).await.unwrap().unwrap();
+    assert!(heard[0].contains("OggS discord voice"), "{}", heard[0]);
+}
+
+#[tokio::test]
 async fn attached_images_reach_the_model() {
     use base64::Engine as _;
     let home = tempfile::tempdir().unwrap();
@@ -2245,8 +2296,8 @@ async fn attached_images_reach_the_model() {
     );
     assert_eq!(
         content[1]["text"],
-        "(sent with no text)\n\n(attachments left out: `notes.txt` is not an image; only images \
-         are read)"
+        "(sent with no text)\n\n(attachments left out: `notes.txt` is not an image or audio; only \
+         those are read)"
     );
     let second = common::body_of(&requests[1]);
     let last = second["messages"]

@@ -1488,6 +1488,60 @@ async fn idle_threads_close_and_open_their_session_again() {
 }
 
 #[tokio::test]
+async fn audio_files_are_transcribed_with_the_bot_token_download() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let s = FakeSlack::start().await;
+    s.file("T1-F1/download/clip.webm", b"webm slack clip".to_vec());
+    let (transcriber, heard) =
+        common::fake_transcriber(vec![(200, json!({"text": "PR 올려 줘"}))], &[]).await;
+    let (api, served) = common::fake_api(vec![(200, common::text_reply("Opening it."))]).await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let running = start_voice(
+        slack(&s, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+        Some(transcriber),
+    );
+    s.wait_connections(1).await;
+    // A stranger's audio is never downloaded.
+    s.push(with_files(
+        STRANGER,
+        "",
+        vec![file(&s, "clip.webm", "audio/webm")],
+    ));
+    s.push(with_files(
+        USER,
+        "이거 처리해",
+        vec![file(&s, "clip.webm", "audio/webm")],
+    ));
+    s.wait_post(DM, |p| p == "Opening it.").await;
+    running.stop().await;
+
+    let downloads: Vec<Received> = s
+        .requests()
+        .into_iter()
+        .filter(|r| r.path.starts_with("/files/"))
+        .collect();
+    assert_eq!(downloads.len(), 1, "{downloads:?}");
+    assert_eq!(downloads[0].path, "/files/T1-F1/download/clip.webm");
+    assert_eq!(downloads[0].auth, format!("Bearer {}", bot_token()));
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(
+        common::first_text(&requests[0]),
+        "이거 처리해\n\n[음성 메시지 받아쓰기]\nPR 올려 줘"
+    );
+    let heard = tokio::time::timeout(WAIT, heard).await.unwrap().unwrap();
+    assert!(heard[0].contains("filename=\"audio.webm\""), "{}", heard[0]);
+    // The Slack token never goes to the transcription service.
+    assert!(!heard[0].contains(&bot_token()), "{}", heard[0]);
+}
+
+#[tokio::test]
 async fn images_reach_the_model_from_the_files_host_only() {
     use base64::Engine as _;
     let home = tempfile::tempdir().unwrap();
