@@ -114,11 +114,13 @@ sandbox_network = "1"
 질문은 표준 오류에 도구 이름, 명령이나 경로, 이유를 보여 준다. 모델이 쓴 글자 가운데 제어 문자(탭 제외)와 양방향 서식 문자(U+202E 등)는 `\r`, `\u{1b}`처럼 글자로 바꿔 보여 주므로, `\r`이나 ESC로 질문 줄을 지우고 다른 명령처럼 보이게 할 수 없다. `edit_file`이면 바꿀 부분(`- 원래`, `+ 새 내용`, 각 8줄까지)을, `write_file`이면 새 파일인지 덮어쓰는지와 내용 앞부분을 함께 보여 준다.
 
 ```
-  ?? approve bash: rm marker
-     * `rm` deletes files
-     always allows: bash: delete files
-  [y] run  [n] decline  [a] always allow this kind this session  [e] decline with a reason >
+  ?? 승인 요청 bash: rm marker
+     * `rm`: 파일을 지웁니다
+     항상 허용하면: bash: delete files
+  [y] 실행  [n] 거절  [a] 이 세션 동안 이 종류는 항상 허용  [e] 이유를 적어 거절 >
 ```
+
+질문의 문구(이유, 미리보기의 안내, 선택지)는 한국어다. 터미널, 게이트웨이(디스코드, 텔레그램, Slack), 대시보드는 같은 이유 문구를 그대로 보여 준다. "항상 허용"이 기억하는 종류 이름(`bash: delete files` 등)은 설정과 기록에서 이름으로 쓰이므로 영어 그대로 둔다. 거절했을 때 모델에 돌려주는 결과(`the user declined: ...`)와 모델이 읽는 거절 메시지도 바꾸지 않았다.
 
 - `y` 실행, `n` 거절, `a` 이번 실행 동안 같은 종류(도구별: 예 `bash: delete files`, `edit_file: write outside the working folder`)는 묻지 않고 허용, `e` 거절 이유 입력(`e 이유`처럼 한 줄로도 된다). 다른 입력이면 다시 묻는다.
 - 거절하면 도구를 실행하지 않고 `the user declined: <이유>`(이유가 없으면 `no reason given`) 오류 결과를 모델에 돌려줘서 모델이 계획을 바꾸게 한다. Ctrl-D(입력 끝)도 거절이다.
