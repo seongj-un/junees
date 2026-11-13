@@ -38,7 +38,7 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
 const TOKEN_BYTES: usize = 32;
 
 pub const HELP: &str = "\
-Usage: junees dashboard [--listen 127.0.0.1:7878] [--no-open] [--chat [--dir <folder>]]
+Usage: junees dashboard [--listen 127.0.0.1:7878] [--no-open | --open] [--chat [--dir <folder>]]
 
 Serves a dashboard of this Junees (settings, sessions and their
 conversations, usage, scheduled jobs, webhooks, doctor) to the browser of
@@ -48,7 +48,8 @@ jobs and webhook routes.
   --listen <ip:port>  where to listen; a loopback address only
                       (127.0.0.1 or ::1). Port 0 picks a free one.
   --no-open           print an address to paste instead of opening a
-                      browser
+                      browser (the default with --chat)
+  --open              open a browser with --chat too (see below)
   --chat              also talk with Junees on the page, approval questions
                       answered with its buttons: the page then has the
                       power of a terminal conversation (api backend only)
@@ -59,6 +60,11 @@ that trades for it once, within a minute, and keeps the token in that tab
 only; the token itself is printed only with --no-open, or when no browser
 can be started. Anyone who can read that address can use the
 dashboard.
+
+With --chat no browser is opened unless --open is given: the one-time
+code on a browser's command line can be read and traded by another
+process of this computer before the browser does, and with the chat the
+token runs commands.
 ";
 
 /// The arguments of `junees dashboard`.
@@ -75,14 +81,15 @@ pub struct Options {
 /// Reads the arguments after `dashboard`; `None` for `--help`.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>> {
     let mut listen = None;
-    let mut open = true;
+    let mut open = None;
     let mut chat = false;
     let mut dir = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
-            "--no-open" => open = false,
+            "--no-open" => open = Some(false),
+            "--open" => open = Some(true),
             "--chat" => chat = true,
             "--dir" => {
                 let value = args.next().context("--dir needs a folder")?;
@@ -114,7 +121,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Options>> 
     }
     Ok(Some(Options {
         listen,
-        open,
+        // The chat's token runs commands: no code on a command line unless
+        // asked for.
+        open: open.unwrap_or(!chat),
         chat,
         dir,
     }))
@@ -184,6 +193,14 @@ pub async fn main(options: Options, chat: Option<chat::Setup>) -> Result<ExitCod
     let mut out = std::io::stdout();
     // The browser's command line, which other processes can read, gets a
     // one-time code; the token is printed only when no browser was started.
+    if options.open && chat.is_some() {
+        eprintln!(
+            "  !! --open with --chat: the one-time code on the browser's command line can be read \
+             by other processes of this computer and traded before the browser does; whoever \
+             trades it can run commands through the chat. Without --open the address is printed \
+             here only."
+        );
+    }
     let opened = options.open && {
         let code = new_token()?;
         if let Ok(mut codes) = context.codes.lock() {
@@ -305,6 +322,9 @@ mod tests {
         let chat = parse(args(&["--chat", "--dir", "/w"])).unwrap().unwrap();
         assert!(chat.chat);
         assert_eq!(chat.dir.as_deref(), Some(std::path::Path::new("/w")));
+        assert!(!chat.open, "--chat prints the address");
+        assert!(parse(args(&["--chat", "--open"])).unwrap().unwrap().open);
+        assert!(parse(args(&["--open"])).unwrap().unwrap().open);
         assert!(parse(args(&["--dir=/w"])).is_err());
         assert!(parse(args(&["--chat", "--dir"])).is_err());
         assert!(parse(args(&["--listen"])).is_err());

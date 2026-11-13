@@ -460,6 +460,7 @@ fn trade_code(body: &[u8], context: &Context) -> Answer {
         .lock()
         .is_ok_and(|mut codes| codes.redeem(&given, Instant::now()));
     if traded {
+        log_exchange(context);
         Answer::json(200, &json!({ "token": context.token }))
     } else {
         Answer::error(
@@ -467,6 +468,25 @@ fn trade_code(body: &[u8], context: &Context) -> Answer {
             "bad_code",
             "the code is wrong, used or expired; run `junees dashboard` again",
         )
+    }
+}
+
+/// Says on stderr and in `dashboard.log` that the one-time code was
+/// traded, with the time only: a trade the user did not make shows.
+fn log_exchange(context: &Context) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let line = format!(
+        "{} code exchanged\n",
+        crate::session::format_utc_seconds(now)
+    );
+    eprint!("dashboard: {line}");
+    let env = context.env.clone();
+    let (settings, _) = crate::config_file::Settings::load_for_setup(move |key| env(key));
+    if let Some(home) = api::home(&settings) {
+        actions::log_line(&home, &line);
     }
 }
 

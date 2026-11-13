@@ -1083,6 +1083,13 @@ async fn an_opened_browser_gets_a_one_time_code_not_the_token() {
     // Once only.
     let reply = post(&dashboard, "/api/token", &origin, &body).await;
     assert_eq!((reply.status, reply.error()), (401, json!("bad_code")));
+    // The trade is logged with its time only.
+    let log = std::fs::read_to_string(home.state.join("dashboard.log")).unwrap();
+    assert_eq!(log.matches("code exchanged").count(), 1, "{log}");
+    assert!(
+        !log.contains(&code) && !log.contains(&dashboard.token),
+        "{log}"
+    );
 }
 
 #[tokio::test]
