@@ -186,6 +186,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 14. 모델과 무인 실행 보강: OpenAI 호환 Chat Completions provider(OpenAI, OpenRouter, Ollama, vLLM, [docs/configuration.md](docs/configuration.md)), 무인 실행의 홈 폴더 지속 실행 경로 보호 ([docs/safety.md](docs/safety.md)) (완료)
 15. 로컬 웹 대시보드: `junees dashboard`(루프백, 토큰, 읽기 전용 상태·세션·사용량·예약 작업·웹훅·점검 화면, [docs/dashboard.md](docs/dashboard.md)) (완료)
 16. 대시보드 2차: 세션 대화 보기, 예약 작업과 웹훅 멈춤·재개(같은 출처 확인, 쓰기 로그), 브라우저에는 일회용 코드만 넘기기 ([docs/dashboard.md](docs/dashboard.md)) (완료)
+17. 음성 메시지: 디스코드, 텔레그램, Slack 게이트웨이의 음성 메시지와 오디오 첨부를 OpenAI 호환 받아쓰기 API(OpenAI, Groq, 로컬 whisper 서버)로 글로 바꿔 처리 ([docs/gateways.md](docs/gateways.md)) (완료)
 
 ## 개발
 
