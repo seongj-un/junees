@@ -147,7 +147,7 @@ async fn undo_puts_back_content_and_bits_and_removes_what_was_made() {
     assert!(
         undone
             .note()
-            .starts_with("[되돌림] 턴 1의 파일 변경을 되돌렸습니다: ")
+            .starts_with("[되돌림] 변경 기록 1의 파일 변경을 되돌렸습니다: ")
     );
     assert!(undone.note().contains("bash로 바꾼 파일은 기록되지 않아"));
 }
@@ -258,7 +258,11 @@ async fn turns_are_undone_newest_first_and_an_undo_can_be_undone() {
     assert!(undone.skipped.is_empty(), "{undone:?}");
     assert_eq!(fs::read_to_string(&file).unwrap(), "v0");
     assert_eq!(undone.checkpoint, Some(3));
-    assert!(undone.note().starts_with("[되돌림] 턴 1, 2의 파일 변경을"));
+    assert!(
+        undone
+            .note()
+            .starts_with("[되돌림] 변경 기록 1, 2의 파일 변경을")
+    );
 
     let list = session.list().unwrap();
     let undo_turn = list.last().unwrap();
@@ -377,7 +381,7 @@ async fn a_change_between_two_turns_makes_the_older_one_not_restorable() {
     let note = undone.note();
     assert!(
         note.starts_with(&format!(
-            "[되돌림] 턴 3, 4의 파일 변경을 되돌렸습니다: {path} (턴 4까지 되돌림, 턴 3은 건너뜀: {})",
+            "[되돌림] 변경 기록 3, 4의 파일 변경을 되돌렸습니다: {path} (변경 기록 4까지 되돌림, 변경 기록 3은 건너뜀: {})",
             reason::KEPT_CREATED
         )),
         "{note}"
