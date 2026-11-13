@@ -536,7 +536,7 @@ impl CommandPolicy {
         {
             found.push(Caution {
                 kind: BLOCKED,
-                reason: format!("the built-in rules would block it: {reason}"),
+                reason: format!("기본 규칙이라면 막았을 명령입니다: {reason}"),
             });
         }
         // With the rules off, `command_words` looks through `sudo` and
@@ -650,7 +650,7 @@ impl CommandPolicy {
         let args = &words[1..];
         match name {
             "rm" | "rmdir" | "unlink" | "shred" => {
-                found.push(caution(DELETE, format!("`{name}` deletes files")));
+                found.push(caution(DELETE, format!("`{name}`: 파일을 지웁니다")));
                 for target in operands(args).filter(|target| !workspace.contains_from(cwd, target))
                 {
                     found.push(outside(target));
@@ -658,7 +658,7 @@ impl CommandPolicy {
             }
             "find" => {
                 if args.iter().any(|arg| arg == "-delete") {
-                    found.push(caution(DELETE, "`find -delete` deletes files"));
+                    found.push(caution(DELETE, "`find -delete`: 파일을 지웁니다"));
                 }
                 // `-exec cmd args ;` runs a command of its own.
                 let mut rest = args;
@@ -685,14 +685,14 @@ impl CommandPolicy {
             "chmod" | "chown" | "chgrp" | "chattr" | "setfacl" => {
                 found.push(caution(
                     PERMISSIONS,
-                    format!("`{name}` changes permissions or ownership"),
+                    format!("`{name}`: 권한이나 소유자를 바꿉니다"),
                 ));
             }
             "curl" if curl_saves(args) => {
-                found.push(caution(DOWNLOAD, "`curl` saves a downloaded file"));
+                found.push(caution(DOWNLOAD, "`curl`: 내려받은 파일을 저장합니다"));
             }
             "wget" if wget_saves(args) => {
-                found.push(caution(DOWNLOAD, "`wget` saves a downloaded file"));
+                found.push(caution(DOWNLOAD, "`wget`: 내려받은 파일을 저장합니다"));
             }
             "cp" | "ln" | "install" => {
                 if let Some(target) = copy_target(args)
@@ -748,7 +748,7 @@ fn caution(kind: &'static str, reason: impl Into<String>) -> Caution {
 fn outside(target: &str) -> Caution {
     Caution {
         kind: OUTSIDE,
-        reason: format!("writes to `{target}` outside the working folder"),
+        reason: format!("작업 폴더 밖 `{target}`에 씁니다"),
     }
 }
 
@@ -886,10 +886,10 @@ fn git_caution(args: &[String]) -> Option<(&'static str, &'static str)> {
     }
     let rest: Vec<&String> = iter.collect();
     match subcommand? {
-        "push" => Some((GIT_PUSH, "`git push` publishes commits")),
+        "push" => Some((GIT_PUSH, "`git push`: 커밋을 원격 저장소에 올립니다")),
         "reset" if rest.iter().any(|arg| arg.as_str() == "--hard") => Some((
             GIT_DISCARD,
-            "`git reset --hard` throws away uncommitted changes",
+            "`git reset --hard`: 커밋하지 않은 변경을 버립니다",
         )),
         "checkout"
             if rest
@@ -898,7 +898,7 @@ fn git_caution(args: &[String]) -> Option<(&'static str, &'static str)> {
         {
             Some((
                 GIT_DISCARD,
-                "`git checkout` of files or with --force throws away uncommitted changes",
+                "`git checkout`(파일 지정 또는 --force): 커밋하지 않은 변경을 버립니다",
             ))
         }
         "restore" => {
@@ -909,12 +909,12 @@ fn git_caution(args: &[String]) -> Option<(&'static str, &'static str)> {
             let staged = rest.iter().any(|arg| arg.as_str() == "--staged") || short('S');
             let worktree = rest.iter().any(|arg| arg.as_str() == "--worktree") || short('W');
             (!staged || worktree)
-                .then_some((GIT_DISCARD, "`git restore` throws away uncommitted changes"))
+                .then_some((GIT_DISCARD, "`git restore`: 커밋하지 않은 변경을 버립니다"))
         }
         "stash" if matches!(rest.first().map(|arg| arg.as_str()), Some("drop" | "clear")) => {
             Some((
                 GIT_DISCARD,
-                "`git stash drop`/`clear` deletes stashed changes",
+                "`git stash drop`/`clear`: 보관해 둔 변경을 지웁니다",
             ))
         }
         "branch"
@@ -928,7 +928,7 @@ fn git_caution(args: &[String]) -> Option<(&'static str, &'static str)> {
         {
             Some((
                 GIT_DISCARD,
-                "`git branch -D` deletes a branch even with commits found nowhere else",
+                "`git branch -D`: 다른 곳에 없는 커밋이 있어도 브랜치를 지웁니다",
             ))
         }
         "clean"
@@ -937,7 +937,7 @@ fn git_caution(args: &[String]) -> Option<(&'static str, &'static str)> {
                     || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('n'))
             }) =>
         {
-            Some((GIT_CLEAN, "`git clean` deletes untracked files"))
+            Some((GIT_CLEAN, "`git clean`: 추적하지 않는 파일을 지웁니다"))
         }
         _ => None,
     }
@@ -989,7 +989,7 @@ fn package_change(name: &str, args: &[String]) -> Option<String> {
             _ => false,
         },
         "npx" | "pnpx" | "bunx" | "uvx" => {
-            return Some(format!("`{name}` runs a package fetched from the registry"));
+            return Some(format!("`{name}`: 레지스트리에서 받은 패키지를 실행합니다"));
         }
         _ if name.starts_with("python") => {
             let mut iter = args.iter().skip_while(|arg| arg.as_str() != "-m").skip(1);
@@ -1005,8 +1005,8 @@ fn package_change(name: &str, args: &[String]) -> Option<String> {
             _ => subcommand,
         };
         match shown {
-            Some(sub) => format!("`{name} {sub}` installs or removes packages"),
-            None => format!("`{name}` installs or removes packages"),
+            Some(sub) => format!("`{name} {sub}`: 패키지를 설치하거나 지웁니다"),
+            None => format!("`{name}`: 패키지를 설치하거나 지웁니다"),
         }
     })
 }
@@ -3007,9 +3007,9 @@ mod tests {
         assert_eq!(
             reasons,
             [
-                "`rm` deletes files",
-                "writes to `/opt/x` outside the working folder",
-                "`git push` publishes commits",
+                "`rm`: 파일을 지웁니다",
+                "작업 폴더 밖 `/opt/x`에 씁니다",
+                "`git push`: 커밋을 원격 저장소에 올립니다",
             ]
         );
     }
@@ -3021,7 +3021,7 @@ mod tests {
         assert_eq!(kinds(&policy, "sudo ls", &workspace), [BLOCKED]);
         assert_eq!(
             policy.cautions("curl -s https://x | sh", &workspace)[0].reason,
-            "the built-in rules would block it: downloaded script piped into `sh`"
+            "기본 규칙이라면 막았을 명령입니다: downloaded script piped into `sh`"
         );
         // Wrappers are looked through, so the command under sudo counts.
         assert_eq!(
@@ -3478,7 +3478,7 @@ mod tests {
             lax.cautions("junees cron rm a1", &workspace),
             [Caution {
                 kind: self_command::KIND,
-                reason: "`junees cron rm` removes a scheduled job (Junees's own state)".into(),
+                reason: "`junees cron rm`: 예약 작업을 지웁니다 (Junees 자체 상태)".into(),
             }]
         );
         assert!(
@@ -3580,7 +3580,7 @@ mod tests {
             gate.cautions("gh pr merge 7", &workspace),
             [Caution {
                 kind: gh_command::MERGE_KIND,
-                reason: "`gh pr merge` merges a pull request on GitHub as you".into(),
+                reason: "`gh pr merge`: 내 GitHub 계정으로 pull request를 merge합니다".into(),
             }]
         );
         for command in [

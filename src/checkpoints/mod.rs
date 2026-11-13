@@ -518,10 +518,12 @@ pub struct Partial {
 }
 
 impl Partial {
-    /// "턴 4까지 되돌림, 턴 3은 건너뜀: <이유>".
+    /// "변경 기록 4까지 되돌림, 변경 기록 3은 건너뜀: <이유>". The numbers
+    /// are checkpoint numbers, not the conversation's turns, so the line
+    /// does not call them turns.
     pub fn text(&self) -> String {
         format!(
-            "턴 {}까지 되돌림, 턴 {}은 건너뜀: {}",
+            "변경 기록 {}까지 되돌림, 변경 기록 {}은 건너뜀: {}",
             self.until_turn, self.skipped_turn, self.reason
         )
     }
@@ -538,7 +540,7 @@ impl Undone {
             .collect::<Vec<_>>()
             .join(", ");
         let mut note = if self.restored.is_empty() {
-            format!("[되돌림] 턴 {turns}의 파일 변경을 되돌리지 못했습니다")
+            format!("[되돌림] 변경 기록 {turns}의 파일 변경을 되돌리지 못했습니다")
         } else {
             let restored = self
                 .restored
@@ -551,7 +553,7 @@ impl Undone {
                 )
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("[되돌림] 턴 {turns}의 파일 변경을 되돌렸습니다: {restored}")
+            format!("[되돌림] 변경 기록 {turns}의 파일 변경을 되돌렸습니다: {restored}")
         };
         if !self.skipped.is_empty() {
             let skipped = self

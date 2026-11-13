@@ -368,6 +368,7 @@ fn turn_json(manifest: &crate::checkpoints::Manifest) -> Value {
     json!({
         "turn": manifest.turn,
         "created_at": manifest.created_at,
+        "undid": manifest.undid,
         "files": manifest.files.iter().map(|file| json!({
             "path": file.path,
             "change": file.change().word(),
@@ -777,21 +778,22 @@ impl Chat {
                     },
                     undone.skipped.len()
                 ));
-                Answer::json(
-                    200,
-                    &json!({
-                        "restored": undone.restored,
-                        "skipped": undone.skipped.iter().map(|(path, reason)| {
-                            json!({ "path": path, "reason": reason })
-                        }).collect::<Vec<_>>(),
-                        "partial": undone.partial.iter().map(|part| json!({
-                            "path": part.path,
-                            "until_turn": part.until_turn,
-                            "skipped_turn": part.skipped_turn,
-                            "reason": part.reason,
-                        })).collect::<Vec<_>>(),
-                    }),
-                )
+                let mut body = json!({
+                    "restored": undone.restored,
+                    "skipped": undone.skipped.iter().map(|(path, reason)| {
+                        json!({ "path": path, "reason": reason })
+                    }).collect::<Vec<_>>(),
+                    "partial": undone.partial.iter().map(|part| json!({
+                        "path": part.path,
+                        "until_turn": part.until_turn,
+                        "skipped_turn": part.skipped_turn,
+                        "reason": part.reason,
+                    })).collect::<Vec<_>>(),
+                });
+                if let Some(checkpoint) = undone.checkpoint {
+                    body["checkpoint"] = json!(checkpoint);
+                }
+                Answer::json(200, &body)
             }
             Ok(Ok(None)) => Answer::error(
                 404,

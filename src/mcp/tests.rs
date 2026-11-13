@@ -712,10 +712,10 @@ async fn untrusted_servers_are_asked_about_trusted_ones_are_not() {
         request,
         Request {
             tool: "mcp__fake__echo".into(),
-            target: "tool `echo` of the MCP server `fake`".into(),
+            target: "MCP 서버 `fake`의 도구 `echo`".into(),
             reasons: vec![
-                "an external tool: the MCP server `fake` runs it with these arguments, \
-                 outside Junees's command rules"
+                "외부 도구입니다(MCP 서버 `fake`). Junees의 명령 규칙을 거치지 않고 이 인자로 \
+                 실행됩니다"
                     .into()
             ],
             preview: Some("  {\n    \"text\": \"rm everything\"\n  }\n".into()),
@@ -911,11 +911,11 @@ async fn subagents_share_the_servers_and_ask_through_the_same_gate() {
         [
             (
                 "mcp__fake__echo".to_string(),
-                "asked by subagent [1] alpha".to_string()
+                "서브에이전트 [1] alpha의 요청입니다".to_string()
             ),
             (
                 "mcp__fake__echo".to_string(),
-                "asked by subagent [2] beta".to_string()
+                "서브에이전트 [2] beta의 요청입니다".to_string()
             ),
         ]
     );

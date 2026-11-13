@@ -4,8 +4,12 @@
 
 ### 새 기능
 
-- 파일 체크포인트와 되돌리기: `write_file`, `edit_file`이 파일을 바꾸기 직전의 내용과 권한(없던 파일은 "없었음")을 턴마다 `$JUNEES_HOME/checkpoints/<session>/<turn>/`(0700/0600)에 남긴다. `/checkpoints`, `/undo [N]`, `junees rewind --session <id> [--list] [--turn <n>] [--force] [--yes]`, 대시보드 `GET /api/chat/<id>/checkpoints`, `POST /api/chat/<id>/undo`로 최근 턴부터 되돌린다. 그 뒤 바뀐 파일은 `--force` 없이는 건너뛰고, 링크는 따라가지 않으며, 파일 도구의 쓰기 규칙을 그대로 거친다. 되돌린 내용은 세션의 다음 메시지 앞에 한 줄로 알리고, 되돌리기도 체크포인트로 남아 되돌릴 수 있다. 2MB가 넘는 파일은 기록하지 않고, 세션 200MB·전체 1GB·30일 상한이 있다. bash가 바꾼 파일은 기록하지 않는다. 체크포인트에는 원래 내용이 남으므로 `checkpoints = false`(`JUNEES_CHECKPOINTS=0`)로 끌 수 있다 ([파일 체크포인트](docs/checkpoints.md))
+- 파일 체크포인트와 되돌리기: `write_file`, `edit_file`이 파일을 바꾸기 직전의 내용과 권한(없던 파일은 "없었음")을 턴마다 `$JUNEES_HOME/checkpoints/<session>/<turn>/`(0700/0600)에 남긴다. `/checkpoints`, `/undo [N]`, `junees rewind --session <id> [--list] [--turn <n>] [--force] [--yes]`, 대시보드 `GET /api/chat/<id>/checkpoints`(되돌리기 기록이면 `undid`), `POST /api/chat/<id>/undo`(남긴 체크포인트 번호 `checkpoint`)로 최근 턴부터 되돌린다. 그 뒤 바뀐 파일은 `--force` 없이는 건너뛰고, 링크는 따라가지 않으며, 파일 도구의 쓰기 규칙을 그대로 거친다. 되돌린 내용은 세션의 다음 메시지 앞에 한 줄로 알리고, 되돌리기도 체크포인트로 남아 되돌릴 수 있다. 2MB가 넘는 파일은 기록하지 않고, 세션 200MB·전체 1GB·30일 상한이 있다. bash가 바꾼 파일은 기록하지 않는다. 체크포인트에는 원래 내용이 남으므로 `checkpoints = false`(`JUNEES_CHECKPOINTS=0`)로 끌 수 있다 ([파일 체크포인트](docs/checkpoints.md))
 - 대시보드 대화(`junees dashboard --chat [--dir <폴더>]`): 페이지에서 Junees와 대화하고, 승인 질문을 페이지 버튼으로 답한다. 응답은 이벤트 스트림(`GET /api/chat/<id>/events`, `after`로 다시 연결)으로 오고, 세션은 일반 세션으로 저장된다. 기본은 꺼져 있고, 켜면 페이지가 터미널 대화와 같은 권한을 가진다. `--chat`이면 브라우저를 열지 않고 `#token=` 주소만 출력한다(`--open`으로 열 수 있고, 그때는 일회용 코드 경합을 경고한다). 일회용 코드 교환은 `dashboard.log`에 남는다. api 백엔드만 지원한다. `/api/status`에 `chat`이 더해졌다 ([대화](docs/dashboard.md#대화---chat))
+
+### 바뀐 것
+
+- 승인 질문의 문구를 한국어로 바꿨다. 묻는 이유(`` `rm`: 파일을 지웁니다 ``, `` `gh pr merge`: 내 GitHub 계정으로 pull request를 merge합니다 `` 등), 미리보기의 안내(`(새 파일, 3줄)`, `... 5줄 더`), 터미널 선택지, 게이트웨이(디스코드, 텔레그램, Slack)의 질문·버튼·결과 줄·안내, 브라우저 도구의 위험 설명이 한국어다. 터미널, 게이트웨이, 대시보드가 같은 이유 문구를 보여 준다. 무엇을 묻는지는 그대로이고, "항상 허용"이 기억하는 종류 이름(`bash: delete files` 등)과 모델이 읽는 거절 결과(`the user declined: ...`)는 바꾸지 않았다 ([승인](docs/safety.md))
 
 ## 0.4.0 (2026-11-13)
 

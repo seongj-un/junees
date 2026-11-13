@@ -27,8 +27,11 @@ use std::path::Path;
 pub struct SelfCommand {
     /// The words after the program name, such as `["cron", "add"]`.
     pub words: &'static [&'static str],
-    /// What it does, for messages: "schedules a job".
+    /// What it does, for messages to the model: "schedules a job".
     pub does: &'static str,
+    /// The same for the person's approval question, in Korean (as the
+    /// question is): "예약 작업을 추가합니다".
+    pub asks: &'static str,
 }
 
 /// Every subcommand that changes Junees's state. A new one only needs an
@@ -40,127 +43,158 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
     SelfCommand {
         words: &["cron", "add"],
         does: "schedules a job",
+        asks: "예약 작업을 추가합니다",
     },
     SelfCommand {
         words: &["cron", "remove"],
         does: "removes a scheduled job",
+        asks: "예약 작업을 지웁니다",
     },
     SelfCommand {
         words: &["cron", "rm"],
         does: "removes a scheduled job",
+        asks: "예약 작업을 지웁니다",
     },
     SelfCommand {
         words: &["cron", "pause"],
         does: "pauses a scheduled job",
+        asks: "예약 작업을 멈춥니다",
     },
     SelfCommand {
         words: &["cron", "resume"],
         does: "resumes a scheduled job",
+        asks: "예약 작업을 다시 켭니다",
     },
     SelfCommand {
         words: &["cron", "allow-home"],
         does: "lets a scheduled job work in the home folder and resumes it",
+        asks: "예약 작업이 홈 폴더에서 일하게 하고 다시 켭니다",
     },
     SelfCommand {
         words: &["cron", "disallow-home"],
         does: "takes back a scheduled job's leave to work in the home folder",
+        asks: "예약 작업의 홈 폴더 허용을 거둡니다",
     },
     SelfCommand {
         words: &["cron", "run"],
         does: "runs a scheduled job now and delivers its answer",
+        asks: "예약 작업을 지금 실행하고 답을 보냅니다",
     },
     SelfCommand {
         words: &["cron", "daemon"],
         does: "starts running the scheduled jobs",
+        asks: "예약 작업 실행을 시작합니다",
     },
     SelfCommand {
         words: &["webhook", "add"],
         does: "adds a webhook route (requests then start runs)",
+        asks: "웹훅 경로를 추가합니다(그 뒤 요청이 실행을 시작합니다)",
     },
     SelfCommand {
         words: &["webhook", "add-github"],
         does: "adds a GitHub flow route (reviews, pushes, merges)",
+        asks: "GitHub 흐름 경로를 추가합니다(리뷰, push, merge)",
     },
     SelfCommand {
         words: &["webhook", "remove"],
         does: "removes a webhook route",
+        asks: "웹훅 경로를 지웁니다",
     },
     SelfCommand {
         words: &["webhook", "rm"],
         does: "removes a webhook route",
+        asks: "웹훅 경로를 지웁니다",
     },
     SelfCommand {
         words: &["webhook", "pause"],
         does: "pauses a webhook route",
+        asks: "웹훅 경로를 멈춥니다",
     },
     SelfCommand {
         words: &["webhook", "resume"],
         does: "resumes a webhook route",
+        asks: "웹훅 경로를 다시 켭니다",
     },
     SelfCommand {
         words: &["webhook", "allow-home"],
         does: "lets a webhook route work in the home folder and resumes it",
+        asks: "웹훅 경로가 홈 폴더에서 일하게 하고 다시 켭니다",
     },
     SelfCommand {
         words: &["webhook", "disallow-home"],
         does: "takes back a webhook route's leave to work in the home folder",
+        asks: "웹훅 경로의 홈 폴더 허용을 거둡니다",
     },
     SelfCommand {
         words: &["webhook", "serve"],
         does: "starts receiving webhook requests",
+        asks: "웹훅 요청을 받기 시작합니다",
     },
     SelfCommand {
         words: &["webhook", "test"],
         does: "runs a webhook route now and delivers its answer",
+        asks: "웹훅 경로를 지금 실행하고 답을 보냅니다",
     },
     SelfCommand {
         words: &["webhook", "run"],
         does: "runs a webhook route now and delivers its answer",
+        asks: "웹훅 경로를 지금 실행하고 답을 보냅니다",
     },
     SelfCommand {
         words: &["plugin", "install"],
         does: "installs a plugin (programs Junees runs)",
+        asks: "플러그인을 설치합니다(Junees가 실행할 프로그램)",
     },
     SelfCommand {
         words: &["plugin", "enable"],
         does: "enables a plugin (its tools and hooks run in later sessions)",
+        asks: "플러그인을 켭니다(다음 세션부터 그 도구와 훅이 실행됩니다)",
     },
     SelfCommand {
         words: &["plugin", "disable"],
         does: "disables a plugin",
+        asks: "플러그인을 끕니다",
     },
     SelfCommand {
         words: &["plugin", "remove"],
         does: "removes a plugin",
+        asks: "플러그인을 지웁니다",
     },
     SelfCommand {
         words: &["plugins", "install"],
         does: "installs a plugin (programs Junees runs)",
+        asks: "플러그인을 설치합니다(Junees가 실행할 프로그램)",
     },
     SelfCommand {
         words: &["plugins", "enable"],
         does: "enables a plugin (its tools and hooks run in later sessions)",
+        asks: "플러그인을 켭니다(다음 세션부터 그 도구와 훅이 실행됩니다)",
     },
     SelfCommand {
         words: &["plugins", "disable"],
         does: "disables a plugin",
+        asks: "플러그인을 끕니다",
     },
     SelfCommand {
         words: &["plugins", "remove"],
         does: "removes a plugin",
+        asks: "플러그인을 지웁니다",
     },
     SelfCommand {
         words: &["mcp", "login"],
         does: "logs in to an MCP server (saves an OAuth token Junees sends to it)",
+        asks: "MCP 서버에 로그인합니다(Junees가 그 서버에 보낼 OAuth 토큰을 저장합니다)",
     },
     SelfCommand {
         words: &["mcp", "logout"],
         does: "removes the saved login of an MCP server",
+        asks: "저장된 MCP 서버 로그인을 지웁니다",
     },
     // `--check` too: the words after `update` are not looked at.
     SelfCommand {
         words: &["update"],
         does: "replaces the Junees binary with another release",
+        asks: "Junees 실행 파일을 다른 릴리스로 바꿉니다",
     },
 ];
 
@@ -203,7 +237,7 @@ impl SelfCommand {
 
     /// What the approval question says about it.
     pub fn caution(&self) -> String {
-        format!("`{}` {} (Junees's own state)", self.command(), self.does)
+        format!("`{}`: {} (Junees 자체 상태)", self.command(), self.asks)
     }
 }
 
@@ -234,17 +268,16 @@ pub fn allows_home(words: &[String]) -> Option<String> {
     let command = find(words)?;
     if MARKS_ALLOW_HOME.contains(&command.words) {
         return Some(format!(
-            "`{}` lets the unattended runs of an existing job or route work in the home \
-             folder (and resumes it): their tools may change everything there but the \
-             protected paths",
+            "`{}`: 기존 예약 작업이나 웹훅 경로의 무인 실행이 홈 폴더에서 일하게 하고 다시 \
+             켭니다. 그 실행의 도구는 보호된 경로를 뺀 홈의 모든 것을 바꿀 수 있습니다",
             command.command()
         ));
     }
     (TAKES_ALLOW_HOME.contains(&command.words) && words.iter().any(|word| word == "--allow-home"))
         .then(|| {
             format!(
-                "`{} --allow-home` lets the unattended runs of what it adds work in the home \
-                 folder: their tools may change everything there but the protected paths",
+                "`{} --allow-home`: 추가하는 작업의 무인 실행이 홈 폴더에서 일하게 합니다. 그 \
+                 실행의 도구는 보호된 경로를 뺀 홈의 모든 것을 바꿀 수 있습니다",
                 command.command()
             )
         })
@@ -382,7 +415,7 @@ mod tests {
         ] {
             let caution = allows_home(&words(command)).unwrap_or_default();
             assert!(
-                caution.starts_with(&format!("`{expected} --allow-home` lets")),
+                caution.starts_with(&format!("`{expected} --allow-home`: 추가하는 작업의")),
                 "{command}: {caution}"
             );
         }
@@ -394,7 +427,7 @@ mod tests {
             let caution = allows_home(&words(command)).unwrap_or_default();
             assert!(
                 caution.starts_with(&format!(
-                    "`{expected}` lets the unattended runs of an existing"
+                    "`{expected}`: 기존 예약 작업이나 웹훅 경로의 무인 실행이"
                 )),
                 "{command}: {caution}"
             );
@@ -462,7 +495,7 @@ mod tests {
         );
         assert_eq!(
             add.caution(),
-            "`junees cron add` schedules a job (Junees's own state)"
+            "`junees cron add`: 예약 작업을 추가합니다 (Junees 자체 상태)"
         );
     }
 }

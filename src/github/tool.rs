@@ -115,32 +115,32 @@ pub fn question(input: &Value) -> Option<Question> {
     let action = Action::parse(input.get("action")?.as_str()?)?;
     let repo = match input.get("repo").and_then(Value::as_str) {
         Some(repo) => repo.to_string(),
-        None => "the working folder's repository".into(),
+        None => "작업 폴더의 저장소".into(),
     };
     let number = input
         .get("number")
         .and_then(Value::as_u64)
         .map_or_else(String::new, |n| format!(" #{n}"));
-    let target = format!("{} on {repo}{number}", action.name());
+    let target = format!("{}: {repo}{number}", action.name());
     let Some(write) = action.write(input) else {
         return Some((target, Vec::new(), Vec::new(), None));
     };
     let (reason, kind) = match write {
-        Write::Comment => ("posts a comment on GitHub as you", "github: comment"),
-        Write::Review => ("submits a review on GitHub as you", "github: review"),
+        Write::Comment => ("내 GitHub 계정으로 코멘트를 답니다", "github: comment"),
+        Write::Review => ("내 GitHub 계정으로 리뷰를 제출합니다", "github: review"),
         Write::Approve => (
-            "approves the pull request on GitHub as you",
+            "내 GitHub 계정으로 pull request를 승인합니다",
             "github: approve",
         ),
         Write::PrCreate => (
-            "opens a pull request on GitHub as you",
+            "내 GitHub 계정으로 pull request를 엽니다",
             "github: create a pull request",
         ),
-        Write::Merge => ("merges the pull request into its base branch", MERGE_KIND),
+        Write::Merge => ("pull request를 base 브랜치에 merge합니다", MERGE_KIND),
     };
     let mut reasons = vec![reason.to_string()];
     if write == Write::Merge {
-        reasons.push("a merge is asked about every time; \"always\" does not cover it".into());
+        reasons.push("merge는 매번 묻습니다. \"항상 허용\"은 merge에 적용되지 않습니다".into());
     }
     Some((
         target,
@@ -182,11 +182,11 @@ fn preview(input: &Value) -> String {
             preview.push_str(&format!("  {}\n", cut(line, PREVIEW_LINE_CHARS)));
         }
         if total > PREVIEW_LINES {
-            preview.push_str(&format!("  ... {} more lines\n", total - PREVIEW_LINES));
+            preview.push_str(&format!("  ... {}줄 더\n", total - PREVIEW_LINES));
         }
     }
     if let Some(comments) = input.get("comments").and_then(Value::as_array) {
-        preview.push_str(&format!("{} line comments\n", comments.len()));
+        preview.push_str(&format!("줄 코멘트 {}개\n", comments.len()));
         for comment in comments.iter().take(PREVIEW_LINES) {
             let body = comment["body"].as_str().unwrap_or_default();
             let first = body.lines().next().unwrap_or_default();

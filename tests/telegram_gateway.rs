@@ -1234,17 +1234,17 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
     let me = USER.to_string();
     bot.push(private(USER, "write a note"));
     let posts = bot
-        .wait_post(&me, |p| p.starts_with("Approve this tool call?"))
+        .wait_post(&me, |p| p.starts_with("이 도구 호출을 승인할까요?"))
         .await;
     let question = posts.last().unwrap();
-    assert!(question.contains("approve write_file:"), "{question}");
+    assert!(question.contains("승인 요청 write_file:"), "{question}");
     assert!(!question.contains("```"), "{question}");
     bot.push(private(USER, "n not today"));
     bot.wait_post(&me, |p| p == "declined, fine").await;
     assert!(!file.exists());
 
     bot.push(private(USER, "now"));
-    bot.wait_posts(&me, 2, |p| p.starts_with("Approve this tool call?"))
+    bot.wait_posts(&me, 2, |p| p.starts_with("이 도구 호출을 승인할까요?"))
         .await;
     // A forwarded message is someone else's words: no answer to the
     // question (#58), but an input for after the turn.
@@ -1259,7 +1259,7 @@ async fn risky_calls_wait_for_an_answer_in_the_chat() {
     bot.wait_post(&me, |p| p == "about the forward").await;
 
     bot.push(private(USER, "once more"));
-    bot.wait_post(&me, |p| p == "(no answer within 1s: declined)")
+    bot.wait_post(&me, |p| p == "(1s 안에 답이 없어 거절했습니다)")
         .await;
     bot.wait_post(&me, |p| p == "timed out").await;
     assert!(!file.exists());
@@ -1320,7 +1320,7 @@ async fn another_bots_command_is_no_answer_to_a_question_in_a_group() {
     );
     let chat = GROUP.to_string();
     bot.push(group(USER, "@junees_bot write a note"));
-    bot.wait_post(&chat, |p| p.starts_with("Approve this tool call?"))
+    bot.wait_post(&chat, |p| p.starts_with("이 도구 호출을 승인할까요?"))
         .await;
     // Another bot's command while the question waits is not taken as the
     // answer (it would decline); the question takes the next message.
@@ -1379,7 +1379,7 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     bot.push(private(USER, "write a note"));
     let (first, buttons) = bot.question(&me, 1).await;
     assert_eq!(buttons.len(), 3, "{buttons:?}");
-    let (allow, decline) = (&buttons["Allow"], &buttons["Decline"]);
+    let (allow, decline) = (&buttons["허용"], &buttons["거절"]);
     assert!(allow.len() <= 64 && allow.starts_with("junees:"), "{allow}");
     // Someone not allowed: told so, nothing runs.
     bot.press(press("q1", STRANGER, private_chat(), first, allow));
@@ -1398,10 +1398,7 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     for query in ["q2", "q3"] {
         let answer = bot.answered(query).await;
         assert!(
-            answer["text"]
-                .as_str()
-                .unwrap()
-                .contains("already answered"),
+            answer["text"].as_str().unwrap().contains("이미 답했거나"),
             "{answer}"
         );
     }
@@ -1413,8 +1410,11 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     let edit = bot.edited(first).await;
     assert_eq!(edit["reply_markup"], json!({"inline_keyboard": []}));
     let text = edit["text"].as_str().unwrap();
-    assert!(text.starts_with("Approve this tool call?"), "{text}");
-    assert!(text.ends_with("\n\n<b>Declined by Someone.</b>"), "{text}");
+    assert!(text.starts_with("이 도구 호출을 승인할까요?"), "{text}");
+    assert!(
+        text.ends_with("\n\n<b>Someone: 거절했습니다.</b>"),
+        "{text}"
+    );
     assert_eq!(edit["parse_mode"], "HTML");
     bot.wait_post(&me, |p| p == "declined, fine").await;
     assert!(!file.exists());
@@ -1425,20 +1425,17 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     bot.press(press("q5", USER, private_chat(), first, allow));
     let answer = bot.answered("q5").await;
     assert!(
-        answer["text"]
-            .as_str()
-            .unwrap()
-            .contains("already answered"),
+        answer["text"].as_str().unwrap().contains("이미 답했거나"),
         "{answer}"
     );
-    bot.press(press("q6", USER, private_chat(), second, &buttons["Allow"]));
+    bot.press(press("q6", USER, private_chat(), second, &buttons["허용"]));
     assert_eq!(bot.answered("q6").await.get("text"), None);
     let edit = bot.edited(second).await;
     assert!(
         edit["text"]
             .as_str()
             .unwrap()
-            .ends_with("<b>Allowed by Someone.</b>"),
+            .ends_with("<b>Someone: 허용했습니다.</b>"),
         "{edit}"
     );
     bot.wait_post(&me, |p| p == "wrote it").await;
@@ -1453,17 +1450,14 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         edit["text"]
             .as_str()
             .unwrap()
-            .ends_with("<b>No answer within 2s: declined.</b>"),
+            .ends_with("<b>2s 안에 답이 없어 거절했습니다.</b>"),
         "{edit}"
     );
     bot.wait_post(&me, |p| p == "timed out").await;
-    bot.press(press("q7", USER, private_chat(), third, &buttons["Allow"]));
+    bot.press(press("q7", USER, private_chat(), third, &buttons["허용"]));
     let answer = bot.answered("q7").await;
     assert!(
-        answer["text"]
-            .as_str()
-            .unwrap()
-            .contains("already answered"),
+        answer["text"].as_str().unwrap().contains("이미 답했거나"),
         "{answer}"
     );
     assert!(!file.exists());
@@ -1474,7 +1468,10 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     bot.push(private(USER, "y"));
     let edit = bot.edited(fourth).await;
     assert!(
-        edit["text"].as_str().unwrap().ends_with("<b>Allowed.</b>"),
+        edit["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("<b>허용했습니다.</b>"),
         "{edit}"
     );
     bot.wait_post(&me, |p| p == "wrote it again").await;
@@ -1527,17 +1524,14 @@ async fn a_button_answers_only_in_its_forum_topic() {
     let (question, buttons) = bot.question(&topic, 1).await;
     let chat = json!({"id": GROUP, "type": "supergroup", "title": "Team", "is_forum": true});
     // The same button seen from the group's general topic: no answer.
-    bot.press(press("g1", USER, chat.clone(), question, &buttons["Allow"]));
+    bot.press(press("g1", USER, chat.clone(), question, &buttons["허용"]));
     let answer = bot.answered("g1").await;
     assert!(
-        answer["text"]
-            .as_str()
-            .unwrap()
-            .contains("already answered"),
+        answer["text"].as_str().unwrap().contains("이미 답했거나"),
         "{answer}"
     );
     assert!(!file.exists());
-    let mut in_topic = press("g2", USER, chat, question, &buttons["Allow"]);
+    let mut in_topic = press("g2", USER, chat, question, &buttons["허용"]);
     in_topic["message"]["is_topic_message"] = json!(true);
     in_topic["message"]["message_thread_id"] = json!(7);
     bot.press(in_topic);
@@ -1550,7 +1544,7 @@ async fn a_button_answers_only_in_its_forum_topic() {
         edit["text"]
             .as_str()
             .unwrap()
-            .ends_with("<b>Allowed by Someone.</b>"),
+            .ends_with("<b>Someone: 허용했습니다.</b>"),
         "{edit}"
     );
     running.stop().await;
@@ -1586,12 +1580,12 @@ async fn an_answer_word_right_after_a_press_starts_no_turn() {
         USER,
         private_chat(),
         question,
-        &buttons["Allow"],
+        &buttons["허용"],
     ));
     assert_eq!(bot.answered("q1").await.get("text"), None);
     // To be sure, the user types y too: told it was answered, no new turn.
     bot.push(private(USER, "y"));
-    bot.wait_post(&me, |p| p.contains("already answered")).await;
+    bot.wait_post(&me, |p| p.contains("이미 답을 받아서")).await;
     bot.wait_post(&me, |p| p == "wrote it").await;
     assert!(file.exists());
     // The next message is an input as always.
@@ -1635,15 +1629,15 @@ async fn a_question_whose_buttons_are_refused_is_posted_without_them() {
     let me = USER.to_string();
     bot.push(private(USER, "write a note"));
     let posts = bot
-        .wait_post(&me, |p| p.contains("Reply y to run it"))
+        .wait_post(&me, |p| p.contains("답장하세요. y는 실행"))
         .await;
     let questions: Vec<&String> = posts
         .iter()
-        .filter(|p| p.contains("Approve this tool call?"))
+        .filter(|p| p.contains("이 도구 호출을 승인할까요?"))
         .collect();
     assert_eq!(questions.len(), 1, "{posts:#?}");
     assert!(
-        !posts.iter().any(|p| p.contains("Press a button")),
+        !posts.iter().any(|p| p.contains("버튼을 누르거나")),
         "{posts:#?}"
     );
     bot.push(private(USER, "y"));
