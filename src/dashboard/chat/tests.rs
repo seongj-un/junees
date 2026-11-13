@@ -35,6 +35,13 @@ fn routes_are_read_strictly() {
     assert_eq!(route("/api/chat/a1/messages"), Some(Route::Messages("a1")));
     assert_eq!(route("/api/chat/a1/events"), Some(Route::Events("a1")));
     assert_eq!(route("/api/chat/a1/cancel"), Some(Route::Cancel("a1")));
+    assert_eq!(route("/api/chat/a1/undo"), Some(Route::Undo("a1")));
+    assert_eq!(
+        route("/api/chat/a1/checkpoints"),
+        Some(Route::Checkpoints("a1"))
+    );
+    assert!(Route::Undo("a1").writes());
+    assert!(!Route::Checkpoints("a1").writes());
     assert_eq!(
         route("/api/chat/a1/approvals/q9"),
         Some(Route::Approval("a1", "q9"))

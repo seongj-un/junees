@@ -1350,6 +1350,11 @@ fn the_tools_sandbox_follows_the_settings() {
     assert!(webhook.hidden.contains(&layout.path("home/.claude")));
     assert!(webhook.hidden.contains(&junees.join("sessions")));
     assert!(!webhook.read_only.contains(&junees.join("sessions")));
+    // The file checkpoints: not written by any run, not read by a webhook's.
+    assert!(plain.read_only.contains(&junees.join("checkpoints")));
+    assert!(!plain.hidden.contains(&junees.join("checkpoints")));
+    assert!(webhook.hidden.contains(&junees.join("checkpoints")));
+    assert!(!webhook.read_only.contains(&junees.join("checkpoints")));
 }
 
 #[test]

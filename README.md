@@ -89,6 +89,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `/update`: 새 릴리스가 있는지(설치는 `junees update`)
 - `/compact`: 앞 대화를 요약으로 바꾸기(api 백엔드)
 - `/usage`: 이 세션의 토큰과 추정 비용
+- `/checkpoints`, `/undo [N]`: 이 세션에서 파일 도구가 바꾼 파일 목록, 마지막 N개 턴 되돌리기([파일 체크포인트](docs/checkpoints.md))
 - `/help`, `/exit`(`/quit`, Ctrl-D)
 
 턴 중 Ctrl-C는 그 턴만 취소한다([중단](docs/usage.md#중단-ctrl-c-sigterm)).
@@ -105,6 +106,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees webhook serve|add|add-github|list|remove|pause|resume|test`: 웹훅과 GitHub PR 흐름([웹훅](docs/automation.md#웹훅))
 - `junees sessions search <낱말>`: 세션 검색([세션 검색](docs/usage.md#세션-검색))
 - `junees usage`: 지난 며칠의 토큰과 비용([사용량과 비용](docs/usage.md#사용량과-비용))
+- `junees rewind --session <id> [--list] [--turn <n>] [--force] [--yes]`: 세션의 파일 변경을 턴 단위로 되돌리기([파일 체크포인트](docs/checkpoints.md))
 - `junees doctor`: 설치와 설정 점검([점검](docs/doctor.md))
 - `junees dashboard [--listen 127.0.0.1:7878] [--no-open] [--chat [--dir <폴더>]]`: 브라우저로 상태와 세션 대화를 보고 예약 작업과 웹훅을 멈추거나 켜는 대시보드. `--chat`이면 페이지에서 대화하고 승인 질문에 답한다([대시보드](docs/dashboard.md))
 - `junees plugin list|install|enable|disable|remove`: 플러그인([플러그인](docs/plugins.md))
@@ -112,7 +114,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees mcp serve [--dir <폴더>]`: Junees를 stdio MCP 서버로 띄워 다른 에이전트가 일을 맡기게 한다([Junees를 MCP 서버로](docs/mcp.md#junees를-mcp-서버로))
 - `junees update [--check] [--version vX.Y.Z]`: 최신 릴리스로 바꾸기([업데이트](docs/install.md#업데이트))
 
-명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `dashboard`, `usage`, `plugin`, `plugins`, `mcp`, `update`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
+명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `dashboard`, `usage`, `rewind`, `plugin`, `plugins`, `mcp`, `update`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
 
 ## 기능
 
@@ -142,6 +144,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [플러그인](docs/plugins.md): 명령 도구, 훅, 프롬프트 조각을 폴더 하나로 더한다.
 - [컨텍스트 관리](docs/context.md): 프롬프트 캐싱, 오래된 도구 결과 비우기, 압축.
 - [기본 도구](docs/tools.md): `bash`, `read_file`, `write_file`, `edit_file`.
+- [파일 체크포인트](docs/checkpoints.md): `write_file`과 `edit_file`이 바꾼 파일을 턴마다 기록해 `/undo`, `junees rewind`, 대시보드로 되돌린다(bash가 바꾼 파일은 기록하지 않음).
 - [명령 정책](docs/safety.md#명령-정책): 치명적인 명령과 비밀 파일을 다루는 명령을 실행 전에 막는다.
 - [실행 격리](docs/safety.md#실행-격리-landlock): `bash` 명령을 Linux Landlock으로 묶어 작업 폴더 밖 쓰기, 설정과 비밀 파일 읽기, (설정하면) TCP를 커널이 막는다.
 - [실행 전 승인](docs/safety.md#실행-전-승인): 대화 모드에서 위험할 수 있는 도구 호출을 먼저 묻는다.
@@ -162,6 +165,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [docs/plugins.md](docs/plugins.md): 플러그인
 - [docs/context.md](docs/context.md): 컨텍스트 관리
 - [docs/tools.md](docs/tools.md): 기본 도구와 `edit_file`
+- [docs/checkpoints.md](docs/checkpoints.md): 파일 체크포인트와 되돌리기(`/undo`, `junees rewind`)
 - [docs/browser.md](docs/browser.md): 브라우저 도구
 - [docs/safety.md](docs/safety.md): 명령 정책, 실행 격리(Landlock), 실행 전 승인
 - [docs/doctor.md](docs/doctor.md): 점검(`junees doctor`)
@@ -190,6 +194,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 17. 음성 메시지: 디스코드, 텔레그램, Slack 게이트웨이의 음성 메시지와 오디오 첨부를 OpenAI 호환 받아쓰기 API(OpenAI, Groq, 로컬 whisper 서버)로 글로 바꿔 처리 ([docs/gateways.md](docs/gateways.md)) (완료)
 18. MCP 서버: `junees mcp serve`(stdio)로 다른 에이전트(Claude Desktop, Claude Code, Hermes, Cursor)가 Junees에 일을 맡기기, 웹훅과 같은 무인 실행 규칙 ([docs/mcp.md](docs/mcp.md#junees를-mcp-서버로)) (완료)
 19. 대시보드 대화: `junees dashboard --chat`으로 페이지에서 Junees와 대화하고, 승인 질문을 버튼으로 답하기(이벤트 스트림, 터미널과 같은 신뢰 수준, [docs/dashboard.md](docs/dashboard.md#대화---chat)) (완료)
+20. 파일 체크포인트: `write_file`, `edit_file`이 바꾼 파일을 턴 단위로 기록하고 `/undo`, `junees rewind`, 대시보드 API로 되돌리기 ([docs/checkpoints.md](docs/checkpoints.md))
 
 ## 개발
 

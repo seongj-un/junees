@@ -144,6 +144,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
         holds: "the GitHub flow prompts and state",
         tool: None,
     },
+    DataFolder {
+        name: crate::checkpoints::FOLDER,
+        holds: "the file checkpoints (/undo, junees rewind)",
+        tool: None,
+    },
 ];
 
 impl DataFolder {

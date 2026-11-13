@@ -366,6 +366,7 @@ pub async fn respond(head: &Head, body: &[u8], context: &Arc<Context>) -> Reply 
                     Ok(events) => Reply::Events(events),
                     Err(answer) => answer.into(),
                 },
+                chat::Route::Checkpoints(id) => chat.checkpoints(id).into(),
                 route => chat.write(&route, body).await.into(),
             };
         }

@@ -1,7 +1,7 @@
 //! Runs the real binary against a fake API server: a bash command the
 //! model sends runs in the Landlock sandbox, so a path the command policy
 //! cannot see (built at run time) still does not reach the settings file,
-//! the secrets folder or a data folder, while the working folder stays
+//! the secrets folder or a data folder (the file checkpoints too), while the working folder stays
 //! writable. Skipped when the kernel has no Landlock.
 
 use std::process::Stdio;
@@ -32,7 +32,8 @@ async fn the_models_bash_runs_in_the_sandbox() {
         "d={}/.jun; echo in > made && echo made-ok; \
          cat ${{d}}ees/config.toml || echo config-refused; \
          cat ${{d}}ees/secrets/token || echo secret-refused; \
-         echo x > ${{d}}ees/memory/new.md || echo memory-refused",
+         echo x > ${{d}}ees/memory/new.md || echo memory-refused; \
+         mkdir -p ${{d}}ees/checkpoints/s1 || echo checkpoints-refused",
         home.path().display()
     );
     let (url, server) = fake_api(vec![
@@ -82,6 +83,7 @@ async fn the_models_bash_runs_in_the_sandbox() {
         "config-refused",
         "secret-refused",
         "memory-refused",
+        "checkpoints-refused",
         "Permission denied",
     ] {
         assert!(result.contains(line), "{line}: {result}");
@@ -90,4 +92,6 @@ async fn the_models_bash_runs_in_the_sandbox() {
     assert!(!result.contains("fake-secret"), "{result}");
     assert!(work.join("made").exists());
     assert!(!junees.join("memory/new.md").exists());
+    // A forged manifest there would be written back by a person's undo.
+    assert!(!junees.join("checkpoints/s1").exists());
 }

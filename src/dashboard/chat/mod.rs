@@ -89,6 +89,8 @@ pub struct Chat {
     running: Arc<Mutex<Option<String>>>,
     streams: Arc<Semaphore>,
     mcp: Arc<Mcp>,
+    /// The write rules an undo goes through: the file tools'.
+    access: crate::tools::FileAccess,
 }
 
 /// One chat: its events, questions and cancel.
@@ -277,12 +279,16 @@ pub enum Route<'a> {
     Events(&'a str),
     Approval(&'a str, &'a str),
     Cancel(&'a str),
+    /// `GET /api/chat/<id>/checkpoints`.
+    Checkpoints(&'a str),
+    /// `POST /api/chat/<id>/undo`.
+    Undo(&'a str),
 }
 
 impl Route<'_> {
     /// Whether it is a `POST`.
     pub fn writes(&self) -> bool {
-        !matches!(self, Route::Events(_))
+        !matches!(self, Route::Events(_) | Route::Checkpoints(_))
     }
 }
 
@@ -297,6 +303,8 @@ pub fn route(path: &str) -> Option<Route<'_>> {
         [id, "messages"] => Some(Route::Messages(id)),
         [id, "events"] => Some(Route::Events(id)),
         [id, "cancel"] => Some(Route::Cancel(id)),
+        [id, "checkpoints"] => Some(Route::Checkpoints(id)),
+        [id, "undo"] => Some(Route::Undo(id)),
         [id, "approvals", question] => Some(Route::Approval(id, question)),
         _ => None,
     }
@@ -325,6 +333,14 @@ struct OpenBody {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct UndoBody {
+    turn: u64,
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MessageBody {
     text: String,
 }
@@ -347,6 +363,19 @@ fn body<T: for<'de> Deserialize<'de>>(body: &[u8], shape: &str) -> Result<T, Ans
         .map_err(|_| Answer::error(400, "bad_body", &format!("the body is {shape}")))
 }
 
+/// One turn of `GET /api/chat/<id>/checkpoints`.
+fn turn_json(manifest: &crate::checkpoints::Manifest) -> Value {
+    json!({
+        "turn": manifest.turn,
+        "created_at": manifest.created_at,
+        "files": manifest.files.iter().map(|file| json!({
+            "path": file.path,
+            "change": file.change().word(),
+            "restorable": file.restorable,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn no_chat(id: &str) -> Answer {
     Answer::error(
         404,
@@ -359,6 +388,7 @@ impl Chat {
     /// Starts the chat's thread.
     pub fn start(setup: Setup) -> Arc<Self> {
         let running = Arc::new(Mutex::new(None));
+        let access = setup.engines.file_access();
         let commands = runner::start(
             setup.engines,
             runner::Shared {
@@ -378,6 +408,7 @@ impl Chat {
             running,
             streams: Arc::new(Semaphore::new(MAX_STREAMS)),
             mcp: setup.mcp,
+            access,
         })
     }
 
@@ -430,7 +461,10 @@ impl Chat {
             Route::Messages(id) => self.message(id, raw),
             Route::Approval(id, question) => self.approve(id, question, raw),
             Route::Cancel(id) => self.cancel(id, raw),
-            Route::Events(_) => Answer::error(405, "method_not_allowed", "only GET is served here"),
+            Route::Undo(id) => self.undo(id, raw).await,
+            Route::Events(_) | Route::Checkpoints(_) => {
+                Answer::error(405, "method_not_allowed", "only GET is served here")
+            }
         }
     }
 
@@ -658,6 +692,116 @@ impl Chat {
             self.log(&format!("chat {id} cancel"));
         }
         Answer::json(200, &json!({ "cancelled": runs }))
+    }
+
+    /// `GET /api/chat/<id>/checkpoints`: the chat's turns that changed
+    /// files, oldest first (none when checkpoints are off).
+    pub fn checkpoints(&self, id: &str) -> Answer {
+        if self.room(id).is_none() {
+            return no_chat(id);
+        }
+        let Some(session) = crate::checkpoints::store().and_then(|store| store.session(id)) else {
+            return Answer::json(200, &json!([]));
+        };
+        match session.list() {
+            Ok(list) => Answer::json(200, &Value::Array(list.iter().map(turn_json).collect())),
+            Err(_) => Answer::error(
+                500,
+                "checkpoints_unreadable",
+                "cannot read the file checkpoints",
+            ),
+        }
+    }
+
+    /// `POST /api/chat/<id>/undo`: undoes turn `turn` and every later one
+    /// while no turn runs (none starts meanwhile).
+    async fn undo(&self, id: &str, raw: &[u8]) -> Answer {
+        if self.room(id).is_none() {
+            return no_chat(id);
+        }
+        let wanted = match body::<UndoBody>(raw, "{\"turn\": <n>, \"force\"?: <bool>}") {
+            Ok(body) if body.turn > 0 => body,
+            Ok(_) => return Answer::error(400, "bad_body", "turn is a turn number from 1"),
+            Err(answer) => return answer,
+        };
+        let Some(session) = crate::checkpoints::store().and_then(|store| store.session(id)) else {
+            return Answer::error(
+                409,
+                "checkpoints_off",
+                "file checkpoints are off (checkpoints = false)",
+            );
+        };
+        {
+            let mut running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(other) = running.as_deref() {
+                let which = if other == id {
+                    "this chat"
+                } else {
+                    "another chat"
+                };
+                return Answer::error(
+                    409,
+                    "turn_running",
+                    &format!("a turn of {which} is running; wait for it or cancel it"),
+                );
+            }
+            *running = Some(id.to_string());
+        }
+        // No turn starts until the undo is done, also if it panics.
+        struct Free(Arc<Mutex<Option<String>>>);
+        impl Drop for Free {
+            fn drop(&mut self) {
+                *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            }
+        }
+        let _free = Free(Arc::clone(&self.running));
+        let access = self.access.clone();
+        let done = tokio::task::spawn_blocking(move || {
+            let list = session.list().map_err(anyhow::Error::from)?;
+            if !list.iter().any(|manifest| manifest.turn >= wanted.turn) {
+                return Ok(None);
+            }
+            crate::checkpoints::cli::undo(&session, wanted.turn, wanted.force, &access).map(Some)
+        })
+        .await;
+        match done {
+            Ok(Ok(Some(undone))) => {
+                self.log(&format!(
+                    "chat {id} undo from turn {}{}: {} restored{}, {} skipped",
+                    wanted.turn,
+                    if wanted.force { " (forced)" } else { "" },
+                    undone.restored.len(),
+                    match undone.partial.len() {
+                        0 => String::new(),
+                        partly => format!(" ({partly} partly)"),
+                    },
+                    undone.skipped.len()
+                ));
+                Answer::json(
+                    200,
+                    &json!({
+                        "restored": undone.restored,
+                        "skipped": undone.skipped.iter().map(|(path, reason)| {
+                            json!({ "path": path, "reason": reason })
+                        }).collect::<Vec<_>>(),
+                        "partial": undone.partial.iter().map(|part| json!({
+                            "path": part.path,
+                            "until_turn": part.until_turn,
+                            "skipped_turn": part.skipped_turn,
+                            "reason": part.reason,
+                        })).collect::<Vec<_>>(),
+                    }),
+                )
+            }
+            Ok(Ok(None)) => Answer::error(
+                404,
+                "not_found",
+                &format!("there is no checkpoint at turn {} or later", wanted.turn),
+            ),
+            Ok(Err(_)) | Err(_) => {
+                Answer::error(500, "undo_failed", "cannot read the file checkpoints")
+            }
+        }
     }
 
     /// The stream of `GET /api/chat/<id>/events`, or why there is none.

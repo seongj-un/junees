@@ -41,6 +41,7 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - `/context`: 컨텍스트 크기와 한도(api 백엔드만. claude-code에서는 Claude Code가 컨텍스트를 스스로 관리한다는 안내), 그리고 이 세션이 읽은 프로젝트 지침 파일과 바이트 수(두 백엔드 모두, [프로젝트 지침 파일](memory-and-skills.md#프로젝트-지침-파일)).
 - `/doctor`: 설치와 설정 점검(`junees doctor`와 같은 목록, 네트워크 없이. [점검](doctor.md#점검-junees-doctor)).
 - `/update`: 새 릴리스가 있는지 한 줄로(`junees update --check`와 같다. 설치는 하지 않는다. [업데이트](install.md#업데이트)).
+- `/checkpoints`: 이 세션에서 `write_file`, `edit_file`이 바꾼 파일을 턴별로(생김, 바뀜, 지움) 보여 준다. `/undo [N]`은 파일을 바꾼 최근 N개 턴(기본 1)을 보여 주고 `y`로 확인한 뒤 되돌린다. bash가 바꾼 파일은 기록하지 않는다([파일 체크포인트](checkpoints.md)).
 - `/compact`(api 백엔드만), `/usage`, `/help`, `/exit`(`/quit`도 됨).
 
 ## 중단 (Ctrl-C, SIGTERM)

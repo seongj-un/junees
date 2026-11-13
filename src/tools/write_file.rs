@@ -87,18 +87,30 @@ impl Tool for WriteFile {
         let access = self.access.clone();
         let names = self.instruction_files.clone();
         let (owned, content) = (path.to_string(), content.to_string());
+        // Task-local: taken here, not on the blocking thread.
+        let turn = crate::checkpoints::current();
         // One blocking call from the checks to the rename: dropping this
         // future (a cancelled turn) cannot stop it half way.
-        tokio::task::spawn_blocking(move || write(&access, &names, &owned, &content))
-            .await
-            .unwrap_or_else(|err| ToolOutput::error(format!("cannot write {path}: {err}")))
+        tokio::task::spawn_blocking(move || {
+            write(&access, &names, &owned, &content, turn.as_deref())
+        })
+        .await
+        .unwrap_or_else(|err| ToolOutput::error(format!("cannot write {path}: {err}")))
     }
 }
 
 /// Writes `content` to `path`: its folder (made when missing) opened and
 /// checked, the new content renamed over the name, or written in place
 /// when the folder has no room for a temporary file.
-fn write(access: &FileAccess, names: &[String], path: &str, content: &str) -> ToolOutput {
+/// With `turn`, the file's state before is recorded first, and its hash
+/// after.
+fn write(
+    access: &FileAccess,
+    names: &[String],
+    path: &str,
+    content: &str,
+    turn: Option<&crate::checkpoints::Turn>,
+) -> ToolOutput {
     let target = match access.open_write(path, true) {
         Ok(target) => target,
         Err(refusal) => return ToolOutput::error(refusal.message(path, "write")),
@@ -106,8 +118,27 @@ fn write(access: &FileAccess, names: &[String], path: &str, content: &str) -> To
     if let Some(name) = super::instruction_files::path_named(target.real(), names) {
         return ToolOutput::error(super::instruction_files::refusal(path, name));
     }
-    match target.replace(content.as_bytes(), true) {
-        Ok(()) => ToolOutput::ok(format!("wrote {} bytes to {path}", content.len())),
+    // A file this process may write but not read (0200) is written
+    // unrecorded, as with checkpoints off, and the model is told.
+    let mut unrecorded = "";
+    if let Some(turn) = turn {
+        match target.before() {
+            Ok(before) => turn.before(target.real(), before),
+            Err(_) => unrecorded = " (not recorded for /undo: its old content cannot be read)",
+        }
+    }
+    let written = target.replace(content.as_bytes(), true);
+    if let Some(turn) = turn {
+        match &written {
+            Ok(()) => turn.after(target.real(), Some(content.as_bytes())),
+            Err(_) => turn.after_disk(target.real()),
+        }
+    }
+    match written {
+        Ok(()) => ToolOutput::ok(format!(
+            "wrote {} bytes to {path}{unrecorded}",
+            content.len()
+        )),
         Err(err) => ToolOutput::error(format!("cannot write {path}: {err}")),
     }
 }
@@ -175,6 +206,28 @@ mod tests {
         let other = root.join(".junees/notes.txt");
         let output = tool.run(json!({"path": other, "content": "x"})).await;
         assert!(!output.is_error, "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn refuses_the_file_checkpoints() {
+        let (_dir, root, file) = crate::tools::settings_file::testing::home();
+        let tool = WriteFile::with_settings(&ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        });
+        for path in [
+            root.join(".junees/checkpoints/s1/1/manifest.json"),
+            root.join(".junees/checkpoints/s1/notes"),
+        ] {
+            let output = tool.run(json!({"path": path, "content": "{}"})).await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(
+                output.content.contains("file checkpoints"),
+                "{}",
+                output.content
+            );
+        }
+        assert!(!root.join(".junees/checkpoints").exists());
     }
 
     #[tokio::test]

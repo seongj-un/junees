@@ -52,6 +52,11 @@ pub enum Slash {
     Webhooks,
     /// `/doctor` checks the installation and the settings.
     Doctor,
+    /// `/checkpoints` lists the session's file checkpoints.
+    Checkpoints,
+    /// `/undo` undoes the last turn that changed files (an undo too);
+    /// `/undo N` the last N turns that are not undos.
+    Undo(Option<usize>),
     /// `/update` says whether a newer release is out (it installs
     /// nothing: `junees update` does).
     Update,
@@ -93,6 +98,12 @@ pub fn parse(line: &str) -> Option<Slash> {
             Some(arg) => Slash::Search(arg),
         },
         "new" | "reset" => plain(Slash::New),
+        "checkpoints" => plain(Slash::Checkpoints),
+        "undo" => match arg.as_deref().map(str::parse::<usize>) {
+            None => Slash::Undo(None),
+            Some(Ok(count)) if count > 0 => Slash::Undo(Some(count)),
+            Some(_) => Slash::Bad("/undo takes how many turns to undo, for example /undo 2".into()),
+        },
         "model" => match arg {
             Some(model) if model.contains(char::is_whitespace) => {
                 Slash::Bad("a model id has no spaces, for example /model claude-sonnet-4-6".into())
@@ -284,6 +295,9 @@ mod tests {
             ("/webhooks", Slash::Webhooks),
             ("/doctor", Slash::Doctor),
             ("/update", Slash::Update),
+            ("/checkpoints", Slash::Checkpoints),
+            ("/undo", Slash::Undo(None)),
+            ("/undo 3", Slash::Undo(Some(3))),
             ("/skill deploy-app", Slash::Skill("deploy-app".into())),
             ("/help", Slash::Help),
             ("/exit", Slash::Exit),

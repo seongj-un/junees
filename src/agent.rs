@@ -166,6 +166,8 @@ pub struct Agent {
     transcript: Transcript,
     /// Where history changes are recorded. `None` records nothing.
     journal: Option<Box<dyn Journal>>,
+    /// The file checkpoint the last input's turn recorded, if any.
+    last_checkpoint: Option<u64>,
     /// Old tool output was cleared before the last model call, so the
     /// context size measured since tells whether that was enough.
     cleared: bool,
@@ -211,6 +213,7 @@ impl Agent {
             options,
             transcript: Transcript::default(),
             journal: None,
+            last_checkpoint: None,
             cleared: false,
             cancel: Cancel::new(),
             limit: None,
@@ -264,6 +267,12 @@ impl Agent {
     pub fn with_after_turn(mut self, after_turn: Arc<dyn AfterTurn>) -> Self {
         self.after_turn = Some(after_turn);
         self
+    }
+
+    /// The file checkpoint ([`crate::checkpoints`]) the last input's turn
+    /// recorded: `None` when it changed no file or nothing is recorded.
+    pub fn last_checkpoint(&self) -> Option<u64> {
+        self.last_checkpoint
     }
 
     /// Records every later history change to `journal`.
@@ -349,7 +358,36 @@ impl Agent {
         images: Vec<crate::images::Image>,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
-        let result = self.run_turn(input, images, &mut on_event).await;
+        // The file tools record what they change to this turn's
+        // checkpoint; lines an undo left come before the input, so the
+        // model knows the files changed back.
+        let journal = self
+            .journal
+            .as_ref()
+            .and_then(|journal| journal.file())
+            .map(std::path::Path::to_path_buf);
+        let turn = crate::checkpoints::begin(journal.as_deref());
+        let notes = turn
+            .as_ref()
+            .and(journal.as_deref())
+            .and_then(|journal| journal.file_stem()?.to_str())
+            .and_then(|id| crate::checkpoints::store()?.session(id))
+            .map(|session| session.take_notes())
+            .unwrap_or_default();
+        let with_notes;
+        let sent = if notes.is_empty() {
+            input
+        } else {
+            with_notes = format!("{}\n\n{input}", notes.join("\n"));
+            with_notes.as_str()
+        };
+        let result =
+            crate::checkpoints::scope(turn.clone(), self.run_turn(sent, images, &mut on_event))
+                .await;
+        self.last_checkpoint = turn.as_ref().and_then(|turn| turn.number());
+        if let Some(turn) = turn {
+            turn.finish();
+        }
         if let Err(err) = &result {
             self.forget_rejected_images(err, &mut on_event);
         }

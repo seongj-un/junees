@@ -210,16 +210,21 @@ async fn run_turn(shared: &Shared, room: &Room, agent: &mut Agent, text: &str, t
         "output_tokens": usage.output_tokens,
         "cost_usd": cost,
     }));
-    match result {
-        Ok(_) => end_turn(shared, room, turn, "end_turn", None),
-        Err(err) if err.downcast_ref::<TurnLimit>().is_some() => {
-            end_turn(shared, room, turn, "max_turns", None)
-        }
-        Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
-            end_turn(shared, room, turn, "cancelled", None)
-        }
-        Err(err) => end_turn(shared, room, turn, "error", Some(&format!("{err:#}"))),
-    }
+    let checkpoint = agent.last_checkpoint();
+    let (stop_reason, error) = match result {
+        Ok(_) => ("end_turn", None),
+        Err(err) if err.downcast_ref::<TurnLimit>().is_some() => ("max_turns", None),
+        Err(err) if err.downcast_ref::<Cancelled>().is_some() => ("cancelled", None),
+        Err(err) => ("error", Some(format!("{err:#}"))),
+    };
+    end_turn_with(
+        shared,
+        room,
+        turn,
+        stop_reason,
+        error.as_deref(),
+        checkpoint,
+    );
 }
 
 /// Ends a turn that did not end itself (a panic in the agent unwinds
@@ -248,6 +253,19 @@ impl Drop for TurnGuard<'_> {
 
 /// Frees the chat for the next message, then says the turn ended.
 fn end_turn(shared: &Shared, room: &Room, turn: u64, stop_reason: &str, error: Option<&str>) {
+    end_turn_with(shared, room, turn, stop_reason, error, None);
+}
+
+/// [`end_turn`] for a turn that recorded file checkpoint `checkpoint`
+/// (the number `POST .../undo` takes), which `turn_end` then carries.
+fn end_turn_with(
+    shared: &Shared,
+    room: &Room,
+    turn: u64,
+    stop_reason: &str,
+    error: Option<&str>,
+    checkpoint: Option<u64>,
+) {
     if let Some(message) = error {
         room.push(json!({ "type": "error", "message": preview(shared, message, PREVIEW_CHARS) }));
     }
@@ -255,7 +273,11 @@ fn end_turn(shared: &Shared, room: &Room, turn: u64, stop_reason: &str, error: O
         .running
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = None;
-    room.push(json!({ "type": "turn_end", "turn": turn, "stop_reason": stop_reason }));
+    let mut end = json!({ "type": "turn_end", "turn": turn, "stop_reason": stop_reason });
+    if let Some(checkpoint) = checkpoint {
+        end["checkpoint"] = json!(checkpoint);
+    }
+    room.push(end);
 }
 
 fn on_event(shared: &Shared, room: &Room, out: &mut TextOut, event: Event<'_>) {
