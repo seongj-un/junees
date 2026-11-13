@@ -12,8 +12,10 @@ import {
 } from "./api.js";
 import { el, notice, skeleton } from "./dom.js";
 import { formatClock } from "./format.js";
-import { parseHash } from "./routes.js";
+import { chatEnabled } from "./chat-stream.js";
+import { chatHash, parseHash } from "./routes.js";
 import * as automation from "./view-automation.js";
+import * as chat from "./view-chat.js";
 import * as doctor from "./view-doctor.js";
 import * as session from "./view-session.js";
 import * as sessions from "./view-sessions.js";
@@ -26,6 +28,15 @@ const REFRESH_MS = 30000;
 // `url` gets the screen's params and the arguments from its address.
 const ROUTES = [
   { id: "status", title: "상태", url: () => "/api/status", render: status.render },
+  {
+    id: "chat",
+    title: "대화",
+    // A live screen: it keeps its own event stream and is not reloaded.
+    live: true,
+    mount: chat.mount,
+    renderControls: chat.renderControls,
+    autoRefresh: false,
+  },
   {
     id: "sessions",
     title: "세션",
@@ -74,6 +85,7 @@ const ui = {
   refresh: $("refresh"),
   announcer: $("announcer"),
   nav: document.querySelectorAll("[data-route]"),
+  chatNav: document.getElementById("nav-chat"),
 };
 
 const state = {
@@ -92,7 +104,44 @@ const state = {
   locked: false,
   /** Write actions in progress; the 30-second refresh waits for them. */
   writes: 0,
+  /** Whether the server has chat on (`--chat`): true, false or null (not known yet). */
+  chat: null,
+  chatAsk: null,
+  /** Closes the live screen shown now (its stream and timers). */
+  cleanup: null,
 };
+
+/** Shows the 대화 link once the server says chat is on, or while it is the open screen. */
+function updateChatNav() {
+  if (ui.chatNav) ui.chatNav.hidden = !(state.chat === true || state.route?.id === "chat");
+}
+
+/** Notes `chat` from a `/api/status` answer. */
+function noteStatus(data) {
+  const before = state.chat;
+  state.chat = chatEnabled(data);
+  updateChatNav();
+  // The session screen offers 이어서 대화 only when chat is on.
+  if (before !== state.chat && state.route?.id === "session") state.route.renderControls?.(ui.controls, ctx());
+}
+
+/** Whether chat is on, asking `/api/status` once; null when it cannot be told. */
+function chatStatus() {
+  if (state.chat !== null) return Promise.resolve(state.chat);
+  state.chatAsk ??= getJson("/api/status")
+    .then((data) => {
+      noteStatus(data);
+      return state.chat;
+    })
+    .catch((err) => {
+      if (err instanceof ApiError && err.kind === "unauthorized") lock();
+      return null;
+    })
+    .finally(() => {
+      state.chatAsk = null;
+    });
+  return state.chatAsk;
+}
 
 function announce(text) {
   ui.announcer.textContent = "";
@@ -106,6 +155,16 @@ function ctx() {
   return {
     now: new Date(),
     params: state.params,
+    args: state.args,
+    chat: state.chat,
+    chatStatus,
+    /** The live screen moved to another address (a new chat got its session id). */
+    setArgs: (args) => {
+      state.args = args;
+      state.hash = chatHash(args.id);
+      window.history.replaceState(null, "", state.hash);
+      state.route.renderControls?.(ui.controls, ctx());
+    },
     setParams,
     announce,
     lock,
@@ -150,7 +209,7 @@ function ctx() {
 }
 
 function currentUrl() {
-  return state.route.url(state.params, state.args);
+  return state.route?.url ? state.route.url(state.params, state.args) : null;
 }
 
 function setParams(next) {
@@ -185,7 +244,7 @@ function retryButton(label = "다시 시도") {
 }
 
 function paint() {
-  if (state.locked) return;
+  if (state.locked || state.route?.live) return;
   const route = state.route;
   const entry = state.cache.get(currentUrl());
   ui.banner.replaceChildren();
@@ -237,7 +296,7 @@ function paint() {
 }
 
 async function load({ manual = false } = {}) {
-  if (state.locked || !state.route) return;
+  if (state.locked || !state.route || state.route.live) return;
   const route = state.route;
   const url = currentUrl();
   state.controller?.abort();
@@ -250,6 +309,7 @@ async function load({ manual = false } = {}) {
     const data = await getJson(url, { signal: controller.signal, timeoutMs: route.timeoutMs });
     if (seq !== state.seq) return;
     state.cache.set(url, { data, at: new Date() });
+    if (route.id === "status") noteStatus(data);
     state.error = null;
     paint();
     if (manual) announce(`${route.title} 화면을 새로 불러왔습니다.`);
@@ -293,6 +353,8 @@ function lock(kind = "token", detail = null) {
   const text = LOCK_TEXT[kind] ?? LOCK_TEXT.token;
   state.locked = true;
   state.controller?.abort();
+  state.cleanup?.();
+  state.cleanup = null;
   forgetToken();
   document.body.classList.add("is-locked");
   document.title = `${text.heading} - Junees 대시보드`;
@@ -319,6 +381,7 @@ async function connect(code) {
     await exchangeCode(code);
     state.connecting = false;
     acceptToken();
+    chatStatus();
   } catch (err) {
     state.connecting = false;
     const refused = err instanceof ApiError && err.status === 401;
@@ -346,6 +409,7 @@ function acceptToken() {
   state.cache.clear();
   state.error = null;
   state.lastAttempt = 0;
+  state.chat = null;
   document.body.classList.remove("is-locked");
   route(false);
   announce("새 토큰으로 대시보드를 다시 열었습니다.");
@@ -363,6 +427,8 @@ function route(fromUser) {
 
   const previous = state.route;
   const openedSession = previous?.id === "session" ? state.args.id : null;
+  state.cleanup?.();
+  state.cleanup = null;
   state.route = next;
   state.args = where.args;
   state.hash = where.canonical;
@@ -378,8 +444,18 @@ function route(fromUser) {
   document.title = `${next.title} - Junees 대시보드`;
   if (next.renderControls) next.renderControls(ui.controls, ctx());
   else ui.controls.replaceChildren();
-  paint();
-  load();
+  updateChatNav();
+  ui.refresh.hidden = Boolean(next.live);
+  if (next.live) {
+    ui.banner.replaceChildren();
+    ui.updated.textContent = "";
+    state.controller?.abort();
+    setBusy(false);
+    state.cleanup = next.mount(ui.view, ctx(), where.args);
+  } else {
+    paint();
+    load();
+  }
   if (!fromUser) return;
   // Back from a session: return to its row, not the top of the page.
   const row = openedSession && next.id === "sessions" ? ui.view.querySelector(`[data-session-link="${CSS.escape(openedSession)}"]`) : null;
@@ -398,13 +474,18 @@ function start() {
   window.addEventListener("hashchange", () => {
     const pasted = takeCodeFromAddress();
     if (pasted) connect(pasted);
-    else if (takeTokenFromAddress()) acceptToken();
+    else if (takeTokenFromAddress()) {
+      acceptToken();
+      chatStatus();
+    }
     else route(true);
   });
 
   if (code) connect(code);
-  else if (getToken()) route(false);
-  else lock();
+  else if (getToken()) {
+    route(false);
+    chatStatus();
+  } else lock();
 
   const refreshIfDue = () => {
     if (state.locked || state.connecting || document.hidden || state.loading || state.writes > 0) return;
