@@ -150,7 +150,10 @@ fn block_json(settings: &Settings, block: &ContentBlock) -> Value {
             put_text(&mut out, "text_preview", content, PREVIEW_CHARS);
             // Screenshots and the like: their kind only, as image blocks.
             if !images.is_empty() {
-                let kinds: Vec<&str> = images.iter().map(|image| image.media_type.as_str()).collect();
+                let kinds: Vec<&str> = images
+                    .iter()
+                    .map(|image| image.media_type.as_str())
+                    .collect();
                 out.insert("images".into(), json!(kinds));
             }
         }
