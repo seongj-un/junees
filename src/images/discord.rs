@@ -16,6 +16,7 @@ use reqwest::redirect::Policy;
 use serde_json::Value;
 
 use super::{Image, MAX_IMAGE_BYTES, human_bytes, too_large};
+use crate::gateway::platform::{Attached, Kind};
 use crate::prompt_text::escape_hidden;
 
 /// The hosts Discord serves attachments from (message object, attachment
@@ -35,7 +36,10 @@ pub const MAX_REDIRECTS: usize = 3;
 /// Time one download may take.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// An image attached to a message.
+/// The message flag of a voice message (`IS_VOICE_MESSAGE`).
+pub const VOICE_MESSAGE: u64 = 1 << 13;
+
+/// An image or audio file attached to a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     /// The file name as sent, with hidden characters escaped.
@@ -43,11 +47,28 @@ pub struct Attachment {
     pub url: String,
     /// Bytes, as Discord reports them.
     pub size: u64,
+    pub kind: Kind,
 }
 
-/// The image attachments of a message (`attachments` of a MESSAGE_CREATE),
-/// and a note for each one left out: not an image, too large, past
-/// [`MAX_ATTACHMENTS`].
+impl Attached for Attachment {
+    fn name(&self) -> &str {
+        &self.filename
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn kind(&self) -> &Kind {
+        &self.kind
+    }
+}
+
+/// The image and audio attachments of a message (`attachments` of a
+/// MESSAGE_CREATE; audio by its `content_type`, or any attachment of a
+/// voice message, [`VOICE_MESSAGE`]), and a note for each one left out:
+/// neither, an image too large, past [`MAX_ATTACHMENTS`]. Audio sizes are
+/// checked against the transcription limit when its turn starts.
 pub fn attachments(message: &Value) -> (Vec<Attachment>, Vec<String>) {
     let mut images = Vec::new();
     let mut notes = Vec::new();
@@ -55,21 +76,32 @@ pub fn attachments(message: &Value) -> (Vec<Attachment>, Vec<String>) {
         .get("attachments")
         .and_then(Value::as_array)
         .map_or(&[][..], Vec::as_slice);
+    let voice = message
+        .get("flags")
+        .and_then(Value::as_u64)
+        .is_some_and(|flags| flags & VOICE_MESSAGE != 0);
     for item in list {
         let text = |key: &str| item.get(key).and_then(Value::as_str);
         let filename = escape_hidden(text("filename").unwrap_or("attachment"));
-        let image = match text("content_type") {
-            Some(kind) => kind.starts_with("image/"),
-            None => has_image_extension(&filename),
+        let content_type = text("content_type");
+        let kind = match content_type {
+            Some(mime) if mime.starts_with("audio/") => Some(Kind::Audio {
+                mime: mime.to_string(),
+            }),
+            _ if voice => Some(Kind::Audio {
+                mime: content_type.unwrap_or("audio/ogg").to_string(),
+            }),
+            Some(mime) => mime.starts_with("image/").then_some(Kind::Image),
+            None => has_image_extension(&filename).then_some(Kind::Image),
         };
-        if !image {
+        let Some(kind) = kind else {
             notes.push(format!(
-                "`{filename}` is not an image; only images are read"
+                "`{filename}` is not an image or audio; only those are read"
             ));
             continue;
-        }
+        };
         let size = item.get("size").and_then(Value::as_u64).unwrap_or(0);
-        if size > MAX_IMAGE_BYTES {
+        if kind == Kind::Image && size > MAX_IMAGE_BYTES {
             notes.push(format!("`{filename}`: {}", too_large(size)));
             continue;
         }
@@ -79,7 +111,7 @@ pub fn attachments(message: &Value) -> (Vec<Attachment>, Vec<String>) {
         };
         if images.len() == MAX_ATTACHMENTS {
             notes.push(format!(
-                "`{filename}` left out: at most {MAX_ATTACHMENTS} images per message"
+                "`{filename}` left out: at most {MAX_ATTACHMENTS} files per message"
             ));
             continue;
         }
@@ -87,6 +119,7 @@ pub fn attachments(message: &Value) -> (Vec<Attachment>, Vec<String>) {
             filename,
             url: url.to_string(),
             size,
+            kind,
         });
     }
     (images, notes)
@@ -143,8 +176,28 @@ impl Fetcher {
     /// The attachment as an image block, or what went wrong, in words.
     pub async fn fetch(&self, attachment: &Attachment) -> Result<Image, String> {
         let name = &attachment.filename;
+        let bytes = match self.bytes(attachment, MAX_IMAGE_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(Ok(len)) => return Err(format!("`{name}`: {}", too_large(len))),
+            Err(Err(why)) => return Err(why),
+        };
+        let (image, _) = Image::from_bytes(&bytes).map_err(|err| format!("`{name}`: {err}"))?;
+        Ok(image)
+    }
+
+    /// The attachment's bytes; `Err(Ok(len))` when it holds more than
+    /// `limit` (`len` as far as known), `Err(Err(why))` with what went
+    /// wrong, in words.
+    pub async fn bytes(
+        &self,
+        attachment: &Attachment,
+        limit: u64,
+    ) -> Result<Vec<u8>, Result<u64, String>> {
+        let name = &attachment.filename;
         if !self.allows(&attachment.url) {
-            return Err(format!("`{name}` is not on Discord's CDN; not downloaded"));
+            return Err(Err(format!(
+                "`{name}` is not on Discord's CDN; not downloaded"
+            )));
         }
         let failed =
             |err: reqwest::Error| format!("`{name}` could not be downloaded: {}", describe(err));
@@ -153,23 +206,23 @@ impl Fetcher {
             .get(&attachment.url)
             .send()
             .await
-            .map_err(failed)?;
+            .map_err(|err| Err(failed(err)))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("`{name}` could not be downloaded: HTTP {status}"));
+            return Err(Err(format!(
+                "`{name}` could not be downloaded: HTTP {status}"
+            )));
         }
         if let Some(len) = response.content_length()
-            && len > MAX_IMAGE_BYTES
+            && len > limit
         {
-            return Err(format!("`{name}`: {}", too_large(len)));
+            return Err(Ok(len));
         }
-        let bytes = match read_capped(&mut response, MAX_IMAGE_BYTES).await {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(len)) => return Err(format!("`{name}`: {}", too_large(len))),
-            Err(err) => return Err(failed(err)),
-        };
-        let (image, _) = Image::from_bytes(&bytes).map_err(|err| format!("`{name}`: {err}"))?;
-        Ok(image)
+        match read_capped(&mut response, limit).await {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(len)) => Err(Ok(len)),
+            Err(err) => Err(Err(failed(err))),
+        }
     }
 }
 
@@ -385,6 +438,7 @@ mod tests {
             filename: path.trim_start_matches('/').to_string(),
             url: format!("{base}{path}?hm=signed"),
             size: 1,
+            kind: crate::gateway::platform::Kind::Image,
         }
     }
 
@@ -534,5 +588,36 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         held.abort();
+    }
+
+    #[test]
+    fn audio_and_voice_messages_are_kept_for_transcription() {
+        let audio = |mime: &str| Kind::Audio { mime: mime.into() };
+        let message = json!({"flags": VOICE_MESSAGE, "attachments": [
+            {"filename": "voice-message.ogg", "content_type": "audio/ogg", "size": 4096,
+             "url": "https://cdn.discordapp.com/attachments/1/2/voice-message.ogg?ex=1"}
+        ]});
+        let (files, notes) = attachments(&message);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(files[0].kind, audio("audio/ogg"));
+        // A voice message's file without a type is audio too.
+        let message = json!({"flags": VOICE_MESSAGE | 4, "attachments": [
+            {"filename": "voice-message", "size": 1, "url": "https://cdn.discordapp.com/a/b"}
+        ]});
+        assert_eq!(attachments(&message).0[0].kind, audio("audio/ogg"));
+        // An audio file over the image limit is kept: transcription has its own.
+        let message = json!({"attachments": [
+            {"filename": "talk.mp3", "content_type": "audio/mpeg", "size": 90_000_000u64,
+             "url": "https://cdn.discordapp.com/a/talk.mp3"},
+            {"filename": "a.txt", "content_type": "text/plain", "size": 1,
+             "url": "https://cdn.discordapp.com/a/a.txt"}
+        ]});
+        let (files, notes) = attachments(&message);
+        assert_eq!((files.len(), files[0].size), (1, 90_000_000));
+        assert_eq!(files[0].kind, audio("audio/mpeg"));
+        assert_eq!(
+            notes,
+            ["`a.txt` is not an image or audio; only those are read"]
+        );
     }
 }

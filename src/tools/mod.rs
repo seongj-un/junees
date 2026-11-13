@@ -53,6 +53,7 @@ pub const SECRET_ENV_VARS: &[&str] = &[
     "JUNEES_SLACK_BOT_TOKEN",
     "JUNEES_SLACK_APP_TOKEN",
     "JUNEES_GITHUB_TOKEN",
+    "JUNEES_TRANSCRIBE_API_KEY",
 ];
 
 /// Claude Code's own credentials, as its documentation names them

@@ -87,7 +87,7 @@ loginctl enable-linger "$USER"             # 로그아웃해도 계속 돌게
 - 같은 채널의 메시지는 받은 순서대로 하나씩 처리한다(턴 중에 온 메시지는 대기열). 다른 채널은 동시에 돌고, 동시에 턴을 돌리는 채널은 `discord_parallel`(기본 2)까지다. 자리가 없으면 `(waiting for a free slot: ...)`을 알리고 기다린다(이때 `!stop`이면 시작하지 않는다). 모든 채널의 대화는 한 스레드에서 비동기로 돈다(에이전트의 future가 `Send`가 아니라서 `LocalSet`).
 - 출력: 턴 중에는 타이핑 표시(8초마다 갱신, 승인 질문을 기다리는 동안은 멈춤). 응답은 메시지 편집으로 스트리밍하지 않고 **완성된 텍스트 블록마다** 보낸다(편집은 레이트 리밋을 빨리 쓰고, 끊긴 응답의 재시도 처리가 복잡해진다). 다음 텍스트 전까지의 도구 호출은 `-> bash ls -la` 같은 한 줄 요약(명령, 경로, 검색어 120자)을 코드 블록 하나로 묶어 보낸다. 2000자가 넘는 블록은 줄 단위로 나누고, 코드 블록이 잘리면 앞 메시지에서 닫고 다음 메시지에서 같은 언어로 다시 연다(다시 여는 줄은 펜스와 32자 이하의 언어만이고, ```` ```rm -rf build``` ````처럼 같은 줄에서 닫히는 펜스는 코드 블록으로 보지 않는다. 길이는 UTF-16 단위로 세어 어느 방식으로 세도 2000자를 넘지 않게 한다). 잘리거나 압축된 응답 같은 안내도 채널에 나온다. 오류는 `error: ...`와 터미널과 같은 힌트로 보낸다.
 - 시스템 프롬프트에 "디스코드로 대화 중이니 짧게, 표 없는 Markdown"이라는 한 문단을 더한다.
-- 이미지 첨부: 허용된 사용자의 메시지에 붙은 첨부 중 `content_type`이 `image/*`인 것(없으면 확장자)을 그 턴이 시작할 때 내려받아 메시지 글 앞에 이미지 블록으로 넣는다(api 백엔드, [이미지 입력](usage.md#이미지-입력)). 글 없이 이미지만 보내도 된다. 디스코드 CDN(`https://cdn.discordapp.com`, `https://media.discordapp.net`)에서만, 리다이렉트는 그 호스트로 3번까지, 30초 안에, 5 MB까지 받고, 받은 바이트가 PNG/JPEG/GIF/WebP가 아니면 버린다. 한 메시지에 10개까지. 이미지가 아닌 파일, 큰 파일, CDN 밖 주소, 받지 못한 것은 `(attachments left out: ...)`로 채널에 알리고 같은 줄을 모델에게도 붙인다(못 받은 그림에 대해 지어내지 않게). 오류 문구와 로그에는 서명된 첨부 URL을 쓰지 않고, 로그에는 형식과 크기만 남긴다. 테스트용 다른 주소는 환경 변수 `JUNEES_DISCORD_CDN_URL`(https, http는 이 컴퓨터만)로만 준다.
+- 이미지 첨부: 허용된 사용자의 메시지에 붙은 첨부 중 `content_type`이 `image/*`인 것(없으면 확장자)을 그 턴이 시작할 때 내려받아 메시지 글 앞에 이미지 블록으로 넣는다(api 백엔드, [이미지 입력](usage.md#이미지-입력)). 글 없이 이미지만 보내도 된다. 디스코드 CDN(`https://cdn.discordapp.com`, `https://media.discordapp.net`)에서만, 리다이렉트는 그 호스트로 3번까지, 30초 안에, 5 MB까지 받고, 받은 바이트가 PNG/JPEG/GIF/WebP가 아니면 버린다. 한 메시지에 10개까지. 이미지도 오디오도 아닌 파일, 큰 이미지, CDN 밖 주소, 받지 못한 것은 `(attachments left out: ...)`로 채널에 알리고 같은 줄을 모델에게도 붙인다(못 받은 그림에 대해 지어내지 않게). 오류 문구와 로그에는 서명된 첨부 URL을 쓰지 않고, 로그에는 형식과 크기만 남긴다. 테스트용 다른 주소는 환경 변수 `JUNEES_DISCORD_CDN_URL`(https, http는 이 컴퓨터만)로만 준다.
 - 명령(슬래시 명령 등록 없이 텍스트로):
   - `!new`: 새 대화(새 세션, 메모리와 스킬 다시 읽음). 대기열 순서대로 처리된다.
   - `!stop`: 진행 중인 턴을 취소하고(도구의 프로세스 그룹까지, 기록은 터미널의 Ctrl-C와 같다) 대기열의 메시지를 버린다. 자리를 기다리던 턴과 첨부 이미지를 내려받던 턴도 시작하지 않고 멈춘다(`!status`에는 "a turn downloads its attachments").
@@ -107,7 +107,7 @@ REST는 [레이트 리밋 문서](https://docs.discord.com/developers/topics/rat
 ### 범위 밖, 한계
 
 - `!task <목표>`(게이트웨이에서 장기 작업 시작)는 후속으로 미뤘다. 작업 모드는 프로세스의 현재 폴더를 저장소 루트로 옮기고 한 저장소에 하나만 돌기 때문에, 여러 채널이 동시에 도는 게이트웨이 안에서는 따로 설계해야 한다. 지금은 컴퓨터에서 `junees task`를 돌리고 진행 알림은 웹훅(`notify_webhook`)으로 받는다.
-- 디스코드 애플리케이션(슬래시) 명령 등록, 이미지가 아닌 첨부 파일 읽기, 메시지 편집 스트리밍, 반응 이모지, 봇이 스스로 스레드를 만드는 것은 하지 않는다.
+- 디스코드 애플리케이션(슬래시) 명령 등록, 이미지와 오디오가 아닌 첨부 파일 읽기, 메시지 편집 스트리밍, 반응 이모지, 봇이 스스로 스레드를 만드는 것은 하지 않는다.
 - 재시작하면 기다리던 질문은 사라지므로(턴도 끝난다) 그 전 질문 메시지에는 버튼이 남는다. 누르면 "already answered" 안내만 받는다. 버튼이 달린 질문 메시지를 올리다 실패하면 아직 올라가지 않은 부분만 버튼 없이 올리고(긴 질문의 앞부분이 이미 올라갔으면 그 뒤만), 안내도 `Press a button, or reply`를 뺀 `Reply `y` to run it, ...`으로 바꾼다. 답은 글 답장으로 받는다.
 - 테스트는 테스트 안에서 띄운 가짜 Gateway(WebSocket)와 가짜 REST 서버로만 했다(`tests/discord_gateway.rs`). 실제 디스코드에는 연결해 보지 않았다.
 
@@ -173,7 +173,7 @@ junees gateway telegram
 - 타이핑: 턴 중 `sendChatAction typing`을 4초마다(텔레그램은 5초 동안 보여 준다). 승인 질문을 기다리는 동안은 멈춘다.
 - 승인 질문은 `Approve this tool call?` + 코드 블록 안의 터미널과 같은 내용 + 답하는 법이고, 질문 메시지에 인라인 키보드 버튼(Allow, Always allow, Decline. Always allow는 매번 묻는 종류뿐이면 없다)이 달린다. 글 답장 `y`/`n`/`n <이유>`/`a`도 그대로 된다. 답한 직후(30초 안) 같은 사용자의 답 낱말 하나는 디스코드처럼 새 입력으로 넘기지 않고 이미 답했다고 알린다. 그룹에서 글로 답할 때는 질문 메시지에 답장한다(개인 정보 모드에서도 봇에 오도록). 버튼 누름은 개인 정보 모드와 상관없이 봇에 온다.
 - 승인 버튼의 동작([Bot API](https://core.telegram.org/bots/api): InlineKeyboardButton, CallbackQuery, answerCallbackQuery, editMessageText): 버튼의 `callback_data`는 `junees:<질문 id>:<y|a|n>`(41바이트, 한도 64바이트)이고, 질문 id는 질문마다 새로 뽑은 128비트 난수다. `getUpdates`의 `allowed_updates`에 `callback_query`를 더해 누름을 받는다. 누름이 받아들여지는 것은 누른 사람이 `telegram_allowed_users`에 있고, 그 채팅(포럼이면 같은 토픽)에서 지금 기다리는 질문의 id이며, 그 질문 메시지에서 눌렸고, 그 질문에 있는 버튼일 때뿐이다. 모든 누름에 `answerCallbackQuery`로 답한다(답하지 않으면 텔레그램 앱이 진행 표시를 계속 보여 준다): 받아들인 누름은 알림 없이, 그 밖의 누름(허용 목록 밖, 끝났거나 시간이 지난 질문, 다른 채팅이나 토픽)은 아무것도 바꾸지 않고 `This question was already answered, timed out or stopped.`(허용 목록 밖이면 `Only the users in telegram_allowed_users can answer Junees.`) 알림으로. 질문이 끝나면(버튼, 글 답장, 시간 초과, `/stop`) `editMessageText`로 질문 메시지에 결과 한 줄(`Allowed by <이름>.` 등, HTML이면 굵게)을 더하고 빈 인라인 키보드로 버튼을 없앤다. 더한 글이 4096자를 넘으면 버튼만 없애고 결과는 따로 보낸다. 재시작 전 질문의 버튼은 남지만 눌러도 안내만 받는다. 버튼이 달린 질문을 보내다 실패하면 디스코드처럼 보내지 못한 부분만 버튼과 버튼 안내 없이 보내고 글 답장으로 받는다.
-- 이미지: 사진(`photo`, 크기 목록 중 5 MB 이하에서 가장 큰 것)과 이미지 문서(`document`, MIME `image/png|jpeg|gif|webp`, 없으면 확장자)를 그 턴이 시작할 때 `getFile`과 파일 URL로 30초 안에 5 MB까지 스트리밍으로 받는다(봇이 받을 수 있는 최대는 20 MB). 받은 바이트가 네 형식이 아니면 버린다. 앨범(같은 채팅, 보낸 사람, `media_group_id`)은 한 입력으로 묶는다(10장까지). 텔레그램은 앨범 사진을 하나씩 보내고 롱 폴링은 첫 업데이트가 오자마자 돌아오므로, 나머지는 다음 응답들로 올 수 있다. 그래서 앨범 사진은 받는 대로 모아 두었다가 1초 동안 다음 사진이 오지 않으면 한 입력으로 넘긴다(#58). 그 사이 같은 채팅에 다른 메시지가 오면 모아 둔 앨범을 먼저 넘겨 순서를 지킨다. 그보다 늦게 온 사진은 따로 입력이 되고, 그룹에서는 받아들인 앨범(최근 64개)을 기억해 그런 늦은 사진도 캡션 없이 받는다. 개인 정보 모드에서는 그룹의 캡션 없는 앨범 사진이 아예 오지 않을 수 있다(아래 개인 정보 모드). 이미지가 아닌 문서, 동영상, 음성, 스티커는 `(attachments left out: ...)`로 알린다. claude-code 백엔드는 디스코드처럼 이미지를 거절한다.
+- 이미지: 사진(`photo`, 크기 목록 중 5 MB 이하에서 가장 큰 것)과 이미지 문서(`document`, MIME `image/png|jpeg|gif|webp`, 없으면 확장자)를 그 턴이 시작할 때 `getFile`과 파일 URL로 30초 안에 5 MB까지 스트리밍으로 받는다(봇이 받을 수 있는 최대는 20 MB). 받은 바이트가 네 형식이 아니면 버린다. 앨범(같은 채팅, 보낸 사람, `media_group_id`)은 한 입력으로 묶는다(10장까지). 텔레그램은 앨범 사진을 하나씩 보내고 롱 폴링은 첫 업데이트가 오자마자 돌아오므로, 나머지는 다음 응답들로 올 수 있다. 그래서 앨범 사진은 받는 대로 모아 두었다가 1초 동안 다음 사진이 오지 않으면 한 입력으로 넘긴다(#58). 그 사이 같은 채팅에 다른 메시지가 오면 모아 둔 앨범을 먼저 넘겨 순서를 지킨다. 그보다 늦게 온 사진은 따로 입력이 되고, 그룹에서는 받아들인 앨범(최근 64개)을 기억해 그런 늦은 사진도 캡션 없이 받는다. 개인 정보 모드에서는 그룹의 캡션 없는 앨범 사진이 아예 오지 않을 수 있다(아래 개인 정보 모드). 이미지도 오디오도 아닌 문서, 동영상, 동영상 메시지, 스티커는 `(attachments left out: ...)`로 알린다. 음성 메시지(`voice`), 오디오(`audio`), 오디오 문서는 [받아쓴다](#음성-메시지-받아쓰기). claude-code 백엔드는 디스코드처럼 이미지를 거절한다.
 
 ### 폴링, 오프셋, 레이트 리밋
 
@@ -183,7 +183,7 @@ junees gateway telegram
 
 ### 범위 밖, 한계
 
-- 웹훅 방식 수신, 메시지 편집 스트리밍, MarkdownV2 서식, 밑줄·스포일러·펼치는 인용(Markdown에 표기가 없다), 음성과 문서 내용 읽기, 그룹 관리 명령, `/task`, setup 마법사의 텔레그램 질문, `junees doctor --online`의 `getMe`(토큰을 외부로 보내야 해서)는 하지 않는다.
+- 웹훅 방식 수신, 메시지 편집 스트리밍, MarkdownV2 서식, 밑줄·스포일러·펼치는 인용(Markdown에 표기가 없다), 문서 내용 읽기, 그룹 관리 명령, `/task`, setup 마법사의 텔레그램 질문, `junees doctor --online`의 `getMe`(토큰을 외부로 보내야 해서)는 하지 않는다.
 - 여러 응답에 나뉘어 온 앨범은 따로따로 입력이 된다(그룹에서도 받기는 한다, [대화와 출력](#대화와-출력)의 이미지). 그룹이 슈퍼그룹으로 바뀌면(`migrate_to_chat_id`) 새 채팅으로 보고 새 대화를 시작한다.
 - 테스트는 테스트 안에서 띄운 가짜 Bot API(루프백)로만 했다(`tests/telegram_gateway.rs`). 실제 텔레그램에는 연결해 보지 않았다.
 
@@ -282,7 +282,7 @@ junees gateway slack
 - 타이핑 표시는 없다: 봇의 타이핑 표시는 은퇴한 RTM API에만 있었다.
 - 승인 질문은 굵은 제목 + 코드 블록(터미널과 같은 내용) + 답하는 법이고, Block Kit 버튼(Allow, Always allow, Decline. Always allow는 매번 묻는 종류뿐이면 없다)이 달린다. 글 답장 `y`/`n`/`n <이유>`/`a`도 그대로 된다. 채널에서는 그 스레드에 답글로 답한다. 답한 직후(30초 안) 같은 사용자의 답 낱말 하나는 디스코드처럼 새 입력으로 넘기지 않고 이미 답했다고 알린다.
 - 승인 버튼의 동작([block_actions payload](https://docs.slack.dev/reference/interaction-payloads/block_actions-payload), [Button element](https://docs.slack.dev/reference/block-kit/block-elements/button-element), [chat.update](https://docs.slack.dev/reference/methods/chat.update)): 질문 메시지(길면 나뉘고 그 마지막 메시지)는 `chat.postMessage`의 `blocks`로 보낸다. mrkdwn `section` 하나(`verbatim: true`: 평문의 채널 이름이나 주소를 슬랙이 링크로 바꾸지 않게)와 `actions` 블록 하나이고, 각 버튼의 `action_id`와 `value`는 `junees:<질문 id>:<y|a|n>`(질문마다 새로 뽑은 128비트 난수)이다. `section` 글은 3000자까지라서, 이스케이프한 mrkdwn이 3000자를 넘으면 질문을 더 잘게 나눠 앞부분은 글로 보내고 마지막 부분에 버튼을 단다. `text`에도 같은 mrkdwn을 넣는다(알림용). 누르면 슬랙이 Socket Mode로 `interactive` 봉투(`block_actions`)를 보내고, Junees는 다른 봉투처럼 처리하기 전에 바로 `envelope_id`로 확인한다(문서: 확인은 3초 안). 누름이 받아들여지는 것은 누른 사람이 `slack_allowed_users`에 있고, 누른 메시지의 대화(채널, 채널이면 그 `thread_ts`)에서 지금 기다리는 질문의 id이며, 그 질문 메시지(`ts`)에서 눌렸고, 그 질문에 있는 버튼일 때뿐이다. 질문이 끝나면(버튼, 글 답장, 시간 초과, `!stop`) `chat.update`로 버튼을 없애고(`blocks`를 질문 `section`과 결과 `section` 둘로 바꾼다) 결과를 굵게 적는다(`Allowed by <사용자 이름>.`, `Declined.`, `No answer within 5m: declined.`, `Not answered: the turn stopped.` 등, 디스코드와 같은 문구). 결과 줄도 `&`, `<`, `>`를 이스케이프하므로 사용자 이름에 무엇이 있어도 멘션이나 링크가 되지 않는다. `chat.update`는 `parse`의 기본값이 `chat.postMessage`와 달리 `client`라서 `parse: none`을 보내고 `link_names`는 보내지 않는다. 그 밖의 누름(허용 목록 밖 사람, 끝났거나 시간이 지난 질문, 재시작 전 질문, 다른 대화나 다른 메시지, Junees의 것이 아닌 버튼)은 아무것도 바꾸지 않고 `chat.postEphemeral`로 누른 사람에게만 보이는 안내를 보낸다(`This question was already answered, timed out or stopped; the button does nothing now.`, 허용 목록 밖이면 `Only the users in slack_allowed_users can answer Junees.`, 허용 목록 밖 사용자는 로그에 한 번 남긴다). `response_url`은 쓰지 않는다(토큰 없이 쓰는 `hooks.slack.com` 주소라 받은 주소를 그대로 믿어야 한다). 버튼이 달린 질문을 보내지 못하면(예: `invalid_blocks`) 보내지 못한 부분만 버튼과 버튼 안내 없이(`Reply `y` to run it, ...`) 보내고 글 답장으로 받는다.
-- 이미지: 메시지의 `files` 가운데 MIME `image/png|jpeg|gif|webp`이고 5 MB 이하인 것(10개까지)을 그 턴이 시작할 때 `url_private_download`(없으면 `url_private`)에서 봇 토큰으로 30초 안에 스트리밍으로 받는다. 문서 "Downloading files"대로 토큰은 `https://files.slack.com`(파싱한 호스트가 정확히 같고 기본 포트, 사용자 정보 없음)에만 보내고, 리다이렉트는 자동으로 따르지 않고 세 번까지 같은 규칙으로 확인한 뒤 따른다. 원격 파일(`mode: external`, `is_external`, `filetype: remote`: 주소를 다른 앱이 정한다), 봇에게 열리지 않은 파일(`file_access`), 이미지가 아닌 파일, 큰 파일은 `(attachments left out: ...)`로 알린다. 받은 바이트가 네 형식이 아니면 버린다(토큰이 틀리면 슬랙은 로그인 HTML을 준다). claude-code 백엔드는 디스코드처럼 이미지를 거절한다.
+- 이미지: 메시지의 `files` 가운데 MIME `image/png|jpeg|gif|webp`이고 5 MB 이하인 것(10개까지)을 그 턴이 시작할 때 `url_private_download`(없으면 `url_private`)에서 봇 토큰으로 30초 안에 스트리밍으로 받는다. 문서 "Downloading files"대로 토큰은 `https://files.slack.com`(파싱한 호스트가 정확히 같고 기본 포트, 사용자 정보 없음)에만 보내고, 리다이렉트는 자동으로 따르지 않고 세 번까지 같은 규칙으로 확인한 뒤 따른다. 원격 파일(`mode: external`, `is_external`, `filetype: remote`: 주소를 다른 앱이 정한다), 봇에게 열리지 않은 파일(`file_access`), 이미지도 오디오도 아닌 파일, 큰 이미지는 `(attachments left out: ...)`로 알린다. 받은 바이트가 네 형식이 아니면 버린다(토큰이 틀리면 슬랙은 로그인 HTML을 준다). claude-code 백엔드는 디스코드처럼 이미지를 거절한다.
 
 ### 연결, 재연결, 레이트 리밋
 
@@ -292,8 +292,55 @@ junees gateway slack
 
 ### 범위 밖, 한계
 
-- 슬래시 명령, 메시지 편집 스트리밍, 반응 이모지, 타이핑 표시, Agent/Assistant 스레드(`assistant.threads.*`), 이미지가 아닌 파일 읽기, 여러 워크스페이스 설치(OAuth 배포), HTTP Events API(요청 URL) 방식, `!task`는 하지 않는다.
+- 슬래시 명령, 메시지 편집 스트리밍, 반응 이모지, 타이핑 표시, Agent/Assistant 스레드(`assistant.threads.*`), 이미지와 오디오가 아닌 파일 읽기, 여러 워크스페이스 설치(OAuth 배포), HTTP Events API(요청 URL) 방식, `!task`는 하지 않는다.
 - 재시작하면 기다리던 질문은 사라지므로 그 전 질문 메시지에는 버튼이 남는다(눌러도 안내만 받는다). 슬랙은 Socket Mode 연결이 여럿이면 아무 연결로나 보낸다: 같은 앱으로 게이트웨이를 둘 띄우면 다른 쪽 질문의 누름은 "already answered"가 된다.
 - `junees doctor`는 토큰 모양과 허용 사용자를 오프라인으로 보고, `--online`이면 `auth.test`로 봇 토큰만 확인한다(앱 토큰은 `apps.connections.open`이 연결 주소를 새로 만들어서 묻지 않는다).
 - 확인(ack)한 뒤 처리 전에 프로세스가 죽은 이벤트는 다시 오지 않는다. 게이트웨이가 꺼진 동안의 메시지는 받지 못한다(Socket Mode는 연결된 동안만 보낸다).
 - 테스트는 테스트 안에서 띄운 가짜 Web API와 가짜 Socket Mode WebSocket 서버(루프백)로만 했다(`tests/slack_gateway.rs`). 실제 슬랙에는 연결해 보지 않았다. 승인 버튼도 가짜 서버로만 눌러 봤다.
+
+## 음성 메시지 받아쓰기
+
+세 게이트웨이 모두 허용된 사용자가 보낸 음성 메시지와 오디오 파일을 글로 받아써서 일반 메시지처럼 처리한다. 받아쓰기는 OpenAI 호환 `POST <transcribe_base_url>/audio/transcriptions` API로 한다. OpenAI, Groq, 이 컴퓨터에서 띄운 whisper 서버(faster-whisper-server, whisper.cpp server 등)가 이 형식을 쓴다. api 백엔드와 claude-code 백엔드 모두에서 된다(모델에는 글만 간다).
+
+### 설정
+
+`transcribe_base_url`을 적어야 켜진다. 꺼져 있으면 오디오는 내려받지 않고 `(attachments left out: ...)`에 "audio is not read, transcription is off"로 이름만 알린다. 같은 메시지의 글과 이미지는 이전처럼 실행하고(모델에게도 그 안내 줄이 붙는다), 오디오만 왔으면 안내만 보내고 턴은 돌지 않는다.
+
+```toml
+transcribe_base_url = "https://api.openai.com/v1"   # JUNEES_TRANSCRIBE_BASE_URL
+transcribe_api_key = "sk-..."                        # JUNEES_TRANSCRIBE_API_KEY
+transcribe_model = "whisper-1"                       # 기본 whisper-1
+transcribe_language = "ko"                           # 선택, ISO-639-1 두 글자
+transcribe_max_bytes = 26214400                      # 기본 25 MB(OpenAI 한도)
+transcribe_timeout = 120                             # 요청 하나의 시간(초), 10~3600, 기본 120
+```
+
+- Groq: `transcribe_base_url = "https://api.groq.com/openai/v1"`, `transcribe_model = "whisper-large-v3-turbo"`(또는 `whisper-large-v3`), 키는 Groq 키.
+- 이 컴퓨터의 whisper 서버: 예를 들어 faster-whisper-server를 `docker run -p 8000:8000 fedirz/faster-whisper-server:latest-cpu`로 띄우고 `transcribe_base_url = "http://127.0.0.1:8000/v1"`, `transcribe_model = "Systran/faster-whisper-small"`. 루프백 주소는 키가 없어도 된다. whisper.cpp의 `whisper-server`는 기본 경로가 `/inference`라서 OpenAI 호환 경로를 내주도록 띄우거나(`--inference-path /v1/audio/transcriptions`) 프록시를 둔다.
+- 주소는 모델 API 주소와 같은 규칙으로 검사한다: https만, 평문 http는 이 컴퓨터의 서버만, 사용자 이름이나 비밀번호가 든 주소는 거절한다. 요청은 리다이렉트를 따라가지 않는다.
+- 키는 [주소와 같은 곳](configuration.md#api-키와-주소)에서만 읽는다(설정 파일의 주소면 설정 파일의 키, 환경 변수의 주소면 환경 변수의 키). 이 컴퓨터가 아닌 서버인데 짝이 맞는 키가 없으면 게이트웨이가 시작하지 않는다. `JUNEES_TRANSCRIBE_API_KEY`는 bash, MCP 서버, 플러그인 훅에 넘기지 않는다.
+- `junees doctor`는 켜짐/꺼짐, 보낼 주소, 모델, 크기 한도, 키가 있는지와 어디서 왔는지를 보여 준다(키 값은 보여 주지 않는다). `--online`이면 `GET <transcribe_base_url>/models`를 키와 함께 묻는다. 로컬 서버에는 이 경로가 없을 수 있어서 실패해도 경고로만 둔다.
+
+### 받는 것
+
+- 디스코드: 음성 메시지(메시지 `flags`의 `IS_VOICE_MESSAGE`, 8192)의 첨부와 `content_type`이 `audio/*`인 첨부. 디스코드 CDN에서만 이미지와 같은 규칙으로 받는다.
+- 텔레그램: `voice`, `audio`, MIME이 `audio/*`인 `document`. `getFile`과 파일 URL로 받는다. 봇 API가 내주는 파일은 20 MB까지라서, 텔레그램에서는 `transcribe_max_bytes`와 20 MB 중 작은 쪽이 한도다(넘으면 그 이유를 안내한다). `audio`에 `mime_type`이 없으면 파일 이름의 확장자로 형식을 정한다.
+- 슬랙: `files` 가운데 `mimetype`이 `audio/*`인 것. 이미지와 같이 `https://files.slack.com`에서만 봇 토큰으로 받는다. 앱에 `files:read`가 없으면 슬랙이 파일 대신 로그인 페이지(HTML)를 주는데, 이것은 받아쓰기로 보내지 않고 권한을 확인하라고 안내한다.
+- 허용된 사용자 검사는 지금처럼 받는 단계에서 먼저 한다. 허용되지 않은 사용자의 오디오는 내려받지 않는다.
+- 크기: 플랫폼이 알려 준 크기가 `transcribe_max_bytes`보다 크면 내려받지 않고, 알려 주지 않았으면 받는 중에 한도를 넘는 순간 멈춘다.
+
+### 처리
+
+- 그 턴이 시작할 때 오디오를 내려받아(30초 안에) 받아쓰기 API에 보낸다. 받는 동안과 받아쓰는 동안에도 `stop`으로 멈출 수 있다.
+- 요청은 `multipart/form-data`로 `model`, `language`(정했으면), `response_format=json`, `file`을 보낸다. 파일 이름은 형식에 맞춘 `audio.ogg`, `audio.mp3`처럼 보내고, 사용자가 붙인 파일 이름은 보내지 않는다. 응답의 `text`를 쓴다.
+- 오디오는 메모리에만 두고 디스크에 쓰지 않는다.
+- 모델에게 가는 글은 `[음성 메시지 받아쓰기]` 다음 줄에 받아쓴 글이다. 같은 메시지에 글(캡션)이 있으면 그 글을 먼저 두고 빈 줄 뒤에 받아쓴 글을 둔다. 오디오가 여럿이면 하나씩 이어 붙인다. 이미지가 함께 오면 이미지도 지금처럼 함께 간다.
+- 실패 처리: 429와 5xx, 연결이 열리지 않은 경우는 세 번까지 다시 보낸다(`Retry-After`를 따르되 30초까지). 보낸 요청이 `transcribe_timeout`(기본 120초) 안에 답하지 않으면 다시 보내지 않는다. 서버는 아직 받아쓰는 중일 수 있어서, 같은 파일을 또 보내면 같은 일을 겹쳐 시키고(유료 API면 과금도) 대화방만 오래 멈추기 때문이다. 이때는 시간이 모자랐다고 안내한다(느린 로컬 서버에서 긴 녹음이면 `transcribe_timeout`을 늘린다).
+- 안내에는 원인을 담는다. 401과 403은 키 문제, 3xx는 리다이렉트를 따르지 않으니 주소를 확인하라는 안내, 404와 405는 주소에 `/v1`이 빠졌는지 확인하라는 안내, 결제 한도(OpenAI의 429 `insufficient_quota`)는 다시 보내지 않고 한도 안내로 끝낸다. 서비스가 준 짧은 이유(비밀 값으로 보이면 빼고 200자까지)가 있으면 붙인다. 세 번 모두 실패하면 마지막 응답의 이유를 붙인다.
+- 켜져 있는데 너무 크거나, 받지 못했거나, 받아쓰지 못했거나, 말소리가 없으면(빈 글) 그 메시지는 실행하지 않는다(모델이 듣지 못한 말에 답하지 않게). 대화방에는 "this message was not run"과 이유를 보내고, 로그에도 이유를 남긴다. 로그에는 오디오 크기와 받아쓴 글의 글자 수만 남기고 내용은 남기지 않는다.
+- 음성 메시지는 승인 질문의 답(`y`, `n`)으로 쓰이지 않는다. 받아쓴 글은 새 입력으로 간다.
+
+### 범위 밖, 한계
+
+- 동영상과 동영상 메시지(텔레그램 `video_note`)의 소리, 스트리밍 받아쓰기, 말로 하는 답(TTS), `verbose_json`의 구간별 시각은 하지 않는다.
+- 테스트는 루프백 가짜 받아쓰기 API와 각 플랫폼의 가짜 서버로만 했다(`src/transcribe/tests.rs`, `tests/*_gateway.rs`). 실제 OpenAI, Groq, whisper 서버나 실제 디스코드, 텔레그램, 슬랙에는 연결해 보지 않았다.

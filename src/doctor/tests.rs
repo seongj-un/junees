@@ -2186,3 +2186,95 @@ async fn online_lists_the_models_of_an_openai_compatible_server() {
         );
     }
 }
+
+#[tokio::test]
+async fn transcription_is_shown_without_its_key_and_asked_online() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut fixture = Fixture::new();
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "transcription",
+        "voice messages",
+        Status::Skip,
+        "off",
+    );
+    assert!(!has(&report, "online", "transcription API"));
+    fixture.config("transcribe_base_url = \"https://api.groq.com/openai/v1\"\n");
+    fixture.set("JUNEES_TRANSCRIBE_API_KEY", "gsk-doctor-voice-secret");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "transcription",
+        "voice messages",
+        Status::Fail,
+        "not where the address is",
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut heads = Vec::new();
+        for status in [200, 404] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            heads.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let body = r#"{"data":[{"id":"whisper-1"}]}"#;
+            let response = format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        }
+        heads
+    });
+    fixture.config(&format!(
+        "transcribe_base_url = \"{base}\"\ntranscribe_api_key = \"gsk-doctor-voice-secret\"\n\
+         transcribe_language = \"ko\"\n"
+    ));
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "transcription",
+        "voice messages",
+        Status::Ok,
+        &format!(
+            "{base}/audio/transcriptions (config.toml), model whisper-1, language ko, files up \
+             to 25.0 MB, timeout 120 s, key set (config.toml)"
+        ),
+    );
+    expect(
+        &report,
+        "online",
+        "transcription API",
+        Status::Ok,
+        "answers GET /models",
+    );
+    assert_hidden(&report, "doctor-voice-secret");
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "online",
+        "transcription API",
+        Status::Warn,
+        "HTTP 404",
+    );
+    let heads = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        heads[0].starts_with("GET /v1/models HTTP/1.1\r\n"),
+        "{}",
+        heads[0]
+    );
+    assert!(
+        heads[0]
+            .to_lowercase()
+            .contains("authorization: bearer gsk-doctor-voice-secret"),
+        "{}",
+        heads[0]
+    );
+}

@@ -373,6 +373,7 @@ pub async fn run_with(
     settings::discord(&mut report, settings);
     settings::telegram(&mut report, settings);
     settings::slack(&mut report, settings);
+    settings::transcribe(&mut report, settings);
     if let Some(home) = home.as_deref() {
         let user_home = settings.env("HOME").map(std::path::PathBuf::from);
         services::cron(&mut report, home, user_home.as_deref());
@@ -384,6 +385,7 @@ pub async fn run_with(
     if online {
         online::api_key(&mut report, settings).await;
         online::openai_models(&mut report, settings).await;
+        online::transcribe(&mut report, settings).await;
         online::release(&mut report, settings).await;
         if has_slack(settings) {
             online::slack(&mut report, settings).await;

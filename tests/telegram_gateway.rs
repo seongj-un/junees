@@ -658,6 +658,16 @@ fn start(
     home: Option<PathBuf>,
     cwd: &Path,
 ) -> Running {
+    start_voice(config, engines, home, cwd, None)
+}
+
+fn start_voice(
+    config: TelegramConfig,
+    engines: Arc<dyn Engines>,
+    home: Option<PathBuf>,
+    cwd: &Path,
+    transcriber: Option<Arc<junees::transcribe::Transcriber>>,
+) -> Running {
     let (log, lines) = capture();
     let gateway = TelegramGateway {
         config,
@@ -673,6 +683,7 @@ fn start(
         },
         typing_every: Duration::from_secs(3600),
         log,
+        transcriber,
     };
     let stop = Cancel::new();
     let cancel = stop.clone();
@@ -1711,7 +1722,7 @@ async fn photos_and_albums_reach_the_model() {
         "file_name": "notes.txt", "mime_type": "text/plain", "file_size": 10});
     bot.push(document);
     bot.wait_post(&me, |p| {
-        p == "(attachments left out: \"notes.txt\" is not an image; only images are read)"
+        p == "(attachments left out: \"notes.txt\" is not an image or audio; only those are read)"
     })
     .await;
     // Both parts of the album in one batch: hold the poll until both are
@@ -1906,6 +1917,129 @@ async fn a_group_album_split_over_two_answers_is_taken_whole() {
     assert_eq!(downloads, ["ph1", "ph2"]);
 }
 
+fn voice(from: i64, file_id: &str, size: u64, caption: Option<&str>) -> Value {
+    let mut message = private(from, "");
+    message.as_object_mut().unwrap().remove("text");
+    message["voice"] = json!({"file_id": file_id, "file_unique_id": file_id, "duration": 2,
+        "mime_type": "audio/ogg", "file_size": size});
+    if let Some(caption) = caption {
+        message["caption"] = json!(caption);
+    }
+    message
+}
+
+#[tokio::test]
+async fn voice_messages_are_transcribed_for_the_model() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let sound = b"OggS fake voice bytes".to_vec();
+    bot.file("vo1", "voice/file_1.oga", sound.clone());
+    let (transcriber, heard) = common::fake_transcriber(
+        vec![
+            (
+                401,
+                json!({"error": {"message": "Incorrect API key provided: sk-fake-vo***"}}),
+            ),
+            (200, json!({"text": "회의는 세 시입니다"})),
+        ],
+        &[("JUNEES_TRANSCRIBE_MAX_BYTES", "1000")],
+    )
+    .await;
+    let (api, served) = common::fake_api(vec![(200, common::text_reply("Noted."))]).await;
+    let engines = Arc::new(ApiEngines::new(
+        api_config(&api, home.path(), "off"),
+        cwd.path().into(),
+    ));
+    let running = start_voice(
+        telegram(&bot.url, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+        Some(transcriber),
+    );
+    let me = USER.to_string();
+    // A stranger's voice is never downloaded.
+    bot.push(voice(STRANGER, "vo1", 21, None));
+    // Over transcribe_max_bytes: not downloaded either.
+    bot.push(voice(USER, "big", 5000, None));
+    bot.wait_post(&me, |p| p.contains("transcribed up to 1000 B"))
+        .await;
+    // A refused key: told, and the model is not asked.
+    bot.push(voice(USER, "vo1", 21, None));
+    bot.wait_post(&me, |p| p.contains("refused the key (HTTP 401)"))
+        .await;
+    bot.push(voice(USER, "vo1", 21, Some("요약해 줘")));
+    let posts = bot.wait_post(&me, |p| p == "Noted.").await;
+    let log = running.stop().await;
+
+    assert!(posts.iter().all(|p| !p.contains("sk-fake")), "{posts:#?}");
+    assert_eq!(bot.calls("getFile").len(), 2);
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        common::first_text(&requests[0]),
+        "요약해 줘\n\n[음성 메시지 받아쓰기]\n회의는 세 시입니다"
+    );
+    let heard = tokio::time::timeout(WAIT, heard).await.unwrap().unwrap();
+    assert_eq!(heard.len(), 2);
+    let sent = &heard[1];
+    assert!(sent.starts_with("POST /v1/audio/transcriptions "), "{sent}");
+    assert!(
+        sent.contains("authorization: Bearer sk-fake-voice"),
+        "{sent}"
+    );
+    assert!(
+        sent.contains("filename=\"audio.ogg\"\r\nContent-Type: audio/ogg"),
+        "{sent}"
+    );
+    assert!(sent.contains("OggS fake voice bytes"), "{sent}");
+    // The log names sizes, never what was said.
+    assert!(
+        log.iter().any(|l| l.contains("transcribed audio (21 B)")),
+        "{log:#?}"
+    );
+    assert!(log.iter().all(|l| !l.contains("회의")), "{log:#?}");
+}
+
+#[tokio::test]
+async fn with_transcription_off_audio_is_named_and_the_text_still_runs() {
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    bot.file("vo1", "voice/file_1.oga", b"OggS".to_vec());
+    let running = start(telegram(&bot.url, &[]), fake(), None, cwd.path());
+    let me = USER.to_string();
+    // Audio alone: the note only, no turn.
+    bot.push(voice(USER, "vo1", 4, None));
+    bot.wait_post(&me, |p| p.contains("transcription is off"))
+        .await;
+    // Audio with a caption: the caption runs, with the note beside it.
+    let mut song = private(USER, "");
+    song.as_object_mut().unwrap().remove("text");
+    song["audio"] = json!({"file_id": "au1", "file_unique_id": "au1", "duration": 9,
+        "file_name": "song.mp3", "mime_type": "audio/mpeg", "file_size": 40});
+    song["caption"] = json!("summarize the lyrics");
+    bot.push(song);
+    let posts = bot
+        .wait_post(&me, |p| p.starts_with("reply 1: summarize the lyrics"))
+        .await;
+    running.stop().await;
+    assert!(
+        posts.iter().any(|p| p
+            == "(attachments left out: song.mp3: audio is not read, transcription is off \
+                (set transcribe_base_url to an OpenAI-compatible transcription API; see \
+                docs/gateways.md))"),
+        "{posts:#?}"
+    );
+    assert!(
+        !posts
+            .iter()
+            .any(|p| p.starts_with("reply") && !p.contains("summarize")),
+        "the audio alone started a turn: {posts:#?}"
+    );
+    assert!(bot.calls("getFile").is_empty());
+}
+
 // ------------------------------------------------------------- Binary
 
 #[tokio::test]
@@ -1967,4 +2101,41 @@ async fn the_binary_answers_and_stops_on_sigterm() {
     let last = bot.calls("getUpdates").pop().unwrap();
     assert_eq!(last.body["offset"], pushed + 1);
     assert_eq!(last.body["timeout"], 0);
+}
+
+#[tokio::test]
+async fn audio_past_the_bot_api_download_limit_is_named_as_such() {
+    let cwd = tempfile::tempdir().unwrap();
+    let bot = FakeBot::start().await;
+    let (transcriber, heard) = common::fake_transcriber(vec![], &[]).await;
+    let running = start_voice(
+        telegram(&bot.url, &[]),
+        fake(),
+        None,
+        cwd.path(),
+        Some(transcriber),
+    );
+    // Under transcribe_max_bytes (25 MB), over what a bot may download.
+    bot.push(voice(USER, "vo1", 21 * 1024 * 1024, None));
+    let posts = bot
+        .wait_post(&USER.to_string(), |p| {
+            p.contains("could not be transcribed")
+        })
+        .await;
+    running.stop().await;
+    assert!(
+        posts.iter().any(|p| p.contains(
+            "voice message: the audio is 21.0 MB; Telegram lets bots download files only up \
+             to 20 MB (up to 20.0 MB)"
+        )),
+        "{posts:#?}"
+    );
+    assert!(bot.calls("getFile").is_empty());
+    assert!(
+        tokio::time::timeout(WAIT, heard)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
 }

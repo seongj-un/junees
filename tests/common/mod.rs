@@ -141,6 +141,55 @@ async fn read_request(socket: &mut TcpStream) -> String {
     String::from_utf8(buf).unwrap()
 }
 
+/// A transcriber for gateway tests: a loopback fake transcription API
+/// answering `answers` like [`fake_api`] (its base URL with `/v1`, the key
+/// `sk-fake-voice`, plus `extra` settings), and the raw requests it got.
+pub async fn fake_transcriber(
+    answers: Vec<(u16, Value)>,
+    extra: &[(&str, &str)],
+) -> (
+    std::sync::Arc<junees::transcribe::Transcriber>,
+    JoinHandle<Vec<String>>,
+) {
+    let (url, served) = fake_api(answers).await;
+    let mut pairs = vec![
+        (
+            junees::transcribe::BASE_URL_ENV.to_string(),
+            format!("{url}/v1"),
+        ),
+        (
+            junees::transcribe::API_KEY_ENV.to_string(),
+            "sk-fake-voice".to_string(),
+        ),
+    ];
+    pairs.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    let settings = junees::transcribe::Settings::read(|key| {
+        pairs
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    })
+    .unwrap()
+    .unwrap();
+    let transcriber = junees::transcribe::Transcriber::new(settings).unwrap();
+    (std::sync::Arc::new(transcriber), served)
+}
+
+/// The text of the first user message of a model request.
+pub fn first_text(request: &str) -> String {
+    let content = &body_of(request)["messages"][0]["content"];
+    match content.as_str() {
+        Some(text) => text.to_string(),
+        None => content
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 pub fn body_of(request: &str) -> Value {
     let (_, body) = request.split_once("\r\n\r\n").unwrap();
     serde_json::from_str(body).unwrap()

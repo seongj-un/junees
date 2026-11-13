@@ -31,6 +31,12 @@ pub const PAIRED_KEYS: &[(&str, &str, &str)] = &[
         openai::BASE_URL_ENV,
         openai::DEFAULT_BASE_URL,
     ),
+    // No default address: without one, transcription is off.
+    (
+        crate::transcribe::API_KEY_ENV,
+        crate::transcribe::BASE_URL_ENV,
+        "",
+    ),
 ];
 
 /// Whether `address` is `default` as written down (case of letters and a
@@ -138,6 +144,12 @@ pub const KEYS: &[(&str, &str)] = &[
     ("browser_allow_private", "JUNEES_BROWSER_ALLOW_PRIVATE"),
     ("browser_unattended", "JUNEES_BROWSER_UNATTENDED"),
     ("browser_no_sandbox", "JUNEES_BROWSER_NO_SANDBOX"),
+    ("transcribe_base_url", "JUNEES_TRANSCRIBE_BASE_URL"),
+    ("transcribe_api_key", "JUNEES_TRANSCRIBE_API_KEY"),
+    ("transcribe_model", "JUNEES_TRANSCRIBE_MODEL"),
+    ("transcribe_language", "JUNEES_TRANSCRIBE_LANGUAGE"),
+    ("transcribe_max_bytes", "JUNEES_TRANSCRIBE_MAX_BYTES"),
+    ("transcribe_timeout", "JUNEES_TRANSCRIBE_TIMEOUT"),
 ];
 
 const HEADER: &str = "\

@@ -813,6 +813,7 @@ async fn conversation(
 /// one quits at once.
 async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
     let discord = DiscordConfig::from_lookup(|key| settings.get(key))?;
+    let voice = transcriber(settings)?;
     let started = gateway_engines(settings, GATEWAY_NOTE).await?;
     let cancel = Cancel::new();
     cancel_on_signals(Signals::install()?, cancel.clone());
@@ -821,15 +822,15 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
         started.cwd.display()
     );
     let memory = conversation_memory(&started.config, &started.cwd);
-    let result = Gateway::new(
+    let mut gateway = Gateway::new(
         discord,
         started.engines,
         started.config.home.clone(),
         started.cwd,
         memory,
-    )
-    .run(cancel)
-    .await;
+    );
+    gateway.transcriber = voice;
+    let result = gateway.run(cancel).await;
     started.mcp.shutdown().await;
     result?;
     eprintln!("gateway stopped");
@@ -840,6 +841,7 @@ async fn discord_gateway(settings: &Settings) -> Result<ExitCode> {
 /// [`discord_gateway`].
 async fn telegram_gateway(settings: &Settings) -> Result<ExitCode> {
     let telegram = TelegramConfig::from_lookup(|key| settings.get(key))?;
+    let voice = transcriber(settings)?;
     let started = gateway_engines(settings, telegram_note(telegram.format)).await?;
     let cancel = Cancel::new();
     cancel_on_signals(Signals::install()?, cancel.clone());
@@ -848,15 +850,15 @@ async fn telegram_gateway(settings: &Settings) -> Result<ExitCode> {
         started.cwd.display()
     );
     let memory = conversation_memory(&started.config, &started.cwd);
-    let result = TelegramGateway::new(
+    let mut gateway = TelegramGateway::new(
         telegram,
         started.engines,
         started.config.home.clone(),
         started.cwd,
         memory,
-    )
-    .run(cancel)
-    .await;
+    );
+    gateway.transcriber = voice;
+    let result = gateway.run(cancel).await;
     started.mcp.shutdown().await;
     result?;
     eprintln!("telegram gateway stopped");
@@ -867,6 +869,7 @@ async fn telegram_gateway(settings: &Settings) -> Result<ExitCode> {
 /// [`discord_gateway`].
 async fn slack_gateway(settings: &Settings) -> Result<ExitCode> {
     let slack = SlackConfig::from_lookup(|key| settings.get(key))?;
+    let voice = transcriber(settings)?;
     let started = gateway_engines(settings, SLACK_NOTE).await?;
     let cancel = Cancel::new();
     cancel_on_signals(Signals::install()?, cancel.clone());
@@ -875,19 +878,31 @@ async fn slack_gateway(settings: &Settings) -> Result<ExitCode> {
         started.cwd.display()
     );
     let memory = conversation_memory(&started.config, &started.cwd);
-    let result = SlackGateway::new(
+    let mut gateway = SlackGateway::new(
         slack,
         started.engines,
         started.config.home.clone(),
         started.cwd,
         memory,
-    )
-    .run(cancel)
-    .await;
+    );
+    gateway.transcriber = voice;
+    let result = gateway.run(cancel).await;
     started.mcp.shutdown().await;
     result?;
     eprintln!("slack gateway stopped");
     Ok(ExitCode::SUCCESS)
+}
+
+/// The transcriber for voice messages, when `transcribe_base_url` is set.
+fn transcriber(settings: &Settings) -> Result<Option<Arc<junees::transcribe::Transcriber>>> {
+    let Some(voice) = junees::transcribe::Settings::read(|key| settings.get(key))? else {
+        return Ok(None);
+    };
+    eprintln!(
+        "voice messages are transcribed by {} (model {})",
+        voice.base_url, voice.model
+    );
+    Ok(Some(Arc::new(junees::transcribe::Transcriber::new(voice)?)))
 }
 
 /// What a gateway runs its conversations with.
