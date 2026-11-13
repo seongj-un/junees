@@ -284,9 +284,7 @@ pub(super) fn keys(report: &mut Report, settings: &Settings, backend: Backend) {
                     "not set (the claude-code backend does not need it)"
                 },
             );
-        } else if settings.env(openai::API_KEY_ENV).is_some()
-            || settings.file().env_value(openai::API_KEY_ENV).is_some()
-        {
+        } else if settings.key_away_from_address(openai::API_KEY_ENV) {
             report.fail(
                 AREA,
                 "OpenAI API key",

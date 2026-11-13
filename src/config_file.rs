@@ -15,7 +15,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::provider::openai::{API_KEY_ENV, BASE_URL_ENV};
+use crate::provider::openai;
+
+/// The API keys read only from where their address is set: (key,
+/// address), as environment variable names ([`Settings::get`]).
+pub const PAIRED_KEYS: &[(&str, &str)] = &[(openai::API_KEY_ENV, openai::BASE_URL_ENV)];
 
 /// The file's name inside the state folder.
 pub const FILE_NAME: &str = "config.toml";
@@ -436,8 +440,9 @@ impl Settings {
     }
 
     /// The value of the environment variable `name`, from the first source
-    /// that sets it to something other than blanks; `OPENAI_API_KEY` only
-    /// from the place the address comes from ([`Settings::openai_key`]).
+    /// that sets it to something other than blanks; an API key
+    /// ([`PAIRED_KEYS`]) only from the place its address comes from
+    /// ([`Settings::paired_key`]).
     pub fn get(&self, name: &str) -> Option<String> {
         self.lookup(name).map(|(value, _)| value)
     }
@@ -448,10 +453,10 @@ impl Settings {
     }
 
     fn lookup(&self, name: &str) -> Option<(String, Origin)> {
-        if name == API_KEY_ENV {
-            return self.openai_key();
+        match PAIRED_KEYS.iter().find(|(key, _)| *key == name) {
+            Some((key, address)) => self.paired_key(key, address),
+            None => self.first(name),
         }
-        self.first(name)
     }
 
     /// The first source's value of `name`, by the plain order.
@@ -471,21 +476,27 @@ impl Settings {
         Some((value.to_string(), Origin::File))
     }
 
-    /// The OpenAI key goes with its address: from the file when
-    /// `openai_base_url` comes from the file, from the environment when
-    /// `OPENAI_BASE_URL` does. Taken key by key, an `OPENAI_API_KEY`
-    /// exported for other tools would go to the file's server (OpenRouter,
-    /// a proxy), or the file's key to an exported address. With the
-    /// default address either one is taken, the environment first.
-    fn openai_key(&self) -> Option<(String, Origin)> {
-        let key = API_KEY_ENV;
-        match self.first(BASE_URL_ENV).map(|(_, origin)| origin) {
+    /// An API key goes with its address: from the file when the address
+    /// comes from the file, from the environment when the address
+    /// variable does. Taken key by key, a key exported for other tools
+    /// would go to the file's server (OpenRouter, a proxy), or the file's
+    /// key to an exported address. With the default address either one is
+    /// taken, the environment first.
+    fn paired_key(&self, key: &str, address: &str) -> Option<(String, Origin)> {
+        match self.first(address).map(|(_, origin)| origin) {
             None | Some(Origin::Override) => self.first(key),
             Some(Origin::Env) => self
                 .overridden(key)
                 .or_else(|| self.env(key).map(|value| (value, Origin::Env))),
             Some(Origin::File) => self.overridden(key).or_else(|| self.in_file(key)),
         }
+    }
+
+    /// Whether the key `name` is set in the environment or the file but
+    /// [`Settings::get`] leaves it out, because its address is set in the
+    /// other place.
+    pub fn key_away_from_address(&self, name: &str) -> bool {
+        self.get(name).is_none() && (self.env(name).is_some() || self.in_file(name).is_some())
     }
 
     /// Only the environment's value of `name`.
