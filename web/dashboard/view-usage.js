@@ -2,7 +2,7 @@
 
 import { card, code, dataTable, el, notice } from "./dom.js";
 import { formatCompact, formatDay, formatDayShort, formatInt, formatUsd } from "./format.js";
-import { dailyTotals, localDay, modelTotals, niceCeil } from "./usage.js";
+import { costLabel, dailyTotals, hasUnpriced, localDay, modelTotals, niceCeil } from "./usage.js";
 
 export const PERIODS = [7, 30, 90];
 export const DEFAULT_DAYS = 30;
@@ -58,7 +58,9 @@ function costChart(days, count) {
     return el(
       "p",
       { class: "chart-empty" },
-      "이 기간에는 비용이 기록되지 않았습니다. 토큰 사용량은 아래 모델별 표에서 볼 수 있습니다.",
+      days.some((d) => d.unpriced)
+        ? "이 기간의 사용은 가격을 알 수 없어(구독 사용이나 가격표에 없는 모델) 비용 막대를 그리지 않았습니다. 토큰 사용량은 아래 모델별 표에서 볼 수 있습니다."
+        : "이 기간에는 비용이 기록되지 않았습니다. 토큰 사용량은 아래 모델별 표에서 볼 수 있습니다.",
     );
   }
   const top = niceCeil(max);
@@ -69,7 +71,7 @@ function costChart(days, count) {
   const showDay = (day) => {
     readout.replaceChildren(
       el("span", { class: "chart-readout-day" }, formatDay(day.date)),
-      el("span", { class: "num" }, formatUsd(day.cost)),
+      el("span", { class: "num" }, costLabel(day.cost, day.unpriced)),
       el("span", { class: "muted num" }, `토큰 ${formatInt(day.input + day.output)}`),
     );
   };
@@ -78,7 +80,7 @@ function costChart(days, count) {
   const bars = days.map((day) => {
     const bar = el("div", {
       class: `bar${day.cost === 0 ? " bar-zero" : ""}`,
-      title: `${formatDay(day.date)} ${formatUsd(day.cost)}`,
+      title: `${formatDay(day.date)} ${costLabel(day.cost, day.unpriced)}`,
     });
     bar.style.setProperty("--v", String(day.cost / top));
     bar.addEventListener("pointerenter", () => showDay(day));
@@ -138,7 +140,7 @@ function costChart(days, count) {
                 null,
                 el("th", { scope: "row" }, formatDay(day.date)),
                 el("td", { class: "col-num num" }, formatInt(day.input + day.output)),
-                el("td", { class: "col-num num" }, formatUsd(day.cost)),
+                el("td", { class: "col-num num" }, costLabel(day.cost, day.unpriced)),
               ),
             ),
           ),
@@ -170,7 +172,14 @@ export function render(root, data, { params, now }) {
     el(
       "div",
       { class: "stats" },
-      stat("총 비용", formatUsd(total.cost_usd), `최근 ${count}일`, true),
+      stat(
+        "총 비용",
+        typeof total.cost_usd === "number" ? formatUsd(total.cost_usd) : "가격 없음",
+        hasUnpriced(rows) && typeof total.cost_usd === "number"
+          ? `최근 ${count}일, 가격을 모르는 사용은 빼고 셈`
+          : `최근 ${count}일`,
+        true,
+      ),
       stat("입력 토큰", formatCompact(total.input_tokens), cacheRead ? `캐시 읽기 ${formatCompact(cacheRead)}` : null),
       stat("출력 토큰", formatCompact(total.output_tokens)),
     ),
@@ -187,7 +196,7 @@ export function render(root, data, { params, now }) {
           { label: "출력", cell: (m) => el("span", { class: "num" }, formatInt(m.output)), className: "col-num" },
           { label: "캐시 읽기", cell: (m) => el("span", { class: "num" }, formatInt(m.cacheRead)), className: "col-num" },
           { label: "캐시 쓰기", cell: (m) => el("span", { class: "num" }, formatInt(m.cacheWrite)), className: "col-num" },
-          { label: "비용", cell: (m) => el("span", { class: "num" }, formatUsd(m.cost)), className: "col-num" },
+          { label: "비용", cell: (m) => el("span", { class: "num" }, costLabel(m.cost, m.unpriced)), className: "col-num" },
         ],
       }),
     ),

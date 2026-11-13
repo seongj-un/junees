@@ -12,7 +12,15 @@ import {
   formatUsd,
   parseTime,
 } from "../../format.js";
-import { dailyTotals, dayRange, modelTotals, niceCeil } from "../../usage.js";
+import {
+  costLabel,
+  dailyTotals,
+  dayRange,
+  hasUnpriced,
+  modelTotals,
+  niceCeil,
+  rangeEnd,
+} from "../../usage.js";
 
 test("formatUsd keeps tiny costs visible and handles missing values", () => {
   assert.equal(formatUsd(0), "$0.00");
@@ -118,4 +126,38 @@ test("niceCeil rounds up to 1, 2, 2.5 or 5 steps", () => {
   assert.equal(niceCeil(7), 10);
   assert.equal(niceCeil(100), 100);
   assert.equal(niceCeil(101), 200);
+});
+
+test("rangeEnd keeps every day the server sent when its date is behind the browser's", () => {
+  // Server in UTC, browser in KST before 09:00: the browser is a day ahead.
+  const rows = [
+    { date: "2026-11-07", cost_usd: 1 },
+    { date: "2026-11-13", cost_usd: 1 },
+  ];
+  assert.equal(rangeEnd(rows, 7, "2026-11-14"), "2026-11-13");
+  const days = dailyTotals(rows, 7, "2026-11-14");
+  assert.equal(days[0].date, "2026-11-07");
+  assert.equal(days.reduce((sum, d) => sum + d.cost, 0), 2);
+});
+
+test("rangeEnd ends today when the data leaves room, and at the newest day when it is ahead", () => {
+  assert.equal(rangeEnd([{ date: "2026-11-10" }], 7, "2026-11-13"), "2026-11-13");
+  assert.equal(rangeEnd([{ date: "2026-11-14" }], 7, "2026-11-13"), "2026-11-14");
+  assert.equal(rangeEnd([], 7, "2026-11-13"), "2026-11-13");
+});
+
+test("a null cost marks its day and model unpriced instead of reading as $0.00", () => {
+  const rows = [
+    { date: "2026-11-12", model: "known", input_tokens: 1, output_tokens: 1, cost_usd: 0.5 },
+    { date: "2026-11-12", model: "local", input_tokens: 1, output_tokens: 1, cost_usd: null },
+    { date: "2026-11-13", model: "local", input_tokens: 1, output_tokens: 1, cost_usd: null },
+  ];
+  const [d12, d13] = dailyTotals(rows, 2, "2026-11-13");
+  assert.equal(costLabel(d12.cost, d12.unpriced), "$0.50 (일부 가격 없음)");
+  assert.equal(costLabel(d13.cost, d13.unpriced), "가격 없음");
+  const local = modelTotals(rows).find((m) => m.model === "local");
+  assert.equal(costLabel(local.cost, local.unpriced), "가격 없음");
+  assert.equal(costLabel(0, false), "$0.00");
+  assert.equal(hasUnpriced(rows), true);
+  assert.equal(hasUnpriced(rows.slice(0, 1)), false);
 });
