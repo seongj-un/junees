@@ -144,8 +144,9 @@ test("undo failures say what happened and what comes next", () => {
   assert.equal(broken.detail, "cannot read the file checkpoints");
   assert.equal(describeUndoError(http(400, "bad_body")).retry, false);
   const lost = describeUndoError(new ApiError("timeout", "slow"));
-  assert.equal(lost.after, "reload");
-  assert.match(lost.text, /확인하지 못했습니다/);
+  assert.equal(lost.after, "unknown");
+  assert.equal(lost.retry, false);
+  assert.match(lost.text, /이미 되돌렸을 수 있습니다/);
 });
 
 test("the undo lines before a message are taken apart from it", () => {

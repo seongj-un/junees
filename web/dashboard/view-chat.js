@@ -141,6 +141,9 @@ class ChatView {
      */
     this.undidHere = new Map();
     this.pendingUndo = null;
+    /** Checkpoints of an undo whose answer never came: no undo for them until the list tells. */
+    this.unsure = new Set();
+    this.unsureTries = 0;
   }
 
   // ---- lifecycle ----
@@ -912,24 +915,38 @@ class ChatView {
 
   // ---- file checkpoints (stage 20) ----
 
-  /** Loads the chat's checkpoint list and redraws what shows it; a failure keeps the last one. */
+  /**
+   * Loads the chat's checkpoint list and redraws what shows it; a failure
+   * keeps the last one. Resolves whether a new list was drawn.
+   */
   async refreshCheckpoints() {
-    if (!this.id || !this.alive) return;
+    if (!this.id || !this.alive) return false;
     const load = ++this.cpLoads;
     let list;
     try {
       list = parseCheckpoints(await getJson(`/api/chat/${encodeURIComponent(this.id)}/checkpoints`));
     } catch (err) {
       if (this.alive) this.ctx.isUnauthorized(err);
-      return;
+      if (this.alive && this.unsure.size) this.checkUnsureLater();
+      return false;
     }
-    if (!this.alive || load !== this.cpLoads) return;
+    if (!this.alive || load !== this.cpLoads) return false;
     const pending = this.pendingUndo;
     if (pending) {
-      const made = list.find((item) => item.turn > pending.newest && !pending.turns.includes(item.turn));
+      // The undo's own checkpoint, if it changed anything: the first one
+      // after the newest the list had before it.
+      const made = list.find((item) => item.turn > pending.newest);
       if (made) {
         this.undidHere.set(made.turn, pending.turns);
-        this.cpSlots.set(made.turn, pending.slot);
+        if (pending.slot) this.cpSlots.set(made.turn, pending.slot);
+      }
+      if (pending.unknown) {
+        const said = made
+          ? "답은 받지 못했지만 서버는 파일을 되돌렸습니다. 파일 변경 기록에서 결과를 확인해 주세요."
+          : "서버에 새 되돌리기 기록이 없어, 되돌린 파일이 없는 것으로 확인했습니다.";
+        this.setStatus(said, made ? "warn" : "neutral");
+        this.ctx.announce(said);
+        this.unsure.clear();
       }
       this.pendingUndo = null;
     }
@@ -943,15 +960,30 @@ class ChatView {
       } catch {
         // Paths are shown whole then.
       }
-      if (!this.alive || load !== this.cpLoads) return;
+      if (!this.alive) return false;
     }
     this.renderCheckpoints();
+    return true;
+  }
+
+  /** Asks for the list again while an unanswered undo is not settled (5 s, then 10 s, up to a minute). */
+  checkUnsureLater() {
+    if (this.unsureTimer) return;
+    const wait = Math.min(5000 * 2 ** this.unsureTries, 60000);
+    this.unsureTries += 1;
+    this.unsureTimer = true;
+    this.later(() => {
+      this.unsureTimer = false;
+      if (this.unsure.size) this.refreshCheckpoints();
+    }, wait);
   }
 
   /** Draws the change list and the end of every turn that left a checkpoint. */
   renderCheckpoints() {
     const list = this.checkpoints;
-    const actions = this.cpOff ? null : { onUndo: (turn, button) => this.undo(turn, button), list, by: undoneBy(list) };
+    const actions = this.cpOff
+      ? null
+      : { onUndo: (turn, button) => this.undo(turn, button), list, by: undoneBy(list), unsure: this.unsure };
     // Keep what the person opened across the redraw.
     const open = new Set([...this.root.querySelectorAll(".cp-files[open]")].map((d) => d.id));
     const panelOpen = Boolean(this.cpPanel.querySelector("details[open]"));
@@ -995,6 +1027,27 @@ class ChatView {
     this.undoing = true;
     this.updateUndoButtons();
     this.sendButton.disabled = true;
+    // Ask with the list as it is now: another tab may have undone or
+    // changed files since it was drawn.
+    if (!(await this.refreshCheckpoints())) {
+      this.undoing = false;
+      this.sendButton.disabled = this.running || this.sending;
+      this.updateUndoButtons();
+      this.setStatus("파일 변경 기록을 다시 받지 못해 되돌리기 창을 열지 않았습니다. 잠시 뒤 다시 시도해 주세요.", "warn");
+      return;
+    }
+    const current = this.root.querySelector(`[data-undo="${turn}"]`);
+    if (!current) {
+      // The new list offers no undo here any more (undone in another tab, or nothing left to put back).
+      this.undoing = false;
+      this.sendButton.disabled = this.running || this.sending;
+      this.updateUndoButtons();
+      const said = "그사이 파일 변경 기록이 바뀌어 이 기록은 되돌릴 수 없게 됐습니다. 새로 그린 기록을 확인해 주세요.";
+      this.setStatus(said, "warn");
+      this.ctx.announce(said);
+      return;
+    }
+    button = current;
     const newest = Math.max(0, ...this.checkpoints.map((item) => item.turn));
     const turns = undoPlan(this.checkpoints, turn).turns.map((item) => item.turn);
     const result = await confirmUndo({
@@ -1034,6 +1087,16 @@ class ChatView {
         this.setStatus("이 대시보드 서버는 파일 체크포인트가 꺼져 있어 되돌릴 수 없습니다.", "warn");
         break;
       case "reload":
+        this.refreshCheckpoints();
+        break;
+      case "unknown":
+        // The files may have been undone: hold these checkpoints' undo
+        // until the list shows whether the undo left its own checkpoint.
+        for (const t of turns) this.unsure.add(t);
+        this.unsureTries = 0;
+        this.pendingUndo = { newest, turns, slot: null, unknown: true };
+        this.setStatus("되돌리기의 답을 받지 못했습니다. 파일을 이미 되돌렸을 수 있어 확인하는 중입니다.", "warn");
+        this.renderCheckpoints();
         this.refreshCheckpoints();
         break;
       case "cancel":

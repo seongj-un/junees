@@ -11,6 +11,7 @@ import { changeLabel, describeUndoError, relPath, undoOutcome, undoPlan } from "
  */
 function undoAction(item, actions, label) {
   if (!actions) return null;
+  if (actions.unsure?.has(item.turn)) return el("p", { class: "cp-state" }, "되돌렸는지 확인하는 중입니다.");
   const undone = actions.by.get(item.turn);
   if (undone !== undefined) return el("p", { class: "cp-state" }, `되돌리기(변경 기록 ${undone})에 포함됐습니다.`);
   if (undoPlan(actions.list, item.turn).back === 0) return el("p", { class: "cp-state" }, "되돌릴 수 있는 파일이 없습니다.");
@@ -123,7 +124,7 @@ export function changePanel(list, cwd, actions, open) {
  * Asks before undoing from checkpoint `from`, then sends it. Resolves
  * `{ outcome: "done", answer }` with the server's answer,
  * `{ outcome: "failed", message }` when the dialog was closed before a
- * failure came back, or `{ outcome: "cancel" | "reload" | "off" }`.
+ * failure came back, or `{ outcome: "cancel" | "reload" | "unknown" | "off" }`.
  * A 401 is passed on as `{ outcome: "lock", error }`.
  */
 export function confirmUndo({ chatId, list, from, cwd, opener, isUnauthorized }) {

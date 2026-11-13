@@ -130,8 +130,9 @@ export function partialText(part) {
 
 /**
  * What to say when an undo fails: `{ text, detail, retry, after }`, where
- * `after` is `stay`, `reload` (the list may be out of date, or the result
- * is unknown) or `off` (the server keeps no checkpoints).
+ * `after` is `stay`, `reload` (the list may be out of date), `unknown`
+ * (no answer: the files may have been undone) or `off` (the server keeps
+ * no checkpoints).
  */
 export function describeUndoError(err) {
   if (err instanceof ApiError && err.kind === "http") {
@@ -175,11 +176,13 @@ export function describeUndoError(err) {
     };
   }
   if (err instanceof ApiError && (err.kind === "timeout" || err.kind === "network" || err.kind === "parse")) {
+    // The server may have undone the files anyway: no retry, and the
+    // buttons of these checkpoints wait until the list says what happened.
     return {
-      text: "서버의 답을 받지 못해 되돌렸는지 확인하지 못했습니다. 창을 닫으면 파일 변경 기록을 새로 불러옵니다.",
+      text: "서버의 답을 받지 못했습니다. 파일을 이미 되돌렸을 수 있습니다. 창을 닫으면 파일 변경 기록을 다시 받아 확인하고, 확인될 때까지 이 기록들의 되돌리기 버튼을 막아 둡니다.",
       detail: null,
       retry: false,
-      after: "reload",
+      after: "unknown",
     };
   }
   return { text: "되돌리지 못했습니다.", detail: err?.message ?? null, retry: false, after: "stay" };
