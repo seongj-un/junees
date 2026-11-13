@@ -373,6 +373,22 @@ impl OpenAiProvider {
             }
         }
     }
+
+    /// One call, with the retries that may help.
+    async fn send(&self, body: &ChatRequest<'_>) -> Result<CompletionResponse, ProviderError> {
+        let url = self.url();
+        let mut attempt = 1;
+        loop {
+            match self.send_once(&url, body).await {
+                Ok(response) => return Ok(response),
+                Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
+                    tokio::time::sleep(backoff(attempt, failure.retry_after)).await;
+                    attempt += 1;
+                }
+                Err(failure) => return Err(failure.error),
+            }
+        }
+    }
 }
 
 fn decode(bytes: &[u8]) -> Result<CompletionResponse, Failure> {
@@ -409,22 +425,22 @@ fn api_failure(status: u16, retry_after: Option<u64>, error: ApiError) -> Failur
 
 #[async_trait]
 impl Provider for OpenAiProvider {
+    /// Sends the call, retrying what may pass later. A call that got
+    /// reasoning room (a summary, [`convert::REASONING_ROOM`]) and is
+    /// refused with a 400 goes once more without it: strict servers
+    /// (vLLM, llama-server) refuse input + limit beyond the model's window,
+    /// and a summary starts when the conversation already fills most of
+    /// it. Summaries are never streamed, so only this path needs it.
     async fn complete(
         &self,
         request: CompletionRequest<'_>,
     ) -> Result<CompletionResponse, ProviderError> {
         let body = self.body(request);
-        let url = self.url();
-        let mut attempt = 1;
-        loop {
-            match self.send_once(&url, &body).await {
-                Ok(response) => return Ok(response),
-                Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
-                    tokio::time::sleep(backoff(attempt, failure.retry_after)).await;
-                    attempt += 1;
-                }
-                Err(failure) => return Err(failure.error),
+        match self.send(&body).await {
+            Err(ProviderError::Api { status: 400, .. }) if body.reasoning_room > 0 => {
+                self.send(&body.without_reasoning_room()).await
             }
+            result => result,
         }
     }
 

@@ -50,6 +50,9 @@ pub(super) struct ChatRequest<'a> {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<Value>,
+    /// The [`REASONING_ROOM`] added to the output limit, if any.
+    #[serde(skip)]
+    pub reasoning_room: u32,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -82,11 +85,12 @@ impl<'a> ChatRequest<'a> {
         let reasons = options
             .reasoning_effort
             .is_some_and(|effort| effort != "none");
-        let limit = if reasons && !request.thinking {
-            request.max_tokens.saturating_add(REASONING_ROOM)
+        let reasoning_room = if reasons && !request.thinking {
+            REASONING_ROOM
         } else {
-            request.max_tokens
+            0
         };
+        let limit = request.max_tokens.saturating_add(reasoning_room);
         Self {
             model,
             messages: messages(request.system, request.messages),
@@ -96,6 +100,25 @@ impl<'a> ChatRequest<'a> {
             reasoning_effort: options.reasoning_effort,
             stream: false,
             stream_options: None,
+            reasoning_room,
+        }
+    }
+
+    /// The same request with the output limit the caller asked for: a
+    /// server that refuses input + limit beyond the model's window (vLLM,
+    /// llama-server) may take it without the reasoning room.
+    pub fn without_reasoning_room(&self) -> Self {
+        let less = |limit: Option<u32>| limit.map(|limit| limit - self.reasoning_room);
+        Self {
+            model: self.model,
+            messages: self.messages.clone(),
+            tools: self.tools.clone(),
+            max_tokens: less(self.max_tokens),
+            max_completion_tokens: less(self.max_completion_tokens),
+            reasoning_effort: self.reasoning_effort,
+            stream: self.stream,
+            stream_options: self.stream_options.clone(),
+            reasoning_room: 0,
         }
     }
 
@@ -716,6 +739,43 @@ mod tests {
         let unset = body(None, false, false);
         assert!(unset.get("reasoning_effort").is_none(), "{unset}");
         assert_eq!(unset["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn the_reasoning_room_can_be_taken_back() {
+        for completion in [true, false] {
+            let request = CompletionRequest {
+                system: "s",
+                messages: &[],
+                tools: &[],
+                max_tokens: 4096,
+                cache: false,
+                thinking: false,
+                web_search: false,
+            };
+            let options = Options {
+                max_completion_tokens: completion,
+                reasoning_effort: Some("low"),
+            };
+            let roomy = ChatRequest::new("o", request, options);
+            assert_eq!(roomy.reasoning_room, REASONING_ROOM);
+            let plain = roomy.without_reasoning_room();
+            assert_eq!(plain.reasoning_room, 0);
+            let (roomy, plain) = (
+                serde_json::to_value(roomy).unwrap(),
+                serde_json::to_value(plain).unwrap(),
+            );
+            let field = if completion {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            assert_eq!(plain[field], 4096, "{plain}");
+            // Everything else stays.
+            let mut expected = roomy.clone();
+            expected[field] = json!(4096);
+            assert_eq!(plain, expected);
+        }
     }
 
     #[test]

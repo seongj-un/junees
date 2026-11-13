@@ -195,6 +195,45 @@ async fn errors_map_to_the_provider_errors_and_only_some_are_retried() {
 }
 
 #[tokio::test]
+async fn a_summary_refused_for_its_reasoning_room_goes_again_without_it() {
+    // vLLM's answer when input + limit exceed the model's window.
+    let too_long = json!({"error": {"message": "This model's maximum context length is \
+        131072 tokens. However, you requested 133196 tokens (104100 in the messages, \
+        29096 in the completion).", "type": "BadRequestError", "param": null, "code": 400}});
+    let (url, server) = fake_api(vec![(400, too_long.clone()), (200, answer("summary"))]).await;
+    let mut reasoning = settings(&url, Some("sk-fake"));
+    reasoning.reasoning_effort = Some("low".into());
+    let provider = OpenAiProvider::new(reasoning.clone(), "gpt-oss".into()).unwrap();
+    let messages = [Message::user_text("the conversation so far")];
+    let summary = CompletionRequest {
+        max_tokens: 4096,
+        thinking: false,
+        cache: false,
+        web_search: false,
+        ..request(&messages)
+    };
+    let response = provider.complete(summary).await.unwrap();
+    assert_eq!(response.content, vec![ContentBlock::text("summary")]);
+    let requests = served(server).await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(body_of(&requests[0])["max_tokens"], 4096 + 25_000);
+    let second = body_of(&requests[1]);
+    assert_eq!(second["max_tokens"], 4096, "{second}");
+    assert_eq!(second["reasoning_effort"], "low", "{second}");
+
+    // A call without the room is refused once and not sent again.
+    let (url, server) = fake_api(vec![(400, too_long)]).await;
+    reasoning.base_url = format!("{url}/v1");
+    let provider = OpenAiProvider::new(reasoning, "gpt-oss".into()).unwrap();
+    let err = provider.complete(request(&messages)).await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::Api { status: 400, .. }),
+        "{err}"
+    );
+    assert_eq!(served(server).await.len(), 1);
+}
+
+#[tokio::test]
 async fn an_error_in_a_200_body_maps_to_its_status_and_is_retried_when_it_may_help() {
     let messages = [Message::user_text("hi")];
     // OpenRouter: an error after the model started comes with status 200.
