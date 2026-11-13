@@ -8,6 +8,7 @@ import {
   STREAM_SILENCE_MS,
   answerChoices,
   approvalDeadline,
+  beforeRunningTurn,
   closedText,
   createSseParser,
   formatRemaining,
@@ -15,7 +16,9 @@ import {
   parseEvent,
   reconnectDelay,
   stopReasonText,
+  streamProblem,
   toolLabel,
+  unfinishedTurns,
 } from "./chat-stream.js";
 import { code, el, notice } from "./dom.js";
 import { formatInt, formatUsd } from "./format.js";
@@ -25,6 +28,10 @@ import { messageView, peek, toolBody } from "./view-session.js";
 const WRITE_TIMEOUT_MS = 30000;
 /** How many of a resumed session's last messages to show above the chat. */
 const HISTORY = 20;
+/** The replay the server sends on connecting is taken as done after this long without a byte... */
+const REPLAY_QUIET_MS = 400;
+/** ...or this long after the stream opened, whichever comes first. */
+const REPLAY_MAX_MS = 1500;
 
 let mounts = 0;
 
@@ -62,6 +69,10 @@ class ChatView {
     this.stream = null;
     this.attempt = 0;
     this.connected = false;
+    /** Bumped on a reset; an older stream loop then ends without reconnecting. */
+    this.gen = 0;
+    /** While not null, events are held here until the session history is shown. */
+    this.replay = null;
   }
 
   // ---- lifecycle ----
@@ -230,8 +241,66 @@ class ChatView {
     }
     if (!this.alive) return;
     this.form.hidden = false;
-    this.loadHistory();
+    this.catchUp();
+  }
+
+  /**
+   * Shows the session history, then only what the stream adds to it.
+   * The stream first replays what the server keeps (up to 1,000 events);
+   * turns that ended are in the history already, so they are held back and
+   * dropped (see unfinishedTurns), and a running turn is drawn from the
+   * stream after the history is cut at the person's last message.
+   */
+  catchUp() {
+    this.replay = [];
+    this.historyDone = false;
+    this.replayDone = false;
+    this.historyMessages = null;
+    this.loadHistory().finally(() => {
+      this.historyDone = true;
+      this.finishReplay();
+    });
     this.listen();
+  }
+
+  finishReplay() {
+    if (!this.alive || this.replay === null || !this.historyDone || !this.replayDone) return;
+    const held = this.replay;
+    this.replay = null;
+    // Without the history (it failed to load) everything held is new here.
+    const { show, running } = this.historyMessages ? unfinishedTurns(held) : { show: held, running: false };
+    if (running) this.showHistory(beforeRunningTurn(this.historyMessages), this.historyTotal);
+    for (const event of show) this.render(event, true);
+  }
+
+  /**
+   * The chat is gone on the server (it restarted, or closed the chat to
+   * keep 16 open): open it again with its session id and draw it afresh.
+   * Event numbers may start over after a restart, so nothing old is kept.
+   */
+  async reopen() {
+    try {
+      await postJson("/api/chat", { payload: { session_id: this.id }, timeoutMs: WRITE_TIMEOUT_MS });
+    } catch (err) {
+      if (!this.alive || this.ctx.isUnauthorized(err)) return false;
+      this.connected = false;
+      this.setRunning(false);
+      this.setStatus(`서버에서 이 대화를 다시 열지 못했습니다. ${this.ctx.describeError(err)} 새로고침해 다시 시도해 주세요.`, "fail");
+      return false;
+    }
+    if (!this.alive) return false;
+    this.gen += 1;
+    this.stream?.abort();
+    this.lastSeq = null;
+    this.current = null;
+    this.pending = null;
+    this.turns.clear();
+    this.questions.clear();
+    this.log.replaceChildren();
+    this.setRunning(false);
+    this.setStatus("");
+    this.catchUp();
+    return true;
   }
 
   /** The resumed session's last messages, from the session API, above the live chat. */
@@ -245,35 +314,54 @@ class ChatView {
       if (!this.alive) return;
       const messages = Array.isArray(page.messages) ? page.messages : [];
       this.ctx.setTitle(head.title || "대화 이어 가기");
-      this.history.replaceChildren(
-        el(
-          "p",
-          { class: "chat-history-head" },
-          total > messages.length ? `이전 대화 ${formatInt(total)}개 중 마지막 ${formatInt(messages.length)}개` : `이전 대화 ${formatInt(total)}개`,
-          el("a", { href: sessionHash(this.id) }, "전체 보기"),
-        ),
-        el("ol", { class: "msgs", "aria-label": "이전 대화" }, messages.map((m) => messageView(m, new Date()))),
-      );
-      this.history.hidden = false;
-      this.empty.hidden = true;
+      this.historyMessages = messages;
+      this.historyTotal = total;
+      this.showHistory(messages, total);
     } catch (err) {
       if (this.alive) this.ctx.isUnauthorized(err);
       // The chat works without it; the session screen has the full history.
     }
   }
 
+  showHistory(messages, total) {
+    const left = total - (this.historyMessages?.length ?? messages.length);
+    const shown = left + messages.length;
+    this.history.replaceChildren(
+      el(
+        "p",
+        { class: "chat-history-head" },
+        shown > messages.length ? `이전 대화 ${formatInt(shown)}개 중 마지막 ${formatInt(messages.length)}개` : `이전 대화 ${formatInt(messages.length)}개`,
+        el("a", { href: sessionHash(this.id) }, "전체 보기"),
+      ),
+      el("ol", { class: "msgs", "aria-label": "이전 대화" }, messages.map((m) => messageView(m, new Date()))),
+    );
+    this.history.hidden = messages.length === 0;
+    if (messages.length) this.empty.hidden = true;
+  }
+
   // ---- the event stream ----
 
   async listen() {
     if (!this.alive || !this.id) return;
+    const gen = this.gen;
     const controller = new AbortController();
     this.stream = controller;
     let silence = null;
+    let quiet = null;
+    let cap = null;
+    const replayOver = () => {
+      clearTimeout(quiet);
+      clearTimeout(cap);
+      if (gen !== this.gen || this.replay === null) return;
+      this.replayDone = true;
+      this.finishReplay();
+    };
     const resetSilence = () => {
       clearTimeout(silence);
       silence = setTimeout(() => controller.abort("silent"), STREAM_SILENCE_MS);
     };
     const after = this.lastSeq === null ? "" : `?after=${this.lastSeq}`;
+    let problem = null;
     try {
       const response = await openStream(`/api/chat/${encodeURIComponent(this.id)}/events${after}`, {
         signal: controller.signal,
@@ -283,6 +371,10 @@ class ChatView {
       this.connected = true;
       this.setStatus("");
       resetSilence();
+      if (this.replay !== null) {
+        quiet = setTimeout(replayOver, REPLAY_QUIET_MS);
+        cap = setTimeout(replayOver, REPLAY_MAX_MS);
+      }
       const parser = createSseParser((raw) => {
         const event = parseEvent(raw);
         if (event) this.handle(event);
@@ -293,29 +385,34 @@ class ChatView {
         if (done) break;
         resetSilence();
         parser.push(value);
+        if (this.replay !== null) {
+          clearTimeout(quiet);
+          quiet = setTimeout(replayOver, REPLAY_QUIET_MS);
+        }
       }
     } catch (err) {
-      if (!this.alive) return;
+      if (!this.alive || gen !== this.gen) return;
       if (this.ctx.isUnauthorized(err)) return;
       if (err instanceof ApiError && err.status === 404) {
         this.connected = false;
-        this.setRunning(false);
-        this.setStatus(
-          "서버에 이 대화가 없습니다. 대시보드 서버가 다시 시작됐을 수 있습니다. 새로고침하면 이 세션에 다시 이어서 대화합니다.",
-          "fail",
-        );
+        this.setStatus("서버에서 이 대화가 닫혀 다시 여는 중입니다.", "warn");
+        this.reopen();
         return;
       }
+      problem = streamProblem(err);
     } finally {
       clearTimeout(silence);
+      clearTimeout(quiet);
+      clearTimeout(cap);
     }
-    if (!this.alive) return;
+    if (!this.alive || gen !== this.gen) return;
     // The stream ended or broke: pick up after the last event seen.
     this.connected = false;
     const wait = reconnectDelay(this.attempt);
     this.attempt += 1;
-    this.setStatus(`연결이 끊겼습니다. ${Math.round(wait / 1000)}초 뒤 다시 연결합니다.`, "warn");
-    if (this.attempt === 1) this.ctx.announce("대화 연결이 끊겨 다시 연결하는 중입니다.");
+    const again = `${Math.round(wait / 1000)}초 뒤 다시 연결합니다.`;
+    this.setStatus(problem ? `${problem} ${again}` : `연결이 끊겼습니다. ${again}`, "warn");
+    if (this.attempt === 1) this.ctx.announce(problem ?? "대화 연결이 끊겨 다시 연결하는 중입니다.");
     this.later(() => this.listen(), wait);
   }
 
@@ -324,6 +421,15 @@ class ChatView {
       if (this.lastSeq !== null && event.seq <= this.lastSeq) return;
       this.lastSeq = event.seq;
     }
+    if (this.replay !== null) {
+      this.replay.push(event);
+      return undefined;
+    }
+    return this.render(event, false);
+  }
+
+  /** Draws one event; `replayed` says it came in the replay on connecting. */
+  render(event, replayed) {
     this.empty.hidden = true;
     switch (event.type) {
       case "turn_start":
@@ -335,7 +441,7 @@ class ChatView {
       case "tool_result":
         return this.toolResult(event);
       case "approval":
-        return this.approval(event);
+        return this.approval(event, replayed);
       case "approval_closed":
         return this.approvalClosed(event);
       case "usage":
@@ -453,7 +559,7 @@ class ChatView {
     this.follow();
   }
 
-  approval(event) {
+  approval(event, replayed = false) {
     const entry = this.current ?? this.turn(null);
     entry.text = null;
     const qid = String(event.question_id ?? "");
@@ -461,7 +567,9 @@ class ChatView {
     const n = this.questions.size + 1;
     const titleId = `chat${this.n}-q${n}-title`;
     const bodyId = `chat${this.n}-q${n}-body`;
-    const deadline = approvalDeadline(event, Date.now());
+    // A replayed question was asked some time ago; without the server's
+    // expires_at its time left is not known, so no countdown for it.
+    const deadline = replayed && !event.expires_at ? null : approvalDeadline(event, Date.now());
     const clock = el("p", { class: "approval-clock" });
     const status = el("p", { class: "approval-status", role: "status" });
     const buttons = answerChoices(event.options).map((answer) =>
@@ -513,7 +621,8 @@ class ChatView {
 
   updateClock(question, now) {
     if (question.closed) return;
-    question.clock.textContent = formatRemaining(question.deadline, now);
+    question.clock.textContent =
+      question.deadline === null ? "질문이 열린 뒤 5분 안에 답하지 않으면 거절합니다." : formatRemaining(question.deadline, now);
   }
 
   updateClocks() {
@@ -555,7 +664,8 @@ class ChatView {
     question.closed = true;
     const hadFocus = question.card.contains(document.activeElement);
     question.card.setAttribute("role", "group");
-    question.card.classList.add("approval-closed", event.answer === "n" || event.by === "timeout" ? "approval-no" : "approval-yes");
+    const tone = event.by === "cancel" ? "approval-cancel" : event.answer === "n" || event.by === "timeout" ? "approval-no" : "approval-yes";
+    question.card.classList.add("approval-closed", tone);
     question.clock.remove();
     question.buttons[0]?.parentElement?.remove();
     question.card.querySelector("[data-open-only]")?.remove();
@@ -588,7 +698,7 @@ class ChatView {
         question.buttons[0]?.parentElement?.remove();
         question.card.querySelector("[data-open-only]")?.remove();
         question.card.setAttribute("role", "group");
-        question.card.classList.add("approval-closed", "approval-no");
+        question.card.classList.add("approval-closed", "approval-cancel");
         question.status.textContent = "답하기 전에 이 답이 끝나서 실행하지 않았습니다.";
       }
     }
@@ -603,7 +713,7 @@ class ChatView {
     entry.body.append(
       el("div", { class: "callout callout-fail chat-failed" }, el("p", null, `오류: ${String(event.message ?? "알 수 없는 오류")}`)),
     );
-    this.current = null;
+    // usage and turn_end follow and still belong to this turn.
     this.setRunning(false);
     if (this.connected) this.ctx.announce("오류로 답을 마치지 못했습니다.");
   }
@@ -642,20 +752,30 @@ class ChatView {
         this.ctx.setArgs({ id: this.id });
         this.listen();
       }
-      const item = this.userItem(text);
-      this.pending = item;
-      this.empty.hidden = true;
-      try {
-        await postJson(`/api/chat/${encodeURIComponent(this.id)}/messages`, {
-          payload: { text },
-          timeoutMs: WRITE_TIMEOUT_MS,
-        });
-      } catch (err) {
-        if (this.pending === item) {
-          item.remove();
-          this.pending = null;
+      const post = async () => {
+        const item = this.userItem(text);
+        this.pending = item;
+        this.empty.hidden = true;
+        try {
+          await postJson(`/api/chat/${encodeURIComponent(this.id)}/messages`, {
+            payload: { text },
+            timeoutMs: WRITE_TIMEOUT_MS,
+          });
+        } catch (err) {
+          if (this.pending === item) {
+            item.remove();
+            this.pending = null;
+          }
+          throw err;
         }
-        throw err;
+      };
+      try {
+        await post();
+      } catch (err) {
+        // The server closed this chat (restart, or 16 open): open it again, send once more.
+        if (!(err instanceof ApiError && err.status === 404 && err.code === "not_found")) throw err;
+        if (!(await this.reopen())) return;
+        await post();
       }
       if (!this.alive) return;
       this.input.value = "";
@@ -663,8 +783,10 @@ class ChatView {
       this.follow();
     } catch (err) {
       if (!this.alive || this.ctx.isUnauthorized(err)) return;
-      if (err instanceof ApiError && err.status === 409) {
-        this.showError("이전 답이 아직 끝나지 않아 보내지 않았습니다. 끝날 때까지 기다리거나 취소해 주세요.");
+      if (err instanceof ApiError && err.status === 409 && err.code === "session_busy") {
+        this.showError("다른 곳에서 실행 중인 Junees가 이 세션을 쓰고 있어 보내지 않았습니다. 그쪽이 끝난 뒤 다시 보내 주세요.");
+      } else if (err instanceof ApiError && err.status === 409) {
+        this.showError("이전 답이 아직 끝나지 않아 보내지 않았습니다. 대시보드에서는 한 번에 한 대화만 답을 만듭니다. 끝날 때까지 기다리거나 취소해 주세요.");
       } else if (err instanceof ApiError && (err.kind === "timeout" || err.kind === "network")) {
         this.showError(`서버의 답을 받지 못해 보냈는지 확인하지 못했습니다. 대화에 답이 나타나지 않으면 다시 보내 주세요. ${this.ctx.describeError(err)}`);
       } else {
@@ -683,8 +805,13 @@ class ChatView {
     this.cancelButton.disabled = true;
     this.cancelButton.textContent = "취소하는 중";
     try {
-      await postJson(`/api/chat/${encodeURIComponent(this.id)}/cancel`, { payload: {}, timeoutMs: WRITE_TIMEOUT_MS });
-      // turn_end follows on the stream and puts the buttons back.
+      const answer = await postJson(`/api/chat/${encodeURIComponent(this.id)}/cancel`, {
+        payload: {},
+        timeoutMs: WRITE_TIMEOUT_MS,
+      });
+      // turn_end follows on the stream and puts the buttons back; with no
+      // turn running there will be none.
+      if (this.alive && answer?.cancelled === false) this.setRunning(false);
     } catch (err) {
       if (!this.alive || this.ctx.isUnauthorized(err)) return;
       this.cancelButton.disabled = false;

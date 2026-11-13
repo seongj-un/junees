@@ -1612,6 +1612,11 @@ a.button {
   font-weight: 600;
 }
 
+.approval-closed.approval-cancel .approval-status {
+  color: var(--muted);
+  font-weight: 600;
+}
+
 .approval-closed.approval-no .approval-status {
   color: var(--fail);
   font-weight: 600;
