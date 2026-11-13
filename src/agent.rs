@@ -360,7 +360,7 @@ impl Agent {
         let turn = crate::checkpoints::begin(journal.as_deref());
         let notes = turn
             .as_ref()
-            .and_then(|_| journal.as_deref())
+            .and(journal.as_deref())
             .and_then(|journal| journal.file_stem()?.to_str())
             .and_then(|id| crate::checkpoints::store()?.session(id))
             .map(|session| session.take_notes())

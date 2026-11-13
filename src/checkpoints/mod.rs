@@ -341,9 +341,8 @@ impl Store {
         })
     }
 
-    /// Every turn folder: `(session folder, turn, its folder, bytes,
-    /// modified)`.
-    fn all_turns(&self) -> io::Result<Vec<(PathBuf, u64, PathBuf, u64, SystemTime)>> {
+    /// Every turn folder of every session.
+    fn all_turns(&self) -> io::Result<Vec<TurnDir>> {
         let mut found = Vec::new();
         let sessions = match fs::read_dir(&self.root) {
             Ok(sessions) => sessions,
@@ -355,9 +354,14 @@ impl Store {
             if !session.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            for (turn, dir) in turn_dirs(&session_dir)? {
+            for (_, dir) in turn_dirs(&session_dir)? {
                 let (bytes, modified) = folder_size(&dir)?;
-                found.push((session_dir.clone(), turn, dir, bytes, modified));
+                found.push(TurnDir {
+                    session: session_dir.clone(),
+                    dir,
+                    bytes,
+                    modified,
+                });
             }
         }
         Ok(found)
@@ -367,7 +371,13 @@ impl Store {
     /// left with nothing in them but their counter and notes.
     pub fn remove_older_than(&self, age: Duration) -> io::Result<()> {
         let now = SystemTime::now();
-        for (session, _, dir, _, modified) in self.all_turns()? {
+        for TurnDir {
+            session,
+            dir,
+            modified,
+            ..
+        } in self.all_turns()?
+        {
             if now.duration_since(modified).unwrap_or_default() > age {
                 fs::remove_dir_all(&dir)?;
                 if turn_dirs(&session)?.is_empty() {
@@ -386,9 +396,9 @@ impl Store {
     /// most `limit` bytes; `keep` is not removed (the turn being written).
     pub fn limit_total(&self, limit: u64, keep: &Path) -> io::Result<()> {
         let mut turns = self.all_turns()?;
-        let mut total: u64 = turns.iter().map(|(_, _, _, bytes, _)| bytes).sum();
-        turns.sort_by_key(|(_, _, _, _, modified)| *modified);
-        for (_, _, dir, bytes, _) in turns {
+        let mut total: u64 = turns.iter().map(|turn| turn.bytes).sum();
+        turns.sort_by_key(|turn| turn.modified);
+        for TurnDir { dir, bytes, .. } in turns {
             if total <= limit {
                 break;
             }
@@ -400,6 +410,14 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// One turn folder found on disk.
+struct TurnDir {
+    session: PathBuf,
+    dir: PathBuf,
+    bytes: u64,
+    modified: SystemTime,
 }
 
 /// The numbered turn folders of a session folder.
