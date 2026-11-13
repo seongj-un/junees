@@ -58,15 +58,16 @@ fn main() {
         .unwrap();
     }
     out.push_str("]\n");
-    let dest = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("dashboard_assets.rs");
+    let dest =
+        PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("dashboard_assets.rs");
     std::fs::write(&dest, out).expect("cannot write the dashboard asset list");
 }
 
 /// Every file under `dir` as (URL path, file path), skipping hidden
 /// entries and the [`NOT_SERVED`] folders at the top.
 fn collect(page: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|err| panic!("cannot read {}: {err}", dir.display()));
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|err| panic!("cannot read {}: {err}", dir.display()));
     for entry in entries {
         let entry = entry.expect("cannot read a page folder entry");
         let path = entry.path();

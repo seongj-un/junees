@@ -617,8 +617,9 @@ async fn another_loopback_address_serves_its_own_host() {
     let (address, token) = rest.split_once("/#token=").unwrap();
     assert!(address.starts_with("127.0.0.2:"), "{address}");
     let mut stream = TcpStream::connect(address).await.unwrap();
-    let request =
-        format!("GET /api/status HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\r\n");
+    let request = format!(
+        "GET /api/status HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).await.unwrap();

@@ -59,7 +59,10 @@ pub async fn answer(path: &str, query: &str, context: &Arc<Context>) -> Answer {
         "/api/sessions" => match number(query, "limit", SESSIONS_LIMIT) {
             Ok(limit) => {
                 let context = context.clone();
-                blocking(settings, move |settings| sessions(settings, limit, &context)).await
+                blocking(settings, move |settings| {
+                    sessions(settings, limit, &context)
+                })
+                .await
             }
             Err(err) => Err(err),
         },
@@ -241,7 +244,10 @@ fn counted(
         .ok()
         .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
     if let Some((modified, len)) = stamp
-        && let Some(found) = cache.lock().ok().and_then(|cache| cache.entries.get(path).cloned())
+        && let Some(found) = cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.entries.get(path).cloned())
         && found.modified == modified
         && found.len == len
     {

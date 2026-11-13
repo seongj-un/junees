@@ -54,8 +54,7 @@ mod tests {
             if !entry.file_type().unwrap().is_file() || name.starts_with('.') {
                 continue;
             }
-            let asset =
-                find(&format!("/{name}")).unwrap_or_else(|| panic!("{name} is not served"));
+            let asset = find(&format!("/{name}")).unwrap_or_else(|| panic!("{name} is not served"));
             assert_eq!(asset.bytes, std::fs::read(entry.path()).unwrap(), "{name}");
             let expected = match name.rsplit_once('.').map(|(_, ext)| ext) {
                 Some("html") => HTML,
@@ -76,8 +75,7 @@ mod tests {
             while let Some(at) = rest.find(marker) {
                 rest = &rest[at + marker.len()..];
                 let quoted = rest.trim_start();
-                let Some(quote) = quoted.chars().next().filter(|c| matches!(c, '"' | '\''))
-                else {
+                let Some(quote) = quoted.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
                     continue;
                 };
                 let body = &quoted[1..];
