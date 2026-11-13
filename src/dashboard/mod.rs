@@ -10,6 +10,8 @@
 
 mod api;
 mod assets;
+#[cfg(test)]
+mod page_files;
 pub mod server;
 
 use std::io::Write as _;

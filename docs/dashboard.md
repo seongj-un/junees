@@ -123,6 +123,7 @@ junees dashboard --listen 127.0.0.1:0 # 빈 포트를 고른다
 `GET /`는 `index.html`이고, `web/dashboard/`의 다른 파일(`style.css`, `app.js`, 모듈 `*.js` 등)도 같은 경로로 줍니다(`/app.js`, 하위 폴더는 `/a/b.js`). `build.rs`가 빌드할 때 `web/dashboard/`를 훑어 목록을 만들고, 파일은 `include_bytes!`로 바이너리에 들어가므로 설치한 바이너리 하나로 동작합니다. 프론트엔드가 파일을 더해도 Rust 코드는 고치지 않습니다.
 
 - `dev/` 폴더(fixtures, 개발 서버)와 `.`으로 시작하는 파일은 넣지 않고, 그 경로는 404입니다.
-- Content-Type은 확장자를 따릅니다: `html`, `css`, `js`(`mjs`)는 `charset=utf-8`이 붙은 `text/html`, `text/css`, `text/javascript`이고, `json`, `svg`, `png`, `ico`, `webp`, `woff2`, `txt`도 받습니다. 그 밖의 확장자는 빌드가 실패하므로, 새 형식은 `build.rs`의 `TYPES`에 더하거나 `dev/`에 둡니다.
+- Content-Type은 확장자를 따릅니다: `html`, `css`, `js`(`mjs`)는 `charset=utf-8`이 붙은 `text/html`, `text/css`, `text/javascript`이고, `json`, `svg`, `png`, `ico`, `webp`, `woff2`, `txt`도 받습니다. 그 밖의 확장자는 빌드가 실패하므로, 새 형식은 `src/dashboard/page_files.rs`의 `TYPES`에 더하거나 `dev/`에 둡니다. 실패 문구가 이 방법을 알려 줍니다.
+- 편집기와 merge가 남기는 파일(`~`, `.orig`, `.rej`, `.bak`, `.swp`로 끝나는 이름)은 건너뜁니다.
 - 파일 이름은 영문자, 숫자, `-`, `_`, `.`만 씁니다.
 - 테스트가 서빙하는 스크립트의 `import`와 `index.html`의 `src`, `href`가 모두 서빙되는지 확인합니다.
