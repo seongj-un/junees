@@ -108,6 +108,8 @@ export function answerChoices(options) {
 /** What became of a question, from `approval_closed`. */
 export function closedText(answer, by) {
   if (by === "timeout") return "정해진 시간 안에 답이 없어 거절했습니다.";
+  // The person stopped the turn while it waited; they did not say no.
+  if (by === "cancel") return "답하기 전에 취소해서 실행하지 않았습니다.";
   switch (answer) {
     case "y":
       return "허용했습니다.";
@@ -139,7 +141,11 @@ export function stopReasonText(reason) {
     case null:
     case "end_turn":
     case "stop_sequence":
+    // The error event just before it says what went wrong.
+    case "error":
       return null;
+    case "max_turns":
+      return "한 번에 실행할 수 있는 단계 수의 한도에 닿아 여기서 멈췄습니다. 이어서 보내면 계속합니다.";
     case "cancelled":
     case "canceled":
     case "interrupted":
@@ -158,4 +164,54 @@ export function stopReasonText(reason) {
 /** Whether the server was started with `--chat` (from `/api/status`). */
 export function chatEnabled(status) {
   return status?.chat === true;
+}
+
+/**
+ * The events of a replayed stream (all it sent on connecting, before the
+ * page shows them) that the session history does not hold yet: turns
+ * without their `turn_end`. A turn that ended is in the session's journal,
+ * which the page shows above the chat, so drawing it again would show it
+ * twice. Returns `{ show, running }`; `running` says a turn is still going.
+ */
+export function unfinishedTurns(events) {
+  const show = [];
+  let part = [];
+  let ended = false;
+  const flush = () => {
+    if (!ended) show.push(...part);
+  };
+  for (const event of events) {
+    if (event.type === "turn_start") {
+      flush();
+      part = [event];
+      ended = false;
+    } else {
+      part.push(event);
+      if (event.type === "turn_end") ended = true;
+    }
+  }
+  flush();
+  return { show, running: show.length > 0 };
+}
+
+/**
+ * Session messages up to the last thing the person wrote, for when a turn
+ * is still running: what the journal holds after that message belongs to
+ * the running turn, which the stream draws in full.
+ */
+export function beforeRunningTurn(messages) {
+  const wrote = (m) => m?.role === "user" && Array.isArray(m.blocks) && m.blocks.some((b) => b?.type === "text");
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (wrote(messages[i])) return messages.slice(0, i + 1);
+  }
+  return messages;
+}
+
+/** What to say when the event stream does not open, by status; null for a plain drop. */
+export function streamProblem(err) {
+  if (err?.status === 429) {
+    return "대화 화면이 열린 탭이 너무 많아 연결하지 못했습니다. 다른 탭의 대화 화면을 닫아 주세요.";
+  }
+  if (err?.status === 503) return "서버가 지금 대화를 받을 수 없습니다.";
+  return null;
 }

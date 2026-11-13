@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   answerChoices,
   approvalDeadline,
+  beforeRunningTurn,
+  streamProblem,
+  unfinishedTurns,
   chatEnabled,
   closedText,
   createSseParser,
@@ -106,4 +109,38 @@ test("chat addresses: new, going on with a session, and a bad id", () => {
   assert.deepEqual(parseHash("#/chat/..%2Fx"), { name: "chat", args: {}, canonical: "#/chat" });
   assert.equal(chatHash("a_b"), "#/chat/a_b");
   assert.equal(chatHash(null), "#/chat");
+});
+
+test("a cancelled question and the backend's stop reasons read as what happened", () => {
+  assert.match(closedText("n", "cancel"), /취소/);
+  assert.doesNotMatch(closedText("n", "cancel"), /거절/);
+  assert.match(stopReasonText("max_turns"), /한도/);
+  assert.equal(stopReasonText("error"), null);
+});
+
+test("a replay keeps only turns without turn_end", () => {
+  const ev = (type, extra = {}) => ({ type, ...extra });
+  const done = [ev("turn_start", { turn: 1 }), ev("text"), ev("usage"), ev("turn_end", { turn: 1 })];
+  const open = [ev("turn_start", { turn: 2 }), ev("text"), ev("approval")];
+  assert.deepEqual(unfinishedTurns(done), { show: [], running: false });
+  assert.deepEqual(unfinishedTurns([...done, ...open]), { show: open, running: true });
+  // A buffer that starts in the middle of a turn: its end tells whether to drop it.
+  assert.deepEqual(unfinishedTurns([ev("text"), ev("turn_end"), ...open]).show, open);
+  assert.deepEqual(unfinishedTurns([ev("text"), ev("tool_use")]).show.length, 2);
+});
+
+test("history stops at the person's last message while a turn runs", () => {
+  const user = (text) => ({ role: "user", blocks: [{ type: "text", text }] });
+  const result = { role: "user", blocks: [{ type: "tool_result" }] };
+  const reply = { role: "assistant", blocks: [{ type: "tool_use" }] };
+  const all = [user("a"), reply, result, user("b"), reply, result];
+  assert.deepEqual(beforeRunningTurn(all), all.slice(0, 4));
+  assert.deepEqual(beforeRunningTurn([reply]), [reply]);
+});
+
+test("a refused stream says why: too many tabs, or chat unavailable", () => {
+  assert.match(streamProblem({ status: 429 }), /탭/);
+  assert.match(streamProblem({ status: 503 }), /대화/);
+  assert.equal(streamProblem({ status: 500 }), null);
+  assert.equal(streamProblem(new Error("x")), null);
 });
