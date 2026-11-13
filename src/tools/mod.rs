@@ -19,7 +19,8 @@ pub(crate) use bash::testing;
 pub(crate) use bash::{Capture, GroupGuard, own_session};
 pub use edit_file::EditFile;
 pub use file_access::{
-    UNATTENDED_CREDENTIALS, program_folders, unattended_folder_warning, unattended_no_write,
+    UNATTENDED_CREDENTIALS, holds_home, program_folders, unattended_folder_warning,
+    unattended_no_write,
 };
 pub(crate) use policy::resolve;
 pub use policy::{Caution, CommandPolicy, OUTSIDE, Verdict, Workspace};

@@ -126,6 +126,10 @@ pub struct Route {
     pub events: Vec<String>,
     /// The folder a run works in (absolute).
     pub dir: PathBuf,
+    /// Added with `--allow-home`: `dir` may be the home folder or hold it
+    /// ([`crate::cron::command::check_home_folder`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_home: bool,
     pub deliver: Delivery,
     #[serde(default)]
     pub paused: bool,
@@ -326,6 +330,7 @@ pub(crate) mod tests {
             no_secret: false,
             events: Vec::new(),
             dir: PathBuf::from("/"),
+            allow_home: false,
             deliver: Delivery::Local,
             paused: false,
             created_at: 0,

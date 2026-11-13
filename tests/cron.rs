@@ -220,6 +220,82 @@ async fn adds_lists_runs_and_delivers_a_job() {
 }
 
 #[tokio::test]
+async fn a_job_in_the_home_folder_needs_allow_home() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let (api, requests) = fake_api(vec![(200, text_reply("홈에서 끝"))]).await;
+    let run = |args: &[&str]| {
+        let mut command = junees(home.path(), work.path(), &api, "http://127.0.0.1:9");
+        command.args(args);
+        async move { output(&mut command, &[]).await }
+    };
+    let home_dir = home.path().to_str().unwrap();
+    for dir in [home_dir, "/"] {
+        let (ok, _, stderr) = run(&["cron", "add", "every 2h", "hi", "--dir", dir]).await;
+        assert!(!ok, "{stderr}");
+        assert!(
+            stderr.contains("is the home folder (or a folder holding it)")
+                && stderr.contains("--allow-home"),
+            "{stderr}"
+        );
+    }
+    assert!(!home.path().join("cron/jobs.json").exists());
+
+    let (ok, _, stderr) = run(&[
+        "cron",
+        "add",
+        "every 2h",
+        "hi",
+        "--name",
+        "home",
+        "--dir",
+        home_dir,
+        "--allow-home",
+    ])
+    .await;
+    assert!(ok, "{stderr}");
+    assert_eq!(jobs(home.path())["jobs"][0]["allow_home"], true);
+    let (ok, stdout, stderr) = run(&["cron", "run", "home"]).await;
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "홈에서 끝\n");
+    assert!(stderr.contains("(the home folder)"), "{stderr}");
+
+    // A job saved without the mark (added before it existed) is refused
+    // at run time, before the model is asked.
+    let path = home.path().join("cron/jobs.json");
+    let mut file = jobs(home.path());
+    file["jobs"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("allow_home");
+    std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+    let (ok, _, stderr) = run(&["cron", "run", "home"]).await;
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("is the home folder") && stderr.contains("remove the job and add it again"),
+        "{stderr}"
+    );
+    let last = &jobs(home.path())["jobs"][0]["last"];
+    assert_eq!(last["status"], "failed");
+    assert!(
+        last["note"].as_str().unwrap().contains("--allow-home"),
+        "{last}"
+    );
+    // ... and paused, so the daemon does not start it (and deliver the
+    // failure) again at every scheduled time.
+    assert_eq!(jobs(home.path())["jobs"][0]["paused"], true);
+    assert!(
+        last["note"].as_str().unwrap().contains("the job is paused"),
+        "{last}"
+    );
+    let requests = tokio::time::timeout(Duration::from_secs(10), requests)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
 async fn jobs_refuse_the_claude_code_backend_unless_allowed() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();

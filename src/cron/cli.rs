@@ -9,7 +9,7 @@ junees cron - prompts that run on a schedule
 
 Usage:
   junees cron add \"<schedule>\" \"<prompt>\" [--name <name>] [--dir <folder>]
-                  [--deliver discord:<channel id>|webhook|local]
+                  [--deliver discord:<channel id>|webhook|local] [--allow-home]
   junees cron list               the jobs, their next and last runs
   junees cron remove <id>        (also rm)
   junees cron pause <id>
@@ -27,7 +27,9 @@ Schedules (local times in the `timezone` setting, default the system's):
   2026-11-10T09:00                   once (also with :SS, Z or +09:00)
 
 Each run is a new session in the job's folder (default: the current one),
-like `junees -p`: no approval questions, the command policy applies, the
+which may not be the home folder (or a folder holding it, such as /)
+unless --allow-home: the run's tools could change everything there but
+the protected paths. Like `junees -p`: no approval questions, the command policy applies, the
 memory and skills can be read but not changed. A run stops at
 cron_max_time (default 30m) or cron_max_tokens (default 1000000). The
 answer goes to $JUNEES_HOME/cron/output/<id>/ and to --deliver (default
@@ -44,6 +46,8 @@ pub enum CronCommand {
         name: Option<String>,
         dir: Option<PathBuf>,
         deliver: Option<String>,
+        /// `--allow-home`: the job may work in the home folder.
+        allow_home: bool,
     },
     List,
     Remove(String),
@@ -123,6 +127,7 @@ fn option_value(
 
 fn add(rest: Vec<String>) -> Result<CronCommand> {
     let (mut name, mut dir, mut deliver) = (None, None, None);
+    let mut allow_home = false;
     let mut positional = Vec::new();
     let mut args = rest.into_iter();
     let mut options_done = false;
@@ -139,6 +144,8 @@ fn add(rest: Vec<String>) -> Result<CronCommand> {
             dir = Some(PathBuf::from(value?));
         } else if let Some(value) = option_value(&arg, &["--deliver"], &mut args) {
             deliver = Some(value?);
+        } else if arg == "--allow-home" {
+            allow_home = true;
         } else if arg == "--help" {
             return Ok(CronCommand::Help);
         } else {
@@ -152,6 +159,7 @@ fn add(rest: Vec<String>) -> Result<CronCommand> {
             name,
             dir,
             deliver,
+            allow_home,
         }),
         Err(positional) if positional.len() > 2 => bail!(
             "`junees cron add` takes the schedule and the prompt, each in quotes: \
@@ -159,7 +167,8 @@ fn add(rest: Vec<String>) -> Result<CronCommand> {
             positional.len()
         ),
         Err(_) => bail!(
-            "usage: junees cron add \"<schedule>\" \"<prompt>\" [--name n] [--dir folder] [--deliver ...]"
+            "usage: junees cron add \"<schedule>\" \"<prompt>\" [--name n] [--dir folder] [--deliver ...] \
+             [--allow-home]"
         ),
     }
 }
@@ -247,7 +256,8 @@ mod tests {
                 "--deliver=discord:42",
                 "뉴스 요약",
                 "--dir",
-                "/srv"
+                "/srv",
+                "--allow-home"
             ])
             .unwrap(),
             CronCommand::Add {
@@ -256,6 +266,7 @@ mod tests {
                 name: Some("news".into()),
                 dir: Some(PathBuf::from("/srv")),
                 deliver: Some("discord:42".into()),
+                allow_home: true,
             }
         );
         assert_eq!(
@@ -266,6 +277,7 @@ mod tests {
                 name: None,
                 dir: None,
                 deliver: None,
+                allow_home: false,
             }
         );
     }

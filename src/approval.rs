@@ -868,6 +868,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allow_home_is_asked_about_every_time_despite_always() {
+        let (_dir, workspace) = workspace();
+        let asker = Scripted::new([Answer::Always, Answer::Always, Answer::Yes]);
+        let gate = approval(ApprovalMode::Risky, &workspace).asking(Box::new(asker.clone()));
+        assert_eq!(
+            gate.check("bash", &bash("junees cron add 'in 1h' x")).await,
+            None
+        );
+        // Covered by the "always" for Junees's own state ...
+        assert_eq!(
+            gate.check("bash", &bash("junees cron pause a1")).await,
+            None
+        );
+        // ... but --allow-home is asked about, and again after an "always".
+        let home = "junees cron add 'every 1h' x --dir . --allow-home";
+        assert_eq!(gate.check("bash", &bash(home)).await, None);
+        assert_eq!(gate.check("bash", &bash(home)).await, None);
+        assert_eq!(asker.asked(), ["junees cron add 'in 1h' x", home, home]);
+        let asked = asker.asked.lock().unwrap().clone();
+        assert_eq!(
+            asked[1].kinds,
+            [
+                "bash: change Junees's own state",
+                "bash: let unattended runs work in the home folder (asked every time)"
+            ]
+        );
+        assert!(asked[1].reasons[1].starts_with("`junees cron add --allow-home` lets"));
+    }
+
+    #[tokio::test]
     async fn a_subagent_question_names_the_subagent_and_shares_always() {
         let (_dir, workspace) = workspace();
         let asker = Scripted::new([Answer::Always]);

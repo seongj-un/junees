@@ -420,7 +420,7 @@ fn unattended_no_write_adds_authorized_keys_and_path_folders_in_home() {
         PathBuf::from("relative/bin"),
     ])
     .unwrap();
-    let paths = super::unattended_no_write(&home);
+    let paths = super::unattended_no_write(&home, None);
     let paths: Vec<PathBuf> = paths
         .into_iter()
         .chain(super::program_folders(&home, Some(&path)))
@@ -458,6 +458,51 @@ fn unattended_no_write_adds_authorized_keys_and_path_folders_in_home() {
         home.join("tools/../escape"),
     ] {
         assert!(!paths.contains(&path), "{}: {paths:?}", path.display());
+    }
+}
+
+#[test]
+fn unattended_no_write_follows_a_config_folder_moved_inside_home() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let moved = home.join("dotfiles/config");
+    let paths = super::unattended_no_write(&home, Some(moved.as_os_str()));
+    for name in ["systemd", "autostart", "git", "environment.d", "fish"] {
+        assert!(paths.contains(&moved.join(name)), "{name}: {paths:?}");
+    }
+    assert!(paths.contains(&home.join(".config/systemd")), "{paths:?}");
+    // The home folder itself (also through a link or with a trailing
+    // `/`): `~/git` and `~/fish` are not refused, `~/.config` still is.
+    std::fs::create_dir_all(&home).unwrap();
+    std::os::unix::fs::symlink(&home, home.join("cfg")).unwrap();
+    for config in [
+        home.clone(),
+        PathBuf::from(format!("{}/", home.display())),
+        home.join("cfg"),
+    ] {
+        let paths = super::unattended_no_write(&home, Some(config.as_os_str()));
+        for name in ["git", "fish", "systemd", "autostart", "environment.d"] {
+            assert!(
+                !paths.contains(&home.join(name)) && !paths.contains(&config.join(name)),
+                "{}: {name}: {paths:?}",
+                config.display()
+            );
+        }
+        assert!(paths.contains(&home.join(".config/git")), "{paths:?}");
+        assert!(paths.contains(&home.join(".config/fish")), "{paths:?}");
+    }
+    // Outside the home folder, relative or not plainly named: not added.
+    for config in [
+        layout.path("outside/config"),
+        PathBuf::from("relative/config"),
+        home.join("a/../config"),
+    ] {
+        let paths = super::unattended_no_write(&home, Some(config.as_os_str()));
+        assert!(
+            !paths.contains(&config.join("systemd")),
+            "{}: {paths:?}",
+            config.display()
+        );
     }
 }
 
@@ -515,12 +560,43 @@ fn unattended_runs_in_the_home_or_state_folder_are_warned_about() {
     assert!(warning.contains("the home folder"), "{warning}");
     let warning = warn(&layout.root).unwrap();
     assert!(warning.contains("state folder"), "{warning}");
+    let warning = super::unattended_folder_warning(&layout.root, Some(&home), None, None).unwrap();
+    assert!(warning.contains("holding the home folder"), "{warning}");
     let warning = warn(&home.join("scripts")).unwrap();
     assert!(warning.contains("program folder on PATH"), "{warning}");
     assert_eq!(warn(&layout.path("work")), None);
     assert_eq!(warn(&layout.path("home/.ssh")), None);
     // Inside a program folder, what the run writes is not on PATH.
     assert_eq!(warn(&home.join("scripts/job")), None);
+}
+
+#[test]
+fn the_home_folder_and_the_folders_holding_it_are_told_apart() {
+    let layout = Layout::new();
+    let home = layout.path("home");
+    std::fs::create_dir_all(home.join("project")).unwrap();
+    let link = layout.path("link-to-home");
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+    for dir in [
+        home.clone(),
+        layout.root.clone(),
+        PathBuf::from("/"),
+        link.clone(),
+    ] {
+        assert!(super::holds_home(&dir, Some(&home)), "{}", dir.display());
+    }
+    // Through the link to the home folder too.
+    assert!(super::holds_home(&home, Some(&link)));
+    for dir in [
+        home.join("project"),
+        layout.path("work"),
+        link.join("project"),
+    ] {
+        assert!(!super::holds_home(&dir, Some(&home)), "{}", dir.display());
+    }
+    // Without a home folder only `/` counts.
+    assert!(super::holds_home(Path::new("/"), None));
+    assert!(!super::holds_home(&home, None));
 }
 
 #[tokio::test]

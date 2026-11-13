@@ -45,6 +45,10 @@ pub struct Job {
     pub prompt: String,
     /// The folder the job works in (absolute).
     pub dir: PathBuf,
+    /// Added with `--allow-home`: `dir` may be the home folder or hold it
+    /// ([`crate::cron::command::check_home_folder`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_home: bool,
     pub deliver: Delivery,
     #[serde(default)]
     pub paused: bool,
@@ -379,6 +383,7 @@ pub(crate) mod tests {
             text: "every 1h".into(),
             prompt: "say hi".into(),
             dir: PathBuf::from("/"),
+            allow_home: false,
             deliver: Delivery::Local,
             paused: false,
             created_at: 0,

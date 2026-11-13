@@ -259,6 +259,92 @@ async fn adds_lists_tests_and_removes_a_route() {
 }
 
 #[tokio::test]
+async fn a_route_in_the_home_folder_needs_allow_home() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let mut command = junees(
+            home.path(),
+            work.path(),
+            "http://127.0.0.1:9",
+            "http://127.0.0.1:9",
+        );
+        command.args(args);
+        async move { output(&mut command, &[]).await }
+    };
+    let home_dir = home.path().to_str().unwrap();
+    let add = [
+        "webhook",
+        "add",
+        "pr",
+        "--prompt",
+        "x",
+        "--secret-env",
+        SECRET_ENV,
+        "--dir",
+        home_dir,
+    ];
+    let (ok, _, stderr) = run(&add).await;
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("is the home folder (or a folder holding it)")
+            && stderr.contains("--allow-home"),
+        "{stderr}"
+    );
+    let (ok, _, stderr) = run(&[
+        "webhook",
+        "add-github",
+        "flow",
+        "--repo",
+        "o/n",
+        "--review",
+        "--dir",
+        "/",
+    ])
+    .await;
+    assert!(!ok && stderr.contains("home folder"), "{stderr}");
+    assert!(!home.path().join("webhooks/routes.json").exists());
+
+    let (ok, _, stderr) = run(&[&add[..], &["--allow-home"]].concat()).await;
+    assert!(ok, "{stderr}");
+    assert_eq!(routes(home.path())["routes"][0]["allow_home"], true);
+
+    // A route saved without the mark is refused at run time.
+    let path = home.path().join("webhooks/routes.json");
+    let mut file = routes(home.path());
+    file["routes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("allow_home");
+    std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+    let payload = work.path().join("payload.json");
+    std::fs::write(&payload, PAYLOAD).unwrap();
+    let (ok, _, stderr) = run(&["webhook", "test", "pr", payload.to_str().unwrap()]).await;
+    assert!(!ok, "{stderr}");
+    assert!(
+        stderr.contains("is the home folder")
+            && stderr.contains("remove the route and add it again"),
+        "{stderr}"
+    );
+    assert_eq!(routes(home.path())["routes"][0]["last"]["status"], "failed");
+    // ... and paused (the server answers 503), with the failure delivered
+    // once: a run of the paused route (a request queued before the pause)
+    // is recorded but writes and delivers nothing.
+    assert_eq!(routes(home.path())["routes"][0]["paused"], true);
+    assert!(stderr.contains("the route is paused"), "{stderr}");
+    let outputs = || {
+        std::fs::read_dir(home.path().join("webhooks/output/pr"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    assert_eq!(outputs(), 1);
+    let (ok, _, stderr) = run(&["webhook", "test", "pr", payload.to_str().unwrap()]).await;
+    assert!(!ok && stderr.contains("is the home folder"), "{stderr}");
+    assert_eq!(outputs(), 1);
+    assert_eq!(routes(home.path())["routes"][0]["last"]["status"], "failed");
+}
+
+#[tokio::test]
 async fn serve_runs_a_signed_request_in_its_own_process_and_stops_on_sigterm() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();

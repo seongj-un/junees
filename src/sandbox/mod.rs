@@ -602,7 +602,11 @@ fn unattended_no_write(tools: &crate::tools::ToolSettings) -> Vec<PathBuf> {
     let Some(home) = tools.settings_file.as_ref().and_then(|file| file.home()) else {
         return Vec::new();
     };
-    from_first_missing(crate::tools::unattended_no_write(home), home)
+    let config = std::env::var_os("XDG_CONFIG_HOME");
+    from_first_missing(
+        crate::tools::unattended_no_write(home, config.as_deref()),
+        home,
+    )
 }
 
 /// The program folders in the home folder an unattended run's commands

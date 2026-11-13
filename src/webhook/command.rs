@@ -17,7 +17,7 @@ use super::store::{Kind, Route, Secret, Store, check_event, check_name};
 use super::template;
 use crate::cancel::Cancel;
 use crate::config_file::{self, Settings};
-use crate::cron::command::{cancel_on_signals, engine_in};
+use crate::cron::command::{cancel_on_signals, check_home_folder, engine_in};
 use crate::cron::deliver::{Delivery, Lookup};
 use crate::cron::run::Outcome;
 use crate::cron::store::{RunStatus, random_hex};
@@ -214,6 +214,7 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         .ok()
         .filter(|dir| dir.is_dir())
         .with_context(|| format!("{} is not a folder", dir.display()))?;
+    check_home_folder(lookup, &dir, args.allow_home, None)?;
     let deliver = match &args.deliver {
         Some(text) => Delivery::parse(text)?,
         None => Delivery::Local,
@@ -269,6 +270,7 @@ fn new_route(store: &Store, lookup: &Lookup, args: AddArgs) -> Result<Route> {
         no_secret: args.no_secret,
         events,
         dir,
+        allow_home: args.allow_home,
         deliver,
         paused: false,
         created_at: unix_now(),
@@ -402,9 +404,15 @@ async fn run_now(
     // gh in the run's commands finds no login there (removed after the run).
     let gh_config = crate::tools::GhConfigDir::new()
         .context("cannot make the run's GitHub CLI configuration folder");
-    let (outcome, prompt, quiet) = match (&route.flow, &gh_config) {
-        (_, Err(err)) => (Outcome::failed(format!("{err:#}")), None, false),
-        (Some(flow), Ok(gh)) => {
+    let refused = check_home_folder(lookup, &route.dir, route.allow_home, Some("route"));
+    let (outcome, prompt, quiet) = match (&refused, &route.flow, &gh_config) {
+        (Err(err), _, _) => {
+            let (note, first) = pause_refused(home, &route.name);
+            // A request queued before the pause is recorded, not delivered.
+            (Outcome::failed(format!("{err:#}; {note}")), None, !first)
+        }
+        (_, _, Err(err)) => (Outcome::failed(format!("{err:#}")), None, false),
+        (Ok(()), Some(flow), Ok(gh)) => {
             let report = flow_run(home, lookup, &route, flow, incoming, gh.path(), &cancel).await;
             let outcome = Outcome {
                 status: report.status,
@@ -415,7 +423,7 @@ async fn run_now(
             };
             (outcome, report.prompt, report.quiet)
         }
-        (None, Ok(gh)) => {
+        (Ok(()), None, Ok(gh)) => {
             let prompt = run::prompt(&route, incoming);
             let outcome = match &prompt {
                 Err(err) => Outcome::failed(format!("cannot make the prompt: {err:#}")),
@@ -458,6 +466,30 @@ async fn run_now(
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// Pauses route `name` after [`check_home_folder`] refused its run, so
+/// the server answers its requests 503 instead of starting runs: a route
+/// saved in the home folder before `--allow-home` existed fails and
+/// delivers that once, not at every request. What to add to the run's
+/// note, and whether this run paused it (it was not paused already).
+fn pause_refused(home: &Path, name: &str) -> (String, bool) {
+    let paused = Store::new(home).lock().and_then(|mut locked| {
+        let Some(route) = locked.routes.iter_mut().find(|route| route.name == name) else {
+            return Ok(false);
+        };
+        let first = !route.paused;
+        route.paused = true;
+        locked.save()?;
+        Ok(first)
+    });
+    match paused {
+        Ok(first) => (
+            "the route is paused so it does not fail again at every request".into(),
+            first,
+        ),
+        Err(err) => (format!("cannot pause the route: {err:#}"), true),
+    }
 }
 
 /// `lookup` with every route's secret variable added to `hidden_env`, so
