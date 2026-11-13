@@ -92,6 +92,7 @@ export function render(root, data, ctx) {
         problems === 0
           ? `${formatInt(all.length)}개 항목 모두 정상입니다.`
           : `${formatInt(all.length)}개 항목 중 실패 ${formatInt(fails)}개, 주의 ${formatInt(warns)}개`,
+        el("span", { class: "summary-note" }, "점검은 자동으로 다시 돌리지 않습니다. 새로고침을 누르면 다시 확인합니다."),
       ),
       el(
         "span",

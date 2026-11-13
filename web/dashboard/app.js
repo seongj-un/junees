@@ -29,7 +29,15 @@ const ROUTES = [
   },
   { id: "cron", title: "예약 작업", url: () => "/api/cron", render: automation.renderCron },
   { id: "webhooks", title: "웹훅", url: () => "/api/webhooks", render: automation.renderWebhooks },
-  { id: "doctor", title: "점검", url: () => "/api/doctor", render: doctor.render, timeoutMs: 20000 },
+  {
+    id: "doctor",
+    title: "점검",
+    url: () => "/api/doctor",
+    render: doctor.render,
+    timeoutMs: 20000,
+    // Every call runs the checks again on the server; only on request.
+    autoRefresh: false,
+  },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -261,6 +269,7 @@ function start() {
 
   const refreshIfDue = () => {
     if (state.locked || document.hidden || state.loading) return;
+    if (state.route?.autoRefresh === false) return;
     if (Date.now() - state.lastAttempt >= REFRESH_MS) load();
   };
   setInterval(refreshIfDue, 5000);
