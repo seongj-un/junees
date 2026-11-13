@@ -38,6 +38,7 @@ pub mod subagent;
 pub mod task;
 pub mod telegram;
 pub mod tools;
+pub mod transcribe;
 pub mod update;
 pub mod usage;
 pub mod web_search;
