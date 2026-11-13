@@ -50,8 +50,9 @@ jobs and webhook routes.
                       browser
 
 The page needs a token made for this run. An opened browser gets a code
-that trades for it once, within a minute; the token itself is printed
-only with --no-open. Anyone who can read that address can use the
+that trades for it once, within a minute, and keeps the token in that tab
+only; the token itself is printed only with --no-open, or when no browser
+can be started. Anyone who can read that address can use the
 dashboard.
 ";
 
@@ -150,14 +151,22 @@ pub async fn main(options: Options) -> Result<ExitCode> {
     // Not println!: it panics when stdout is closed (`| head -1`, a closed
     // terminal), and the server goes on without anyone reading it.
     let mut out = std::io::stdout();
-    if options.open {
-        // The browser's command line, which other processes can read,
-        // gets a one-time code; the token is printed nowhere.
+    // The browser's command line, which other processes can read, gets a
+    // one-time code; the token is printed only when no browser was started.
+    let opened = options.open && {
         let code = new_token()?;
         if let Ok(mut codes) = context.codes.lock() {
             codes.issue(code.clone(), std::time::Instant::now());
         }
-        let printed = writeln!(
+        let started = open_browser(&fragment_url(address, "code", &code));
+        if !started && let Ok(mut codes) = context.codes.lock() {
+            // On no command line: the code ends, the token is printed.
+            codes.clear();
+        }
+        started
+    };
+    let printed = if opened {
+        writeln!(
             out,
             "Junees dashboard: opening {} in the browser; Ctrl-C stops it.",
             base_url(address)
@@ -169,25 +178,16 @@ pub async fn main(options: Options) -> Result<ExitCode> {
                  for an address to paste."
             )
         })
-        .and_then(|()| out.flush());
-        if printed.is_err() {
-            eprintln!("Cannot print the dashboard's address; it serves on {address}.");
-        }
-        open_browser(&fragment_url(address, "code", &code));
     } else {
-        let url = page_url(address, &token);
-        if writeln!(out, "Junees dashboard: {url}")
-            .and_then(|()| {
-                writeln!(
-                    out,
-                    "The address holds a token for this run; Ctrl-C stops it."
-                )
-            })
-            .and_then(|()| out.flush())
-            .is_err()
-        {
-            eprintln!("Cannot print the dashboard's address; it serves on {address}.");
-        }
+        writeln!(out, "Junees dashboard: {}", page_url(address, &token)).and_then(|()| {
+            writeln!(
+                out,
+                "The address holds a token for this run; Ctrl-C stops it."
+            )
+        })
+    };
+    if printed.and_then(|()| out.flush()).is_err() {
+        eprintln!("Cannot print the dashboard's address; it serves on {address}.");
     }
     tokio::select! {
         served = serve(listener, context) => {
@@ -200,7 +200,10 @@ pub async fn main(options: Options) -> Result<ExitCode> {
 
 /// Opens `url` in the default browser, if a way to is found; the address
 /// is printed either way.
-fn open_browser(url: &str) {
+/// Whether the opener started: `xdg-open` (`open` on macOS) with `url`.
+/// When it cannot run (no desktop, an SSH session), says so; the caller
+/// prints an address to paste instead.
+fn open_browser(url: &str) -> bool {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
@@ -215,8 +218,11 @@ fn open_browser(url: &str) {
     match spawned {
         // Not waited for: xdg-open may stay with the browser it starts.
         // The child is reaped when Junees exits.
-        Ok(_) => {}
-        Err(_) => eprintln!("Cannot run `{opener}`; open the address above in a browser."),
+        Ok(_) => true,
+        Err(_) => {
+            eprintln!("Cannot run `{opener}`; printing an address to paste instead.");
+            false
+        }
     }
 }
 

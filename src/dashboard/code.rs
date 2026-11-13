@@ -34,6 +34,11 @@ impl Codes {
         });
     }
 
+    /// Ends the current code, if any.
+    pub fn clear(&mut self) {
+        self.current = None;
+    }
+
     /// Whether `given` is the current code at `now`. A right code ends it
     /// (it works once), as do an expired one and the [`MAX_FAILURES`]th
     /// wrong one. Compared in constant time.
@@ -94,6 +99,15 @@ mod tests {
             assert!(!codes.redeem(wrong, now));
         }
         assert!(!codes.redeem("xyz", now), "the fifth wrong one ended it");
+    }
+
+    #[test]
+    fn a_cleared_code_does_not_work() {
+        let now = Instant::now();
+        let mut codes = Codes::default();
+        codes.issue("abc".into(), now);
+        codes.clear();
+        assert!(!codes.redeem("abc", now));
     }
 
     #[test]
