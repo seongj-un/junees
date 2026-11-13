@@ -438,6 +438,8 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 후속(#88): Anthropic 키도 주소와 짝을 짓는다
   - 결정: 짝 규칙은 `config_file::PAIRED_KEYS`(키, 주소) 표 하나로 두고 OpenAI와 Anthropic이 같은 `Settings::paired_key`를 쓴다. 기본 주소면 지금처럼 환경 변수 > 파일
   - 결정: Anthropic API는 언제나 키가 필요하므로 루프백 예외를 두지 않는다. 짝이 맞는 키가 없고 주소를 정했으면 `no API key for <주소>: ... in the same place as the address`, 주소를 정하지 않았으면 예전 `no API key: run junees setup` 오류
+  - 결정(#91 리뷰): 기본 주소를 적어 둔 것은 적지 않은 것으로 본다(`config_file::is_default_address`: 앞뒤 공백, 끝의 `/`, 대소문자 무시). 두 키 모두 같은 공식 API로 가므로 막을 이유가 없고, 0.2.0에서 기본 주소를 한쪽에 적어 둔 설정이 올린 뒤 시작하지 않는 일을 피한다. OpenAI도 같다
+  - 결정(#91 리뷰): Anthropic 클라이언트도 리다이렉트를 따라가지 않고(`x-api-key`는 reqwest가 다른 호스트로 넘길 때 떼지 않는다), 주소는 OpenAI와 같은 `provider::check_base_url`(https, 루프백 http, 계정 정보 거절)로 검사한다. api 백엔드에서만 검사한다: claude-code 백엔드는 이 주소를 쓰지 않고 `claude`가 같은 변수를 읽을 수 있어서
   - 결정: `junees setup`은 주소를 묻지 않으므로 그대로 두고, 저장한 뒤 환경에 `ANTHROPIC_BASE_URL`이 있으면 "파일의 키는 그 주소로 가지 않는다"고 알린다
   - 테스트: 단위 `config_file.rs`(`the_anthropic_key_comes_from_where_the_address_does`), `doctor/tests.rs`(`the_anthropic_key_and_its_address`). 통합 `tests/simple_cli.rs`(`a_bare_question_runs_once_with_the_key_from_the_settings_file`: 셸의 키가 파일의 주소로 가지 않음, `the_anthropic_key_goes_only_to_the_address_set_in_the_same_place`)
 
