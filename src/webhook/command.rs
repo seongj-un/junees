@@ -406,7 +406,12 @@ async fn run_now(
         .context("cannot make the run's GitHub CLI configuration folder");
     let refused = check_home_folder(lookup, &route.dir, route.allow_home, Some("route"));
     let (outcome, prompt, quiet) = match (&refused, &route.flow, &gh_config) {
-        (Err(err), _, _) | (_, _, Err(err)) => (Outcome::failed(format!("{err:#}")), None, false),
+        (Err(err), _, _) => {
+            let (note, first) = pause_refused(home, &route.name);
+            // A request queued before the pause is recorded, not delivered.
+            (Outcome::failed(format!("{err:#}; {note}")), None, !first)
+        }
+        (_, _, Err(err)) => (Outcome::failed(format!("{err:#}")), None, false),
         (Ok(()), Some(flow), Ok(gh)) => {
             let report = flow_run(home, lookup, &route, flow, incoming, gh.path(), &cancel).await;
             let outcome = Outcome {
@@ -461,6 +466,30 @@ async fn run_now(
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// Pauses route `name` after [`check_home_folder`] refused its run, so
+/// the server answers its requests 503 instead of starting runs: a route
+/// saved in the home folder before `--allow-home` existed fails and
+/// delivers that once, not at every request. What to add to the run's
+/// note, and whether this run paused it (it was not paused already).
+fn pause_refused(home: &Path, name: &str) -> (String, bool) {
+    let paused = Store::new(home).lock().and_then(|mut locked| {
+        let Some(route) = locked.routes.iter_mut().find(|route| route.name == name) else {
+            return Ok(false);
+        };
+        let first = !route.paused;
+        route.paused = true;
+        locked.save()?;
+        Ok(first)
+    });
+    match paused {
+        Ok(first) => (
+            "the route is paused so it does not fail again at every request".into(),
+            first,
+        ),
+        Err(err) => (format!("cannot pause the route: {err:#}"), true),
+    }
 }
 
 /// `lookup` with every route's secret variable added to `hidden_env`, so

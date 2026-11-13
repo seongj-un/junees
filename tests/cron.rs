@@ -281,6 +281,13 @@ async fn a_job_in_the_home_folder_needs_allow_home() {
         last["note"].as_str().unwrap().contains("--allow-home"),
         "{last}"
     );
+    // ... and paused, so the daemon does not start it (and deliver the
+    // failure) again at every scheduled time.
+    assert_eq!(jobs(home.path())["jobs"][0]["paused"], true);
+    assert!(
+        last["note"].as_str().unwrap().contains("the job is paused"),
+        "{last}"
+    );
     let requests = tokio::time::timeout(Duration::from_secs(10), requests)
         .await
         .unwrap()

@@ -327,6 +327,21 @@ async fn a_route_in_the_home_folder_needs_allow_home() {
         "{stderr}"
     );
     assert_eq!(routes(home.path())["routes"][0]["last"]["status"], "failed");
+    // ... and paused (the server answers 503), with the failure delivered
+    // once: a run of the paused route (a request queued before the pause)
+    // is recorded but writes and delivers nothing.
+    assert_eq!(routes(home.path())["routes"][0]["paused"], true);
+    assert!(stderr.contains("the route is paused"), "{stderr}");
+    let outputs = || {
+        std::fs::read_dir(home.path().join("webhooks/output/pr"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+    assert_eq!(outputs(), 1);
+    let (ok, _, stderr) = run(&["webhook", "test", "pr", payload.to_str().unwrap()]).await;
+    assert!(!ok && stderr.contains("is the home folder"), "{stderr}");
+    assert_eq!(outputs(), 1);
+    assert_eq!(routes(home.path())["routes"][0]["last"]["status"], "failed");
 }
 
 #[tokio::test]

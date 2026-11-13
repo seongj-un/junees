@@ -308,9 +308,12 @@ async fn run_now(
         job.id,
         escape_hidden(&job.dir.display().to_string())
     );
-    let outcome = match prepare(lookup, &job).await {
-        Ok((engine, limits)) => engine.run(&job.spec(), &cancel, limits).await,
-        Err(err) => Outcome::failed(format!("{err:#}")),
+    let outcome = match check_home_folder(lookup, &job.dir, job.allow_home, Some("job")) {
+        Err(err) => Outcome::failed(format!("{err:#}; {}", pause_refused(home, &job.id))),
+        Ok(()) => match prepare(lookup, &job).await {
+            Ok((engine, limits)) => engine.run(&job.spec(), &cancel, limits).await,
+            Err(err) => Outcome::failed(format!("{err:#}")),
+        },
     };
     let last = super::finish(home, tz, lookup, &job, &run_id, due, started_at, &outcome).await;
     if !outcome.answer.is_empty() {
@@ -336,11 +339,28 @@ async fn run_now(
 }
 
 /// The engine of the `backend` setting and the limits, in the job's
-/// folder, unless that folder is refused ([`check_home_folder`]).
+/// folder (checked with [`check_home_folder`] first).
 async fn prepare(lookup: &Lookup, job: &Job) -> Result<(Box<dyn Engine>, super::run::Limits)> {
-    check_home_folder(lookup, &job.dir, job.allow_home, Some("job"))?;
     let limits = super::limits(&**lookup)?;
     Ok((engine_in(lookup, &job.dir).await?, limits))
+}
+
+/// Pauses job `id` after [`check_home_folder`] refused its run, so the
+/// daemon stops starting it: a job saved in the home folder before
+/// `--allow-home` existed fails and delivers that once, not at every
+/// scheduled time. What to add to the run's note.
+fn pause_refused(home: &Path, id: &str) -> String {
+    let paused = Store::new(home).lock().and_then(|mut locked| {
+        if let Some(job) = locked.jobs.iter_mut().find(|job| job.id == id) {
+            job.paused = true;
+            locked.save()?;
+        }
+        Ok(())
+    });
+    match paused {
+        Ok(()) => "the job is paused so it does not fail again at every scheduled time".into(),
+        Err(err) => format!("cannot pause the job: {err:#}"),
+    }
 }
 
 /// The user's home folder (HOME).
