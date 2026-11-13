@@ -22,8 +22,10 @@ import {
 } from "./chat-stream.js";
 import { code, el, notice } from "./dom.js";
 import { formatInt, formatUsd } from "./format.js";
+import { linkHistory, parseCheckpoints } from "./checkpoints.js";
 import { chatHash, sessionHash } from "./routes.js";
 import { messageView, peek, toolBody } from "./view-session.js";
+import { changePanel, confirmUndo, outcomeView, turnFooter } from "./view-undo.js";
 
 const WRITE_TIMEOUT_MS = 30000;
 /** How many of a resumed session's last messages to show above the chat. */
@@ -121,6 +123,17 @@ class ChatView {
     this.gen = 0;
     /** While not null, events are held here until the session history is shown. */
     this.replay = null;
+    /** The chat's file checkpoints (GET .../checkpoints), oldest first. */
+    this.checkpoints = [];
+    /** Where a live turn's checkpoint is shown, by checkpoint number (turn_end.checkpoint). */
+    this.cpSlots = new Map();
+    this.cpLoads = 0;
+    /** The server keeps no checkpoints (409 checkpoints_off): no undo buttons. */
+    this.cpOff = false;
+    this.undoing = false;
+    /** The session's working folder, to show paths under it shortly. */
+    this.cwd = null;
+    this.historyShown = [];
   }
 
   // ---- lifecycle ----
@@ -216,8 +229,9 @@ class ChatView {
         el("div", { class: "chat-buttons" }, this.cancelButton, this.sendButton),
       ),
     );
+    this.cpPanel = el("div", { class: "cp-panel-slot" });
     this.root.replaceChildren(
-      el("div", { class: "chat" }, this.statusLine, this.history, this.empty, this.log, this.form),
+      el("div", { class: "chat" }, this.statusLine, this.cpPanel, this.history, this.empty, this.log, this.form),
     );
     this.setStatus("연결하는 중입니다");
   }
@@ -248,8 +262,9 @@ class ChatView {
     this.cancelButton.hidden = !running;
     this.cancelButton.disabled = false;
     this.cancelButton.textContent = "취소";
-    this.sendButton.disabled = running || this.sending;
+    this.sendButton.disabled = running || this.sending || this.undoing;
     this.root.querySelector(".chat")?.setAttribute("aria-busy", String(running));
+    this.updateUndoButtons();
   }
 
   off() {
@@ -310,6 +325,7 @@ class ChatView {
     this.loadHistory().finally(() => {
       this.historyDone = true;
       this.finishReplay();
+      this.refreshCheckpoints();
     });
     this.listen();
   }
@@ -347,6 +363,7 @@ class ChatView {
     this.pending = null;
     this.turns.clear();
     this.questions.clear();
+    this.cpSlots.clear();
     this.log.replaceChildren();
     this.setRunning(false);
     this.setStatus("");
@@ -365,6 +382,7 @@ class ChatView {
       if (!this.alive) return;
       const messages = Array.isArray(page.messages) ? page.messages : [];
       this.ctx.setTitle(head.title || "대화 이어 가기");
+      if (typeof head.cwd === "string") this.cwd = head.cwd;
       this.historyMessages = messages;
       this.historyTotal = total;
       this.showHistory(messages, total);
@@ -388,6 +406,8 @@ class ChatView {
     );
     this.history.hidden = messages.length === 0;
     if (messages.length) this.empty.hidden = true;
+    this.historyShown = messages;
+    this.renderCheckpoints();
   }
 
   // ---- the event stream ----
@@ -743,6 +763,13 @@ class ChatView {
     const note = stopReasonText(event.stop_reason);
     if (entry && note) entry.body.append(el("p", { class: "msg-note chat-stop" }, note));
     if (entry && !entry.body.childElementCount) entry.body.append(el("p", { class: "msg-note" }, "글 없이 끝났습니다."));
+    // The turn changed files: its undo goes under it once the list says what changed.
+    if (entry && Number.isSafeInteger(event.checkpoint) && event.checkpoint > 0) {
+      const slot = el("div", { class: "cp-slot" });
+      entry.node.insertBefore(slot, entry.usage ?? null);
+      this.cpSlots.set(event.checkpoint, slot);
+      this.refreshCheckpoints();
+    }
     // A question still open when its turn ends will not be answered.
     for (const question of this.questions.values()) {
       if (!question.closed && entry?.body.contains(question.card)) {
@@ -792,9 +819,10 @@ class ChatView {
     const problem = messageProblem(text);
     if (problem) return this.showError(problem);
     if (this.running) return this.showError("답을 받는 중에는 보낼 수 없습니다. 끝날 때까지 기다리거나 취소해 주세요.");
-    if (this.sending) return;
+    if (this.sending || this.undoing) return;
     this.sending = true;
     this.sendButton.disabled = true;
+    this.updateUndoButtons();
     this.sendButton.textContent = "보내는 중";
     this.error.hidden = true;
     try {
@@ -850,7 +878,8 @@ class ChatView {
     } finally {
       this.sending = false;
       this.sendButton.textContent = "보내기";
-      this.sendButton.disabled = this.running;
+      this.sendButton.disabled = this.running || this.undoing;
+      this.updateUndoButtons();
     }
   }
 
@@ -871,6 +900,124 @@ class ChatView {
       this.cancelButton.disabled = false;
       this.cancelButton.textContent = "취소";
       this.showError(`취소하지 못했습니다. ${this.ctx.describeError(err)}`);
+    }
+  }
+
+  // ---- file checkpoints (stage 20) ----
+
+  /** Loads the chat's checkpoint list and redraws what shows it; a failure keeps the last one. */
+  async refreshCheckpoints() {
+    if (!this.id || !this.alive) return;
+    const load = ++this.cpLoads;
+    let list;
+    try {
+      list = parseCheckpoints(await getJson(`/api/chat/${encodeURIComponent(this.id)}/checkpoints`));
+    } catch (err) {
+      if (this.alive) this.ctx.isUnauthorized(err);
+      return;
+    }
+    if (!this.alive || load !== this.cpLoads) return;
+    this.checkpoints = list;
+    if (this.cwd === null && list.length) {
+      // A new chat: its working folder comes with the session.
+      try {
+        const head = await getJson(`/api/sessions/${encodeURIComponent(this.id)}?offset=0&limit=1`);
+        if (typeof head?.cwd === "string") this.cwd = head.cwd;
+      } catch {
+        // Paths are shown whole then.
+      }
+      if (!this.alive || load !== this.cpLoads) return;
+    }
+    this.renderCheckpoints();
+  }
+
+  /** Draws the change list and the end of every turn that left a checkpoint. */
+  renderCheckpoints() {
+    const list = this.checkpoints;
+    const onUndo = this.cpOff ? null : (turn, button) => this.undo(turn, button);
+    // Keep what the person opened across the redraw.
+    const open = new Set([...this.root.querySelectorAll(".cp-files[open]")].map((d) => d.id));
+    const panelOpen = Boolean(this.cpPanel.querySelector("details[open]"));
+    const focused = document.activeElement?.dataset?.undo ?? null;
+
+    const slots = new Map();
+    for (const [index, turns] of linkHistory(this.historyShown, list)) {
+      const anchor = this.history.querySelector(`li[data-index="${index}"]`);
+      if (!anchor) continue;
+      let slot = anchor.querySelector(":scope > .cp-slot");
+      if (!slot) {
+        slot = el("div", { class: "cp-slot" });
+        anchor.append(slot);
+      }
+      slot.replaceChildren();
+      for (const turn of turns) slots.set(turn, slot);
+    }
+    for (const [turn, slot] of this.cpSlots) {
+      slot.replaceChildren();
+      slots.set(turn, slot);
+    }
+    for (const [turn, slot] of slots) {
+      const item = list.find((cp) => cp.turn === turn);
+      if (item) slot.append(turnFooter(item, this.cwd, onUndo));
+    }
+    for (const id of open) document.getElementById(id)?.setAttribute("open", "");
+
+    this.cpPanel.replaceChildren(...(list.length ? [changePanel(list, this.cwd, onUndo, panelOpen)] : []));
+    this.updateUndoButtons();
+    if (focused) this.root.querySelector(`.cp-slot [data-undo="${focused}"]`)?.focus();
+  }
+
+  /** Undo waits while a turn runs, a message goes out or another undo is open. */
+  updateUndoButtons() {
+    const busy = this.running || this.sending || this.undoing;
+    for (const button of this.root.querySelectorAll("[data-undo]")) button.disabled = busy;
+  }
+
+  async undo(turn, button) {
+    if (this.running || this.sending || this.undoing || !this.id) return;
+    this.undoing = true;
+    this.updateUndoButtons();
+    this.sendButton.disabled = true;
+    const result = await confirmUndo({
+      chatId: this.id,
+      list: this.checkpoints,
+      from: turn,
+      cwd: this.cwd,
+      opener: button,
+      isUnauthorized: (err) => this.ctx.isUnauthorized(err),
+    });
+    this.undoing = false;
+    this.sendButton.disabled = this.running || this.sending;
+    this.updateUndoButtons();
+    if (!this.alive) return;
+    switch (result.outcome) {
+      case "done": {
+        const { node, headline } = outcomeView(result.answer, this.cwd);
+        this.log.append(node);
+        this.empty.hidden = true;
+        node.focus({ preventScroll: true });
+        node.scrollIntoView({ block: "nearest", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+        this.ctx.announce(headline);
+        this.refreshCheckpoints();
+        break;
+      }
+      case "failed":
+        this.setStatus(result.message, "warn");
+        this.ctx.announce(result.message);
+        break;
+      case "off":
+        this.cpOff = true;
+        this.renderCheckpoints();
+        this.setStatus("이 대시보드 서버는 파일 체크포인트가 꺼져 있어 되돌릴 수 없습니다.", "warn");
+        break;
+      case "reload":
+        this.refreshCheckpoints();
+        break;
+      case "cancel":
+        if (button.isConnected) button.focus();
+        break;
+      default:
+        break;
     }
   }
 }
