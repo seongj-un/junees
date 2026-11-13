@@ -767,11 +767,19 @@ async fn a_session_reads_page_by_page_without_secrets_or_thinking() {
     }
     // A link in the sessions folder is not followed.
     std::os::unix::fs::symlink(
-        home.state.join("config.toml"),
+        home.state.join(format!("sessions/{id}.jsonl")),
         home.state.join("sessions/linked.jsonl"),
     )
     .unwrap();
     assert_eq!(dashboard.get("/api/sessions/linked").await.status, 404);
+    // ... and not listed, so the list never offers a session the view refuses.
+    let ids: Vec<Value> = dashboard.json("/api/sessions").await["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|session| session["id"].clone())
+        .collect();
+    assert_eq!(ids, [json!(id)]);
 }
 
 #[tokio::test]
@@ -893,6 +901,14 @@ async fn pause_and_resume_need_the_page_and_change_the_stores() {
         "{message}"
     );
     assert_eq!(read_jobs()["jobs"][0]["paused"], true);
+    // A pause of what is paused changes nothing: the home folder's mark,
+    // and so the 409, stay.
+    let reply = post(&dashboard, &pause, &page, "").await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let job: Value = serde_json::from_str(&reply.body).unwrap();
+    assert_eq!((&job["paused"], &job["paused_for_home"]), (&json!(true), &json!(true)));
+    let reply = post(&dashboard, &format!("/api/cron/{id}/resume"), &page, "").await;
+    assert_eq!(reply.status, 409, "{}", reply.body);
     let routes_path = home.state.join("webhooks/routes.json");
     let mut routes: Value =
         serde_json::from_str(&std::fs::read_to_string(&routes_path).unwrap()).unwrap();
@@ -922,8 +938,13 @@ async fn pause_and_resume_need_the_page_and_change_the_stores() {
     // One line per write that reached its target, and no token.
     let log = std::fs::read_to_string(home.state.join("dashboard.log")).unwrap();
     let lines: Vec<&str> = log.lines().collect();
-    assert_eq!(lines.len(), 7, "{log}");
+    assert_eq!(lines.len(), 9, "{log}");
     assert!(lines[0].ends_with(&format!(" pause cron {id} ok")), "{log}");
+    assert!(lines[5].ends_with(&format!(" pause cron {id} ok")), "{log}");
+    assert!(
+        lines[6].ends_with(&format!(" resume cron {id} 409 conflict")),
+        "{log}"
+    );
     assert!(
         lines[1].ends_with(&format!(" resume cron {id} ok")),
         "{log}"
@@ -938,7 +959,7 @@ async fn pause_and_resume_need_the_page_and_change_the_stores() {
         "{log}"
     );
     assert!(
-        lines[5].ends_with(" pause cron ffffffff 404 not_found"),
+        lines[7].ends_with(" pause cron ffffffff 404 not_found"),
         "{log}"
     );
     assert!(lines[0].split(' ').next().unwrap().ends_with('Z'), "{log}");

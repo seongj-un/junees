@@ -1371,7 +1371,9 @@ pub fn list_channel_sessions(home: &Path, limit: usize) -> Result<Vec<Summary>> 
 }
 
 /// [`list_recent`] for every session, of the terminal and of channels,
-/// each with the path of its journal.
+/// each with the path of its journal. A journal that is a symbolic link is
+/// left out: the dashboard, which lists these, does not follow links into
+/// the sessions folder.
 pub fn list_all(home: &Path, limit: usize) -> Result<Vec<(PathBuf, Summary)>> {
     list(home, limit, None)
 }
@@ -1386,6 +1388,11 @@ fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<(PathBu
     Ok(session_files(home)?
         .into_iter()
         .filter_map(|file| {
+            if channels.is_none()
+                && fs::symlink_metadata(&file.path).is_ok_and(|meta| meta.file_type().is_symlink())
+            {
+                return None;
+            }
             let (meta, mut rest) = read_head(&file.path)?;
             if channels.is_some_and(|channels| meta.source.is_some() != channels) {
                 return None;
