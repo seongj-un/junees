@@ -1,6 +1,6 @@
 # 대시보드 (`junees dashboard`)
 
-이 컴퓨터의 브라우저에서 Junees의 상태를 보는 읽기 전용 페이지입니다. 설정, 최근 세션, 사용량, 예약 작업, 웹훅 경로, 점검 결과를 보여 주고, 아무것도 바꾸지 않습니다.
+이 컴퓨터의 브라우저에서 Junees의 상태를 보는 페이지입니다. 설정, 최근 세션과 그 대화, 사용량, 예약 작업, 웹훅 경로, 점검 결과를 보여 줍니다. 바꾸는 것은 예약 작업과 웹훅 경로의 멈춤과 재개뿐입니다([쓰기](#쓰기-멈춤과-재개)).
 
 ```sh
 junees dashboard                      # 127.0.0.1:7878에서 열고 브라우저를 띄운다
@@ -22,13 +22,14 @@ junees dashboard --listen 127.0.0.1:0 # 빈 포트를 고른다
 - **토큰**: `/api/*`는 `Authorization: Bearer <토큰>`이 있어야 답합니다. 없거나 틀리면 401입니다. 비교는 상수 시간으로 합니다.
 - **`Host`**: `127.0.0.1:<포트>`, `localhost:<포트>`, `[::1]:<포트>`, 그리고 `--listen`에 준 주소(`127.0.0.2:<포트>` 등)만 받고, 아니면 421입니다. 포트가 80이면 브라우저가 포트를 빼고 보내므로 포트 없는 `Host`도 받습니다. 다른 사이트의 이름을 127.0.0.1로 돌리는 공격(DNS rebinding)을 막습니다. 이 검사는 정적 파일에도 적용됩니다.
 - **`Origin`**: 보내 왔으면 이 서버(`http://<Host>`)여야 하고, 아니면 403입니다. CORS 헤더는 보내지 않습니다.
-- **메서드와 크기**: `GET`만 받고(405), 머리는 8KB(431), 본문은 1KB(413)까지입니다. 본문은 읽지 않습니다. 머리는 10초 안에 와야 하고, 연결 하나는 60초까지이며, 동시에 16개까지 받습니다.
+- **메서드와 크기**: `GET`을 받고, `POST`는 쓰기 경로에서만 받습니다(그 밖은 405와 `Allow`). 머리는 8KB(431), 본문은 1KB(413)까지이고, 본문은 `POST`일 때만 읽습니다. 머리는 10초 안에 와야 하고, 연결 하나는 60초까지이며, 동시에 16개까지 받습니다.
 - **헤더**: 모든 응답에 다음을 붙입니다.
   - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`
   - `X-Content-Type-Options: nosniff`
   - `Referrer-Policy: no-referrer`
   - `Cache-Control: no-store`
-- **비밀 값**: 키, 토큰, 웹훅 시크릿은 응답에 넣지 않습니다. 키는 있는지와 출처(`env`, `config.toml`)만, 웹훅 시크릿은 있는지만 보냅니다. 세션 본문은 보내지 않고, 첫 사용자 메시지의 앞부분만 보냅니다. 이 미리보기, 제목, 실행 결과 메모, 점검 결과에서는 `junees doctor`와 같은 방식으로 비밀 값을 가립니다. 알려진 설정과 변수의 값, 그리고 자격 증명처럼 보이는 낱말(`secrets` 모듈)이 대상입니다. 가린 뒤에 자르므로 비밀 값의 조각이 남지 않습니다.
+- **쓰기 요청**: `POST`는 위 검사에 더해 `Origin`이 반드시 있어야 하고(없으면 403, 다른 출처면 위에서 이미 403), `Content-Type`이 있으면 `application/json`이어야 하며(415), 본문은 비었거나 `{}`여야 합니다(400). 그래서 이 페이지의 스크립트만 쓰기를 보낼 수 있습니다. 다른 사이트의 폼이나 `fetch`는 `Origin`을 다르게 붙이고, `Origin` 없는 요청은 브라우저 밖의 프로그램뿐인데 그런 프로그램은 토큰도 따로 있어야 합니다. 쓰기는 모두 `$JUNEES_HOME/dashboard.log`(권한 600)에 한 줄씩 남습니다.
+- **비밀 값**: 키, 토큰, 웹훅 시크릿은 응답에 넣지 않습니다. 키는 있는지와 출처(`env`, `config.toml`)만, 웹훅 시크릿은 있는지만 보냅니다. 세션 목록은 첫 사용자 메시지의 앞부분만 보내고, 세션 상세는 글을 블록마다 정해진 길이까지만 보냅니다. 이미지 데이터와 thinking 내용은 보내지 않습니다. 이 글들, 제목, 실행 결과 메모, 점검 결과에서는 `junees doctor`와 같은 방식으로 비밀 값을 가립니다. 알려진 설정과 변수의 값, 그리고 자격 증명처럼 보이는 낱말(`secrets` 모듈)이 대상입니다. 가린 뒤에 자르므로 비밀 값의 조각이 남지 않습니다.
 
 ## API 계약
 
@@ -102,16 +103,57 @@ junees dashboard --listen 127.0.0.1:0 # 빈 포트를 고른다
 - `status`: `ok`, `warn`, `fail` 중 하나입니다.
 - `fix`: 경고와 실패를 고치는 방법입니다. 없으면 `null`입니다.
 
+### `GET /api/sessions/<id>?offset=0&limit=100`
+
+세션 하나의 대화를 기록된 그대로, 앞에서부터 `offset`번째 메시지부터 `limit`개(1부터 200, 기본 100)씩 보냅니다. 압축이나 도구 결과 비우기로 모델이 보는 기록이 줄어도, 여기서는 쓰인 메시지를 모두 보냅니다. 이어 붙인 입력은 앞의 사용자 메시지에 합치고, Claude Code 턴 하나는 메시지 두 개(입력, 답)입니다. `/api/sessions`의 `messages`도 같은 수입니다.
+
+- `id`는 `/api/sessions`가 준 값입니다. `[A-Za-z0-9_-]` 1~64자가 아니면 400 `bad_id`이고(`..`, `/`, `%`도 여기서 막힙니다), 그런 세션이 없으면 404입니다. 세션 폴더의 심볼릭 링크는 따라가지 않고 404로 봅니다.
+- `offset`이 전체보다 크면 `messages`가 빈 배열입니다.
+
+```json
+{"id":"20261113-010203-abcd","title":"Fix the login bug","cwd":"/home/u/work/x","updated_at":"2026-11-13T01:05:00Z","total":42,"offset":0,
+ "messages":[{"index":0,"role":"user","at":"2026-11-13T01:02:03Z","blocks":[
+    {"type":"text","text":"...","truncated":true},
+    {"type":"tool_use","name":"bash","input_preview":"ls -la"},
+    {"type":"tool_result","is_error":false,"text_preview":"..."},
+    {"type":"image","media_type":"image/png"},
+    {"type":"thinking"},
+    {"type":"other","kind":"server_tool_use"}]}]}
+```
+
+- `index`는 대화 전체에서의 순서(0부터)이고, `at`은 그 줄이 기록된 시각입니다. 시각을 남기기 전의 기록은 `null`입니다.
+- `text`는 8,000자, `input_preview`와 `text_preview`는 2,000자까지이고, 잘렸으면 `"truncated": true`가 붙습니다(안 잘렸으면 이 필드가 없습니다). 비밀 값을 먼저 가린 뒤에 자릅니다.
+- `input_preview`는 `bash`처럼 `command`가 있으면 그 명령, 문자열 필드 하나뿐이면 그 값, 그 밖에는 입력 JSON입니다.
+- `thinking`은 내용 없이 종류만 보냅니다. 서버 도구 호출과 결과(웹 검색 등)는 `"type":"other"`와 그 종류(`kind`)만 보냅니다.
+
+### 쓰기: 멈춤과 재개
+
+- `POST /api/cron/<id>/pause`, `POST /api/cron/<id>/resume`
+- `POST /api/webhooks/<name>/pause`, `POST /api/webhooks/<name>/resume`
+
+[쓰기 요청 규칙](#보안)을 지켜야 합니다. 바꾼 뒤의 항목 하나를 200으로 돌려주고, 모양은 `/api/cron`의 `jobs[]` 원소, `/api/webhooks`의 `routes[]` 원소와 같습니다.
+
+- `<id>`는 작업의 `id` 그대로, `<name>`은 경로 이름 그대로여야 합니다. CLI처럼 이름이나 id 앞부분으로는 찾지 않습니다. 없으면 404, 형식(`[A-Za-z0-9_-]` 1~64자)이 다르면 400 `bad_id`입니다.
+- 바꾸는 방법은 `junees cron pause|resume`, `junees webhook pause|resume`과 같은 함수입니다. 저장 파일의 잠금도 CLI와 같아서, 데몬이나 서버가 돌고 있어도 됩니다. 멈추면 "사용자가 멈춘 것"이 되고(`paused_for_home`은 `false`), 예약 작업을 다시 켜면 다음 실행 시각을 지금부터 다시 셉니다.
+- 409 `conflict`
+  - 홈 폴더 때문에 멈춘 항목(`paused_for_home`)의 `resume`: `message`에 터미널에서 실행할 `junees cron allow-home <id>`(웹훅은 `junees webhook allow-home <name>`)를 담습니다. 대시보드는 `allow-home`을 하지 않습니다. CLI의 `resume`은 이런 항목도 다시 켜지만, 다음 실행이 같은 이유로 다시 멈추므로 대시보드에서는 막습니다.
+  - 시각이 지난 일회성 작업의 `resume`: CLI와 같은 문구("was to run once, at a time that has passed; add it again")입니다.
+- 쓰기 로그: 대상까지 찾아간 쓰기(200, 404, 409 등)는 `$JUNEES_HOME/dashboard.log`에 `<시각> <pause|resume> <cron|webhook> <id 또는 이름> <ok 또는 상태 코드와 오류 코드>` 한 줄을 남깁니다. 토큰과 본문은 남기지 않습니다. 401, 403처럼 대상에 닿기 전에 거절된 요청은 남기지 않습니다. 로그를 쓰지 못해도 바꾼 것은 그대로 두고, 표준 오류에 알립니다.
+
 ### 오류
 
 모든 오류는 `{"error":"<짧은 영어 코드>","message":"<사람이 읽을 문장>"}` 모양입니다.
 
 - 400 `bad_query`: `limit`, `days`가 범위 밖이거나 숫자가 아님
+- 400 `bad_id`: 세션 id, 작업 id, 경로 이름의 형식이 다름
+- 400 `bad_body`: 쓰기의 본문이 비었거나 `{}`가 아님
 - 400 `bad_request`: 요청 머리를 읽을 수 없음, `Transfer-Encoding` 본문
 - 401 `unauthorized`: 토큰이 없거나 틀림(`WWW-Authenticate: Bearer`)
-- 403 `forbidden_origin`: 다른 출처의 `Origin`
+- 403 `forbidden_origin`: 다른 출처의 `Origin`, 또는 `Origin`이 없는 쓰기
+- 409 `conflict`: 다시 켤 수 없는 작업이나 경로(홈 폴더 때문에 멈춤, 시각이 지난 일회성 작업)
+- 415 `unsupported_media_type`: 쓰기의 `Content-Type`이 `application/json`이 아님
 - 404 `not_found`: 없는 경로
-- 405 `method_not_allowed`: `GET`이 아님(`Allow: GET`)
+- 405 `method_not_allowed`: 쓰기 경로가 아닌데 `GET`이 아니거나(`Allow: GET`), 쓰기 경로인데 `POST`가 아님(`Allow: POST`)
 - 413 `body_too_large`: 본문이 1KB보다 큼
 - 421 `misdirected_request`: `Host`가 이 서버가 아님
 - 431 `head_too_large`: 머리가 8KB보다 큼
