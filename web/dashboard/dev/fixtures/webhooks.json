@@ -1,0 +1,39 @@
+{
+  "routes": [
+    {
+      "name": "pr-review",
+      "kind": "github",
+      "dir": "/home/u/work/junees",
+      "paused": false,
+      "allow_home": false,
+      "has_secret": true,
+      "last_run": {
+        "at": "2026-11-13T07:52:40Z",
+        "status": "ok",
+        "note": null
+      }
+    },
+    {
+      "name": "deploy-notify",
+      "kind": "template",
+      "dir": "/home/u/work/site",
+      "paused": false,
+      "allow_home": false,
+      "has_secret": true,
+      "last_run": {
+        "at": "2026-11-11T14:03:11Z",
+        "status": "failed",
+        "note": "turn limit reached (40 turns)"
+      }
+    },
+    {
+      "name": "legacy-hook",
+      "kind": "template",
+      "dir": "/home/u/work/old",
+      "paused": true,
+      "allow_home": false,
+      "has_secret": false,
+      "last_run": null
+    }
+  ]
+}

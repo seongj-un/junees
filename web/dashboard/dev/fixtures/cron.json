@@ -1,0 +1,75 @@
+{
+  "jobs": [
+    {
+      "id": "a1",
+      "name": "daily-report",
+      "schedule": "0 9 * * *",
+      "dir": "/home/u/work/reports",
+      "paused": false,
+      "paused_for_home": false,
+      "allow_home": false,
+      "next_run": "2026-11-14T00:00:00Z",
+      "last_run": {
+        "at": "2026-11-13T00:00:04Z",
+        "status": "ok",
+        "note": null
+      }
+    },
+    {
+      "id": "b7",
+      "name": "weekly-deps",
+      "schedule": "30 8 * * 1",
+      "dir": "/home/u/work/junees",
+      "paused": false,
+      "paused_for_home": false,
+      "allow_home": false,
+      "next_run": "2026-11-16T23:30:00Z",
+      "last_run": {
+        "at": "2026-11-09T23:30:02Z",
+        "status": "failed",
+        "note": "cargo update failed: could not reach crates.io (timed out after 60s)"
+      }
+    },
+    {
+      "id": "c3",
+      "name": "home-cleanup",
+      "schedule": "0 3 * * *",
+      "dir": "/home/u",
+      "paused": true,
+      "paused_for_home": true,
+      "allow_home": false,
+      "next_run": null,
+      "last_run": {
+        "at": "2026-11-12T18:00:01Z",
+        "status": "failed",
+        "note": "/home/u is the home folder; the job is paused"
+      }
+    },
+    {
+      "id": "d9",
+      "name": "inbox-digest",
+      "schedule": "0 */4 * * *",
+      "dir": "/home/u",
+      "paused": false,
+      "paused_for_home": false,
+      "allow_home": true,
+      "next_run": "2026-11-13T12:00:00Z",
+      "last_run": {
+        "at": "2026-11-13T08:00:03Z",
+        "status": "ok",
+        "note": null
+      }
+    },
+    {
+      "id": "e2",
+      "name": "release-notes",
+      "schedule": "0 10 * * 5",
+      "dir": "/home/u/work/junees",
+      "paused": true,
+      "paused_for_home": false,
+      "allow_home": false,
+      "next_run": null,
+      "last_run": null
+    }
+  ]
+}
