@@ -458,24 +458,13 @@ mod tests {
         assert!(ran.exists());
     }
 
-    /// Whether a process is gone (a zombie counts as gone).
-    fn gone(pid: &str) -> bool {
-        match std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
-            Err(_) => true,
-            Ok(stat) => stat
-                .rsplit_once(')')
-                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
-        }
-    }
-
     async fn until_gone(pid: &str) {
-        for _ in 0..100 {
-            if gone(pid) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        panic!("process {pid} is still there");
+        let gone = crate::tools::testing::gone_within(
+            crate::tools::testing::pid_in(pid),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(gone, "process {} is still there", pid.trim());
     }
 
     /// A session that starts long commands, prints its first response (then

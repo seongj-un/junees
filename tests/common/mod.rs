@@ -328,3 +328,32 @@ pub fn sse_stream(message: &Value, piece: usize) -> String {
     events.push(json!({"type": "message_stop"}));
     events.iter().map(sse_event).collect()
 }
+
+/// Whether the process runs: it exists and is neither a zombie (`Z`) nor
+/// dead (`X`, shown while its parent reaps it). The same rule as the lib
+/// tests' `tools::testing::alive`.
+pub fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        // The state follows the command name, which is in parentheses and
+        // may itself contain spaces or parentheses.
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| !matches!(state, "Z" | "X" | "x"))
+    })
+}
+
+/// Waits up to `wait` for the process to stop running ([`alive`]), looking
+/// every 50 ms; whether it did. Decide on this answer alone: a later look
+/// may see the process at another stage.
+pub async fn gone_within(pid: u32, wait: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if !alive(pid) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

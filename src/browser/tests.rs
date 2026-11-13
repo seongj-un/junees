@@ -207,12 +207,11 @@ fn parent_of(pid: i32) -> Option<i32> {
 async fn assert_gone(main: i32, pids: &[i32], profile: &Path) {
     for _ in 0..100 {
         let main_gone = stat(main).is_none();
+        // A zombie or dead process is reaped by someone else: its parent
+        // is not `main` (once gone, it has no parent at all).
         let others_gone = pids.iter().all(|&pid| {
-            stat(pid).is_none_or(|stat| {
-                stat.rfind(')')
-                    .is_some_and(|at| stat[at + 2..].starts_with('Z'))
-                    && parent_of(pid) != Some(main)
-            })
+            u32::try_from(pid).is_ok_and(|pid| !crate::tools::testing::alive(pid))
+                && parent_of(pid) != Some(main)
         });
         if main_gone && others_gone && !profile.exists() {
             return;

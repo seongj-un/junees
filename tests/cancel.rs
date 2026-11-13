@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod common;
-use common::{body_of, fake_api, text_reply};
+use common::{alive, body_of, fake_api, text_reply};
 
 /// A reply running `sleep` in the background and waiting for it, after
 /// writing the sleep's pid to `pid_file`.
@@ -69,15 +69,6 @@ async fn pid_in(pid_file: &Path) -> u32 {
         .trim()
         .parse()
         .unwrap()
-}
-
-/// Whether the process runs (a zombie does not).
-fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z" && state != "X")
-    })
 }
 
 fn send(pid: Option<u32>, signal: i32) {
