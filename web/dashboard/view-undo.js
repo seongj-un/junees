@@ -133,13 +133,16 @@ export function confirmUndo({ chatId, list, from, cwd, opener, isUnauthorized })
   const bodyId = `undo-body-${dialogs}`;
   const many = plan.turns.length > 1;
   // No particle after a number (과/와, 을/를 depend on how it is read).
+  const redo = !many && plan.turns[0]?.undid.length > 0;
   const scope = many
     ? `변경 기록 ${from}부터 ${plan.turns[0].turn}까지 ${plan.turns.length}개를 최근 것부터 되돌립니다. 그 뒤에 파일을 바꾼 턴도 함께 되돌아갑니다.`
-    : "아래 파일을 이 턴 전의 내용으로 되돌립니다.";
+    : redo
+      ? "아래 파일을 되돌리기 전의 내용으로 다시 돌려 놓습니다."
+      : "아래 파일을 이 턴 전의 내용으로 되돌립니다.";
   const error = el("div", { class: "dialog-error", role: "alert", hidden: true });
   // Cancel takes the first focus, not the scrolling list before it.
   const cancel = el("button", { type: "button", class: "button button-secondary", autofocus: true }, "취소");
-  const confirm = el("button", { type: "button", class: "button" }, "되돌리기");
+  const confirm = el("button", { type: "button", class: "button" }, redo ? "되돌리기 취소" : "되돌리기");
   const notes = [el("p", null, scope)];
   for (const item of plan.turns) {
     const time = when(item);
@@ -171,7 +174,7 @@ export function confirmUndo({ chatId, list, from, cwd, opener, isUnauthorized })
   const dialog = el(
     "dialog",
     { class: "dialog dialog-wide", "aria-labelledby": titleId, "aria-describedby": bodyId },
-    el("h2", { class: "dialog-title", id: titleId }, many ? `변경 기록 ${from}부터 되돌릴까요?` : "이 턴의 파일 변경을 되돌릴까요?"),
+    el("h2", { class: "dialog-title", id: titleId }, many ? `변경 기록 ${from}부터 되돌릴까요?` : redo ? "이 되돌리기를 취소할까요?" : "이 턴의 파일 변경을 되돌릴까요?"),
     el("div", { id: bodyId, class: "dialog-body dialog-scroll", tabindex: "0" }, notes),
     error,
     el("div", { class: "dialog-actions" }, cancel, confirm),
