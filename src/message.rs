@@ -426,6 +426,29 @@ where
 }
 
 impl Usage {
+    /// What was added since `earlier`, a reading of the same running total.
+    pub fn since(&self, earlier: &Usage) -> Usage {
+        Usage {
+            input_tokens: self.input_tokens.saturating_sub(earlier.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(earlier.output_tokens),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .saturating_sub(earlier.cache_creation_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .saturating_sub(earlier.cache_read_input_tokens),
+            reasoning_tokens: self
+                .reasoning_tokens
+                .saturating_sub(earlier.reasoning_tokens),
+            server_tool_use: crate::message::ServerToolUsage {
+                web_search_requests: self
+                    .server_tool_use
+                    .web_search_requests
+                    .saturating_sub(earlier.server_tool_use.web_search_requests),
+            },
+        }
+    }
+
     pub fn add(&mut self, other: Usage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;

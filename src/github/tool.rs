@@ -218,6 +218,9 @@ pub struct GithubTool {
     /// In a webhook run: the route's name and the writes it allows. A
     /// write without a question then needs both lists.
     webhook: Option<(String, Vec<Write>)>,
+    /// In a run another agent handed over (`junees mcp serve`): every
+    /// write is refused, whatever the settings allow.
+    read_only: bool,
     /// In a webhook run: `pr_comments` shows the text of comments and
     /// reviews only of people whose reviews count for the GitHub flow
     /// ([`crate::flow::access::Access::counts`]: write access, or one of
@@ -242,8 +245,17 @@ impl GithubTool {
             unattended,
             origin_only: false,
             webhook: None,
+            read_only: false,
             comment_authors: None,
         }
+    }
+
+    /// Makes this the tool of a run `junees mcp serve` started: it reads
+    /// GitHub and never writes, and says so instead of naming settings that
+    /// would not change it.
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
     }
 
     /// Shows in `pr_comments` only the text of people with write access
@@ -287,6 +299,14 @@ impl GithubTool {
                  others, so leave it out"
                     .into(),
             );
+        }
+        if action.write(input).is_some() && self.read_only {
+            return Err(format!(
+                "not run: `{}` writes to GitHub, and a run another agent handed over through \
+                 `junees mcp serve` only reads GitHub; no setting changes this. Return what you \
+                 would write in your answer instead",
+                action.name()
+            ));
         }
         if let Some(write) = action.write(input)
             && !self.asks

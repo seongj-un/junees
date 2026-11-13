@@ -109,6 +109,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees dashboard [--listen 127.0.0.1:7878] [--no-open]`: 브라우저로 보는 읽기 전용 대시보드([대시보드](docs/dashboard.md))
 - `junees plugin list|install|enable|disable|remove`: 플러그인([플러그인](docs/plugins.md))
 - `junees mcp login|logout <서버>`: MCP 서버 OAuth 로그인([OAuth 로그인](docs/mcp.md#oauth-로그인))
+- `junees mcp serve [--dir <폴더>]`: Junees를 stdio MCP 서버로 띄워 다른 에이전트가 일을 맡기게 한다([Junees를 MCP 서버로](docs/mcp.md#junees를-mcp-서버로))
 - `junees update [--check] [--version vX.Y.Z]`: 최신 릴리스로 바꾸기([업데이트](docs/install.md#업데이트))
 
 명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `dashboard`, `usage`, `plugin`, `plugins`, `mcp`, `update`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
@@ -133,7 +134,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [텔레그램 게이트웨이](docs/gateways.md#텔레그램-게이트웨이): 같은 엔진으로 도는 텔레그램 봇(승인 버튼은 인라인 키보드).
 - [슬랙 게이트웨이](docs/gateways.md#슬랙-게이트웨이): Socket Mode로 받는 슬랙 앱(DM과 채널 스레드마다 대화 하나, mrkdwn 서식).
 - [음성 메시지 받아쓰기](docs/gateways.md#음성-메시지-받아쓰기): 디스코드, 텔레그램, 슬랙의 음성 메시지와 오디오 파일을 OpenAI 호환 받아쓰기 API(OpenAI, Groq, 로컬 whisper 서버)로 글로 바꿔 처리한다.
-- [MCP 서버](docs/mcp.md): stdio와 Streamable HTTP MCP 서버의 도구, OAuth 로그인.
+- [MCP 서버](docs/mcp.md): stdio와 Streamable HTTP MCP 서버의 도구, OAuth 로그인, Junees 자신을 MCP 서버로 쓰기(`junees mcp serve`).
 - [예약 작업](docs/automation.md#예약-작업): 프롬프트를 일정에 맞춰 무인 실행하고 결과를 파일, 디스코드, 웹훅으로 보낸다.
 - [웹훅](docs/automation.md#웹훅): HTTP 요청(GitHub 웹훅 등)이 무인 실행을 시작하고, `add-github`는 PR 리뷰, 리뷰 반영, merge를 맡는다.
 - [GitHub](docs/automation.md#github): 모델의 `github` 도구로 PR 읽기, 코멘트, 리뷰, PR 열기, merge.
@@ -187,6 +188,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 15. 로컬 웹 대시보드: `junees dashboard`(루프백, 토큰, 읽기 전용 상태·세션·사용량·예약 작업·웹훅·점검 화면, [docs/dashboard.md](docs/dashboard.md)) (완료)
 16. 대시보드 2차: 세션 대화 보기, 예약 작업과 웹훅 멈춤·재개(같은 출처 확인, 쓰기 로그), 브라우저에는 일회용 코드만 넘기기 ([docs/dashboard.md](docs/dashboard.md)) (완료)
 17. 음성 메시지: 디스코드, 텔레그램, Slack 게이트웨이의 음성 메시지와 오디오 첨부를 OpenAI 호환 받아쓰기 API(OpenAI, Groq, 로컬 whisper 서버)로 글로 바꿔 처리 ([docs/gateways.md](docs/gateways.md)) (완료)
+18. MCP 서버: `junees mcp serve`(stdio)로 다른 에이전트(Claude Desktop, Claude Code, Hermes, Cursor)가 Junees에 일을 맡기기, 웹훅과 같은 무인 실행 규칙 ([docs/mcp.md](docs/mcp.md#junees를-mcp-서버로))
 
 ## 개발
 

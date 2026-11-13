@@ -329,6 +329,15 @@ pub fn register_webhook(
     }
 }
 
+/// Registers the `github` tool for a run `junees mcp serve` started: no one
+/// is asked, the prompt is another agent's, so it only reads; comments
+/// show only the text of people with write access, as in webhook runs.
+pub fn register_read_only(tools: &mut ToolRegistry, settings: &Settings, cwd: &Path) {
+    if let Some(tool) = tool(settings, cwd, false) {
+        tools.register(tool.read_only().comments_from_writers(&[]));
+    }
+}
+
 fn tool(settings: &Settings, cwd: &Path, asks: bool) -> Option<GithubTool> {
     let token = settings.token.as_ref()?;
     match Client::new(&settings.api_url, token.clone()) {

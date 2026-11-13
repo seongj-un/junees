@@ -22,7 +22,7 @@ const ID_CHARS: usize = 64;
 
 /// Whether `id` may name a session: 1 to 64 of `A-Z`, `a-z`, `0-9`, `_`
 /// and `-`, so it can never leave the sessions folder.
-pub(super) fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     (1..=ID_CHARS).contains(&id.len())
         && id
             .bytes()
@@ -117,6 +117,17 @@ pub(super) fn detail(
         "offset": offset,
         "messages": messages,
     }))
+}
+
+/// [`detail`] for the rest of Junees (`junees mcp serve`'s
+/// `junees_session`): the same page, or why there is none, in words.
+pub(crate) fn page(
+    settings: &Settings,
+    id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Value, String> {
+    detail(settings, id, offset, limit).map_err(|failure| failure.message)
 }
 
 /// One block as the API shows it.

@@ -42,6 +42,9 @@ Usage:
   junees mcp login <server>
                           log in to an MCP server of mcp.json that asks for OAuth
                           (also mcp logout <server>; see `junees mcp --help`)
+  junees mcp serve        serve Junees as an MCP server on stdio for another agent
+                          (--dir, --allow-write, --allow-bash; see
+                          `junees mcp serve --help`)
   junees update           replace this binary with the latest release (--check:
                           only look; see `junees update --help`)
 
@@ -490,7 +493,7 @@ as written. Newest sessions first.
 Options:
   --all            every working folder, not only this one
   --limit <N>      sessions to show, 1 to 20 (default 5)
-  --source <S>     only sessions from terminal, discord, telegram, slack, cron, webhook
+  --source <S>     only sessions from terminal, discord, telegram, slack, cron, webhook, mcp
                    or all
                    (default all; repeat or use a comma list)
   --session <ID>   only this session (an id or the start of one), in any folder
