@@ -196,13 +196,23 @@ impl Events {
         }
     }
 
-    /// Events up to and including the first of `kind`.
+    /// Events up to and including the first of `kind`, which must come
+    /// before the turn ends and within [`WAIT`] (keepalives would
+    /// otherwise wait forever).
     async fn until(&mut self, kind: &str) -> Value {
+        let deadline = tokio::time::Instant::now() + WAIT;
         loop {
-            let (_, event) = self.next().await;
+            let (_, event) = tokio::time::timeout_at(deadline, self.next())
+                .await
+                .unwrap_or_else(|_| panic!("no {kind} event; got {:?}", self.kinds()));
             if event["type"] == kind {
                 return event;
             }
+            assert!(
+                event["type"] != "turn_end",
+                "the turn ended before a {kind} event: {:?}",
+                self.seen
+            );
         }
     }
 
@@ -780,4 +790,46 @@ async fn a_chat_closed_for_room_ends_its_stream_and_numbers_on_when_opened_again
     // An `after` from another run of the dashboard starts from the oldest.
     let mut fresh = dashboard.events(&id, Some(u64::MAX / 2)).await;
     assert_eq!(fresh.next().await.1["type"], "turn_start");
+}
+
+#[tokio::test]
+async fn an_approval_shows_the_whole_command() {
+    let home = Home::new();
+    std::fs::write(home.work.join("one.txt"), "x").unwrap();
+    // The policy refuses `curl ... | sh` before asking, so the tail here
+    // is harmless; the unit test asks one ending in it.
+    let command = format!("rm one.txt; echo {}; echo tail-is-shown", "a".repeat(2_100));
+    let (api, _served) = common::fake_api(vec![
+        (200, tool_use("toolu_1", &command)),
+        (200, common::text_reply("ok")),
+    ])
+    .await;
+    let dashboard = Dashboard::start(&home, &api, &["--chat"]).await;
+    let id = dashboard.post("/api/chat", json!({})).await.1["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut events = dashboard.events(&id, None).await;
+    dashboard
+        .post(&format!("/api/chat/{id}/messages"), json!({"text": "go"}))
+        .await;
+    let question = events.until("approval").await;
+    assert_eq!(question["target"], command.as_str());
+    assert!(
+        question["summary"]
+            .as_str()
+            .unwrap()
+            .contains("; echo tail-is-shown\n"),
+        "{question}"
+    );
+    let approvals = format!(
+        "/api/chat/{id}/approvals/{}",
+        question["question_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        dashboard.post(&approvals, json!({"answer": "n"})).await.0,
+        200
+    );
+    events.until("turn_end").await;
+    assert!(exists(&home.work, "one.txt"));
 }

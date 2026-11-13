@@ -441,7 +441,13 @@ impl Ask for ChatAsk {
         } else {
             vec!["y", "n"]
         };
-        let hide = |text: &str, chars| cut(&self.settings, &shown(text), chars).0;
+        // Whole, as the terminal shows it: a cut or a word hidden whole
+        // could keep what runs out of sight. Only known secrets go.
+        let hide = |text: &str| {
+            let mut text = shown(text);
+            crate::doctor::hide_known_secrets(&self.settings, std::iter::once(&mut text));
+            text
+        };
         let expires_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -451,10 +457,10 @@ impl Ask for ChatAsk {
             "type": "approval",
             "question_id": id,
             "kind": request.tool,
-            "summary": hide(&summary(request), PREVIEW_CHARS),
-            "target": hide(&request.target, PREVIEW_CHARS),
-            "reasons": request.reasons.iter().map(|reason| hide(reason, NAME_CHARS)).collect::<Vec<_>>(),
-            "preview": request.preview.as_deref().map(|preview| hide(preview, PREVIEW_CHARS)),
+            "summary": hide(&summary(request)),
+            "target": hide(&request.target),
+            "reasons": request.reasons.iter().map(|reason| hide(reason)).collect::<Vec<_>>(),
+            "preview": request.preview.as_deref().map(hide),
             "options": options,
             "expires_in": self.time.as_secs(),
             "expires_at": crate::session::format_utc_seconds(expires_at),

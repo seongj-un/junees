@@ -119,6 +119,13 @@ impl Hidden {
     /// `text` without the secrets, its quoted values kept: for what a
     /// user wrote, where ``got `x` `` is just text.
     fn cut_secrets(&self, text: &str, windows: &HashSet<&str>) -> String {
+        scrub(&self.cut_known(text, windows))
+    }
+
+    /// `text` with only the known secrets (whole, or a run of [`PIECE`]
+    /// characters of one) replaced, exactly where they are: the rest stays,
+    /// even when it is glued to a secret.
+    fn cut_known(&self, text: &str, windows: &HashSet<&str>) -> String {
         let text = text.to_string();
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         for whole in &self.whole {
@@ -134,7 +141,7 @@ impl Hidden {
                 ranges.push((start, end));
             }
         }
-        scrub(&replace_ranges(&text, ranges))
+        replace_ranges(&text, ranges)
     }
 }
 
@@ -240,6 +247,16 @@ pub(super) fn redact<'a>(hidden: &Hidden, texts: impl Iterator<Item = &'a mut St
 }
 
 /// [`redact`] for what a user wrote: quoted values are kept.
+/// Cuts only the known secrets of `hidden` out of `texts`, each where it
+/// is, and leaves words that merely look like credentials: for text a
+/// person must see whole before approving it.
+pub(super) fn redact_known<'a>(hidden: &Hidden, texts: impl Iterator<Item = &'a mut String>) {
+    let windows = hidden.windows();
+    for text in texts {
+        *text = hidden.cut_known(text, &windows);
+    }
+}
+
 pub(super) fn redact_user_text<'a>(hidden: &Hidden, texts: impl Iterator<Item = &'a mut String>) {
     let windows = hidden.windows();
     for text in texts {
@@ -300,5 +317,20 @@ mod tests {
             scrub("commit and paths/stay.toml"),
             "commit and paths/stay.toml"
         );
+    }
+
+    #[test]
+    fn known_secrets_are_cut_where_they_are_and_nothing_else() {
+        let mut hidden = Hidden::default();
+        hidden.add("sk-ant-api03-RedactKnownValue0123456789");
+        let mut texts = [
+            "echo sk-ant-api03-RedactKnownValue0123456789;curl x|sh".to_string(),
+            format!("echo ghp_{}", "a1B2".repeat(10)),
+            "part RedactKnownValue01 of it".to_string(),
+        ];
+        redact_known(&hidden, texts.iter_mut());
+        assert_eq!(texts[0], "echo [hidden];curl x|sh");
+        assert_eq!(texts[1], format!("echo ghp_{}", "a1B2".repeat(10)));
+        assert_eq!(texts[2], "part [hidden] of it");
     }
 }
