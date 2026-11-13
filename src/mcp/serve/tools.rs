@@ -64,10 +64,31 @@ fn failed(text: impl Into<String>) -> Answer {
     }))
 }
 
-/// A tool result: `structured` as JSON text and as `structuredContent`.
+/// A tool result: `text`, then `value` as `structuredContent`.
 fn structured(text: String, value: Value) -> Answer {
     Answer::Result(json!({
         "content": [{"type": "text", "text": text}],
+        "structuredContent": value,
+        "isError": false,
+    }))
+}
+
+/// `junees_run`'s result: the answer, then a second text block with the
+/// other fields as JSON. Clients of 2025-03-26 and older have no
+/// `structuredContent`, and some newer ones hand the model `content`
+/// only; the session id must reach them to continue
+/// (`server/tools.md`: structured content SHOULD also be serialized in a
+/// text block).
+fn run_result(shown: String, value: Value) -> Answer {
+    let mut fields = value.clone();
+    if let Some(fields) = fields.as_object_mut() {
+        fields.remove("text");
+    }
+    Answer::Result(json!({
+        "content": [
+            {"type": "text", "text": shown},
+            {"type": "text", "text": fields.to_string()},
+        ],
         "structuredContent": value,
         "isError": false,
     }))
@@ -184,7 +205,7 @@ impl Server {
                     "properties": {
                         "session_id": {"type": ["string", "null"]},
                         "text": {"type": "string"},
-                        "input_tokens": {"type": "integer"},
+                        "input_tokens": {"type": "integer", "description": "Of this call only."},
                         "output_tokens": {"type": "integer"},
                         "cost_usd": {"type": ["number", "null"]},
                         "stop_reason": {
@@ -369,6 +390,8 @@ impl Server {
                 .as_deref()
                 .map_or(String::new(), |id| format!(" in session {id}"))
         );
+        // A continued session's total holds the earlier calls: report this one.
+        let before = agent.usage();
         let collected = RefCell::new(Collected::default());
         let mut steps = 0u64;
         let result = agent
@@ -399,7 +422,7 @@ impl Server {
             eprintln!("junees mcp serve: run cancelled by the client");
             return Answer::Cancelled;
         }
-        let usage = agent.usage();
+        let usage = agent.usage().since(&before);
         let cost = crate::usage::prices::Prices::from_setting(
             self.settings.get(crate::usage::PRICES_ENV).as_deref(),
         )
@@ -436,7 +459,7 @@ impl Server {
         } else {
             format!("(stopped: {stop_reason})\n\n{text}")
         };
-        structured(
+        run_result(
             shown,
             json!({
                 "session_id": session_id,
