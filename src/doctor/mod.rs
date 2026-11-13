@@ -334,6 +334,17 @@ pub fn hide_secrets_in_user_text<'a>(
     redact::redact_user_text(&hidden, texts);
 }
 
+/// Hides the values of the secret settings and variables in `texts`,
+/// exactly where they are, and nothing else: unlike
+/// [`hide_secrets_in_user_text`] a word that only looks like a credential
+/// stays, and what is glued to a secret stays visible. For an approval
+/// question, which must show what will run.
+pub fn hide_known_secrets<'a>(settings: &Settings, texts: impl Iterator<Item = &'a mut String>) {
+    let mut hidden = redact::Hidden::default();
+    hidden.add_settings(settings);
+    redact::redact_known(&hidden, texts);
+}
+
 /// Runs every check on `settings`. `broken` is why the settings file could
 /// not be read, if it could not (the checks then go on without it).
 pub async fn run(settings: &Settings, broken: Option<&anyhow::Error>, online: bool) -> Report {

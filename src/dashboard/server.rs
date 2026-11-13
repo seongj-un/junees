@@ -11,14 +11,19 @@
 //! 3. `Origin`, when sent, is this server (403): no other site's script
 //!    reads the answers, and no CORS headers are sent;
 //! 4. the method is `GET`, or `POST` on a write path
-//!    ([`super::actions`]) only (405); a body of at most [`MAX_BODY`]
-//!    bytes (413), read for a `POST` only;
+//!    ([`super::actions`], [`super::chat`]) only (405); a body of at most
+//!    [`MAX_BODY`] bytes ([`super::chat::MAX_MESSAGE_BODY`] for a chat
+//!    message) (413), read for a `POST` only;
 //! 5. a write carries an `Origin` (403), a JSON `Content-Type` if any
-//!    (415), and no body but `{}` (400);
+//!    (415), and no body but `{}` (400; a chat write's body is a JSON
+//!    object its handler reads);
 //! 6. under `/api/`, `Authorization: Bearer <token>` holds this run's
-//!    token, compared in constant time (401).
+//!    token, compared in constant time (401);
+//! 7. the chat API answers only with `--chat` (404).
 //!
-//! Every answer carries [`SECURITY_HEADERS`].
+//! Every answer carries [`SECURITY_HEADERS`]. A chat's event stream
+//! ([`super::chat::stream`]) is the one answer that stays open; the
+//! others are sent whole within [`CONNECTION_TIME`].
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -29,7 +34,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
-use super::{actions, api, assets};
+use super::{actions, api, assets, chat};
 use crate::webhook::http::{self, Head};
 
 /// The request line and the headers together.
@@ -75,6 +80,8 @@ pub struct Context {
     pub(crate) doctor: Arc<Semaphore>,
     /// The code an opened browser trades for `token`.
     pub(crate) codes: std::sync::Mutex<super::code::Codes>,
+    /// The chat, with `--chat`.
+    pub(crate) chat: Option<Arc<chat::Chat>>,
 }
 
 impl Context {
@@ -88,7 +95,26 @@ impl Context {
             sessions: Default::default(),
             doctor: Arc::new(Semaphore::new(1)),
             codes: Default::default(),
+            chat: None,
         }
+    }
+
+    /// Serves the chat API with `chat`.
+    pub fn with_chat(mut self, chat: Arc<chat::Chat>) -> Self {
+        self.chat = Some(chat);
+        self
+    }
+}
+
+/// What a request gets: an answer sent whole, or a chat's event stream.
+pub enum Reply {
+    Whole(Answer),
+    Events(chat::stream::Stream),
+}
+
+impl From<Answer> for Reply {
+    fn from(answer: Answer) -> Self {
+        Reply::Whole(answer)
     }
 }
 
@@ -159,7 +185,7 @@ pub async fn serve(listener: TcpListener, context: Arc<Context>) -> std::io::Res
         let context = context.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            let _ = tokio::time::timeout(CONNECTION_TIME, connection(stream, &context)).await;
+            connection(stream, &context).await;
         });
     }
 }
@@ -171,7 +197,7 @@ async fn connection(mut stream: TcpStream, context: &Arc<Context>) {
         http::read_head_within(&mut stream, &mut buf, MAX_HEAD),
     )
     .await;
-    let answer = match read {
+    let reply = match read {
         // Too slow: closed without an answer.
         Err(_) => return,
         Ok(Err(err)) => {
@@ -180,14 +206,28 @@ async fn connection(mut stream: TcpStream, context: &Arc<Context>) {
             } else {
                 "bad_request"
             };
-            Answer::error(err.status, code, err.message)
+            Answer::error(err.status, code, err.message).into()
         }
         Ok(Ok(head)) => match read_body(&mut stream, &head, buf).await {
-            Ok(body) => answer(&head, &body, context).await,
-            Err(answer) => answer,
+            Ok(body) => {
+                match tokio::time::timeout(CONNECTION_TIME, respond(&head, &body, context)).await {
+                    Ok(reply) => reply,
+                    Err(_) => return,
+                }
+            }
+            Err(answer) => answer.into(),
         },
     };
-    send(&mut stream, &answer).await;
+    match reply {
+        Reply::Whole(answer) => {
+            let _ = tokio::time::timeout(CONNECTION_TIME, send(&mut stream, &answer)).await;
+        }
+        Reply::Events(events) => {
+            let (mut input, mut output) = stream.split();
+            chat::stream::serve(&mut input, &mut output, events, SECURITY_HEADERS).await;
+            let _ = stream.shutdown().await;
+        }
+    }
 }
 
 /// The body of a `POST`, which `Content-Length` announces and
@@ -236,6 +276,18 @@ async fn send<W: AsyncWrite + Unpin>(io: &mut W, answer: &Answer) {
 
 /// The answer to a request whose head (and, for a `POST`, body) was read.
 pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer {
+    match respond(head, body, context).await {
+        Reply::Whole(answer) => answer,
+        Reply::Events(_) => Answer::error(
+            406,
+            "not_acceptable",
+            "an event stream is served on a connection only",
+        ),
+    }
+}
+
+/// [`answer`], with a chat's event stream kept open.
+pub async fn respond(head: &Head, body: &[u8], context: &Arc<Context>) -> Reply {
     let Some(host) = head
         .header("host")
         .filter(|host| own_host(host, context.ip, context.port))
@@ -244,7 +296,8 @@ pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer 
             421,
             "misdirected_request",
             "the Host header does not name this dashboard",
-        );
+        )
+        .into();
     };
     if let Some(origin) = head.header("origin")
         && !same_origin(origin, host)
@@ -253,29 +306,41 @@ pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer 
             403,
             "forbidden_origin",
             "requests from other sites are refused",
-        );
+        )
+        .into();
     }
     let trade = head.path == TOKEN_PATH;
-    let write = trade || actions::is_write_path(&head.path);
+    let chat_route = chat::route(&head.path);
+    let chat_write = chat_route.as_ref().is_some_and(chat::Route::writes);
+    let write = trade || chat_write || actions::is_write_path(&head.path);
     match (head.method.as_str(), write) {
         ("GET", false) | ("POST", true) => {}
         (_, false) => {
             return Answer::error(405, "method_not_allowed", "only GET is served here")
-                .with_header("allow", "GET");
+                .with_header("allow", "GET")
+                .into();
         }
         (_, true) => {
             return Answer::error(405, "method_not_allowed", "only POST is served here")
-                .with_header("allow", "POST");
+                .with_header("allow", "POST")
+                .into();
         }
     }
     if let Some(answer) = body_refused(head) {
-        return answer;
+        return answer.into();
     }
-    if write && let Some(answer) = write_refused(head, body, trade) {
-        return answer;
+    let rule = if trade {
+        BodyRule::Code
+    } else if chat_write {
+        BodyRule::Object
+    } else {
+        BodyRule::Empty
+    };
+    if write && let Some(answer) = write_refused(head, body, rule) {
+        return answer.into();
     }
     if trade {
-        return trade_code(body, context);
+        return trade_code(body, context).into();
     }
     if head.path == "/api" || head.path.starts_with("/api/") {
         if !authorized(head.header("authorization"), &context.token) {
@@ -284,12 +349,30 @@ pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer 
                 "unauthorized",
                 "open the address `junees dashboard` printed",
             )
-            .with_header("www-authenticate", "Bearer");
+            .with_header("www-authenticate", "Bearer")
+            .into();
+        }
+        if chat::is_chat_path(&head.path) {
+            let (Some(chat), Some(route)) = (&context.chat, chat_route) else {
+                return Answer::error(
+                    404,
+                    "not_found",
+                    "the chat is served only by `junees dashboard --chat`",
+                )
+                .into();
+            };
+            return match route {
+                chat::Route::Events(id) => match chat.events(id, &head.query) {
+                    Ok(events) => Reply::Events(events),
+                    Err(answer) => answer.into(),
+                },
+                route => chat.write(&route, body).await.into(),
+            };
         }
         if write {
-            return actions::write(&head.path, context).await;
+            return actions::write(&head.path, context).await.into();
         }
-        return api::answer(&head.path, &head.query, context).await;
+        return api::answer(&head.path, &head.query, context).await.into();
     }
     match assets::find(&head.path) {
         Some(asset) => Answer {
@@ -297,16 +380,28 @@ pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer 
             content_type: asset.content_type,
             body: asset.bytes.to_vec(),
             headers: Vec::new(),
-        },
-        None => Answer::error(404, "not_found", "there is nothing at this path"),
+        }
+        .into(),
+        None => Answer::error(404, "not_found", "there is nothing at this path").into(),
     }
+}
+
+/// What a write's body may be.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BodyRule {
+    /// Nothing or `{}`.
+    Empty,
+    /// `{"code": "<code>"}` ([`TOKEN_PATH`]).
+    Code,
+    /// Nothing or a JSON object, which the chat handler reads.
+    Object,
 }
 
 /// Why a write is refused before its token is checked: it must carry an
 /// `Origin` (the same origin was checked already), so only this page's
 /// script can send it; a `Content-Type`, when given, must be JSON; the
 /// body must be empty or `{}`.
-fn write_refused(head: &Head, body: &[u8], trade: bool) -> Option<Answer> {
+fn write_refused(head: &Head, body: &[u8], rule: BodyRule) -> Option<Answer> {
     if head.header("origin").is_none() {
         return Some(Answer::error(
             403,
@@ -325,17 +420,17 @@ fn write_refused(head: &Head, body: &[u8], trade: bool) -> Option<Answer> {
         }
     }
     let fits = match std::str::from_utf8(body).map(str::trim) {
-        Ok(text) if trade => serde_json::from_str::<CodeBody>(text).is_ok(),
+        Ok(text) if rule == BodyRule::Code => serde_json::from_str::<CodeBody>(text).is_ok(),
         Ok("") => true,
         Ok(text) => serde_json::from_str::<serde_json::Map<String, Value>>(text)
-            .is_ok_and(|object| object.is_empty()),
+            .is_ok_and(|object| rule == BodyRule::Object || object.is_empty()),
         Err(_) => false,
     };
     if !fits {
-        let message = if trade {
-            "the body is {\"code\": \"<code>\"}"
-        } else {
-            "a write takes no body, or `{}`"
+        let message = match rule {
+            BodyRule::Code => "the body is {\"code\": \"<code>\"}",
+            BodyRule::Object => "the body is a JSON object",
+            BodyRule::Empty => "a write takes no body, or `{}`",
         };
         return Some(Answer::error(400, "bad_body", message));
     }
@@ -366,6 +461,7 @@ fn trade_code(body: &[u8], context: &Context) -> Answer {
         .lock()
         .is_ok_and(|mut codes| codes.redeem(&given, Instant::now()));
     if traded {
+        log_exchange(context);
         Answer::json(200, &json!({ "token": context.token }))
     } else {
         Answer::error(
@@ -373,6 +469,25 @@ fn trade_code(body: &[u8], context: &Context) -> Answer {
             "bad_code",
             "the code is wrong, used or expired; run `junees dashboard` again",
         )
+    }
+}
+
+/// Says on stderr and in `dashboard.log` that the one-time code was
+/// traded, with the time only: a trade the user did not make shows.
+fn log_exchange(context: &Context) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let line = format!(
+        "{} code exchanged\n",
+        crate::session::format_utc_seconds(now)
+    );
+    eprint!("dashboard: {line}");
+    let env = context.env.clone();
+    let (settings, _) = crate::config_file::Settings::load_for_setup(move |key| env(key));
+    if let Some(home) = api::home(&settings) {
+        actions::log_line(&home, &line);
     }
 }
 
@@ -387,12 +502,13 @@ fn body_refused(head: &Head) -> Option<Answer> {
         ));
     }
     let length = head.header("content-length")?;
+    let most = chat::body_limit(&head.path).unwrap_or(MAX_BODY);
     match length.parse::<u64>() {
-        Ok(length) if length <= MAX_BODY => None,
+        Ok(length) if length <= most => None,
         Ok(_) => Some(Answer::error(
             413,
             "body_too_large",
-            "a request body may hold 1 KiB at most",
+            &format!("a request body may hold {} KiB at most here", most / 1024),
         )),
         Err(_) => Some(Answer::error(
             400,

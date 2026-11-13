@@ -200,6 +200,7 @@ fn status(settings: &Settings, context: &Context) -> Value {
     };
     json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "chat": context.chat.is_some(),
         "home": home(settings).map(|home| home.display().to_string()),
         "backend": backend.map(|backend| match backend {
             Backend::Api => "api",
