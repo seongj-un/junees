@@ -213,6 +213,96 @@ ul {
   background: var(--primary-hover);
 }
 
+a.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.button-secondary {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.button-secondary:hover {
+  background: var(--surface-2);
+}
+
+.button-small {
+  min-height: 32px;
+  min-width: 0;
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.row-action {
+  margin-top: 6px;
+}
+
+/* Confirmation dialog */
+
+.dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 12px 32px rgb(16 24 40 / 18%);
+}
+
+.dialog::backdrop {
+  background: rgb(15 17 21 / 45%);
+}
+
+.dialog-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.dialog-body {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.dialog-target {
+  margin-bottom: 4px;
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.dialog-error {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--fail-soft);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.dialog-detail {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
 .is-locked .topbar-actions,
 .is-locked .sidenav {
   display: none;
@@ -771,6 +861,189 @@ ul {
   max-height: 320px;
   margin-top: 8px;
   overflow-y: auto;
+}
+
+/* Session detail */
+
+.table-clickable tbody tr {
+  cursor: pointer;
+}
+
+.table-clickable tbody tr:hover > * {
+  background: var(--surface-2);
+}
+
+.row-link {
+  color: var(--primary-text);
+  text-decoration: none;
+}
+
+.row-link:hover {
+  text-decoration: underline;
+}
+
+.session-head {
+  margin-bottom: 16px;
+}
+
+.facts-inline {
+  grid-template-columns: max-content minmax(0, 1fr);
+}
+
+.msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.msg {
+  min-width: 0;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.msg:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.msg-user {
+  border-left-color: var(--primary);
+}
+
+.msg-assistant {
+  border-left-color: var(--ok);
+}
+
+.msg-tool {
+  background: var(--surface-2);
+}
+
+.msg-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.msg-role {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.msg-index {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.msg-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.msg-text + .msg-text,
+.msg > .tool,
+.msg > .msg-note {
+  margin-top: 8px;
+}
+
+.msg-cut {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: normal;
+}
+
+.msg-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tool {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.tool summary {
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* Inside the summary, so the native disclosure marker stays. */
+.tool-sum {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 1.5em);
+  vertical-align: middle;
+}
+
+.tool-kind {
+  flex: none;
+  font-weight: 600;
+}
+
+.tool-error .tool-kind {
+  color: var(--fail);
+}
+
+.tool-peek {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool[open] .tool-peek {
+  display: none;
+}
+
+.tool-error {
+  border-color: color-mix(in srgb, var(--fail) 35%, var(--border));
+}
+
+.tool-body {
+  max-height: 360px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.more {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.more .summary {
+  margin: 0;
+}
+
+.more-error {
+  color: var(--fail);
+  font-size: 14px;
 }
 
 /* Doctor */
