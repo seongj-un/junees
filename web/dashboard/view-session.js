@@ -7,8 +7,27 @@ export const PAGE = 100;
 
 const ROLES = { user: "사용자", assistant: "어시스턴트", system: "시스템" };
 
-/** Messages fetched with 더 보기, kept across refreshes of the first page. */
-const more = { id: null, messages: [] };
+/**
+ * Messages fetched with 더 보기, kept across refreshes of the first page:
+ * `next` is the offset of the next page, `done` that a page came back empty.
+ */
+const more = { id: null, messages: [], next: 0, done: false };
+
+/**
+ * Where the page after `page` starts. Offsets count messages, like
+ * `offset` in the request; the `index` of each message is not used for it.
+ */
+export function pageEnd(page, requested) {
+  const start = Number.isInteger(page?.offset) ? page.offset : requested;
+  return start + (Array.isArray(page?.messages) ? page.messages.length : 0);
+}
+
+/** Server-side blocks the dashboard does not show, by `kind`. */
+const OTHER_KINDS = {
+  server_tool_use: "서버 도구 호출",
+  web_search_tool_result: "웹 검색 결과",
+  web_fetch_tool_result: "웹 페이지 가져오기 결과",
+};
 
 /** The role as shown; a user turn made only of tool results reads as one. */
 export function roleLabel(message) {
@@ -96,6 +115,12 @@ function blockView(block, messageIndex, n) {
       return el("p", { class: "msg-note" }, `이미지${block.media_type ? ` (${block.media_type})` : ""}. 대시보드에는 이미지 내용을 보내지 않습니다.`);
     case "thinking":
       return el("p", { class: "msg-note" }, "생각 과정. 내용은 대시보드에 보내지 않습니다.");
+    case "other":
+      return el(
+        "p",
+        { class: "msg-note" },
+        `${OTHER_KINDS[block.kind] ?? `기타 블록(${block.kind ?? "종류 없음"})`}. 내용은 대시보드에 보내지 않습니다.`,
+      );
     default:
       return el("p", { class: "msg-note" }, `표시하지 않는 내용(${block.type ?? "알 수 없음"})`);
   }
@@ -130,9 +155,9 @@ export function renderControls(root) {
 
 export function render(root, data, ctx) {
   if (more.id !== data.id) {
-    more.id = data.id;
-    more.messages = [];
+    Object.assign(more, { id: data.id, messages: [], next: 0, done: false });
   }
+  more.next = Math.max(more.next, pageEnd(data, 0));
   const first = Array.isArray(data.messages) ? data.messages : [];
   let messages = mergePages(first, more.messages);
   const total = Math.max(Number(data.total) || 0, messages.length);
@@ -165,23 +190,28 @@ export function render(root, data, ctx) {
   const footer = el("div", { class: "more" }, count, error, button);
 
   const update = () => {
-    const left = total - messages.length;
+    const left = more.done ? 0 : Math.max(0, total - more.next);
     count.textContent =
       left > 0
         ? `${formatInt(total)}개 중 ${formatInt(messages.length)}개를 보고 있습니다.`
-        : `메시지 ${formatInt(total)}개를 모두 보고 있습니다.`;
+        : `메시지 ${formatInt(messages.length)}개를 모두 보고 있습니다.`;
     button.hidden = left <= 0;
     button.textContent = left > 0 ? `${formatInt(Math.min(PAGE, left))}개 더 보기` : "더 보기";
   };
 
   button.addEventListener("click", async () => {
-    const offset = messages.length ? messages[messages.length - 1].index + 1 : 0;
+    const offset = more.next;
     button.disabled = true;
     button.textContent = "불러오는 중";
     error.hidden = true;
     try {
       const page = await ctx.fetchJson(`/api/sessions/${encodeURIComponent(data.id)}?offset=${offset}&limit=${PAGE}`);
-      const added = (Array.isArray(page.messages) ? page.messages : []).filter((m) => m.index >= offset);
+      const got = Array.isArray(page.messages) ? page.messages : [];
+      const shown = new Set(messages.map((m) => m.index));
+      const added = got.filter((m) => !shown.has(m.index));
+      more.next = Math.max(more.next, pageEnd(page, offset));
+      // An empty page ends the list even if `total` says more: no endless button.
+      if (got.length === 0) more.done = true;
       more.messages = mergePages(more.messages, added);
       messages = mergePages(messages, added);
       list.append(...added.map((m) => messageView(m, now)));
