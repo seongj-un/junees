@@ -5,6 +5,10 @@ check, security headers). Not part of the binary.
 
     python3 web/dashboard/dev/serve.py [--port 8787] [--mode ok] [--token T]
 
+One-time codes: the second line it prints opens with #code=, which the page
+trades at POST /api/token (60 seconds, once, 5 wrong tries end it), as the
+browser `junees dashboard` opens does. GET /__dev/code makes another.
+
 Writes: POST /api/cron/<id>/pause|resume and /api/webhooks/<name>/pause|resume
 change the fixtures in memory (restart to reset). They need the token, an
 Origin from this server and an empty or {} body, as the contract says.
@@ -138,6 +142,29 @@ class DevServer(ThreadingHTTPServer):
     token = ""
     mode = "ok"
     fixtures: dict = {}
+    # One-time codes for the address: code -> [expires (monotonic), wrong tries]
+    codes: dict = {}
+
+    def new_code(self):
+        code = secrets.token_urlsafe(32)
+        self.codes[code] = [time.monotonic() + CODE_SECONDS, 0]
+        return code
+
+    def trade(self, given):
+        """Uses up `given` if it is a live code; a wrong one counts against every live code."""
+        now = time.monotonic()
+        for code, (expires, _) in list(self.codes.items()):
+            if expires < now:
+                del self.codes[code]
+        for code in list(self.codes):
+            if hmac.compare_digest(code.encode(), given.encode()):
+                del self.codes[code]
+                return True
+        for code in list(self.codes):
+            self.codes[code][1] += 1
+            if self.codes[code][1] >= 5:
+                del self.codes[code]
+        return False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -168,6 +195,8 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host")
         if host not in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}:
             return self.send_json(421, {"error": "misdirected", "message": "unexpected Host"})
+        if urlsplit(self.path).path == "/api/token":
+            return self.trade_code(host)
         match = ACTION.fullmatch(urlsplit(self.path).path)
         if not match:
             return self.send_json(405 if self.path.startswith("/api/") else 404, {"error": "method_not_allowed", "message": "only GET here"})
@@ -218,6 +247,24 @@ class Handler(BaseHTTPRequestHandler):
                 item["next_run"] = soon.replace(minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.send_json(200, item)
 
+    def trade_code(self, host):
+        """POST /api/token: a one-time code from the address for the token."""
+        if self.headers.get("Origin") != f"http://{host}":
+            return self.send_json(403, {"error": "forbidden_origin", "message": "a write needs an Origin from this server"})
+        content_type = self.headers.get("Content-Type")
+        if content_type is not None and content_type.split(";")[0].strip() != "application/json":
+            return self.send_json(415, {"error": "unsupported_media_type", "message": "application/json only"})
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 1024:
+            return self.send_json(413, {"error": "too_large", "message": "the body may be 1KB"})
+        try:
+            code = json.loads(self.rfile.read(length) or b"{}").get("code")
+        except (ValueError, AttributeError):
+            return self.send_json(400, {"error": "bad_body", "message": "send {\"code\": \"...\"}"})
+        if self.server.trade(code if isinstance(code, str) else ""):
+            return self.send_json(200, {"token": self.server.token})
+        self.send_json(401, {"error": "bad_code", "message": "the code is wrong, used or expired"})
+
     def authorized(self):
         auth = self.headers.get("Authorization", "")
         expected = f"Bearer {self.server.token}"
@@ -231,6 +278,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Host") not in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}:
             return self.send_json(421, {"error": "misdirected", "message": "unexpected Host"})
         url = urlsplit(self.path)
+
+        if url.path == "/__dev/code":
+            # A fresh one-time address, as `junees dashboard` gives the browser it opens.
+            return self.send_json(200, {"url": f"http://{self.headers.get('Host')}/#code={self.server.new_code()}"})
 
         if url.path.startswith("/__dev/mode/"):
             mode = url.path.rsplit("/", 1)[1]
@@ -279,6 +330,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 STARTED = time.monotonic()
+CODE_SECONDS = 60
 
 
 def main():
@@ -291,8 +343,11 @@ def main():
     server = DevServer(("127.0.0.1", args.port), Handler)
     server.token = args.token or secrets.token_urlsafe(32)
     server.mode = args.mode
+    server.codes = {}
     server.fixtures = load_fixtures()
-    print(f"http://127.0.0.1:{server.server_address[1]}/#token={server.token}", flush=True)
+    base = f"http://127.0.0.1:{server.server_address[1]}/"
+    print(f"{base}#token={server.token}", flush=True)
+    print(f"{base}#code={server.new_code()}  (one-time, 60 s; GET /__dev/code for another)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

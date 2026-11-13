@@ -586,7 +586,11 @@
      {
       "type": "tool_result",
       "is_error": false,
-      "text_preview": "Nov 12 09:00:04 junees[1201]: daily-report failed: could not reach api.anthropic.com (timed out after 60s)"
+      "text_preview": "[hidden: it looks like it holds a credential]"
+     },
+     {
+      "type": "text",
+      "text": "[hidden: it looks like it holds a credential]"
      }
     ]
    },

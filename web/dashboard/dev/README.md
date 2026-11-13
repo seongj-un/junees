@@ -12,6 +12,7 @@ python3 web/dashboard/dev/serve.py --token dev --mode empty
 - `web/dashboard/`의 정적 파일과, `fixtures/*.json`으로 만든 `/api/*` 응답을 내줍니다. 응답 모양은 로드맵 15단계 스펙의 API 계약과 같습니다.
 - 실제 서버처럼 토큰(`Authorization: Bearer`)과 `Host`를 확인하고, CSP 등 보안 헤더를 붙입니다. 그래서 인라인 스크립트나 스타일을 쓰면 여기서도 막힙니다.
 - fixtures의 시각은 2026-11-13 09:00 UTC를 기준으로 적었고, 서버가 지금 시각으로 옮겨서 보냅니다.
+- 시작할 때 주소를 두 줄 출력합니다. `#token=` 주소는 `--no-open`처럼 사람이 붙여 넣는 경우이고, `#code=` 주소는 `junees dashboard`가 브라우저를 열 때 넘기는 일회용 주소입니다(60초, 한 번만, 틀린 코드 5번이면 무효). 화면은 이 코드를 `POST /api/token`으로 토큰과 바꿉니다. 새 일회용 주소가 필요하면 `GET /__dev/code`를 엽니다.
 - 상태를 바꿔 보려면 실행 중에 `GET /__dev/mode/<모드>`를 엽니다(토큰 없이).
   - `ok`: fixtures 그대로
   - `empty`: 모든 목록이 빈 응답
