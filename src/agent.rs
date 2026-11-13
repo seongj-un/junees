@@ -349,7 +349,35 @@ impl Agent {
         images: Vec<crate::images::Image>,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
-        let result = self.run_turn(input, images, &mut on_event).await;
+        // The file tools record what they change to this turn's
+        // checkpoint; lines an undo left come before the input, so the
+        // model knows the files changed back.
+        let journal = self
+            .journal
+            .as_ref()
+            .and_then(|journal| journal.file())
+            .map(std::path::Path::to_path_buf);
+        let turn = crate::checkpoints::begin(journal.as_deref());
+        let notes = turn
+            .as_ref()
+            .and_then(|_| journal.as_deref())
+            .and_then(|journal| journal.file_stem()?.to_str())
+            .and_then(|id| crate::checkpoints::store()?.session(id))
+            .map(|session| session.take_notes())
+            .unwrap_or_default();
+        let with_notes;
+        let sent = if notes.is_empty() {
+            input
+        } else {
+            with_notes = format!("{}\n\n{input}", notes.join("\n"));
+            with_notes.as_str()
+        };
+        let result =
+            crate::checkpoints::scope(turn.clone(), self.run_turn(sent, images, &mut on_event))
+                .await;
+        if let Some(turn) = turn {
+            turn.finish();
+        }
         if let Err(err) = &result {
             self.forget_rejected_images(err, &mut on_event);
         }

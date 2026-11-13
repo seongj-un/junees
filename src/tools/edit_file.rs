@@ -117,11 +117,21 @@ impl Tool for EditFile {
         let access = self.access.clone();
         let names = self.instruction_files.clone();
         let (owned, old, new) = (path.to_string(), old.to_string(), new.to_string());
+        // Task-local: taken here, not on the blocking thread.
+        let turn = crate::checkpoints::current();
         // One blocking call from the checks to the rename: dropping this
         // future (a cancelled turn) cannot stop it between creating the
         // temporary file and renaming or removing it.
         let edited = tokio::task::spawn_blocking(move || {
-            edit(&access, &names, &owned, &old, &new, replace_all)
+            edit(
+                &access,
+                &names,
+                &owned,
+                &old,
+                &new,
+                replace_all,
+                turn.as_deref(),
+            )
         })
         .await;
         match edited {
@@ -134,6 +144,7 @@ impl Tool for EditFile {
 /// Makes the edit: the file found through its folder, opened and checked
 /// by `access` (a link leads to its target, which is replaced and the link
 /// kept), and the result written to a temporary file renamed over it.
+/// With `turn`, the content before is recorded first, and the hash after.
 fn edit(
     access: &FileAccess,
     names: &[String],
@@ -141,6 +152,7 @@ fn edit(
     old: &str,
     new: &str,
     replace_all: bool,
+    turn: Option<&crate::checkpoints::Turn>,
 ) -> Result<ToolOutput, ToolOutput> {
     if old.is_empty() {
         return Err(ToolOutput::error(
@@ -181,6 +193,7 @@ fn edit(
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(too_large(bytes.len() as u64));
     }
+    let before = crate::checkpoints::Before::from_content(&bytes, &opened.meta);
     // Before any hint shows lines of it: such files are not text
     // (`/proc/<pid>/environ` is NUL-separated).
     if bytes.contains(&0) {
@@ -192,9 +205,17 @@ fn edit(
         .map_err(|_| ToolOutput::error(format!("{path} is not valid UTF-8 text")))?;
 
     let edit = plan_edit(&text, old, new, replace_all).map_err(ToolOutput::error)?;
-    target
-        .replace(edit.text.as_bytes(), false)
-        .map_err(|err| ToolOutput::error(format!("cannot write {path}: {err}")))?;
+    if let Some(turn) = turn {
+        turn.before(target.real(), before);
+    }
+    let written = target.replace(edit.text.as_bytes(), false);
+    if let Some(turn) = turn {
+        match &written {
+            Ok(()) => turn.after(target.real(), Some(edit.text.as_bytes())),
+            Err(_) => turn.after_disk(target.real()),
+        }
+    }
+    written.map_err(|err| ToolOutput::error(format!("cannot write {path}: {err}")))?;
     Ok(ToolOutput::ok(edit.summary(path)))
 }
 

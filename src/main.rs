@@ -121,6 +121,7 @@ async fn run() -> Result<ExitCode> {
         // stdout is the protocol's: nothing else is printed there.
         Command::Mcp(junees::mcp::oauth::cli::McpCommand::Serve(options)) => {
             let settings = Settings::from_env()?;
+            junees::checkpoints::configure(|key| settings.get(key));
             return junees::mcp::serve::main(&options, settings).await;
         }
         Command::Mcp(command) => return mcp_command(&command).await,
@@ -207,6 +208,7 @@ async fn run() -> Result<ExitCode> {
     if wants_first_setup(&command, &settings) {
         setup(&mut settings, &input).await?;
     }
+    junees::checkpoints::configure(|key| settings.get(key));
     match command {
         Command::Run(args) => conversation(args, settings, input).await,
         Command::Task(command) => run_task(command, &settings).await,
@@ -971,6 +973,7 @@ async fn gateway_engines(settings: &Settings, note: &'static str) -> Result<Gate
 /// its commands without Junees's approval questions, so it is refused.
 async fn dashboard_chat(dir: Option<&Path>) -> Result<junees::dashboard::chat::Setup> {
     let settings = Settings::from_env()?;
+    junees::checkpoints::configure(|key| settings.get(key));
     let backend = Backend::from_lookup(|key| settings.get(key))?;
     if matches!(backend, Backend::ClaudeCode) {
         anyhow::bail!(

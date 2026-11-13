@@ -504,6 +504,32 @@ impl Target {
         &self.real
     }
 
+    /// Removes the file there (no link is followed: the name goes).
+    pub fn remove(&self) -> io::Result<()> {
+        unlink_at(&self.dir, &self.name)
+    }
+
+    /// What the file there is now, for a checkpoint: absent, or its
+    /// content read without following a link.
+    pub fn before(&self) -> Result<crate::checkpoints::Before, Refusal> {
+        if self.existing.is_none() {
+            return Ok(crate::checkpoints::Before::Absent);
+        }
+        use std::io::Read as _;
+        let opened = self.open_existing()?;
+        if opened.meta.len() > crate::checkpoints::MAX_FILE_BYTES {
+            return Ok(crate::checkpoints::Before::TooLarge(opened.meta.len()));
+        }
+        let mut bytes = Vec::new();
+        (&opened.file)
+            .take(crate::checkpoints::MAX_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(crate::checkpoints::Before::from_content(
+            &bytes,
+            &opened.meta,
+        ))
+    }
+
     /// Opens the file there for reading, without following a link.
     pub fn open_existing(&self) -> Result<Opened, Refusal> {
         let file = open_at(
