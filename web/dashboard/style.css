@@ -904,7 +904,6 @@ a.button {
   padding: 14px 18px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--border-strong);
   border-radius: var(--radius);
 }
 
@@ -913,12 +912,14 @@ a.button {
   outline-offset: 2px;
 }
 
+/* Roles differ by a light tint and their label, not a colored side bar. */
 .msg-user {
-  border-left-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 5%, var(--surface));
+  border-color: color-mix(in srgb, var(--primary) 22%, var(--border));
 }
 
-.msg-assistant {
-  border-left-color: var(--ok);
+.msg-user .msg-role {
+  color: var(--primary-text);
 }
 
 .msg-tool {
