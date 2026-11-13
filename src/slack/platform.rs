@@ -27,7 +27,7 @@ use super::api::Api;
 use super::format::{escape, to_mrkdwn};
 use crate::approval::{Request, render};
 use crate::gateway::ask::{
-    Choice, Question, WITH_BUTTONS, button_data, fence_safe, human, without_buttons,
+    Choice, Question, WITH_BUTTONS, button_data, fence_safe, instructions, without_buttons,
 };
 use crate::gateway::platform::{Attached, Kind, Platform};
 use crate::gateway::split::{length, split_message};
@@ -470,17 +470,12 @@ fn question_blocks(text: &str, question: &Question) -> Value {
 /// Slack's: what the call does in a code block, then the choices.
 pub fn question(request: &Request, timeout: Duration) -> String {
     let mut details = render(request);
-    details.push_str(&format!(
-        "     always allows: {}\n",
-        request.kinds.join(", ")
-    ));
+    details.push_str(&crate::approval::always_line(request));
     format!(
-        "**Approve this tool call?**\n```\n{}```\n{WITH_BUTTONS} `y` to run it, `n` to decline \
-         (`n <reason>` tells the model why), `a` to allow this kind for the rest of this \
-         conversation. Anything else declines with your words as the reason. No answer within \
-         {} declines. In a channel, reply in this thread.",
+        "**이 도구 호출을 승인할까요?**\n```\n{}```\n{WITH_BUTTONS}{} 채널에서는 이 스레드에 \
+         답장하세요.",
         fence_safe(&details),
-        human(timeout)
+        instructions("이 대화가 끝날 때까지", timeout)
     )
 }
 
@@ -610,7 +605,7 @@ mod tests {
         );
         question.always = true;
         let blocks = question_blocks("q", &question);
-        assert_eq!(blocks[1]["elements"][1]["text"]["text"], "Always allow");
+        assert_eq!(blocks[1]["elements"][1]["text"]["text"], "항상 허용");
         assert_eq!(
             blocks[1]["elements"][1]["action_id"],
             blocks[1]["elements"][1]["value"]
@@ -628,14 +623,14 @@ mod tests {
         };
         let text = to_mrkdwn(&question(&request, Duration::from_secs(300)));
         assert!(
-            text.starts_with("*Approve this tool call?*\n```\n"),
+            text.starts_with("*이 도구 호출을 승인할까요?*\n```\n"),
             "{text}"
         );
         assert!(
-            text.contains("approve bash: rm -r build &amp;&amp; echo &lt;done&gt;"),
+            text.contains("승인 요청 bash: rm -r build &amp;&amp; echo &lt;done&gt;"),
             "{text}"
         );
-        assert!(text.contains("within 5m"), "{text}");
+        assert!(text.contains("5m 안에 답이 없으면"), "{text}");
         assert!(!text.contains("**"), "{text}");
     }
 

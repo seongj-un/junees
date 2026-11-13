@@ -69,9 +69,9 @@ impl Choice {
     /// The button's label.
     pub fn label(self) -> &'static str {
         match self {
-            Choice::Allow => "Allow",
-            Choice::Always => "Always allow",
-            Choice::Decline => "Decline",
+            Choice::Allow => "허용",
+            Choice::Always => "항상 허용",
+            Choice::Decline => "거절",
         }
     }
 }
@@ -354,7 +354,7 @@ impl Ask for DiscordAsk {
             slot: &self.slot,
             out: &self.out,
             id: id.clone(),
-            outcome: "Not answered: the turn stopped.".to_string(),
+            outcome: "답하기 전에 턴이 멈췄습니다.".to_string(),
         };
         // Through the worker, so it shows after the tool lines before it.
         let _ = self.out.send(Progress::Question(Question {
@@ -371,9 +371,9 @@ impl Ask for DiscordAsk {
             Ok(Err(_)) => Answer::No,
             Err(_) => {
                 let waited = human(self.timeout);
-                ended.outcome = format!("No answer within {waited}: declined.");
+                ended.outcome = format!("{waited} 안에 답이 없어 거절했습니다.");
                 let _ = self.out.send(Progress::Note(format!(
-                    "(no answer within {waited}: declined)"
+                    "({waited} 안에 답이 없어 거절했습니다)"
                 )));
                 Answer::NoBecause(format!("no answer within {waited}"))
             }
@@ -386,44 +386,56 @@ impl Ask for DiscordAsk {
 /// every time).
 fn outcome(reply: &Reply, always: bool) -> String {
     let what = match &reply.answer {
-        Answer::Always if always => "Allowed, and this kind from now on",
-        Answer::Yes | Answer::Always => "Allowed",
-        Answer::No => "Declined",
-        Answer::NoBecause(_) => "Declined with a reason",
+        Answer::Always if always => "허용했고, 이 종류는 앞으로 묻지 않습니다",
+        Answer::Yes | Answer::Always => "허용했습니다",
+        Answer::No => "거절했습니다",
+        Answer::NoBecause(_) => "이유를 적어 거절했습니다",
     };
     match &reply.by {
-        Some(by) => format!("{what} by {by}."),
+        Some(by) => format!("{by}: {what}."),
         None => format!("{what}."),
     }
 }
 
 /// How the instructions of a question with buttons begin.
-pub const WITH_BUTTONS: &str = "Press a button, or reply";
+pub const WITH_BUTTONS: &str = "버튼을 누르거나 답장하세요";
+/// How they begin without buttons.
+const WITHOUT_BUTTONS: &str = "답장하세요";
 
 /// `text`, a question, as it reads without buttons: the instructions
-/// (after the request, which may hold any words) begin with "Reply".
+/// (after the request, which may hold any words) begin with
+/// "답장하세요".
 pub fn without_buttons(text: &str) -> String {
     match text.rfind(WITH_BUTTONS) {
-        Some(at) => format!("{}Reply{}", &text[..at], &text[at + WITH_BUTTONS.len()..]),
+        Some(at) => format!(
+            "{}{WITHOUT_BUTTONS}{}",
+            &text[..at],
+            &text[at + WITH_BUTTONS.len()..]
+        ),
         None => text.to_string(),
     }
+}
+
+/// The instructions after [`WITH_BUTTONS`]: the replies, then that no
+/// answer within `timeout` declines. `scope` says how long `a` lasts.
+pub fn instructions(scope: &str, timeout: Duration) -> String {
+    format!(
+        ". `y`는 실행, `n`은 거절(`n <이유>`면 모델에게 이유를 알립니다), `a`는 {scope} 이 \
+         종류를 항상 허용합니다. 그 밖의 답장은 그 글을 이유로 거절합니다. {} 안에 답이 없으면 \
+         거절합니다.",
+        human(timeout)
+    )
 }
 
 /// The question as posted: what the call does in a code block, then the
 /// choices.
 pub fn question(request: &Request, timeout: Duration) -> String {
     let mut details = render(request);
-    details.push_str(&format!(
-        "     always allows: {}\n",
-        request.kinds.join(", ")
-    ));
+    details.push_str(&crate::approval::always_line(request));
     format!(
-        "**Approve this tool call?**\n```text\n{}```\n{WITH_BUTTONS} `y` to run it, `n` to \
-         decline (`n <reason>` tells the model why), `a` to allow this kind for the rest of this \
-         channel's conversation. Anything else declines with your words as the reason. No \
-         answer within {} declines.",
+        "**이 도구 호출을 승인할까요?**\n```text\n{}```\n{WITH_BUTTONS}{}",
         fence_safe(&details),
-        human(timeout)
+        instructions("이 채널 대화가 끝날 때까지", timeout)
     )
 }
 
@@ -504,9 +516,12 @@ mod tests {
     fn the_question_keeps_its_code_block() {
         let text = question(&request(), Duration::from_secs(300));
         assert_eq!(text.matches("```").count(), 2, "{text}");
-        assert!(text.contains("approve bash: rm -r build"), "{text}");
-        assert!(text.contains("within 5m"), "{text}");
-        assert!(text.contains("Press a button, or reply `y`"), "{text}");
+        assert!(text.contains("승인 요청 bash: rm -r build"), "{text}");
+        assert!(text.contains("5m 안에 답이 없으면 거절합니다"), "{text}");
+        assert!(
+            text.contains("버튼을 누르거나 답장하세요. `y`는 실행"),
+            "{text}"
+        );
         assert_eq!(human(Duration::from_secs(5400)), "1h30m");
         assert_eq!(human(Duration::from_secs(0)), "0s");
     }
@@ -587,7 +602,7 @@ mod tests {
             rx.recv().await,
             Some(Progress::Answered {
                 id: question.id.clone(),
-                outcome: "Allowed, and this kind from now on.".into()
+                outcome: "허용했고, 이 종류는 앞으로 묻지 않습니다.".into()
             })
         );
         // The question is over: its buttons do nothing.
@@ -618,7 +633,7 @@ mod tests {
             rx.recv().await,
             Some(Progress::Answered {
                 id: question.id.clone(),
-                outcome: "Declined by <@1>.".into()
+                outcome: "<@1>: 거절했습니다.".into()
             })
         );
         assert!(!slot.press(press(&question.id, Choice::Allow, Some("77"))));
@@ -648,13 +663,13 @@ mod tests {
         };
         assert_eq!(
             rx.recv().await,
-            Some(Progress::Note("(no answer within 1s: declined)".into()))
+            Some(Progress::Note("(1s 안에 답이 없어 거절했습니다)".into()))
         );
         assert_eq!(
             rx.recv().await,
             Some(Progress::Answered {
                 id: question.id.clone(),
-                outcome: "No answer within 1s: declined.".into()
+                outcome: "1s 안에 답이 없어 거절했습니다.".into()
             })
         );
         assert!(!slot.press(press(&question.id, Choice::Allow, None)));
@@ -673,7 +688,7 @@ mod tests {
             rx.recv().await,
             Some(Progress::Answered {
                 id: question.id.clone(),
-                outcome: "Not answered: the turn stopped.".into()
+                outcome: "답하기 전에 턴이 멈췄습니다.".into()
             })
         );
         assert!(!slot.press(press(&question.id, Choice::Allow, None)));
@@ -683,12 +698,12 @@ mod tests {
     fn without_buttons_rewrites_only_the_instructions() {
         let mut request = request();
         // The request may hold the same words; they stay as they are.
-        request.target = "echo Press a button, or reply".into();
+        request.target = format!("echo {WITH_BUTTONS}");
         let text = question(&request, Duration::from_secs(300));
         let plain = without_buttons(&text);
-        assert!(plain.contains("echo Press a button, or reply"), "{plain}");
-        assert!(plain.contains("\nReply `y` to run it"), "{plain}");
-        assert_eq!(plain.matches("Press a button").count(), 1, "{plain}");
+        assert!(plain.contains(&format!("echo {WITH_BUTTONS}")), "{plain}");
+        assert!(plain.contains("\n답장하세요. `y`는 실행"), "{plain}");
+        assert_eq!(plain.matches(WITH_BUTTONS).count(), 1, "{plain}");
         assert_eq!(without_buttons("no instructions"), "no instructions");
     }
 
@@ -706,7 +721,7 @@ mod tests {
             rx.recv().await,
             Some(Progress::Answered {
                 id: question.id,
-                outcome: "Allowed.".into()
+                outcome: "허용했습니다.".into()
             })
         );
     }
