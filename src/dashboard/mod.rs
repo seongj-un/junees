@@ -1,16 +1,21 @@
-//! `junees dashboard`: a read-only web page about this Junees (settings,
-//! sessions, usage, scheduled jobs, webhooks, doctor), served on a
-//! loopback address to the browser of this computer.
+//! `junees dashboard`: a web page about this Junees (settings, sessions
+//! and their conversations, usage, scheduled jobs, webhooks, doctor),
+//! served on a loopback address to the browser of this computer. Its only
+//! writes pause and resume jobs and routes.
 //!
 //! - [`server`]: the HTTP side and its guards (bearer token, `Host`,
 //!   `Origin`, size and time limits, security headers).
 //! - [`api`]: the JSON of `/api/*`, built from the modules that own the
 //!   data. The contract is in `docs/dashboard.md`.
+//! - [`session_view`]: one session's conversation, a page at a time.
+//! - [`actions`]: pause and resume, logged to `dashboard.log`.
 //! - [`assets`]: the page itself, `web/dashboard/`, built into the binary.
 
+mod actions;
 mod api;
 mod assets;
 pub mod server;
+mod session_view;
 
 use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
