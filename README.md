@@ -109,6 +109,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees dashboard [--listen 127.0.0.1:7878] [--no-open]`: 브라우저로 보는 읽기 전용 대시보드([대시보드](docs/dashboard.md))
 - `junees plugin list|install|enable|disable|remove`: 플러그인([플러그인](docs/plugins.md))
 - `junees mcp login|logout <서버>`: MCP 서버 OAuth 로그인([OAuth 로그인](docs/mcp.md#oauth-로그인))
+- `junees mcp serve [--dir <폴더>]`: Junees를 stdio MCP 서버로 띄워 다른 에이전트가 일을 맡기게 한다([Junees를 MCP 서버로](docs/mcp.md#junees를-mcp-서버로))
 - `junees update [--check] [--version vX.Y.Z]`: 최신 릴리스로 바꾸기([업데이트](docs/install.md#업데이트))
 
 명령줄에서도 `junees task "목표"`(계획 + 실행), `junees task`(이어서 실행), `junees status`(상태). 하위 명령 이름과 같은 한 단어 질문(`status`, `task`, `setup`, `gateway`, `discord`, `telegram`, `cron`, `webhook`, `sessions`, `doctor`, `dashboard`, `usage`, `plugin`, `plugins`, `mcp`, `update`)은 `junees -p status`처럼 `-p`로 묻는다. `-`로 시작하는 질문은 `junees -- "-5도면 추워?"`.
@@ -132,7 +133,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [디스코드 게이트웨이](docs/gateways.md#디스코드-게이트웨이): 채널(스레드, DM)마다 대화 하나를 두는 디스코드 봇. 승인 질문은 버튼이나 글 답장으로 답한다.
 - [텔레그램 게이트웨이](docs/gateways.md#텔레그램-게이트웨이): 같은 엔진으로 도는 텔레그램 봇(승인 버튼은 인라인 키보드).
 - [슬랙 게이트웨이](docs/gateways.md#슬랙-게이트웨이): Socket Mode로 받는 슬랙 앱(DM과 채널 스레드마다 대화 하나, mrkdwn 서식).
-- [MCP 서버](docs/mcp.md): stdio와 Streamable HTTP MCP 서버의 도구, OAuth 로그인.
+- [MCP 서버](docs/mcp.md): stdio와 Streamable HTTP MCP 서버의 도구, OAuth 로그인, Junees 자신을 MCP 서버로 쓰기(`junees mcp serve`).
 - [예약 작업](docs/automation.md#예약-작업): 프롬프트를 일정에 맞춰 무인 실행하고 결과를 파일, 디스코드, 웹훅으로 보낸다.
 - [웹훅](docs/automation.md#웹훅): HTTP 요청(GitHub 웹훅 등)이 무인 실행을 시작하고, `add-github`는 PR 리뷰, 리뷰 반영, merge를 맡는다.
 - [GitHub](docs/automation.md#github): 모델의 `github` 도구로 PR 읽기, 코멘트, 리뷰, PR 열기, merge.

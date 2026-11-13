@@ -78,6 +78,89 @@ junees mcp logout docs    # 저장한 로그인을 지운다
 
 승인(`JUNEES_APPROVAL`, [실행 전 승인](safety.md#실행-전-승인) 절): `risky`(기본)에서는 `trust`가 없는 서버의 도구를 부를 때마다 "외부 도구"로 묻는다. 질문에는 서버와 원래 도구 이름, 인자 JSON 앞부분(8줄)이 나오고, `a`는 그 도구 하나를 이번 실행 동안 허용한다. `all`은 trust 서버의 도구도 묻고, `off`는 묻지 않는다. 게이트웨이는 같은 질문을 채널에서 묻는다. `-p`는 사람이 없으므로 묻지 않는다(기존 정책 그대로). 예약 작업과 웹훅 실행에는 `trust: true`인 서버의 도구만 준다: 물을 사람이 없는데 웹훅은 누구나 쓴 글로 움직이므로, 대화에서라면 물었을 도구는 빼고 그 서버 이름을 실행 출력(stderr)과 실행 결과의 메모(출력 파일, 전달된 결과, `cron list`/`webhook list`의 마지막 실행)에 적는다. 실행 자체는 `ok`로 끝난다.
 
+## Junees를 MCP 서버로
+
+`junees mcp serve`를 쓰면 다른 에이전트(Claude Desktop, Claude Code, Hermes, Cursor 등)가 MCP로 Junees에 일을 맡길 수 있다. 전송은 stdio뿐이고 네트워크로는 듣지 않는다. 클라이언트가 이 명령을 자식 프로세스로 띄우고, stdin과 stdout으로 JSON-RPC 2.0 메시지를 한 줄에 하나씩 주고받는다. stdout에는 프로토콜 메시지만 쓰고, 로그는 stderr로 보낸다.
+
+```
+junees mcp serve [--dir <폴더>] [--allow-write] [--allow-bash] [--allow-home]
+```
+
+- `--dir`: 실행이 일하는 폴더다(기본: 현재 폴더). 세션 도구도 이 폴더의 세션만 보여 준다.
+- `--allow-write`: 실행에 `write_file`과 `edit_file`을 준다. 없으면 읽기 전용이다.
+- `--allow-bash`: 실행에 `bash`를 준다.
+- `--allow-home`: 홈 폴더(또는 홈을 품은 폴더)를 `--dir`로 받는다. 없으면 시작을 거절한다.
+
+### 프로토콜
+
+- 버전: `2025-06-18`. 클라이언트가 `2025-03-26`이나 `2024-11-05`를 청하면 그 버전으로 답하고, 모르는 버전이면 `2025-06-18`로 답한다.
+- 처리하는 메시지
+  - `initialize`, `notifications/initialized`, `ping`, `tools/list`, `tools/call`
+  - `notifications/cancelled`: 실행 중인 호출은 멈추고, 기다리던 호출은 버린다. 취소된 요청에는 답하지 않는다.
+  - `notifications/progress`: 호출에 `_meta.progressToken`이 있으면, 도구를 부를 때마다 도구 이름만 보낸다(입력은 보내지 않는다).
+- 오류
+  - `initialize` 전의 요청(`ping` 빼고)은 `-32002`로 답한다.
+  - 배치(배열)는 `-32600`, 모르는 메서드는 `-32601`, 모르는 도구는 `-32602`로 답한다.
+  - 4 MiB를 넘는 줄은 읽어서 버린다.
+- `tools/call`은 한 번에 하나만 실행하고, 동시에 온 호출은 들어온 순서대로 처리한다. `ping`과 `tools/list`는 실행 중에도 바로 답한다.
+
+### 도구
+
+- `junees_run` `{"prompt": 문자열, "session_id"?: 문자열, "max_turns"?: 1~200}`
+  - Junees 에이전트 한 턴을 끝까지 돌리고 마지막 답을 돌려준다.
+  - `structuredContent`는 `{session_id, text, input_tokens, output_tokens, cost_usd, stop_reason}`이다. `stop_reason`은 `end_turn`, `max_turns`, `token_limit`, `time_limit`(30분) 중 하나다.
+  - 실행마다 세션(source `mcp`)을 남긴다. `session_id`를 주면 그 세션을 이어 가는데, 이 폴더에서 `junees_run`이 시작한 세션만 이을 수 있다.
+  - 답과 오류 문구의 비밀 값은 가린다. `cost_usd`는 가격표에 없는 모델이면 `null`이다.
+- `junees_sessions` `{"limit"?: 1~100}`: 이 폴더의 최근 세션 목록이다. id, 제목(첫 메시지 첫 줄 80자, 비밀 값 가림), source, 갱신 시각을 준다.
+- `junees_session` `{"session_id": 문자열, "offset"?: 0 이상, "limit"?: 1~200}`: 이 폴더의 세션 하나를 페이지로 준다. 형식은 [대시보드](dashboard.md)의 `GET /api/sessions/<id>`와 같다(가린 뒤 자름).
+- 잘못된 인자(빠진 `prompt`, 모르는 인자, 범위 밖 숫자, 이 폴더의 것이 아닌 세션)는 JSON-RPC 오류가 아니라 `isError: true` 결과로 돌려준다.
+
+### 무인 실행 규칙
+
+프롬프트는 바깥 에이전트가 주고, MCP로는 사람에게 승인을 물을 수 없다. 그래서 웹훅 실행과 같은 규칙을 적용한다.
+
+- 승인 게이트가 없다. 승인이 필요했을 호출(매번 묻는 종류 포함)은 실행하지 않고 거절한다. bash의 명령 정책, Junees 자신의 상태를 바꾸는 명령 거절, 실행 격리(sandbox, 꺼져 있으면 `require`)를 그대로 따른다.
+- bash에는 웹훅 규칙을 적용한다.
+  - 자격 증명이 든 환경 변수와 git 자격 증명을 넘기지 않는다.
+  - GitHub CLI 설정 폴더는 실행마다 비어 있는 것을 쓴다.
+  - 상태 폴더와 Claude Code 설정 폴더를 읽고 쓰지 못한다.
+  - 홈 폴더의 지속 실행 경로를 막는다.
+- 신뢰(`"trust": true`)하지 않은 MCP 서버의 도구는 뺀다. `github` 도구는 읽기만 하고 쓰기는 모두 거절한다. 세션 검색 도구는 없다.
+- 메모리와 스킬은 읽기만 한다. 프로젝트 지침 파일은 `--dir`에서 읽는다.
+- claude-code 백엔드는 거절한다(Junees의 무인 규칙 밖에서 명령을 실행하므로). `backend = "api"`로 쓴다.
+
+### 설정 예시
+
+Claude Code:
+
+```
+claude mcp add junees -- junees mcp serve --dir /home/me/project
+```
+
+Claude Desktop(`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "junees": {
+      "command": "junees",
+      "args": ["mcp", "serve", "--dir", "/home/me/project", "--allow-write"]
+    }
+  }
+}
+```
+
+Hermes(`config.yaml`의 `mcp_servers`):
+
+```yaml
+mcp_servers:
+  junees:
+    command: junees
+    args: ["mcp", "serve", "--dir", "/home/me/project"]
+```
+
+API 키 등 설정은 `~/.junees/config.toml`과 환경 변수에서 읽는다. 클라이언트가 환경 변수를 넘기지 않으면 `config.toml`에 둔다.
+
 ## MCP 범위 밖
 
 범위 밖: OAuth의 Client ID Metadata Document 호스팅, 토큰 철회(RFC 7009)와 `private_key_jwt`/DPoP, 게이트웨이 채널의 로그인 명령, 이전 명세의 서버 알림 GET 스트림과 끊긴 스트림 이어 받기(`Last-Event-ID`), 2024-11-05 HTTP+SSE 전송, resources/prompts, 목록 변경 구독(`subscriptions/listen`), sampling/elicitation(MRTR), 작업 모드(`junees task`)와 claude-code 백엔드의 MCP. claude-code 백엔드는 지금처럼 `--strict-mcp-config`로 MCP 서버 없이 돈다. `--mcp-config`로 같은 목록을 넘기는 것은 문서상 가능하지만([CLI reference](https://code.claude.com/docs/en/cli-reference)) 간단하지 않아 미뤘다: `-p`는 `--permission-prompts none`이라 `--allowedTools`에 없는 MCP 도구는 모두 거절되므로 trust 서버만 쓸 수 있고, `env` 값이 인자나 임시 파일로 Claude Code에 넘어가야 하며, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`이 서버 환경에서 무엇을 지우는지와 서버 연결 대기(`MCP_TIMEOUT`)도 맞춰야 한다.
