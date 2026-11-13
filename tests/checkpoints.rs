@@ -362,6 +362,31 @@ impl Dashboard {
         self.send("POST", path, &headers, &body.to_string()).await
     }
 
+    /// The first `turn_end` event of chat `id`, read from its stream.
+    async fn turn_end(&self, id: &str) -> Value {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).await.unwrap();
+        let request = format!(
+            "GET /api/chat/{id}/events HTTP/1.1\r\nHost: {}\r\n{}\r\n",
+            self.host(),
+            self.bearer()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut lines = BufReader::new(stream).lines();
+        loop {
+            let line = tokio::time::timeout(WAIT, lines.next_line())
+                .await
+                .expect("no turn_end")
+                .unwrap()
+                .expect("the stream ended");
+            if let Some(data) = line.strip_prefix("data: ") {
+                let event: Value = serde_json::from_str(data).unwrap();
+                if event["type"] == "turn_end" {
+                    return event;
+                }
+            }
+        }
+    }
+
     async fn get(&self, path: &str) -> (u16, Value) {
         self.send("GET", path, &self.bearer(), "").await
     }
@@ -412,11 +437,24 @@ async fn the_chat_serves_checkpoints_and_undo() {
     dashboard.idle(&id).await;
     assert_eq!(read(&made).as_deref(), Some("made\n"));
 
-    let (status, list) = dashboard.get(&format!("/api/chat/{id}/checkpoints")).await;
+    // The chat's turn says which checkpoint it recorded.
+    let end = dashboard.turn_end(&id).await;
+    assert_eq!(
+        (&end["turn"], &end["checkpoint"]),
+        (&json!(1), &json!(1)),
+        "{end}"
+    );
+
+    let (status, mut list) = dashboard.get(&format!("/api/chat/{id}/checkpoints")).await;
     assert_eq!(status, 200);
+    let created_at = list[0]["created_at"].take();
+    assert!(
+        created_at.as_str().is_some_and(|at| at.ends_with('Z')),
+        "{created_at}"
+    );
     assert_eq!(
         list,
-        json!([{"turn": 1, "files": [
+        json!([{"turn": 1, "created_at": null, "files": [
             {"path": made.display().to_string(), "change": "created", "restorable": true}
         ]}])
     );
