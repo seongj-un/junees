@@ -158,7 +158,7 @@ fn question(known: &Known, input: &Value) -> Question {
     let on = if known.url.is_empty() {
         String::new()
     } else {
-        format!(" on {}", page::cut(&known.url, MAX_URL))
+        format!(" (페이지: {})", page::cut(&known.url, MAX_URL))
     };
     let target = match (action, element) {
         ("open" | "navigate", _) => format!(
@@ -168,7 +168,7 @@ fn question(known: &Known, input: &Value) -> Question {
                 MAX_URL
             )
         ),
-        (_, Some(n)) => format!("{action} element {n}{on}"),
+        (_, Some(n)) => format!("{action} 요소 {n}{on}"),
         _ => format!("{action}{on}"),
     };
     let meta = |n: usize| {
@@ -180,21 +180,22 @@ fn question(known: &Known, input: &Value) -> Question {
     };
     let (reason, kind) = match action {
         "evaluate" => (
-            "runs JavaScript the model wrote in the page, with the page's cookies and logins"
+            "모델이 쓴 JavaScript를 이 페이지에서 페이지의 쿠키와 로그인으로 실행합니다"
                 .to_string(),
             KIND_EVALUATE,
         ),
         "type" => match element.map(meta) {
             Some(element) if !element.type_risk.is_empty() => (
-                format!("types into {}", element.type_risk),
+                format!("{}에 입력합니다", risk_in_korean(&element.type_risk)),
                 KIND_SENSITIVE_INPUT,
             ),
             _ => return (target, Vec::new(), Vec::new(), None),
         },
         "click" => match element.map(meta) {
-            Some(element) if !element.click_risk.is_empty() => {
-                (format!("the element {}", element.click_risk), KIND_SUBMIT)
-            }
+            Some(element) if !element.click_risk.is_empty() => (
+                format!("이 요소: {}", risk_in_korean(&element.click_risk)),
+                KIND_SUBMIT,
+            ),
             _ => return (target, Vec::new(), Vec::new(), None),
         },
         "press" if submit_key(input) => {
@@ -202,7 +203,10 @@ fn question(known: &Known, input: &Value) -> Question {
             if risk.is_empty() {
                 return (target, Vec::new(), Vec::new(), None);
             }
-            (format!("the key press {risk}"), KIND_SUBMIT)
+            (
+                format!("이 키 입력: {}", risk_in_korean(&risk)),
+                KIND_SUBMIT,
+            )
         }
         _ => return (target, Vec::new(), Vec::new(), None),
     };
@@ -218,7 +222,7 @@ fn question(known: &Known, input: &Value) -> Question {
         "type" => input
             .get("text")
             .and_then(Value::as_str)
-            .map(|text| format!("text: {} characters (not shown)\n", text.chars().count())),
+            .map(|text| format!("입력할 글: {}자(보이지 않음)\n", text.chars().count())),
         _ => None,
     };
     (target, reasons, vec![kind.to_string()], preview)
@@ -226,8 +230,49 @@ fn question(known: &Known, input: &Value) -> Question {
 
 /// The reason added when the question shows an `evaluate` script only in
 /// part.
-pub const PARTIAL: &str = "the script below is only partially shown (long lines cut, long runs of \
-     blanks shortened or lines left out): what is not shown runs too";
+pub const PARTIAL: &str = "아래 스크립트는 일부만 보입니다(긴 줄은 자르고, 긴 공백은 줄이고, 일부 줄은 \
+     뺐습니다). 보이지 않는 부분도 실행됩니다";
+
+/// A risk the page's guard (`guard.js`) names, as the Korean approval
+/// question says it. The guard's English words stay as they are for the
+/// refusals the model reads and for comparing snapshots; an unknown one is
+/// shown as written.
+pub(crate) fn risk_in_korean(risk: &str) -> String {
+    const KNOWN: &[(&str, &str)] = &[
+        ("a password field", "비밀번호 칸"),
+        (
+            "a payment card or bank account field",
+            "카드 번호나 계좌 번호 칸",
+        ),
+        (
+            "a field with a closed shadow root, whose inside cannot be checked",
+            "안을 확인할 수 없는 닫힌 shadow root의 칸",
+        ),
+        (
+            "submits a form with a password field",
+            "비밀번호 칸이 있는 양식을 제출합니다",
+        ),
+        (
+            "submits a form with payment fields",
+            "결제 칸이 있는 양식을 제출합니다",
+        ),
+        (
+            "goes into a closed shadow root, whose fields and buttons cannot be checked",
+            "칸과 버튼을 확인할 수 없는 닫힌 shadow root로 들어갑니다",
+        ),
+        (
+            "goes into a frame from another site, whose fields and buttons cannot be checked",
+            "칸과 버튼을 확인할 수 없는 다른 사이트의 프레임으로 들어갑니다",
+        ),
+    ];
+    if let Some((_, korean)) = KNOWN.iter().find(|(english, _)| *english == risk) {
+        return (*korean).to_string();
+    }
+    match risk.strip_prefix("looks like a payment or purchase button ") {
+        Some(label) => format!("결제나 구매 버튼으로 보입니다 {label}"),
+        None => risk.to_string(),
+    }
+}
 
 /// What the latest snapshot says Enter (or Space, when `space`) would
 /// do: in element `element`, else in the element the last action
@@ -262,8 +307,8 @@ fn script_preview(code: &str) -> (String, bool) {
     if total > MAX_EXPRESSION {
         return (
             format!(
-                "  ({total} characters: too long to show; the browser tool refuses expressions \
-                 over {MAX_EXPRESSION} characters without running them)\n"
+                "  ({total}자: 너무 길어 보이지 않습니다. 브라우저 도구는 {MAX_EXPRESSION}자가 넘는 \
+                 스크립트를 실행하지 않고 거절합니다)\n"
             ),
             true,
         );
@@ -277,10 +322,7 @@ fn script_preview(code: &str) -> (String, bool) {
         out.push('\n');
     }
     if lines.len() > PREVIEW_LINES {
-        out.push_str(&format!(
-            "  ... {} more lines\n",
-            lines.len() - PREVIEW_LINES
-        ));
+        out.push_str(&format!("  ... {}줄 더\n", lines.len() - PREVIEW_LINES));
         partial = true;
     }
     (out, partial)
@@ -323,12 +365,12 @@ fn preview_line(line: &str, out: &mut String) -> bool {
     let mut at = 0;
     while at < chars.len() {
         if shown >= PREVIEW_WIDTH {
-            out.push_str(&format!("... ({} more characters)", chars.len() - at));
+            out.push_str(&format!("... ({}자 더)", chars.len() - at));
             return true;
         }
         let run = chars[at..].iter().take_while(|c| c.is_whitespace()).count();
         if run > PREVIEW_BLANKS {
-            let mark = format!("[{run} blanks]");
+            let mark = format!("[공백 {run}개]");
             shown += mark.chars().count();
             out.push_str(&mark);
             at += run;

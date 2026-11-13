@@ -1044,10 +1044,10 @@ async fn risky_calls_wait_for_an_answer_in_the_dm_and_the_thread() {
     s.wait_connections(1).await;
     s.push(dm(USER, "write a note"));
     let posts = s
-        .wait_post(DM, |p| p.starts_with("*Approve this tool call?*"))
+        .wait_post(DM, |p| p.starts_with("*이 도구 호출을 승인할까요?*"))
         .await;
     let question = posts.last().unwrap();
-    assert!(question.contains("approve write_file:"), "{question}");
+    assert!(question.contains("승인 요청 write_file:"), "{question}");
     s.push(dm(USER, "n not today"));
     s.wait_post(DM, |p| p == "declined, fine").await;
     assert!(!file.exists());
@@ -1056,7 +1056,7 @@ async fn risky_calls_wait_for_an_answer_in_the_dm_and_the_thread() {
     let asked = mention(USER, "now in the channel", None);
     let thread = thread_key(&asked["ts"]);
     s.push(asked.clone());
-    s.wait_post(&thread, |p| p.starts_with("*Approve this tool call?*"))
+    s.wait_post(&thread, |p| p.starts_with("*이 도구 호출을 승인할까요?*"))
         .await;
     s.push(in_channel(USER, "y", Some(asked["ts"].as_str().unwrap())));
     s.wait_post(&thread, |p| p == "wrote it").await;
@@ -1064,7 +1064,7 @@ async fn risky_calls_wait_for_an_answer_in_the_dm_and_the_thread() {
     std::fs::remove_file(&file).unwrap();
 
     s.push(dm(USER, "once more"));
-    s.wait_post(DM, |p| p == "(no answer within 1s: declined)")
+    s.wait_post(DM, |p| p == "(1s 안에 답이 없어 거절했습니다)")
         .await;
     s.wait_post(DM, |p| p == "timed out").await;
     assert!(!file.exists());
@@ -1204,11 +1204,11 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     assert_eq!(blocks[0]["text"]["verbatim"], true);
     let section = blocks[0]["text"]["text"].as_str().unwrap();
     assert!(
-        section.starts_with("*Approve this tool call?*"),
+        section.starts_with("*이 도구 호출을 승인할까요?*"),
         "{section}"
     );
     assert!(
-        section.contains("Press a button, or reply `y`"),
+        section.contains("버튼을 누르거나 답장하세요. `y`는 실행"),
         "{section}"
     );
     assert_eq!(question["text"].as_str(), Some(section));
@@ -1218,7 +1218,7 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         .iter()
         .map(|b| b["text"]["text"].as_str().unwrap())
         .collect();
-    assert_eq!(labels, ["Allow", "Always allow", "Decline"]);
+    assert_eq!(labels, ["허용", "항상 허용", "거절"]);
     for button in buttons {
         assert_eq!(button["type"], "button");
         assert_eq!(button["action_id"], button["value"]);
@@ -1258,10 +1258,10 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     .await;
     assert_eq!(
         ephemerals(&s, STRANGER),
-        ["Only the users in slack_allowed_users can answer Junees."; 2]
+        ["slack_allowed_users에 있는 사용자만 Junees에 답할 수 있습니다."; 2]
     );
     let already =
-        "This question was already answered, timed out or stopped; the button does nothing now.";
+        "이미 답했거나 시간이 지났거나 멈춘 질문이라 이 버튼은 이제 아무것도 하지 않습니다.";
     assert_eq!(
         ephemerals(&s, USER),
         [already, already, "Junees does not know this button."]
@@ -1281,7 +1281,10 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     let closed = update["blocks"].as_array().unwrap();
     assert_eq!(closed.len(), 2, "{update}");
     assert_eq!(closed[0], blocks[0]);
-    assert_eq!(closed[1]["text"]["text"], "*Declined by sam&lt;&amp;&gt;.*");
+    assert_eq!(
+        closed[1]["text"]["text"],
+        "*sam&lt;&amp;&gt;: 거절했습니다.*"
+    );
     assert!(!update.to_string().contains("\"actions\""), "{update}");
     // The old question's buttons do nothing now.
     s.wait_ack(&s.press(press_on(USER, &question, &values[0])))
@@ -1326,21 +1329,20 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     assert_eq!(update["channel"], CHANNEL);
     assert_eq!(update["ts"], question["_sent_ts"]);
     let line = update["blocks"][1]["text"]["text"].as_str().unwrap();
-    assert!(line.starts_with("*Allowed"), "{line}");
+    assert!(line.contains("허용했"), "{line}");
     s.push(in_channel(USER, "y", Some(&root)));
-    s.wait_post(&thread, |p| p.contains("already answered"))
-        .await;
+    s.wait_post(&thread, |p| p.contains("이미 답")).await;
 
     // No answer: declined, and a press afterwards does nothing.
     s.push(dm(USER, "once more"));
-    s.wait_post(DM, |p| p == "(no answer within 5s: declined)")
+    s.wait_post(DM, |p| p == "(5s 안에 답이 없어 거절했습니다)")
         .await;
     s.wait_post(DM, |p| p == "timed out").await;
     s.until("the timed out question closed", || updates(&s).len() == 3)
         .await;
     assert_eq!(
         updates(&s)[2]["blocks"][1]["text"]["text"],
-        "*No answer within 5s: declined.*"
+        "*5s 안에 답이 없어 거절했습니다.*"
     );
     let question = buttoned(&s, DM).remove(1);
     s.wait_ack(&s.press(press_on(USER, &question, &button_values(&question)[0])))
@@ -1357,14 +1359,19 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     s.wait_post(DM, |p| p == "wrote again").await;
     s.until("the third question closed", || updates(&s).len() == 4)
         .await;
-    assert_eq!(updates(&s)[3]["blocks"][1]["text"]["text"], "*Allowed.*");
+    assert_eq!(
+        updates(&s)[3]["blocks"][1]["text"]["text"],
+        "*허용했습니다.*"
+    );
     std::fs::remove_file(&file).unwrap();
 
     // Buttons refused: the question comes as text, answered in text.
     s.state.refuse_blocks.store(true, Ordering::SeqCst);
     s.push(dm(USER, "plain please"));
-    let posts = s.wait_post(DM, |p| p.contains("Reply `y` to run it")).await;
-    assert!(!posts.last().unwrap().contains("Press a button"));
+    let posts = s
+        .wait_post(DM, |p| p.contains("답장하세요. `y`는 실행"))
+        .await;
+    assert!(!posts.last().unwrap().contains("버튼을 누르거나"));
     s.push(dm(USER, "n"));
     s.wait_post(DM, |p| p == "plain").await;
     let log = running.stop().await;

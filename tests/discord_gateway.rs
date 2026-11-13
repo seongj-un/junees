@@ -1590,13 +1590,13 @@ async fn risky_calls_wait_for_an_answer_in_the_channel() {
     )
     .await;
     let posts = rest
-        .wait_post("505", |p| p.contains("Approve this tool call?"))
+        .wait_post("505", |p| p.contains("이 도구 호출을 승인할까요?"))
         .await;
     assert_eq!(posts.len(), 2, "{posts:#?}");
     // The tool line is shortened; the question shows the whole command.
     assert!(posts[0].starts_with("```\n-> bash rm -f "), "{}", posts[0]);
     assert!(
-        posts[1].contains(&format!("approve bash: {command}")),
+        posts[1].contains(&format!("승인 요청 bash: {command}")),
         "{}",
         posts[1]
     );
@@ -1611,7 +1611,7 @@ async fn risky_calls_wait_for_an_answer_in_the_channel() {
     // y runs it.
     conn.dispatch("MESSAGE_CREATE", message("505", USER, "now", false, &[]))
         .await;
-    rest.wait_posts("505", 2, |p| p.contains("Approve this tool call?"))
+    rest.wait_posts("505", 2, |p| p.contains("이 도구 호출을 승인할까요?"))
         .await;
     conn.dispatch("MESSAGE_CREATE", message("505", USER, "y", false, &[]))
         .await;
@@ -1625,7 +1625,7 @@ async fn risky_calls_wait_for_an_answer_in_the_channel() {
         message("505", USER, "once more", false, &[]),
     )
     .await;
-    rest.wait_post("505", |p| p == "(no answer within 1s: declined)")
+    rest.wait_post("505", |p| p == "(1s 안에 답이 없어 거절했습니다)")
         .await;
     rest.wait_post("505", |p| p == "timed out").await;
     assert!(!cwd.path().join("marker").exists());
@@ -1733,8 +1733,8 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     let (first, buttons) = rest.question("505", 1).await;
     let mut labels: Vec<&String> = buttons.keys().collect();
     labels.sort();
-    assert_eq!(labels, ["Allow", "Always allow", "Decline"]);
-    let (allow, decline) = (&buttons["Allow"], &buttons["Decline"]);
+    assert_eq!(labels, ["거절", "항상 허용", "허용"]);
+    let (allow, decline) = (&buttons["허용"], &buttons["거절"]);
     assert!(
         allow.len() <= 100 && allow.starts_with("junees:"),
         "{allow}"
@@ -1753,7 +1753,7 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         press("2", "505", USER, &first, &guessed),
     )
     .await;
-    ephemeral(&rest.response("2").await, "already answered");
+    ephemeral(&rest.response("2").await, "이미 답했거나");
     assert!(!marker.exists());
     // Decline: acknowledged, then the message loses its buttons.
     conn.dispatch(
@@ -1765,9 +1765,9 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     let edit = rest.edit("505", &first).await;
     assert_eq!(edit["components"], json!([]));
     let content = edit["content"].as_str().unwrap();
-    assert!(content.contains("Approve this tool call?"), "{content}");
+    assert!(content.contains("이 도구 호출을 승인할까요?"), "{content}");
     assert!(
-        content.ends_with(&format!("\n\n**Declined by <@{USER}>.**")),
+        content.ends_with(&format!("\n\n**<@{USER}>: 거절했습니다.**")),
         "{content}"
     );
     assert_eq!(edit["allowed_mentions"], json!({"parse": []}));
@@ -1782,17 +1782,17 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     // The first question's button, and this one's from another channel.
     conn.dispatch("INTERACTION_CREATE", press("4", "505", USER, &first, allow))
         .await;
-    ephemeral(&rest.response("4").await, "already answered");
+    ephemeral(&rest.response("4").await, "이미 답했거나");
     conn.dispatch(
         "INTERACTION_CREATE",
-        press("5", "506", USER, &second, &buttons["Allow"]),
+        press("5", "506", USER, &second, &buttons["허용"]),
     )
     .await;
-    ephemeral(&rest.response("5").await, "already answered");
+    ephemeral(&rest.response("5").await, "이미 답했거나");
     assert!(!marker.exists());
     conn.dispatch(
         "INTERACTION_CREATE",
-        press("6", "505", USER, &second, &buttons["Allow"]),
+        press("6", "505", USER, &second, &buttons["허용"]),
     )
     .await;
     assert_eq!(rest.response("6").await, json!({"type": 6}));
@@ -1801,7 +1801,7 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         edit["content"]
             .as_str()
             .unwrap()
-            .ends_with(&format!("**Allowed by <@{USER}>.**")),
+            .ends_with(&format!("**<@{USER}>: 허용했습니다.**")),
         "{edit}"
     );
     rest.wait_post("505", |p| p == "ran it").await;
@@ -1820,16 +1820,16 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         edit["content"]
             .as_str()
             .unwrap()
-            .ends_with("**No answer within 2s: declined.**"),
+            .ends_with("**2s 안에 답이 없어 거절했습니다.**"),
         "{edit}"
     );
     rest.wait_post("505", |p| p == "timed out").await;
     conn.dispatch(
         "INTERACTION_CREATE",
-        press("7", "505", USER, &third, &buttons["Allow"]),
+        press("7", "505", USER, &third, &buttons["허용"]),
     )
     .await;
-    ephemeral(&rest.response("7").await, "already answered");
+    ephemeral(&rest.response("7").await, "이미 답했거나");
     assert!(!marker.exists());
 
     // A text answer still works, and the buttons go too.
@@ -1840,7 +1840,10 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         .await;
     let edit = rest.edit("505", &fourth).await;
     assert!(
-        edit["content"].as_str().unwrap().ends_with("**Allowed.**"),
+        edit["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("**허용했습니다.**"),
         "{edit}"
     );
     rest.wait_post("505", |p| p == "ran it again").await;
@@ -1905,21 +1908,21 @@ async fn an_answer_word_right_after_a_press_starts_no_turn() {
     let (question, buttons) = rest.question("505", 1).await;
     // A press from 2015 (an event sent again much later): its token has
     // expired, so it is neither answered nor applied.
-    let mut stale = press("10", "505", USER, &question, &buttons["Allow"]);
+    let mut stale = press("10", "505", USER, &question, &buttons["허용"]);
     stale["id"] = json!("1");
     stale["token"] = json!("token-1-of-the-press");
     conn.dispatch("INTERACTION_CREATE", stale).await;
     // Still waiting: this press answers it.
     conn.dispatch(
         "INTERACTION_CREATE",
-        press("11", "505", USER, &question, &buttons["Allow"]),
+        press("11", "505", USER, &question, &buttons["허용"]),
     )
     .await;
     assert_eq!(rest.response("11").await, json!({"type": 6}));
     // To be sure, the user types y too: told it was answered, no new turn.
     conn.dispatch("MESSAGE_CREATE", message("505", USER, "y", false, &[]))
         .await;
-    rest.wait_post("505", |p| p.contains("already answered"))
+    rest.wait_post("505", |p| p.contains("이미 답을 받아서"))
         .await;
     rest.wait_post("505", |p| p == "ran it").await;
     assert!(marker.exists());
@@ -1992,17 +1995,17 @@ async fn a_question_whose_buttons_are_refused_is_posted_once_without_them() {
     )
     .await;
     let posts = rest
-        .wait_post("505", |p| p.contains("Reply `y` to run it"))
+        .wait_post("505", |p| p.contains("답장하세요. `y`는 실행"))
         .await;
     // The first part once, then the rest without the words about buttons.
     let question: Vec<&String> = posts
         .iter()
-        .skip_while(|p| !p.contains("Approve this tool call?"))
+        .skip_while(|p| !p.contains("이 도구 호출을 승인할까요?"))
         .collect();
     assert_eq!(question.len(), 2, "{posts:#?}");
-    assert!(question[1].contains("Reply `y` to run it"), "{posts:#?}");
+    assert!(question[1].contains("답장하세요. `y`는 실행"), "{posts:#?}");
     assert!(
-        !posts.iter().any(|p| p.contains("Press a button")),
+        !posts.iter().any(|p| p.contains("버튼을 누르거나")),
         "{posts:#?}"
     );
     // The refused post was the last part with its buttons.
@@ -2016,7 +2019,7 @@ async fn a_question_whose_buttons_are_refused_is_posted_once_without_them() {
         refused[0].body["content"]
             .as_str()
             .unwrap()
-            .contains("Press a button, or reply `y`")
+            .contains("버튼을 누르거나 답장하세요. `y`는 실행")
     );
     // A text answer still works.
     conn.dispatch("MESSAGE_CREATE", message("505", USER, "y", false, &[]))

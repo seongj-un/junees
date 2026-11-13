@@ -1831,10 +1831,10 @@ fn questions_follow_the_latest_snapshot() {
     let q = |focused, input: Value| tool::test_question(refs.clone(), focused, &input);
     let (target, reasons, kinds, preview) =
         q(None, json!({"action": "type", "ref": 2, "text": "pw"}));
-    assert_eq!(target, "type element 2 on http://example.test/");
-    assert_eq!(reasons, ["types into a password field"]);
+    assert_eq!(target, "type 요소 2 (페이지: http://example.test/)");
+    assert_eq!(reasons, ["비밀번호 칸에 입력합니다"]);
     assert_eq!(kinds, [KIND_SENSITIVE_INPUT]);
-    assert_eq!(preview.unwrap(), "text: 2 characters (not shown)\n");
+    assert_eq!(preview.unwrap(), "입력할 글: 2자(보이지 않음)\n");
     assert!(
         q(None, json!({"action": "type", "ref": 1, "text": "x"}))
             .2
@@ -1910,13 +1910,13 @@ fn evaluate_questions_show_the_whole_script_or_say_they_do_not() {
     assert_eq!(reasons[1], tool::PARTIAL);
     assert_eq!(
         preview,
-        "  document.title;[150 blanks]document.querySelector('form#pay').submit()\n"
+        "  document.title;[공백 150개]document.querySelector('form#pay').submit()\n"
     );
     // A cut line says how much it left out.
     let (reasons, preview) = ask(&format!("x = '{}'", "a".repeat(300)));
     assert_eq!(reasons[1], tool::PARTIAL);
     assert!(
-        preview.ends_with(&format!("{}... (146 more characters)\n", "a".repeat(155))),
+        preview.ends_with(&format!("{}... (146자 더)\n", "a".repeat(155))),
         "{preview}"
     );
     // JavaScript's other line ends split lines and stay visible.
@@ -1930,15 +1930,12 @@ fn evaluate_questions_show_the_whole_script_or_say_they_do_not() {
     let many: Vec<String> = (0..45).map(|n| format!("f{n}()")).collect();
     let (reasons, preview) = ask(&many.join("\n"));
     assert_eq!(reasons[1], tool::PARTIAL);
-    assert!(
-        preview.contains("  f39()\n  ... 5 more lines\n"),
-        "{preview}"
-    );
+    assert!(preview.contains("  f39()\n  ... 5줄 더\n"), "{preview}");
     assert!(!preview.contains("f40()"), "{preview}");
     // A script the tool refuses is not shown at all.
     let (reasons, preview) = ask(&"x".repeat(tool::MAX_EXPRESSION + 1));
     assert_eq!(reasons[1], tool::PARTIAL);
-    assert!(preview.contains("too long to show"), "{preview}");
+    assert!(preview.contains("너무 길어 보이지 않습니다"), "{preview}");
     assert!(!preview.contains("xxxx"), "{preview}");
     let (reasons, _) = ask(&"x".repeat(tool::MAX_EXPRESSION));
     assert_eq!(reasons[1], tool::PARTIAL, "one line of 2000 is cut");
@@ -1956,9 +1953,16 @@ fn evaluate_questions_show_the_whole_script_or_say_they_do_not() {
 fn a_key_press_into_a_frame_of_another_site_is_asked_about() {
     let (target, reasons, kinds, _) =
         tool::test_question_in_frame(&json!({"action": "press", "key": "Enter"}));
-    assert_eq!(target, "press on http://example.test/");
+    assert_eq!(target, "press (페이지: http://example.test/)");
     assert_eq!(kinds, [KIND_SUBMIT]);
-    assert_eq!(reasons, [format!("the key press {}", page::FRAME_RISK)]);
+    assert_eq!(
+        reasons,
+        [format!(
+            "이 키 입력: {}",
+            tool::risk_in_korean(page::FRAME_RISK)
+        )]
+    );
+    assert!(!reasons[0].contains("frame from"), "{reasons:?}");
     assert!(
         tool::test_question_in_frame(&json!({"action": "press", "key": "space"}))
             .2
@@ -2453,4 +2457,40 @@ async fn a_browser_that_cannot_start_says_why() {
         output.content
     );
     assert!(tool.process().await.is_none());
+}
+
+#[test]
+fn every_risk_the_guard_names_is_asked_about_in_korean() {
+    // The guard's risks, as `guard.js` writes them: a constant or a returned
+    // string literal. Each must have a Korean wording in the question.
+    let guard = include_str!("guard.js");
+    let mut risks = Vec::new();
+    for line in guard.lines() {
+        let line = line.trim();
+        let Some(at) = line.find("'") else { continue };
+        let named = line.starts_with("const ") && line.contains("_RISK = '");
+        let returned = line.contains("return '") || line.contains(") return '");
+        if !(named || returned) {
+            continue;
+        }
+        let rest = &line[at + 1..];
+        let Some(end) = rest.find('\'') else { continue };
+        let risk = &rest[..end];
+        if risk.contains(' ') {
+            risks.push(risk.to_string());
+        }
+    }
+    assert!(risks.len() >= 7, "{risks:?}");
+    for risk in &risks {
+        let korean = tool::risk_in_korean(risk);
+        assert!(
+            korean.chars().any(|c| ('가'..='힣').contains(&c)),
+            "{risk} -> {korean}"
+        );
+    }
+    assert_eq!(
+        tool::risk_in_korean("looks like a payment or purchase button (\"Buy\")"),
+        "결제나 구매 버튼으로 보입니다 (\"Buy\")"
+    );
+    assert_eq!(tool::risk_in_korean("something new"), "something new");
 }

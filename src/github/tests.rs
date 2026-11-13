@@ -1402,12 +1402,12 @@ async fn writes_are_asked_about_and_a_merge_every_time() {
                     "body": "first\n\u{1b}[2Ksecond"}),
         )
         .unwrap();
-    assert_eq!(request.target, "pr_comment on o/n #7");
-    assert_eq!(request.reasons, ["posts a comment on GitHub as you"]);
+    assert_eq!(request.target, "pr_comment: o/n #7");
+    assert_eq!(request.reasons, ["내 GitHub 계정으로 코멘트를 답니다"]);
     assert_eq!(request.kinds, ["github: comment"]);
     assert_eq!(
         crate::approval::render(&request),
-        "  ?? approve github: pr_comment on o/n #7\n     * posts a comment on GitHub as you\n     \
+        "  ?? 승인 요청 github: pr_comment: o/n #7\n     * 내 GitHub 계정으로 코멘트를 답니다\n     \
          body:\n       first\n       \\u{1b}[2Ksecond\n"
     );
     let approve = json!({"action": "review", "number": 7, "event": "APPROVE", "commit_id": HEAD});
@@ -1426,15 +1426,12 @@ async fn writes_are_asked_about_and_a_merge_every_time() {
     );
     let merge = json!({"action": "merge", "number": 7, "sha": HEAD});
     let request = risky.request("github", &merge).unwrap();
-    assert_eq!(
-        request.target,
-        "merge on the working folder's repository #7"
-    );
+    assert_eq!(request.target, "merge: 작업 폴더의 저장소 #7");
     assert_eq!(
         request.reasons,
         [
-            "merges the pull request into its base branch",
-            "a merge is asked about every time; \"always\" does not cover it"
+            "pull request를 base 브랜치에 merge합니다",
+            "merge는 매번 묻습니다. \"항상 허용\"은 merge에 적용되지 않습니다"
         ]
     );
     assert!(request.kinds[0].ends_with(crate::approval::ASKED_EVERY_TIME));
@@ -1472,9 +1469,9 @@ async fn writes_are_asked_about_and_a_merge_every_time() {
     assert_eq!(
         asked,
         [
-            "pr_comment on the working folder's repository #7",
-            "merge on the working folder's repository #7",
-            "merge on the working folder's repository #7"
+            "pr_comment: 작업 폴더의 저장소 #7",
+            "merge: 작업 폴더의 저장소 #7",
+            "merge: 작업 폴더의 저장소 #7"
         ]
     );
 }

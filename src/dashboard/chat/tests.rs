@@ -102,12 +102,12 @@ fn the_summary_is_plain_lines_with_control_characters_shown() {
     let request = Request {
         tool: "bash".into(),
         target: "rm a.txt\u{1b}[2K".into(),
-        reasons: vec!["`rm` deletes files".into()],
+        reasons: vec!["`rm`: 파일을 지웁니다".into()],
         preview: Some("+ x\n".into()),
         kinds: vec![],
     };
     let text = super::runner::summary_for_test(&request);
-    assert_eq!(text, "rm a.txt\\u{1b}[2K\n- `rm` deletes files\n+ x");
+    assert_eq!(text, "rm a.txt\\u{1b}[2K\n- `rm`: 파일을 지웁니다\n+ x");
 }
 
 #[tokio::test]

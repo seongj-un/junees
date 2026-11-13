@@ -31,8 +31,8 @@ use crate::provider::ProviderError;
 use crate::skills;
 
 /// What a late answer to an answered approval question gets back.
-pub const LATE_NOTE: &str = "(that approval question was already answered; this reply was not \
-                             passed on. Send it again to pass it on.)";
+pub const LATE_NOTE: &str = "(그 승인 질문은 이미 답을 받아서 이 답장은 전달하지 않았습니다. \
+                             전달하려면 다시 보내 주세요.)";
 
 /// What the gateway shares with every channel's worker.
 pub struct Shared<P: Platform> {

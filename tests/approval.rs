@@ -264,7 +264,7 @@ async fn streamed_text_and_the_question_share_the_terminal() {
     let text = shown.find("Let me remove the marker.\n").expect(&shown);
     let call = shown.find("\n  -> bash ").expect(&shown);
     let question = shown
-        .find("\n  ?? approve bash: rm marker\n     * `rm` deletes files\n")
+        .find("\n  ?? 승인 요청 bash: rm marker\n     * `rm`: 파일을 지웁니다\n")
         .expect(&shown);
     let answer = shown.find("Removed it.\n").expect(&shown);
     assert!(

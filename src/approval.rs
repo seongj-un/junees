@@ -229,7 +229,7 @@ impl Approval {
                 } else {
                     (
                         path.to_string(),
-                        vec![format!("writes to `{path}` outside the working folder")],
+                        vec![format!("작업 폴더 밖 `{path}`에 씁니다")],
                         vec![format!("{tool}: {OUTSIDE}")],
                         preview,
                     )
@@ -239,10 +239,8 @@ impl Approval {
             name if self.questions.contains_key(name) => self.questions[name].question(input)?,
             name => {
                 let external = self.external.get(name)?;
-                let target = format!(
-                    "tool `{}` of the {} `{}`",
-                    external.tool, external.kind, external.server
-                );
+                let runner = external_kind(external.kind);
+                let target = format!("{runner} `{}`의 도구 `{}`", external.server, external.tool);
                 let mut preview = String::new();
                 let arguments = serde_json::to_string_pretty(input).unwrap_or_default();
                 preview_lines(&mut preview, "  ", &arguments);
@@ -252,9 +250,9 @@ impl Approval {
                     (
                         target,
                         vec![format!(
-                            "an external tool: the {} `{}` runs it with these arguments, \
-                             outside Junees's command rules",
-                            external.kind, external.server
+                            "외부 도구입니다({runner} `{}`). Junees의 명령 규칙을 거치지 않고 이 \
+                             인자로 실행됩니다",
+                            external.server
                         )],
                         vec![format!("{tool}: external tool")],
                         Some(preview),
@@ -303,7 +301,7 @@ impl Approval {
         if let Some(agent) = agent {
             request
                 .reasons
-                .insert(0, format!("asked by subagent {agent}"));
+                .insert(0, format!("서브에이전트 {agent}의 요청입니다"));
         }
         if self.allowed(&request) {
             return None;
@@ -380,7 +378,7 @@ fn edit_preview(input: &Value) -> Option<String> {
     let new = input.get("new_string")?.as_str()?;
     let mut preview = String::new();
     if input.get("replace_all").and_then(Value::as_bool) == Some(true) {
-        preview.push_str("(every occurrence)\n");
+        preview.push_str("(모든 곳을 바꿈)\n");
     }
     preview_lines(&mut preview, "- ", old);
     preview_lines(&mut preview, "+ ", new);
@@ -390,11 +388,11 @@ fn edit_preview(input: &Value) -> Option<String> {
 fn write_preview(input: &Value, path: &Path) -> Option<String> {
     let content = input.get("content")?.as_str()?;
     let what = if path.exists() {
-        "replaces the file"
+        "파일을 바꿈"
     } else {
-        "new file"
+        "새 파일"
     };
-    let mut preview = format!("({what}, {} lines)\n", content.lines().count());
+    let mut preview = format!("({what}, {}줄)\n", content.lines().count());
     preview_lines(&mut preview, "+ ", content);
     Some(preview)
 }
@@ -414,10 +412,7 @@ fn preview_lines(preview: &mut String, marker: &str, text: &str) {
         preview.push('\n');
     }
     if total > PREVIEW_LINES {
-        preview.push_str(&format!(
-            "{marker}... {} more lines\n",
-            total - PREVIEW_LINES
-        ));
+        preview.push_str(&format!("{marker}... {}줄 더\n", total - PREVIEW_LINES));
     }
 }
 
@@ -427,7 +422,7 @@ fn preview_lines(preview: &mut String, marker: &str, text: &str) {
 pub fn render(request: &Request) -> String {
     let mut lines = request.target.lines();
     let mut text = format!(
-        "  ?? approve {}: {}\n",
+        "  ?? 승인 요청 {}: {}\n",
         visible(&request.tool),
         visible(lines.next().unwrap_or_default())
     );
@@ -447,6 +442,20 @@ pub fn render(request: &Request) -> String {
     text
 }
 
+/// The line under a question that says what an "always" answer allows:
+/// the kinds, which are the names answers are remembered by.
+pub fn always_line(request: &Request) -> String {
+    format!("     항상 허용하면: {}\n", request.kinds.join(", "))
+}
+
+/// What runs an external tool, as the question says it.
+fn external_kind(kind: &str) -> &'static str {
+    match kind {
+        "plugin" => "플러그인",
+        _ => "MCP 서버",
+    }
+}
+
 /// One line of `text` with control characters (other than tab) and
 /// bidirectional formatting characters written out as escapes (`\r`,
 /// `\u{1b}`, `\u{202e}`), so they show instead of acting on the terminal.
@@ -464,8 +473,8 @@ pub(crate) fn visible(line: &str) -> String {
     shown
 }
 
-const CHOICES: &str = "  [y] run  [n] decline  [a] always allow this kind this session  \
-                       [e] decline with a reason > ";
+const CHOICES: &str = "  [y] 실행  [n] 거절  [a] 이 세션 동안 이 종류는 항상 허용  \
+                       [e] 이유를 적어 거절 > ";
 
 /// Asks on the terminal: the question goes to `output` (stderr), the
 /// answer comes from the lines the prompt reads too.
@@ -495,10 +504,7 @@ impl TerminalAsk {
 impl Ask for TerminalAsk {
     async fn ask(&mut self, request: &Request) -> Answer {
         self.say(&render(request));
-        self.say(&format!(
-            "     always allows: {}\n",
-            request.kinds.join(", ")
-        ));
+        self.say(&always_line(request));
         loop {
             self.say(CHOICES);
             let Some(line) = self.line().await else {
@@ -514,7 +520,7 @@ impl Ask for TerminalAsk {
                 "e" => {
                     let mut reason = rest.trim().to_string();
                     if reason.is_empty() {
-                        self.say("  reason > ");
+                        self.say("  이유 > ");
                         reason = self.line().await.unwrap_or_default().trim().to_string();
                     }
                     return if reason.is_empty() {
@@ -523,7 +529,7 @@ impl Ask for TerminalAsk {
                         Answer::NoBecause(reason)
                     };
                 }
-                _ => self.say("  answer y, n, a or e\n"),
+                _ => self.say("  y, n, a, e 중 하나로 답해 주세요\n"),
             }
         }
     }
@@ -647,7 +653,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 request.reasons,
-                ["`junees cron add` schedules a job (Junees's own state)"]
+                ["`junees cron add`: 예약 작업을 추가합니다 (Junees 자체 상태)"]
             );
             assert_eq!(request.kinds, ["bash: change Junees's own state"]);
         }
@@ -672,10 +678,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             request.reasons,
-            [
-                "`gh pr review` submits a review (approval, change request or comment) on GitHub \
-              as you"
-            ]
+            ["`gh pr review`: 내 GitHub 계정으로 리뷰를 제출합니다(승인, 변경 요청 또는 코멘트)"]
         );
         assert_eq!(request.kinds, ["bash: write to GitHub through gh"]);
         // A merge, like the github tool's, is asked about every time.
@@ -704,8 +707,8 @@ mod tests {
                 tool: "bash".into(),
                 target: "rm -rf build && git push".into(),
                 reasons: vec![
-                    "`rm` deletes files".into(),
-                    "`git push` publishes commits".into()
+                    "`rm`: 파일을 지웁니다".into(),
+                    "`git push`: 커밋을 원격 저장소에 올립니다".into()
                 ],
                 preview: None,
                 kinds: vec!["bash: delete files".into(), "bash: git push".into()],
@@ -734,7 +737,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             request.reasons,
-            [format!("writes to `{outside}` outside the working folder")]
+            [format!("작업 폴더 밖 `{outside}`에 씁니다")]
         );
         assert_eq!(
             request.kinds,
@@ -742,7 +745,7 @@ mod tests {
         );
         assert_eq!(
             request.preview.as_deref(),
-            Some("(new file, 2 lines)\n+ a\n+ b\n")
+            Some("(새 파일, 2줄)\n+ a\n+ b\n")
         );
         let edit = json!({"path": "../x.rs", "old_string": "a", "new_string": "b"});
         assert_eq!(
@@ -813,7 +816,7 @@ mod tests {
         let expected_old: String = (1..=8).map(|n| format!("- line {n}\n")).collect();
         assert_eq!(
             preview,
-            format!("(every occurrence)\n{expected_old}- ... 2 more lines\n{expected_new}")
+            format!("(모든 곳을 바꿈)\n{expected_old}- ... 2줄 더\n{expected_new}")
         );
         std::fs::write(dir.path().join("old.txt"), "x").unwrap();
         let write = json!({"path": "old.txt", "content": "new"});
@@ -822,7 +825,7 @@ mod tests {
                 .unwrap()
                 .preview
                 .as_deref(),
-            Some("(replaces the file, 1 lines)\n+ new\n")
+            Some("(파일을 바꿈, 1줄)\n+ new\n")
         );
     }
 
@@ -900,7 +903,10 @@ mod tests {
                 "bash: let unattended runs work in the home folder (asked every time)"
             ]
         );
-        assert!(asked[1].reasons[1].starts_with("`junees cron add --allow-home` lets"));
+        assert!(
+            asked[1].reasons[1]
+                .starts_with("`junees cron add --allow-home`: 추가하는 작업의 무인 실행이")
+        );
         // So is marking an existing job; taking the mark back is not.
         let mark = "junees cron allow-home a1";
         assert_eq!(gate.check("bash", &bash(mark)).await, None);
@@ -915,7 +921,7 @@ mod tests {
             ["junees cron add 'in 1h' x", home, home, mark, mark]
         );
         let asked = asker.asked.lock().unwrap().clone();
-        assert!(asked[3].reasons[1].starts_with("`junees cron allow-home` lets"));
+        assert!(asked[3].reasons[1].starts_with("`junees cron allow-home`: 기존 예약 작업이나"));
     }
 
     #[tokio::test]
@@ -930,9 +936,12 @@ mod tests {
         let asked = asker.asked.lock().unwrap().clone();
         assert_eq!(
             asked[0].reasons,
-            ["asked by subagent [2] tidy up", "`rm` deletes files"]
+            [
+                "서브에이전트 [2] tidy up의 요청입니다",
+                "`rm`: 파일을 지웁니다"
+            ]
         );
-        assert!(render(&asked[0]).contains("     * asked by subagent [2] tidy up\n"));
+        assert!(render(&asked[0]).contains("     * 서브에이전트 [2] tidy up의 요청입니다\n"));
         // What it allowed holds for the parent and the other subagents.
         assert_eq!(gate.check("bash", &bash("rm b")).await, None);
         assert_eq!(gate.check_for("[1] x", "bash", &bash("rm c")).await, None);
@@ -997,15 +1006,15 @@ mod tests {
         let shown = render(&gate.request("bash", &bash(command)).unwrap());
         assert_eq!(
             shown.lines().next().unwrap(),
-            "  ?? approve bash: rm -rf ~/projects # \\r\\u{1b}[2Kecho tidy up build cache"
+            "  ?? 승인 요청 bash: rm -rf ~/projects # \\r\\u{1b}[2Kecho tidy up build cache"
         );
         let write = json!({"path": "/etc/x\u{202e}txt.sh", "content": "a\tb\x07\r\nc\u{8}"});
         let shown = render(&gate.request("write_file", &write).unwrap());
         assert_eq!(
             shown,
-            "  ?? approve write_file: /etc/x\\u{202e}txt.sh\n     \
-             * writes to `/etc/x\\u{202e}txt.sh` outside the working folder\n     \
-             (new file, 2 lines)\n     + a\tb\\u{7}\n     + c\\u{8}\n"
+            "  ?? 승인 요청 write_file: /etc/x\\u{202e}txt.sh\n     \
+             * 작업 폴더 밖 `/etc/x\\u{202e}txt.sh`에 씁니다\n     \
+             (새 파일, 2줄)\n     + a\tb\\u{7}\n     + c\\u{8}\n"
         );
         assert!(
             !shown
@@ -1018,7 +1027,7 @@ mod tests {
         let request = Request {
             tool: "bash".into(),
             target: "rm a\nrm b".into(),
-            reasons: vec!["`rm` deletes files".into()],
+            reasons: vec!["`rm`: 파일을 지웁니다".into()],
             preview: None,
             kinds: vec!["bash: delete files".into()],
         };
@@ -1038,15 +1047,18 @@ mod tests {
         assert_eq!(
             screen,
             format!(
-                "  ?? approve bash: rm a\n     | rm b\n     * `rm` deletes files\n     \
-                 always allows: bash: delete files\n{CHOICES}"
+                "  ?? 승인 요청 bash: rm a\n     | rm b\n     * `rm`: 파일을 지웁니다\n     \
+                 항상 허용하면: bash: delete files\n{CHOICES}"
             )
         );
         assert_eq!(ask_with("No\n").await.0, Answer::No);
         assert_eq!(ask_with(" a \n").await.0, Answer::Always);
         let (answer, screen) = ask_with("maybe\nyes\n").await;
         assert_eq!(answer, Answer::Yes);
-        assert!(screen.contains("answer y, n, a or e\n"), "{screen}");
+        assert!(
+            screen.contains("y, n, a, e 중 하나로 답해 주세요\n"),
+            "{screen}"
+        );
         assert_eq!(
             ask_with("e\n지우지 마세요\n").await.0,
             Answer::NoBecause("지우지 마세요".into())

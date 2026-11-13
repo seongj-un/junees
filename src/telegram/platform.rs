@@ -18,7 +18,7 @@ use super::config::Format;
 use super::format;
 use crate::approval::{Request, render};
 use crate::gateway::ask::{
-    Choice, Question, WITH_BUTTONS, button_data, fence_safe, human, without_buttons,
+    Choice, Question, WITH_BUTTONS, button_data, fence_safe, instructions, without_buttons,
 };
 use crate::gateway::platform::{Attached, Kind, Platform};
 use crate::gateway::split::{length, split_plain};
@@ -644,14 +644,12 @@ impl Sent {
 /// text shows the fences as typed.
 pub fn question(request: &Request, timeout: Duration) -> String {
     let mut details = render(request);
-    details.push_str(&format!("     always allows: {}", request.kinds.join(", ")));
+    details.push_str(crate::approval::always_line(request).trim_end());
     format!(
-        "Approve this tool call?\n```\n{}\n```\n{WITH_BUTTONS} y to run it, n to decline \
-         (n <reason> tells the model why), a to allow this kind for the rest of this chat's \
-         conversation. Anything else declines with your words as the reason. No answer within \
-         {} declines. In a group, reply to this message.",
+        "이 도구 호출을 승인할까요?\n```\n{}\n```\n{WITH_BUTTONS}{} 그룹에서는 이 메시지에 \
+         답장하세요.",
         fence_safe(&details),
-        human(timeout)
+        instructions("이 대화가 끝날 때까지", timeout).replace('`', "")
     )
 }
 
@@ -769,17 +767,22 @@ mod tests {
             kinds: vec!["bash: delete".into()],
         };
         let text = question(&request, Duration::from_secs(300));
-        assert!(text.starts_with("Approve this tool call?\n```\n"), "{text}");
-        assert!(text.contains("within 5m"), "{text}");
+        assert!(
+            text.starts_with("이 도구 호출을 승인할까요?\n```\n"),
+            "{text}"
+        );
+        assert!(text.contains("5m 안에 답이 없으면"), "{text}");
         let parts = format::render(&text, true, MESSAGE_LIMIT);
         assert_eq!(parts.len(), 1, "{parts:#?}");
         let html = &parts[0].html;
         assert!(
-            html.contains("<pre>  ?? approve bash: rm -r build/**/*.o `x` `\u{200b}`\u{200b}`\n"),
+            html.contains("<pre>  ?? 승인 요청 bash: rm -r build/**/*.o `x` `\u{200b}`\u{200b}`\n"),
             "{html}"
         );
         assert!(
-            html.contains("always allows: bash: delete</pre>\nPress a button, or reply y"),
+            html.contains(
+                "항상 허용하면: bash: delete</pre>\n버튼을 누르거나 답장하세요. y는 실행"
+            ),
             "{html}"
         );
         assert!(!html.contains("<b>") && !html.contains("<code>"), "{html}");
