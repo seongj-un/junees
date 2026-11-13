@@ -87,7 +87,8 @@ turn of the conversation is one `claude -p` run that continues the same
 Claude Code session (--resume).
 
 Environment (each also a key of config.toml, named in brackets):
-  ANTHROPIC_API_KEY   [api_key] needed on the api backend only
+  ANTHROPIC_API_KEY   [api_key] needed on the api backend only; read from where
+                      the address is set
   ANTHROPIC_BASE_URL  [base_url] API base URL (default https://api.anthropic.com)
   JUNEES_PROVIDER     [provider] API of the api backend: anthropic (default) or openai
                       (Chat Completions: OpenAI, OpenRouter, Ollama, vLLM, LM Studio)

@@ -1355,10 +1355,12 @@ async fn fake_api(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<St
 
 #[tokio::test]
 async fn online_asks_the_api_whether_it_takes_the_key() {
-    let mut fixture = Fixture::new();
-    fixture.config("api_key = \"sk-doctor-online-key\"\n");
+    let fixture = Fixture::new();
     let (url, server) = fake_api(vec![200, 401, 500]).await;
-    fixture.set("ANTHROPIC_BASE_URL", &format!("{url}/"));
+    // The key goes with its address, both in the file.
+    fixture.config(&format!(
+        "api_key = \"sk-doctor-online-key\"\nbase_url = \"{url}/\"\n"
+    ));
     let report = fixture.run(true).await;
     expect(
         &report,
@@ -1457,12 +1459,11 @@ async fn online_says_whether_a_newer_release_is_out() {
 
 #[tokio::test]
 async fn offline_sends_nothing() {
-    let mut fixture = Fixture::new();
-    fixture.config("api_key = \"sk-test\"\n");
+    let fixture = Fixture::new();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    fixture.set("ANTHROPIC_BASE_URL", &url);
+    fixture.config(&format!("api_key = \"sk-test\"\nbase_url = \"{url}\"\n"));
     let report = fixture.run(false).await;
     assert!(!has(&report, "online", "API key"));
     let err = listener.accept().unwrap_err();

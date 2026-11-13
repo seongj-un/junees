@@ -130,10 +130,26 @@ impl Config {
             .transpose()?;
         let api_key = match (need_key, &openai) {
             (false, _) => String::new(),
-            (true, None) => get("ANTHROPIC_API_KEY").context(
-                "no API key: run `junees setup`, or set ANTHROPIC_API_KEY \
-                 (get a key at https://console.anthropic.com)",
-            )?,
+            (true, None) => match (get("ANTHROPIC_API_KEY"), get("ANTHROPIC_BASE_URL")) {
+                (Some(key), _) => key,
+                (None, None) => bail!(
+                    "no API key: run `junees setup`, or set ANTHROPIC_API_KEY \
+                     (get a key at https://console.anthropic.com)"
+                ),
+                // The settings give the key only from where the address is
+                // set (config_file::PAIRED_KEYS).
+                (None, Some(base_url)) => bail!(
+                    "no API key for {}: set api_key or ANTHROPIC_API_KEY, in the same \
+                     place as the address (config.toml's api_key goes with base_url, \
+                     ANTHROPIC_API_KEY with ANTHROPIC_BASE_URL)",
+                    // A user name or password in the address stays out.
+                    if base_url.contains('@') {
+                        "the address in base_url"
+                    } else {
+                        base_url.as_str()
+                    }
+                ),
+            },
             (true, Some(openai)) => {
                 openai.require_key()?;
                 if get("JUNEES_MODEL").is_none() {

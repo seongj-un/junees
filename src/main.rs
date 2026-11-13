@@ -13,7 +13,7 @@ use junees::claude_code::chat::Chat;
 use junees::claude_code::{BACKEND_ENV, Backend, ClaudeCode, MODEL_ENV, UsageLimit};
 use junees::cli::{self, Command, SessionMode, TaskCommand, TaskRun};
 use junees::config::Config;
-use junees::config_file::Settings;
+use junees::config_file::{Origin, Settings};
 use junees::context_files::ContextFiles;
 use junees::gateway::Gateway;
 use junees::gateway::config::DiscordConfig;
@@ -371,10 +371,18 @@ async fn setup(settings: &mut Settings, input: &SharedLines) -> Result<()> {
     let has_key = file.get("api_key").is_some();
     settings.replace_file(file);
     eprintln!("Saved {}.", path.display());
-    for (key, name) in [("api_key", "ANTHROPIC_API_KEY"), ("backend", BACKEND_ENV)] {
-        if settings.env(name).is_some() && (key != "api_key" || has_key) {
-            eprintln!("Note: {name} in your environment wins over `{key}` in the file.");
-        }
+    // The key goes with its address (config_file::PAIRED_KEYS): with
+    // ANTHROPIC_BASE_URL exported, the file's key is not sent there.
+    if has_key && settings.origin("ANTHROPIC_BASE_URL") == Some(Origin::Env) {
+        eprintln!(
+            "Note: ANTHROPIC_BASE_URL is set in your environment, so the key comes from \
+             ANTHROPIC_API_KEY there, not from `api_key` in the file."
+        );
+    } else if has_key && settings.origin("ANTHROPIC_API_KEY") == Some(Origin::Env) {
+        eprintln!("Note: ANTHROPIC_API_KEY in your environment wins over `api_key` in the file.");
+    }
+    if settings.env(BACKEND_ENV).is_some() {
+        eprintln!("Note: {BACKEND_ENV} in your environment wins over `backend` in the file.");
     }
     Ok(())
 }
