@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 mod common;
-use common::{body_of, fake_api};
+use common::{alive, body_of, fake_api};
 
 /// Git without the user's configuration, with a fixed identity, and blind to
 /// a repository named in the environment (`git rebase -x` in a worktree
@@ -279,14 +279,6 @@ async fn a_claude_code_without_login_tells_how_to_sign_in_and_notifies() {
     let content = body_of(&posts[0])["content"].as_str().unwrap().to_string();
     assert!(content.contains("stopped (error)"), "{content}");
     assert!(content.contains("/login"), "{content}");
-}
-
-fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z" && state != "X")
-    })
 }
 
 async fn until(what: &str, mut check: impl FnMut() -> bool) {

@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 mod common;
-use common::{body_of, fake_api, text_reply};
+use common::{body_of, fake_api, gone_within, text_reply};
 
 const FAKE_SERVER: &str = include_str!("fixtures/fake_mcp.py");
 
@@ -83,13 +83,6 @@ fn check(output: &Output) {
         "junees failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
-    })
 }
 
 #[tokio::test]
@@ -163,13 +156,10 @@ async fn the_model_calls_mcp_tools_whose_server_sees_no_secrets() {
     );
     let sleep_pid: u32 = results[1]["content"].as_str().unwrap().parse().unwrap();
     // Junees ended the server, and with it what the server started.
-    for _ in 0..50 {
-        if !alive(sleep_pid) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(!alive(sleep_pid), "the server's background sleep survived");
+    assert!(
+        gone_within(sleep_pid, Duration::from_secs(5)).await,
+        "the server's background sleep survived"
+    );
     let log = std::fs::read_to_string(log).unwrap();
     assert!(log.contains("\"tools/call\""), "{log}");
 }

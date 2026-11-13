@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 mod common;
+use common::alive;
 
 /// A fake `claude` playing `turns` in order (after answering `--version`,
 /// and `auth status` as signed in with the subscription), saving each
@@ -380,14 +381,6 @@ async fn one_shot_questions_continue_with_dash_c_and_need_no_api_key() {
     let (out, stdout, stderr) = output(junees(work.path(), home.path(), &bin, &["third"])).await;
     assert!(out.status.success(), "{stdout}\n{stderr}");
     assert_eq!(after(&args_of(fake.path(), 3), "--resume"), None);
-}
-
-fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z" && state != "X")
-    })
 }
 
 async fn until(what: &str, mut check: impl FnMut() -> bool) {

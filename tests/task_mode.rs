@@ -7,7 +7,7 @@ use std::process::{Output, Stdio};
 use serde_json::{Value, json};
 
 mod common;
-use common::{body_of, fake_api, text_reply};
+use common::{alive, body_of, fake_api, text_reply};
 
 /// Git without the user's configuration, with a fixed identity, and blind to
 /// a repository named in the environment (`git rebase -x` in a worktree
@@ -756,15 +756,6 @@ async fn task_mode_refuses_folders_outside_git() {
         "{stderr}"
     );
     assert!(!plain.path().join(".junees").exists());
-}
-
-/// Whether the process runs (a zombie does not).
-fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z" && state != "X")
-    })
 }
 
 /// Waits up to ten seconds for `check` to hold.
