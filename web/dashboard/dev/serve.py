@@ -9,6 +9,12 @@ One-time codes: the second line it prints opens with #code=, which the page
 trades at POST /api/token (60 seconds, once, 5 wrong tries end it), as the
 browser `junees dashboard` opens does. GET /__dev/code makes another.
 
+Chat (stage 19): with --chat, /api/status says "chat": true and the
+/api/chat endpoints answer from chat_sim.py, a scripted agent (see there for
+what each message does). --approval-seconds shortens the 5-minute question
+timeout. GET /__dev/drop-streams ends every open event stream, to try the
+page's reconnection.
+
 Writes: POST /api/cron/<id>/pause|resume and /api/webhooks/<name>/pause|resume
 change the fixtures in memory (restart to reset). They need the token, an
 Origin from this server and an empty or {} body, as the contract says.
@@ -28,6 +34,7 @@ Timestamps in the fixtures are shifted so that 2026-11-13 09:00 UTC is now.
 """
 
 import argparse
+import sys
 import copy
 import datetime as dt
 import hmac
@@ -44,6 +51,11 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 MODES = {"ok", "empty", "error", "slow", "hang", "unauthorized", "forbidden", "conflict", "busy"}
 SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ACTION = re.compile(r"/api/(cron|webhooks)/([^/]+)/(pause|resume)")
+CHAT = re.compile(r"/api/chat(?:/([^/]+)/(messages|cancel|approvals/([^/]+)))?")
+CHAT_EVENTS = re.compile(r"/api/chat/([^/]+)/events")
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import chat_sim  # noqa: E402  (next to this file)
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
 }
@@ -95,11 +107,12 @@ def bounded(query, name, default, low, high):
     return int(raw)
 
 
-def api_body(name, query, mode, fixtures):
+def api_body(name, query, mode, fixtures, chat=False):
     """(status, body) for /api/<name>."""
     if name == "status":
         body = copy.deepcopy(fixtures["status"])
         body["uptime_secs"] = int(time.monotonic() - STARTED)
+        body["chat"] = chat
         return 200, body
     if name.startswith("sessions/"):
         session_id = unquote(name[len("sessions/"):])
@@ -143,6 +156,7 @@ class DevServer(ThreadingHTTPServer):
     token = ""
     mode = "ok"
     fixtures: dict = {}
+    chats = None  # chat_sim.Chats with --chat
     # One-time codes for the address: code -> [expires (monotonic), wrong tries]
     codes: dict = {}
 
@@ -170,6 +184,7 @@ class DevServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     server: DevServer
+    SECURITY_HEADERS = SECURITY_HEADERS
     server_version = "junees-dashboard-dev"
 
     def send(self, status, body, content_type):
@@ -198,6 +213,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(421, {"error": "misdirected", "message": "unexpected Host"})
         if urlsplit(self.path).path == "/api/token":
             return self.trade_code(host)
+        if CHAT.fullmatch(urlsplit(self.path).path):
+            return self.chat_write(host)
         match = ACTION.fullmatch(urlsplit(self.path).path)
         if not match:
             return self.send_json(405 if self.path.startswith("/api/") else 404, {"error": "method_not_allowed", "message": "only GET here"})
@@ -250,6 +267,48 @@ class Handler(BaseHTTPRequestHandler):
                 item["next_run"] = soon.replace(minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.send_json(200, item)
 
+    def chat_write(self, host):
+        """POST /api/chat, .../messages, .../approvals/<q>, .../cancel."""
+        chats = self.server.chats
+        if chats is None:
+            return self.send_json(404, {"error": "not_found", "message": "chat is off (start with --chat)"})
+        if self.server.mode == "forbidden" or self.headers.get("Origin") != f"http://{host}":
+            return self.send_json(403, {"error": "forbidden_origin", "message": "a write needs an Origin from this server"})
+        if not self.authorized():
+            return self.send_json(401, {"error": "unauthorized", "message": "missing or wrong token"})
+        content_type = self.headers.get("Content-Type")
+        if content_type is not None and content_type.split(";")[0].strip() != "application/json":
+            return self.send_json(415, {"error": "unsupported_media_type", "message": "application/json only"})
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 256 * 1024:
+            return self.send_json(413, {"error": "too_large", "message": "the body may be 256KB"})
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError:
+            return self.send_json(400, {"error": "bad_body", "message": "send a JSON object"})
+        if self.server.mode == "error":
+            return self.send_json(500, {"error": "internal", "message": "fixture error mode"})
+        match = CHAT.fullmatch(urlsplit(self.path).path)
+        session_id, what, question_id = match.group(1), match.group(2), match.group(3)
+        if session_id is None:
+            given = body.get("session_id")
+            if given is not None and (not isinstance(given, str) or not SESSION_ID.fullmatch(given)):
+                return self.send_json(400, {"error": "bad_id", "message": "a session id is [A-Za-z0-9_-]{1,64}"})
+            return self.send_json(*chats.start(given))
+        chat = chats.get(unquote(session_id))
+        if chat is None:
+            return self.send_json(404, {"error": "not_found", "message": "no such chat; POST /api/chat first"})
+        if what == "messages":
+            text = body.get("text")
+            if not isinstance(text, str) or not 1 <= len(text) <= 32000:
+                return self.send_json(400, {"error": "bad_text", "message": "text is 1 to 32,000 characters"})
+            return self.send_json(*chats.send(chat, text))
+        if what == "cancel":
+            return self.send_json(*chats.cancel(chat))
+        return self.send_json(*chats.answer(chat, unquote(question_id), body.get("answer")))
+
     def trade_code(self, host):
         """POST /api/token: a one-time code from the address for the token."""
         if self.headers.get("Origin") != f"http://{host}":
@@ -285,6 +344,15 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/__dev/code":
             # A fresh one-time address, as `junees dashboard` gives the browser it opens.
             return self.send_json(200, {"url": f"http://{self.headers.get('Host')}/#code={self.server.new_code()}"})
+
+        if url.path == "/__dev/drop-streams":
+            chats = self.server.chats
+            if chats is not None:
+                chats.generation += 1
+                for chat in list(chats.chats.values()):
+                    with chat.cond:
+                        chat.cond.notify_all()
+            return self.send_json(200, {"dropped": True})
 
         if url.path.startswith("/__dev/mode/"):
             mode = url.path.rsplit("/", 1)[1]
@@ -322,8 +390,20 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(30)
         if mode == "error":
             return self.send_json(500, {"error": "internal", "message": "fixture error mode"})
+        events = CHAT_EVENTS.fullmatch(url.path)
+        if events:
+            chat = self.server.chats.get(unquote(events.group(1))) if self.server.chats else None
+            if chat is None:
+                return self.send_json(404, {"error": "not_found", "message": "no such chat"})
+            try:
+                after = bounded(parse_qs(url.query), "after", None, 0, 10**12) if "after" in parse_qs(url.query) else None
+            except ValueError as err:
+                return self.send_json(400, {"error": "bad_query", "message": str(err)})
+            return chat_sim.stream(self, chat, after, self.server.chats)
         try:
-            status, body = api_body(url.path[len("/api/"):], parse_qs(url.query), mode, self.server.fixtures)
+            status, body = api_body(
+                url.path[len("/api/"):], parse_qs(url.query), mode, self.server.fixtures, self.server.chats is not None
+            )
         except ValueError as err:
             return self.send_json(400, {"error": "bad_query", "message": str(err)})
         self.send_json(status, body)
@@ -341,6 +421,8 @@ def main():
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--mode", choices=sorted(MODES), default="ok")
     parser.add_argument("--token", help="fixed token instead of a random one")
+    parser.add_argument("--chat", action="store_true", help="turn chat on, as junees dashboard --chat")
+    parser.add_argument("--approval-seconds", type=int, default=chat_sim.APPROVAL_SECONDS)
     args = parser.parse_args()
 
     server = DevServer(("127.0.0.1", args.port), Handler)
@@ -348,6 +430,8 @@ def main():
     server.mode = args.mode
     server.codes = {}
     server.fixtures = load_fixtures()
+    if args.chat:
+        server.chats = chat_sim.Chats(server.fixtures["session_details"].keys(), args.approval_seconds)
     base = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"{base}#token={server.token}", flush=True)
     print(f"{base}#code={server.new_code()}  (one-time, 60 s; GET /__dev/code for another)", flush=True)
