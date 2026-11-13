@@ -339,3 +339,107 @@ fn the_setting_turns_recording_off() {
         assert!(!enabled(Some(off)), "{off}");
     }
 }
+
+#[tokio::test]
+async fn a_change_between_two_turns_makes_the_older_one_not_restorable() {
+    let (_home, _store, session) = session();
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("c.txt");
+    turn_writing(&session, &file, "made").await;
+    // bash changes it, then turn 2 changes it again.
+    fs::write(&file, "by bash").unwrap();
+    turn_writing(&session, &file, "turn 2").await;
+
+    let list = session.list().unwrap();
+    assert!(list[1].files[0].restorable, "turn 2 alone goes back");
+    assert!(
+        !list[0].files[0].restorable,
+        "turn 1 would find bash's text"
+    );
+
+    let undone = session.undo(1, false, &FileAccess::default()).unwrap();
+    // Turn 2 put back "by bash"; turn 1's file was then skipped: reported
+    // once, as skipped.
+    assert!(undone.restored.is_empty(), "{undone:?}");
+    assert_eq!(
+        undone.skipped,
+        vec![(file.display().to_string(), reason::KEPT_CREATED.to_string())]
+    );
+    assert_eq!(
+        undone.note().matches("c.txt").count(),
+        1,
+        "{}",
+        undone.note()
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "by bash");
+}
+
+#[tokio::test]
+async fn a_forged_manifest_path_is_not_written() {
+    let (_home, _store, session) = session();
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("a.txt");
+    fs::write(&file, "before").unwrap();
+    let number = turn_writing(&session, &file, "after").await;
+    let manifest_path = session.dir().join(number.to_string()).join(MANIFEST);
+    let original = fs::read_to_string(&manifest_path).unwrap();
+    let target = work.path().join("other.txt");
+    for (path, content) in [
+        ("relative.txt".to_string(), "0.bin"),
+        (
+            format!("{}/../other.txt", work.path().join("sub").display()),
+            "0.bin",
+        ),
+        (file.display().to_string(), "../../../x.bin"),
+    ] {
+        let mut manifest: Manifest = serde_json::from_str(&original).unwrap();
+        manifest.files[0].path = path.clone();
+        manifest.files[0].content = Some(content.to_string());
+        manifest.files[0].after_sha256 = None;
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let undone = session.undo(number, true, &FileAccess::default()).unwrap();
+        assert_eq!(undone.skipped[0].1, reason::BAD_RECORD, "{path} {content}");
+    }
+    assert!(!target.exists());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "after");
+}
+
+#[tokio::test]
+async fn a_file_that_cannot_be_read_is_written_unrecorded() {
+    let (_home, _store, session) = session();
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("write-only.txt");
+    fs::write(&file, "old").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o200)).unwrap();
+    let turn = Arc::new(Turn::new(session.clone()));
+    let output = scope(
+        Some(Arc::clone(&turn)),
+        WriteFile::default().run(json!({"path": file, "content": "new"})),
+    )
+    .await;
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("not recorded for /undo"),
+        "{}",
+        output.content
+    );
+    assert_eq!(turn.number(), None);
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "new");
+}
+
+#[test]
+fn a_planted_link_at_the_temporary_name_is_not_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("manifest.json");
+    write_private(&path, b"one").unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"one");
+    assert_eq!(mode(&path), 0o600);
+    // Nothing but the file itself is left behind.
+    let names: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("manifest.json")]);
+}

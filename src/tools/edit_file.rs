@@ -193,7 +193,8 @@ fn edit(
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(too_large(bytes.len() as u64));
     }
-    let before = crate::checkpoints::Before::from_content(&bytes, &opened.meta);
+    // Copied only when a turn records it.
+    let before = turn.map(|_| crate::checkpoints::Before::from_content(&bytes, &opened.meta));
     // Before any hint shows lines of it: such files are not text
     // (`/proc/<pid>/environ` is NUL-separated).
     if bytes.contains(&0) {
@@ -205,7 +206,7 @@ fn edit(
         .map_err(|_| ToolOutput::error(format!("{path} is not valid UTF-8 text")))?;
 
     let edit = plan_edit(&text, old, new, replace_all).map_err(ToolOutput::error)?;
-    if let Some(turn) = turn {
+    if let (Some(turn), Some(before)) = (turn, before) {
         turn.before(target.real(), before);
     }
     let written = target.replace(edit.text.as_bytes(), false);

@@ -118,10 +118,13 @@ fn write(
     if let Some(name) = super::instruction_files::path_named(target.real(), names) {
         return ToolOutput::error(super::instruction_files::refusal(path, name));
     }
+    // A file this process may write but not read (0200) is written
+    // unrecorded, as with checkpoints off, and the model is told.
+    let mut unrecorded = "";
     if let Some(turn) = turn {
         match target.before() {
             Ok(before) => turn.before(target.real(), before),
-            Err(refusal) => return ToolOutput::error(refusal.message(path, "write")),
+            Err(_) => unrecorded = " (not recorded for /undo: its old content cannot be read)",
         }
     }
     let written = target.replace(content.as_bytes(), true);
@@ -132,7 +135,10 @@ fn write(
         }
     }
     match written {
-        Ok(()) => ToolOutput::ok(format!("wrote {} bytes to {path}", content.len())),
+        Ok(()) => ToolOutput::ok(format!(
+            "wrote {} bytes to {path}{unrecorded}",
+            content.len()
+        )),
         Err(err) => ToolOutput::error(format!("cannot write {path}: {err}")),
     }
 }
@@ -200,6 +206,28 @@ mod tests {
         let other = root.join(".junees/notes.txt");
         let output = tool.run(json!({"path": other, "content": "x"})).await;
         assert!(!output.is_error, "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn refuses_the_file_checkpoints() {
+        let (_dir, root, file) = crate::tools::settings_file::testing::home();
+        let tool = WriteFile::with_settings(&ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        });
+        for path in [
+            root.join(".junees/checkpoints/s1/1/manifest.json"),
+            root.join(".junees/checkpoints/s1/notes"),
+        ] {
+            let output = tool.run(json!({"path": path, "content": "{}"})).await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(
+                output.content.contains("file checkpoints"),
+                "{}",
+                output.content
+            );
+        }
+        assert!(!root.join(".junees/checkpoints").exists());
     }
 
     #[tokio::test]
