@@ -118,6 +118,11 @@ async fn run() -> Result<ExitCode> {
         }
         // Needs no API key; the login waits for the browser or a pasted
         // address.
+        // stdout is the protocol's: nothing else is printed there.
+        Command::Mcp(junees::mcp::oauth::cli::McpCommand::Serve(options)) => {
+            let settings = Settings::from_env()?;
+            return junees::mcp::serve::main(&options, settings).await;
+        }
         Command::Mcp(command) => return mcp_command(&command).await,
         Command::SessionsHelp => {
             print!("{}", cli::SESSIONS_HELP);

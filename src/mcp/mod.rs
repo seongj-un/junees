@@ -14,6 +14,7 @@ pub mod conn;
 pub mod http;
 pub mod link;
 pub mod oauth;
+pub mod serve;
 pub mod server;
 pub mod tool;
 

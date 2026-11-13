@@ -14,6 +14,9 @@ junees mcp login <server>   log in to a `url` MCP server of $JUNEES_HOME/mcp.jso
                             that asks for OAuth: prints an address to open in a
                             browser and waits for the answer (or a pasted address)
 junees mcp logout <server>  remove the server's saved login
+junees mcp serve [--dir <folder>] [--allow-write] [--allow-bash]
+                            serve Junees as an MCP server on stdin and stdout, for
+                            another agent (see `junees mcp serve --help`)
 
 The tokens are kept in $JUNEES_HOME/secrets/mcp-oauth/<server>.json (0600),
 sent only to that server, and renewed by themselves when the server gave a
@@ -26,6 +29,8 @@ start one. In the conversation: /mcp login <server>, /mcp logout <server>.
 pub enum McpCommand {
     Login(String),
     Logout(String),
+    /// `junees mcp serve`: Junees as an MCP server ([`crate::mcp::serve`]).
+    Serve(crate::mcp::serve::Options),
     Help,
 }
 
@@ -33,6 +38,7 @@ pub enum McpCommand {
 pub fn parse(mut args: impl Iterator<Item = String>) -> Result<McpCommand> {
     let command = match args.next().as_deref() {
         None | Some("-h" | "--help" | "help") => return Ok(McpCommand::Help),
+        Some("serve") => return crate::mcp::serve::parse(args).map(McpCommand::Serve),
         Some(word @ ("login" | "logout")) => {
             let Some(name) = args.next() else {
                 bail!("usage: junees mcp {word} <server>");
@@ -47,7 +53,7 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Result<McpCommand> {
                 McpCommand::Logout(name)
             }
         }
-        Some(other) => bail!("unknown `junees mcp` command `{other}` (login, logout)"),
+        Some(other) => bail!("unknown `junees mcp` command `{other}` (login, logout, serve)"),
     };
     if let Some(extra) = args.next() {
         bail!("`junees mcp` takes one server name (got `{extra}` too)");
@@ -69,6 +75,9 @@ pub async fn run(
     };
     match command {
         McpCommand::Help => Ok(HELP.to_string()),
+        McpCommand::Serve(_) => {
+            Err("junees mcp serve runs on its own (crate::mcp::serve::main)".into())
+        }
         McpCommand::Logout(name) => logout(home()?, name).await,
         McpCommand::Login(name) => {
             let home = home()?;

@@ -19,7 +19,7 @@ mod code;
 #[cfg(test)]
 mod page_files;
 pub mod server;
-mod session_view;
+pub(crate) mod session_view;
 
 use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
