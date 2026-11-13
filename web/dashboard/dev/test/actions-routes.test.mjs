@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { actionFor, describeActionError } from "../../actions.js";
 import { ApiError } from "../../api.js";
 import { parseHash, sessionHash } from "../../routes.js";
-import { firstLine, mergePages, roleLabel } from "../../view-session.js";
+import { firstLine, mergePages, pageEnd, roleLabel } from "../../view-session.js";
 
 test("parseHash reads screens, old links and session addresses", () => {
   assert.deepEqual(parseHash(""), { name: "status", args: {}, canonical: "#/status" });
@@ -46,9 +46,19 @@ test("describeActionError says what each refusal means", () => {
   assert.equal(describeActionError(new ApiError("unauthorized", "x", { status: 401 })).outcome, "lock");
   assert.equal(describeActionError(new ApiError("http", "", { status: 404 })).outcome, "reload");
 
-  const flaky = describeActionError(new ApiError("timeout", "timed out"));
-  assert.equal(flaky.retry, true);
-  assert.match(flaky.text, /응답하지 않았습니다/);
+  const fault = describeActionError(new ApiError("http", "", { status: 503 }));
+  assert.equal(fault.retry, true);
+  for (const status of [400, 405, 413, 415, 421]) {
+    assert.equal(describeActionError(new ApiError("http", "", { status })).retry, false, String(status));
+  }
+});
+
+test("a write with no answer is not called a failure: reload and say it is unknown", () => {
+  for (const kind of ["timeout", "network", "parse"]) {
+    const said = describeActionError(new ApiError(kind, kind));
+    assert.deepEqual([said.outcome, said.retry], ["reload", false], kind);
+    assert.match(said.text, /확인하지 못했습니다/);
+  }
 });
 
 test("mergePages keeps order and drops repeats", () => {
@@ -70,4 +80,10 @@ test("roleLabel names a user turn of tool results as one", () => {
 test("firstLine skips blank lines", () => {
   assert.equal(firstLine("\n\n  cargo test -q\nmore"), "cargo test -q");
   assert.equal(firstLine(null), "");
+});
+
+test("pageEnd counts messages from the page's offset, not from index", () => {
+  assert.equal(pageEnd({ offset: 100, messages: [{ index: 7 }, { index: 9 }] }, 0), 102);
+  assert.equal(pageEnd({ messages: [{ index: 0 }] }, 200), 201);
+  assert.equal(pageEnd({ offset: 300, messages: [] }, 300), 300);
 });

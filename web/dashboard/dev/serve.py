@@ -175,11 +175,12 @@ class Handler(BaseHTTPRequestHandler):
         if length > 1024:
             return self.send_json(413, {"error": "too_large", "message": "the body may be 1KB"})
         body = self.rfile.read(length).decode("utf-8", "replace").strip() if length else ""
-        if not self.authorized():
-            return self.send_json(401, {"error": "unauthorized", "message": "missing or wrong token"})
+        # The real server checks Origin before the token.
         mode = self.server.mode
         if mode == "forbidden" or self.headers.get("Origin") != f"http://{host}":
-            return self.send_json(403, {"error": "forbidden", "message": "a write needs an Origin from this server"})
+            return self.send_json(403, {"error": "forbidden_origin", "message": "a write needs an Origin from this server"})
+        if not self.authorized():
+            return self.send_json(401, {"error": "unauthorized", "message": "missing or wrong token"})
         content_type = self.headers.get("Content-Type")
         if content_type is not None and content_type.split(";")[0].strip() != "application/json":
             return self.send_json(415, {"error": "unsupported_media_type", "message": "application/json only"})
@@ -237,6 +238,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400, {"error": "bad_mode", "message": f"one of {sorted(MODES)}"})
             self.server.mode = mode
             return self.send_json(200, {"mode": mode})
+
+        origin = self.headers.get("Origin")
+        if origin is not None and origin != f"http://{self.headers.get('Host')}":
+            return self.send_json(403, {"error": "forbidden_origin", "message": "another site's page"})
 
         if url.path.startswith("/api/"):
             return self.api(url)
