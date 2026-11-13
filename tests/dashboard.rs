@@ -565,13 +565,17 @@ async fn the_dashboard_serves_the_contract_and_guards_it() {
 #[tokio::test]
 async fn a_closed_stdout_does_not_stop_the_dashboard() {
     let home = Home::new();
+    // A pipe whose reading end is closed before the dashboard starts, so
+    // its first print fails (closing it after the spawn races with the
+    // print, which a full pipe buffer takes without an error).
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
     let mut child = home
         .command(&["dashboard", "--no-open", "--listen", "127.0.0.1:0"])
+        .stdout(writer)
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    // Closed before the dashboard prints anything.
-    drop(child.stdout.take());
     let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
     let line = tokio::time::timeout(Duration::from_secs(30), stderr.next_line())
         .await
