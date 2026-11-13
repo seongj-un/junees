@@ -106,7 +106,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees sessions search <낱말>`: 세션 검색([세션 검색](docs/usage.md#세션-검색))
 - `junees usage`: 지난 며칠의 토큰과 비용([사용량과 비용](docs/usage.md#사용량과-비용))
 - `junees doctor`: 설치와 설정 점검([점검](docs/doctor.md))
-- `junees dashboard [--listen 127.0.0.1:7878] [--no-open]`: 브라우저로 보는 읽기 전용 대시보드([대시보드](docs/dashboard.md))
+- `junees dashboard [--listen 127.0.0.1:7878] [--no-open] [--chat [--dir <폴더>]]`: 브라우저로 보는 대시보드. `--chat`이면 페이지에서 대화하고 승인 질문에 답한다([대시보드](docs/dashboard.md))
 - `junees plugin list|install|enable|disable|remove`: 플러그인([플러그인](docs/plugins.md))
 - `junees mcp login|logout <서버>`: MCP 서버 OAuth 로그인([OAuth 로그인](docs/mcp.md#oauth-로그인))
 - `junees mcp serve [--dir <폴더>]`: Junees를 stdio MCP 서버로 띄워 다른 에이전트가 일을 맡기게 한다([Junees를 MCP 서버로](docs/mcp.md#junees를-mcp-서버로))
@@ -146,7 +146,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [실행 격리](docs/safety.md#실행-격리-landlock): `bash` 명령을 Linux Landlock으로 묶어 작업 폴더 밖 쓰기, 설정과 비밀 파일 읽기, (설정하면) TCP를 커널이 막는다.
 - [실행 전 승인](docs/safety.md#실행-전-승인): 대화 모드에서 위험할 수 있는 도구 호출을 먼저 묻는다.
 - [점검](docs/doctor.md): `junees doctor`로 설치와 설정을 점검한다(기본은 네트워크 없이).
-- [대시보드](docs/dashboard.md): `junees dashboard`가 이 컴퓨터의 브라우저에 상태, 세션, 사용량, 예약 작업, 웹훅, 점검 결과를 읽기 전용으로 보여 준다(루프백 주소와 실행마다 새 토큰만).
+- [대시보드](docs/dashboard.md): `junees dashboard`가 이 컴퓨터의 브라우저에 상태, 세션, 사용량, 예약 작업, 웹훅, 점검 결과를 보여 준다(루프백 주소와 실행마다 새 토큰만). `--chat`이면 페이지에서 Junees와 대화한다.
 - [설치와 업데이트](docs/install.md): `install.sh`, `junees update`(체크섬 확인, 한 번의 rename으로 교체), 태그로 만드는 릴리스.
 
 ## 문서
@@ -189,6 +189,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 16. 대시보드 2차: 세션 대화 보기, 예약 작업과 웹훅 멈춤·재개(같은 출처 확인, 쓰기 로그), 브라우저에는 일회용 코드만 넘기기 ([docs/dashboard.md](docs/dashboard.md)) (완료)
 17. 음성 메시지: 디스코드, 텔레그램, Slack 게이트웨이의 음성 메시지와 오디오 첨부를 OpenAI 호환 받아쓰기 API(OpenAI, Groq, 로컬 whisper 서버)로 글로 바꿔 처리 ([docs/gateways.md](docs/gateways.md)) (완료)
 18. MCP 서버: `junees mcp serve`(stdio)로 다른 에이전트(Claude Desktop, Claude Code, Hermes, Cursor)가 Junees에 일을 맡기기, 웹훅과 같은 무인 실행 규칙 ([docs/mcp.md](docs/mcp.md#junees를-mcp-서버로))
+19. 대시보드 대화: `junees dashboard --chat`으로 페이지에서 Junees와 대화하고, 승인 질문을 버튼으로 답하기(이벤트 스트림, 터미널과 같은 신뢰 수준, [docs/dashboard.md](docs/dashboard.md#대화---chat))
 
 ## 개발
 

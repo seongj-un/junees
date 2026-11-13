@@ -1,11 +1,12 @@
 # 대시보드 (`junees dashboard`)
 
-이 컴퓨터의 브라우저에서 Junees의 상태를 보는 페이지입니다. 설정, 최근 세션과 그 대화, 사용량, 예약 작업, 웹훅 경로, 점검 결과를 보여 줍니다. 바꾸는 것은 예약 작업과 웹훅 경로의 멈춤과 재개뿐입니다([쓰기](#쓰기-멈춤과-재개)).
+이 컴퓨터의 브라우저에서 Junees의 상태를 보는 페이지입니다. 설정, 최근 세션과 그 대화, 사용량, 예약 작업, 웹훅 경로, 점검 결과를 보여 줍니다. 바꾸는 것은 예약 작업과 웹훅 경로의 멈춤과 재개뿐입니다([쓰기](#쓰기-멈춤과-재개)). `--chat`으로 띄우면 페이지에서 Junees와 대화할 수도 있습니다([대화](#대화---chat)).
 
 ```sh
 junees dashboard                      # 127.0.0.1:7878에서 열고 브라우저를 띄운다
 junees dashboard --no-open            # 주소만 출력한다
 junees dashboard --listen 127.0.0.1:0 # 빈 포트를 고른다
+junees dashboard --chat --dir ~/work/x # 페이지에서 ~/work/x의 Junees와 대화한다
 ```
 
 실행할 때마다 32바이트 무작위 토큰을 새로 만들고, 페이지는 API 요청마다 이 토큰을 보냅니다. 페이지가 토큰을 받는 주소는 두 가지입니다. `#` 뒤는 브라우저가 서버에 보내지 않고 `Referer`에도 넣지 않으며, 페이지는 읽자마자 주소에서 지웁니다. Ctrl-C로 끝냅니다.
@@ -25,7 +26,7 @@ junees dashboard --listen 127.0.0.1:0 # 빈 포트를 고른다
 - **토큰**: `/api/*`는 `Authorization: Bearer <토큰>`이 있어야 답합니다. 없거나 틀리면 401입니다. 비교는 상수 시간으로 합니다. `POST /api/token`만 토큰 없이 받습니다(아래).
 - **`Host`**: `127.0.0.1:<포트>`, `localhost:<포트>`, `[::1]:<포트>`, 그리고 `--listen`에 준 주소(`127.0.0.2:<포트>` 등)만 받고, 아니면 421입니다. 포트가 80이면 브라우저가 포트를 빼고 보내므로 포트 없는 `Host`도 받습니다. 다른 사이트의 이름을 127.0.0.1로 돌리는 공격(DNS rebinding)을 막습니다. 이 검사는 정적 파일에도 적용됩니다.
 - **`Origin`**: 보내 왔으면 이 서버(`http://<Host>`)여야 하고, 아니면 403입니다. CORS 헤더는 보내지 않습니다.
-- **메서드와 크기**: `GET`을 받고, `POST`는 쓰기 경로에서만 받습니다(그 밖은 405와 `Allow`). 머리는 8KB(431), 본문은 1KB(413)까지이고, 본문은 `POST`일 때만 읽습니다. 머리는 10초 안에 와야 하고, 연결 하나는 60초까지이며, 동시에 16개까지 받습니다.
+- **메서드와 크기**: `GET`을 받고, `POST`는 쓰기 경로에서만 받습니다(그 밖은 405와 `Allow`). 머리는 8KB(431), 본문은 1KB(413, 대화 메시지는 512KB)까지이고, 본문은 `POST`일 때만 읽습니다. 머리는 10초 안에 와야 하고, 연결 하나는 60초까지이며(대화의 이벤트 스트림만 예외), 동시에 16개까지 받습니다.
 - **헤더**: 모든 응답에 다음을 붙입니다.
   - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`
   - `X-Content-Type-Options: nosniff`
@@ -51,6 +52,7 @@ junees dashboard --listen 127.0.0.1:0 # 빈 포트를 고른다
 - `model`: api 백엔드는 `model`(`JUNEES_MODEL`) 값이고, 정하지 않았으면 Anthropic 기본 모델입니다. OpenAI 호환 provider에서 정하지 않았으면 `null`입니다. claude-code 백엔드는 `JUNEES_CLAUDE_MODEL` 값이고, 정하지 않았으면 Claude Code가 고르므로 `null`입니다.
 - `keys.*.source`: 실제로 쓰이는 키의 출처입니다. 키는 주소와 같은 곳에서만 읽으므로, 다른 곳에 적어 둔 키는 `set: false`로 나옵니다.
 - `sandbox.abi`: 커널의 Landlock ABI입니다. Landlock이 없으면 `landlock: false`, `abi: null`입니다.
+- `chat`: `--chat`으로 띄워 [대화 API](#대화---chat)를 서빙하면 `true`입니다.
 
 ### `GET /api/sessions?limit=50`
 
@@ -169,12 +171,76 @@ junees dashboard --listen 127.0.0.1:0 # 빈 포트를 고른다
 - 415 `unsupported_media_type`: 쓰기의 `Content-Type`이 `application/json`이 아님
 - 404 `not_found`: 없는 경로
 - 405 `method_not_allowed`: 쓰기 경로가 아닌데 `GET`이 아니거나(`Allow: GET`), 쓰기 경로인데 `POST`가 아님(`Allow: POST`)
-- 413 `body_too_large`: 본문이 1KB보다 큼
+- 413 `body_too_large`: 본문이 1KB(대화 메시지는 512KB)보다 큼
 - 421 `misdirected_request`: `Host`가 이 서버가 아님
 - 431 `head_too_large`: 머리가 8KB보다 큼
 - 503 `busy`: 쓰기 중 다른 junees가 저장 파일 잠금을 10초 넘게 쥐고 있음. 다시 시도하면 됩니다.
 - 500 `internal`, `bad_settings`: 상태 폴더나 설정(`prices`, `timezone`)을 읽지 못함. 메시지의 비밀 값은 가립니다.
 - 503 `doctor_busy`: `/api/doctor`는 한 번에 하나만 돕니다. 앞 요청의 doctor를 20초 기다려도 차례가 오지 않거나, doctor가 20초 안에 끝나지 않으면 이 오류입니다.
+
+## 대화 (`--chat`)
+
+```sh
+junees dashboard --chat [--dir <폴더>]
+```
+
+페이지에서 Junees와 대화합니다. 위험한 명령의 승인 질문도 페이지의 버튼으로 답합니다. 기본으로는 꺼져 있고, `--chat`이 없으면 아래 경로는 모두 404입니다.
+
+**보안 주의: 대화를 켜면 페이지가 그 폴더의 터미널 대화(`junees`)와 같은 권한을 가집니다.** 대화는 무인 실행이 아닙니다. bash, 파일 쓰기, MCP 서버, 플러그인을 터미널처럼 쓰고, 승인이 필요한 호출은 페이지에 질문을 띄워 사람의 답을 기다립니다. 그래서 토큰이 든 주소를 읽을 수 있는 사람이나 프로그램은 이 컴퓨터에서 명령을 실행할 수 있습니다. [위의 토큰 주의](#대시보드-junees-dashboard)를 더 엄격히 지키고, 무인 실행(웹훅, 예약 작업)이 도는 컴퓨터에서는 쓸 때만 켭니다.
+
+- **작업 폴더**: `--dir`(기본: 현재 폴더)입니다. 터미널 대화처럼 홈 폴더도 받습니다. 대시보드는 이 폴더로 옮겨 가서 돕니다.
+- **백엔드**: api 백엔드(Junees 자신의 에이전트)만 됩니다. claude-code 백엔드는 Junees의 승인 질문 없이 명령을 실행하므로 페이지가 답할 수 없어서, 시작할 때 거절합니다.
+- **승인**: 질문 규칙은 터미널과 같습니다(`JUNEES_APPROVAL`, "항상 허용"은 그 대화에서만, 매번 묻는 종류는 매번). 5분 동안 답이 없으면 거절로 닫고, 턴을 취소하면 열린 질문도 거절로 닫습니다.
+- **턴**: 대시보드 전체에서 한 번에 하나만 돕니다(터미널 하나처럼). 턴이 도는 동안 보낸 메시지는 409 `turn_running`입니다.
+- **세션**: 터미널 세션과 같은 일반 세션으로 저장됩니다. 대시보드의 세션 화면과 `junees --resume`으로 볼 수 있습니다. 기존 세션을 이어 갈 수도 있는데, 작업 폴더가 `--dir`이고 claude-code 세션이 아니어야 합니다. 다른 Junees가 쓰고 있는 세션은 409 `session_busy`입니다.
+- **열린 대화**: 에이전트를 16개까지 둡니다. 더 열면 가장 오래 쓰지 않은 대화를 닫습니다. 닫힌 대화(그리고 대시보드를 다시 띄운 뒤의 대화)는 `session_id`로 다시 엽니다.
+- **쓰기 로그**: `dashboard.log`에 `chat started in <폴더>`, `chat <id> opened`, `chat <id> message <번호>`, `chat <id> approval <질문 id> <y|a|n>`, `chat <id> cancel`을 남깁니다. 메시지 내용과 토큰은 남기지 않습니다.
+
+### 경로
+
+쓰기 요청 규칙(Bearer, `Host`, `Origin` 필수와 같은 출처, `Content-Type: application/json`)은 [보안](#보안)과 같고, 본문은 JSON 객체입니다. 모르는 필드가 있으면 400 `bad_body`입니다.
+
+- `POST /api/chat` `{"session_id"?: string}` → 200 `{"session_id": "..."}`
+  - `session_id`가 없거나 `{}`면 새 대화입니다. 세션 파일은 첫 메시지 때 만들어집니다.
+  - 있으면 그 세션을 이어 갑니다. 이미 열린 대화면 그대로 돌려줍니다. `--dir`의 세션이 아니면 404, 형식이 다르면 400입니다.
+- `POST /api/chat/<id>/messages` `{"text": string}` → 202 `{"turn": n}`
+  - `text`는 1~32,000자이고, 공백만이면 안 됩니다(400 `bad_body`). `n`은 이 대화에서 몇 번째 턴인지입니다.
+- `GET /api/chat/<id>/events?after=<seq>` → 200 `text/event-stream`
+  - Bearer 헤더가 있어야 하므로 `EventSource`가 아니라 `fetch` 스트림으로 읽습니다.
+  - 이벤트마다 `id: <seq>` 줄과 `data: <JSON 한 줄>` 줄, 빈 줄을 씁니다. `seq`는 대화마다 1부터 늘어납니다.
+  - `after`를 주면 그다음부터, 없으면 남아 있는 것 전부부터 보냅니다. 대화마다 최근 1,000개를 메모리에 둡니다. 그보다 오래된 것은 다시 받을 수 없습니다.
+  - 15초마다 `: keepalive` 주석 줄을 보냅니다. 스트림은 동시에 8개까지이고, 넘으면 429 `too_many_streams`입니다.
+- `POST /api/chat/<id>/approvals/<question_id>` `{"answer": "y"|"a"|"n"}` → 200 `{"question_id", "answer"}`
+  - 없는 질문은 404, 이미 닫힌 질문은 409 `conflict`입니다. `a`를 내놓지 않은 질문에 `a`를 보내면 400 `bad_body`입니다.
+- `POST /api/chat/<id>/cancel` → 200 `{"cancelled": true|false}`
+  - 이 대화의 턴이 돌고 있으면 취소하고(Ctrl-C와 같음) `true`, 아니면 아무것도 하지 않고 `false`입니다.
+- 없는 대화 id는 404입니다.
+
+### 이벤트
+
+`data`는 `type`과 아래 필드를 가진 JSON입니다. 미리보기와 요약은 세션 상세처럼 비밀 값을 가린 뒤 2,000자로 자릅니다.
+
+- `turn_start` `{turn}`
+- `text` `{delta}`: 모델 답의 다음 조각입니다. 비밀 값을 가리려면 낱말이 온전해야 하므로, 토큰 단위가 아니라 공백이나 줄 끝까지 모아 보냅니다. 이어 붙이면 답이 됩니다. Junees가 덧붙이는 줄도 `text`로 옵니다. 경고, 대화 요약(compaction), 인용한 웹 페이지, 그리고 응답이 끊겨 다시 받을 때의 "(the reply broke off; asking for it again)"가 그렇습니다.
+- `tool_use` `{name, input_preview}`: 도구 호출입니다. bash는 명령, 입력이 문자열 하나인 도구는 그 문자열, 나머지는 입력 JSON입니다. API가 직접 도는 도구(웹 검색)와 서브에이전트의 한 줄(`name`: `subagent <번호>`)도 이 이벤트로 옵니다.
+- `tool_result` `{name, is_error, text_preview}`
+- `approval` `{question_id, kind, summary, options}`
+  - `kind`는 도구 이름이고, `summary`는 터미널 질문과 같은 글입니다(명령이나 경로, 이유, 바뀌는 내용 미리보기).
+  - `options`는 `["y","a","n"]`이고, "항상 허용"이 의미 없는 질문(매번 묻는 종류만 있음)이면 `["y","n"]`입니다.
+- `approval_closed` `{question_id, answer, by}`: `by`는 `browser`, `timeout`(5분, `answer: "n"`), `cancel`(턴 취소, `answer: "n"`) 중 하나입니다.
+- `usage` `{input_tokens, output_tokens, cost_usd}`: 이번 턴의 사용량이고, `turn_end` 바로 앞에 옵니다.
+- `error` `{message}`: 턴이 실패한 이유이고, `turn_end` 바로 앞에 옵니다.
+- `turn_end` `{turn, stop_reason}`: `stop_reason`은 `end_turn`, `max_turns`, `cancelled`, `error` 중 하나입니다. 이 이벤트가 나갈 때는 이미 다음 메시지를 받을 수 있습니다.
+
+### 대화 오류
+
+- 400 `bad_body`, `bad_query`(`after`가 0 이상의 정수가 아님)
+- 404 `not_found`: `--chat`이 아님, 없는 대화·질문·세션
+- 405: `GET /api/chat` 등 메서드가 다름
+- 409 `turn_running`, `session_busy`, `conflict`(닫힌 질문, claude-code 세션)
+- 413 `body_too_large`: 메시지 본문이 512KB보다 큼
+- 429 `too_many_streams`
+- 503 `chat_unavailable`(에이전트를 만들지 못함), `chat_stopped`(대화 스레드가 멈춤. 대시보드를 다시 띄웁니다)
 
 ## 정적 파일
 

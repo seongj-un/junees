@@ -196,6 +196,7 @@ src/
     api.rs             /api/status, sessions, usage, cron, webhooks, doctor의 JSON(계약), 쿼리 검사, 미리보기의 비밀 값 가리기, doctor는 별도 런타임
     session_view.rs    /api/sessions/<id>: 기록된 대화를 페이지로(id 형식 검사, 링크 거절, 가린 뒤 자르기, 이미지와 thinking은 종류만)
     actions.rs         POST 멈춤과 재개(CLI와 같은 함수와 잠금, 정확한 id, 홈 폴더 때문에 멈춘 항목은 409, dashboard.log)
+    chat/              --chat의 대화: mod.rs는 경로, 본문 검사, 대화(Room)마다 이벤트 1,000개와 질문과 취소, 한 번에 턴 하나, 열린 대화 16개, dashboard.log. runner.rs는 에이전트 전용 스레드(LocalSet, gateway ApiEngines::agent), 턴과 이벤트 변환(낱말 단위 text, 미리보기 가림), 승인 질문(ChatAsk, 5분, 취소). stream.rs는 text/event-stream(id/data, after, 15초 keepalive, 쓰기 30초)
     assets.rs          build.rs가 만든 web/dashboard 파일 목록(include_bytes!), import와 링크가 모두 서빙되는지 검사
     page_files.rs      서빙할 파일 판정(확장자별 Content-Type, 숨김 파일과 편집기 백업은 건너뜀, 모르는 확장자는 빌드 중단과 고치는 법), build.rs와 함께 씀
   doctor/            설치와 설정 점검 (junees doctor, /doctor)
@@ -244,6 +245,7 @@ tests/
   webhook.rs           실제 바이너리와 가짜 API, 가짜 디스코드 REST로 webhook add/list/test(전달, 출력 파일, 웹훅 세션)/pause/resume/rm, serve에 reqwest로 서명한 요청(queued, duplicate, 틀린 서명, 405, 404), 자식 프로세스 실행의 bash에 시크릿 없음, SIGTERM 종료 검증
   doctor.rs            실제 바이너리로 junees doctor 출력과 종료 코드(권한 실패면 1), --json 형식, 깨진 설정 파일도 점검 결과로, --help와 잘못된 인자, 대화의 /doctor(대화 중에 깨진 설정 파일을 다시 읽음), 비밀 값이 출력되지 않음 검증
   dashboard.rs         실제 바이너리 junees dashboard --no-open --listen 127.0.0.1:0에 원시 HTTP로: 401, 421, 403, 405, 413, 431, 400, 404, 보안 헤더, 정적 파일 Content-Type, API마다 계약 필드, 키와 시크릿과 토큰과 대화에 붙인 키가 어떤 응답에도 없음, 루프백 아닌 주소 거절, 세션 상세와 멈춤/재개와 쓰기 로그, 가짜 xdg-open으로 일회용 코드 교환, 여는 프로그램이 없으면 토큰 주소 출력 검증
+  dashboard_chat.rs    실제 바이너리 junees dashboard --chat과 루프백 가짜 API: 이벤트 스트림의 턴, 승인 y/n과 명령 실행 여부, 턴 중 메시지 409, 닫힌 질문 409, after로 다시 연결, 취소(질문 대기 중, 모델 대기 중), --chat 없으면 404, Origin/토큰/본문/크기 검사, 이벤트와 로그에 비밀 값 없음, claude-code 거절
   update.rs            실제 바이너리로 junees update --check(가짜 릴리스 서버), --help와 잘못된 인자, 루프백 아닌 JUNEES_DOWNLOAD_BASE 거절, 대화의 /update(바이너리는 바꾸지 않는다)
   usage.rs             실제 바이너리와 가짜 API로 대화의 /usage(호출, /model 전환 뒤 다른 가격, 합계), 기록 줄의 모델, junees usage(모델별, 날짜별, prices 덮어쓰기, 폴더 범위와 --all, 도움말과 오류) 검증
   session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
