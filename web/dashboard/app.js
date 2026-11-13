@@ -1,6 +1,15 @@
 // Entry point: token, screens, loading and the 30-second refresh.
 
-import { ApiError, describeError, forgetToken, getJson, getToken, takeTokenFromAddress } from "./api.js";
+import {
+  ApiError,
+  describeError,
+  exchangeCode,
+  forgetToken,
+  getJson,
+  getToken,
+  takeCodeFromAddress,
+  takeTokenFromAddress,
+} from "./api.js";
 import { el, notice, skeleton } from "./dom.js";
 import { formatClock } from "./format.js";
 import { parseHash } from "./routes.js";
@@ -260,25 +269,72 @@ async function load({ manual = false } = {}) {
 }
 
 /** The token is missing or no longer accepted: nothing else can load. */
-function lock() {
+const LOCK_TEXT = {
+  token: {
+    heading: "다시 열어 주세요",
+    title: "터미널에서 대시보드를 다시 열어 주세요",
+    body: "이 페이지에는 대시보드를 열 수 있는 토큰이 없거나, 토큰이 더 이상 맞지 않습니다. 터미널에서 junees dashboard를 다시 실행하면 브라우저가 새로 열립니다. --no-open으로 띄웠다면 터미널에 나온 주소(#token=이 붙은 주소)를 그대로 열어 주세요. 서버를 다시 시작하면 토큰도 바뀝니다.",
+    said: "토큰이 맞지 않아 대시보드를 열 수 없습니다. 터미널에서 다시 열어 주세요.",
+  },
+  expired: {
+    heading: "주소가 만료되었습니다",
+    title: "터미널에서 junees dashboard를 다시 실행하세요",
+    body: "브라우저를 열 때 넘긴 주소(#code=)는 60초 안에 한 번만 쓸 수 있어서, 다시 실행해 새 주소로 열어야 합니다.",
+    said: "주소가 만료되었습니다. 터미널에서 junees dashboard를 다시 실행하세요.",
+  },
+};
+
+/**
+ * Nothing else can load: the token is missing or refused (`token`), or the
+ * one-time code from the address was used, wrong or too old (`expired`).
+ * `detail` replaces the body when the reason is something else.
+ */
+function lock(kind = "token", detail = null) {
+  const text = LOCK_TEXT[kind] ?? LOCK_TEXT.token;
   state.locked = true;
   state.controller?.abort();
   forgetToken();
   document.body.classList.add("is-locked");
-  document.title = "다시 열어 주세요 - Junees 대시보드";
-  ui.title.textContent = "다시 열어 주세요";
+  document.title = `${text.heading} - Junees 대시보드`;
+  ui.title.textContent = text.heading;
   ui.controls.replaceChildren();
   ui.banner.replaceChildren();
   ui.updated.textContent = "";
   ui.view.setAttribute("aria-busy", "false");
-  ui.view.replaceChildren(
-    notice({
-      title: "터미널에 나온 주소로 다시 여세요",
-      body: "이 페이지에는 대시보드를 열 수 있는 토큰이 없거나, 토큰이 더 이상 맞지 않습니다. junees dashboard를 실행한 터미널에 나온 주소(#token=이 붙은 주소)를 그대로 열어 주세요. 서버를 다시 시작하면 토큰도 바뀝니다.",
-      tone: "warn",
-    }),
-  );
-  announce("토큰이 맞지 않아 대시보드를 열 수 없습니다. 터미널에 나온 주소로 다시 여세요.");
+  ui.view.replaceChildren(notice({ title: text.title, body: detail ?? text.body, tone: "warn" }));
+  announce(detail ? `${text.heading}. ${detail}` : text.said);
+}
+
+/**
+ * Trades a one-time `#code=` for the token, then opens the dashboard with
+ * it. A refused code keeps a token this tab already has; with none, the
+ * page explains that the address has expired.
+ */
+async function connect(code) {
+  state.connecting = true;
+  ui.title.textContent = "연결하는 중";
+  ui.view.setAttribute("aria-busy", "true");
+  ui.view.replaceChildren(el("p", { class: "loading-text" }, "대시보드에 연결하는 중입니다"), skeleton(3));
+  try {
+    await exchangeCode(code);
+    state.connecting = false;
+    acceptToken();
+  } catch (err) {
+    state.connecting = false;
+    const refused = err instanceof ApiError && err.status === 401;
+    if (getToken()) {
+      // An old address opened in a tab that is already connected: stay on
+      // the screen it showed.
+      state.locked = false;
+      state.route = null;
+      if (state.hash) window.history.replaceState(null, "", state.hash);
+      route(false);
+      announce(refused ? "이 주소는 만료되어 쓰지 않았습니다. 지금 연결을 그대로 씁니다." : `새 주소로 연결하지 못했습니다. ${describeError(err)}`);
+      return;
+    }
+    if (refused) lock("expired");
+    else lock("token", `대시보드 서버에 연결하지 못했습니다. ${describeError(err)} 그다음 터미널에서 junees dashboard를 다시 실행하세요.`);
+  }
 }
 
 /** A new token arrived in the address: start over with it, on the same screen. */
@@ -296,7 +352,7 @@ function acceptToken() {
 }
 
 function route(fromUser) {
-  if (state.locked) return;
+  if (state.locked || state.connecting) return;
   const where = parseHash(window.location.hash);
   if (window.location.hash !== where.canonical) {
     window.history.replaceState(null, "", where.canonical);
@@ -332,6 +388,7 @@ function route(fromUser) {
 }
 
 function start() {
+  const code = takeCodeFromAddress();
   takeTokenFromAddress();
   ui.refresh.addEventListener("click", () => load({ manual: true }));
   document.querySelector(".skip-link")?.addEventListener("click", (event) => {
@@ -339,15 +396,18 @@ function start() {
     ui.title.focus();
   });
   window.addEventListener("hashchange", () => {
-    if (takeTokenFromAddress()) acceptToken();
+    const pasted = takeCodeFromAddress();
+    if (pasted) connect(pasted);
+    else if (takeTokenFromAddress()) acceptToken();
     else route(true);
   });
 
-  if (getToken()) route(false);
+  if (code) connect(code);
+  else if (getToken()) route(false);
   else lock();
 
   const refreshIfDue = () => {
-    if (state.locked || document.hidden || state.loading || state.writes > 0) return;
+    if (state.locked || state.connecting || document.hidden || state.loading || state.writes > 0) return;
     if (state.route?.autoRefresh === false) return;
     if (Date.now() - state.lastAttempt >= REFRESH_MS) load();
   };

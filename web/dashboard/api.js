@@ -36,6 +36,33 @@ export function takeTokenFromAddress(win = window) {
   return Boolean(token);
 }
 
+/**
+ * Reads a one-time `#code=...` from the address (the browser `junees
+ * dashboard` opens gets one instead of the token) and clears the address
+ * at once. Returns the code, or null. Trade it with {@link exchangeCode}.
+ */
+export function takeCodeFromAddress(win = window) {
+  const hash = win.location.hash.replace(/^#/, "");
+  if (!/(^|&)code=/.test(hash)) return null;
+  const code = new URLSearchParams(hash).get("code");
+  win.history.replaceState(null, "", win.location.pathname + win.location.search);
+  return code || null;
+}
+
+/**
+ * Trades a one-time code for the token (`POST /api/token`, no Bearer) and
+ * keeps the token for this tab. A used, wrong or expired code throws an
+ * {@link ApiError} with `status` 401 and `code` `bad_code`.
+ */
+export async function exchangeCode(code, win = window) {
+  const answer = await request("POST", "/api/token", { auth: false, payload: { code } });
+  if (typeof answer?.token !== "string" || answer.token === "") {
+    throw new ApiError("parse", "no token in the answer");
+  }
+  win.sessionStorage.setItem(TOKEN_KEY, answer.token);
+  return answer.token;
+}
+
 export function getToken(win = window) {
   return win.sessionStorage.getItem(TOKEN_KEY);
 }
@@ -61,9 +88,9 @@ export function postJson(path, options = {}) {
   return request("POST", path, options);
 }
 
-async function request(method, path, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  const token = getToken();
-  if (!token) throw new ApiError("unauthorized", "no token");
+async function request(method, path, { signal, timeoutMs = DEFAULT_TIMEOUT_MS, auth = true, payload = {} } = {}) {
+  const token = auth ? getToken() : null;
+  if (auth && !token) throw new ApiError("unauthorized", "no token");
 
   const controller = new AbortController();
   const onAbort = () => controller.abort(signal.reason);
@@ -83,11 +110,11 @@ async function request(method, path, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } 
       response = await fetch(path, {
         method,
         headers: {
-          Authorization: `Bearer ${token}`,
+          ...(auth ? { Authorization: `Bearer ${token}` } : {}),
           Accept: "application/json",
           ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
         },
-        body: method === "POST" ? "{}" : undefined,
+        body: method === "POST" ? JSON.stringify(payload) : undefined,
         cache: "no-store",
         credentials: "omit",
         signal: controller.signal,
@@ -98,7 +125,7 @@ async function request(method, path, { signal, timeoutMs = DEFAULT_TIMEOUT_MS } 
       throw new ApiError("network", "network error");
     }
 
-    if (response.status === 401) {
+    if (response.status === 401 && auth) {
       throw new ApiError("unauthorized", "unauthorized", { status: 401 });
     }
 
