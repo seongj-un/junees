@@ -523,8 +523,10 @@ impl Partial {
     /// does not call them turns.
     pub fn text(&self) -> String {
         format!(
-            "변경 기록 {}까지 되돌림, 변경 기록 {}은 건너뜀: {}",
-            self.until_turn, self.skipped_turn, self.reason
+            "변경 기록 {}까지 되돌림, 변경 기록 {} 건너뜀: {}",
+            self.until_turn,
+            crate::korean::topic(&self.skipped_turn.to_string()),
+            self.reason
         )
     }
 }

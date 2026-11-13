@@ -691,8 +691,8 @@ async fn address_run(
     let committed = address::commit(&tree, &message).map_err(|err| (format!("{err:#}"), true))?;
     let Some(new) = committed else {
         let body = format!(
-            "Junees가 리뷰 {}(@{reviewer})를 살폈지만 바꾼 파일이 없어 push하지 않았습니다.\n\n{}",
-            review["id"],
+            "Junees가 @{reviewer}의 리뷰 {} 살폈지만 바꾼 파일이 없어 push하지 않았습니다.\n\n{}",
+            crate::korean::object(&review["id"].to_string()),
             answer_block(cx, &report.answer)
         );
         let posted = comment(cx, r, n, &body).await;
@@ -715,10 +715,10 @@ async fn address_run(
             shown.push(format!("외 {}개", github_files.len() - 5));
         }
         let body = format!(
-            "Junees가 리뷰 {}(@{reviewer})를 반영한 커밋 {}이 `{}` 아래 파일({})을 바꿔서 push하지 \
+            "Junees가 @{reviewer}의 리뷰 {} 반영한 커밋 {} `{}` 아래 파일({})을 바꿔서 push하지 \
              않았습니다. 워크플로와 액션은 저장소 시크릿으로 실행되므로 직접 확인하고 반영해 주세요.\n\n{}",
-            review["id"],
-            short(&new),
+            crate::korean::object(&review["id"].to_string()),
+            crate::korean::subject(short(&new)),
             merge::GITHUB_DIR,
             shown.join(", "),
             answer_block(cx, &report.answer)
@@ -753,9 +753,9 @@ async fn address_run(
     };
     if let Some(tested) = tested.as_ref().filter(|tested| !tested.passed) {
         let body = format!(
-            "Junees가 리뷰 {}(@{reviewer})를 반영한 커밋 {}의 테스트가 실패해서 push하지 않았습니다 \
+            "Junees가 @{reviewer}의 리뷰 {} 반영한 커밋 {}의 테스트가 실패해서 push하지 않았습니다 \
              ({}).\n\n```\n{}\n```\n\n{}",
-            review["id"],
+            crate::korean::object(&review["id"].to_string()),
             short(&new),
             tested.how,
             fence_safe(&tested.tail),
@@ -786,8 +786,9 @@ async fn address_run(
         Some(tested) => format!("테스트: 통과 ({})", tested.how),
     };
     let body = format!(
-        "Junees가 리뷰 {}(@{reviewer})를 반영해 커밋 {new}를 `{branch}`에 push했습니다.\n\n{test_line}\n\n{}",
-        review["id"],
+        "Junees가 @{reviewer}의 리뷰 {} 반영해 커밋 {} `{branch}`에 push했습니다.\n\n{test_line}\n\n{}",
+        crate::korean::object(&review["id"].to_string()),
+        crate::korean::object(&new),
         answer_block(cx, &report.answer)
     );
     let posted = comment(cx, r, n, &body).await;
@@ -833,10 +834,10 @@ async fn config_unchanged(
     };
     let reviewer = review["user"]["login"].as_str().unwrap_or("?");
     let body = format!(
-        "Junees가 리뷰 {}(@{reviewer})를 반영하던 중 {korean} git 설정 파일 {}개가 바뀌어서 \
+        "Junees가 @{reviewer}의 리뷰 {} 반영하던 중 {korean} git 설정 파일 {}개가 바뀌어서 \
          push하지 않았습니다. 바뀐 설정은 되돌리지 않았으니 서버에서 확인해 주세요 \
          (`junees webhook list`의 결과에 키 이름이 있습니다).",
-        review["id"],
+        crate::korean::object(&review["id"].to_string()),
         changes.len()
     );
     let posted = comment(cx, r, n, &body).await;
@@ -987,8 +988,8 @@ async fn merge_step(
     match merge::merge(cx.client, r, n, sha).await {
         Ok(commit) => {
             let body = format!(
-                "Junees가 조건을 모두 확인하고 {}를 merge했습니다(merge 커밋 {}).\n\n{table}",
-                short(sha),
+                "Junees가 조건을 모두 확인하고 {} merge했습니다(merge 커밋 {}).\n\n{table}",
+                crate::korean::object(short(sha)),
                 short(&commit)
             );
             let posted = post(cx, r, n, &body).await;

@@ -554,7 +554,10 @@ async fn addresses_requested_changes_in_a_worktree_and_pushes_a_new_commit() {
     assert_eq!(writes[0].0, "POST /repos/o/n/issues/7/comments");
     let body = writes[0].1["body"].as_str().unwrap();
     assert!(
-        body.contains(&format!("커밋 {pushed}를 `feature`에 push")),
+        body.contains(&format!(
+            "커밋 {} `feature`에 push",
+            crate::korean::object(&pushed)
+        )),
         "{body}"
     );
     assert!(body.contains("테스트: 통과"), "{body}");
