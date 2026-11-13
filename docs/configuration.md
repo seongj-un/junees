@@ -41,7 +41,7 @@ model = "openai/gpt-4o-mini"                       # JUNEES_MODEL, 이 provider�
 # openai_max_tokens_field = "auto"                 # JUNEES_OPENAI_MAX_TOKENS_FIELD
 ```
 
-- 우선순위: 다른 설정과 같다. 키마다 환경 변수(`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `JUNEES_OPENAI_*`)가 있으면 설정 파일 값(`openai_base_url`, `openai_api_key`, `openai_*`)보다 우선하고, 빈 값(공백뿐인 값 포함)인 환경 변수는 없는 것으로 본다. 키마다 따로 정하므로 주소는 파일에서, 키는 환경 변수에서 올 수 있다. 다른 도구 때문에 셸에 `OPENAI_API_KEY`나 `OPENAI_BASE_URL`을 둔 채 설정 파일에 OpenRouter 같은 다른 서버를 적으면, 그 환경 변수가 이겨서 OpenAI 키가 파일의 주소로 가거나 다른 주소로 요청이 간다. 그럴 때는 그 셸에서 변수를 비우거나(`OPENAI_API_KEY= junees`), 주소와 키를 같은 곳(둘 다 파일 또는 둘 다 환경 변수)에 둔다. `junees doctor`가 키가 어디서 왔는지(환경 변수 / config.toml)와 실제로 쓸 주소를 보여 준다.
+- 우선순위: 키마다 환경 변수(`OPENAI_BASE_URL`, `JUNEES_OPENAI_*`)가 있으면 설정 파일 값(`openai_base_url`, `openai_*`)보다 우선하고, 빈 값(공백뿐인 값 포함)인 환경 변수는 없는 것으로 본다. 키만은 주소와 한 쌍으로 읽는다: 주소를 설정 파일(`openai_base_url`)에서 읽었으면 키도 설정 파일(`openai_api_key`)에서만, 주소를 환경 변수(`OPENAI_BASE_URL`)에서 읽었으면 키도 환경 변수(`OPENAI_API_KEY`)에서만 읽는다. 다른 도구 때문에 셸에 `OPENAI_API_KEY`를 둔 채 설정 파일에 OpenRouter 같은 다른 서버를 적어도 OpenAI 키가 그 서버로 가지 않고, 반대로 셸의 `OPENAI_BASE_URL`로 파일의 키가 가지도 않는다. 주소를 어디에도 적지 않았으면(기본 주소) 키는 다른 설정처럼 환경 변수, 설정 파일 순서로 찾는다. 짝이 맞는 키가 없고 서버가 이 컴퓨터에 있지 않으면 시작할 때 `no API key for <주소>: ... in the same place as the address` 오류로 알리고, `junees doctor`는 "set, but not where the address is set"로 어느 쪽에 키를 옮길지 알려 준다. 키가 어디서 왔는지(환경 변수 / config.toml)와 실제로 쓸 주소도 `junees doctor`가 보여 준다.
 
 - 주소: https만 받는다. 평문 http는 키와 대화 전체가 네트워크에 그대로 실리므로 서버가 이 컴퓨터에 있을 때(`localhost`, `127.0.0.0/8`, `::1`)만 받는다. 리다이렉트는 따라가지 않는다. 주소는 오류와 `junees doctor` 출력에 나오므로 사용자 이름이나 비밀번호가 든 주소(`https://user:pass@proxy/v1`)는 거절한다. 키는 `openai_api_key`에 둔다.
 - 키: `Authorization: Bearer <키>`로 보낸다. 루프백 주소의 서버는 키 없이 부를 수 있고, 그 밖의 주소에서 키가 없으면 시작할 때 오류다. `OPENAI_API_KEY`는 `ANTHROPIC_API_KEY`처럼 bash, MCP 서버, 플러그인, `claude` 자식 환경에서 지우고, `junees doctor` 출력에서 가린다. 메모리와 스킬에 저장하는 글의 비밀 값 검사는 OpenAI 프로젝트 키(`sk-proj-` 등), OpenRouter 키(`sk-or-v1-`), 접두 없는 `sk-` 키(`sk-` 뒤 영문자와 숫자 32자 이상: OpenAI 옛 키, DeepSeek 같은 호환 서버 키)도 찾는다.
@@ -64,7 +64,7 @@ model = "openai/gpt-4o-mini"                       # JUNEES_MODEL, 이 provider�
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API 주소 |
 | `JUNEES_PROVIDER` | `anthropic` | api 백엔드가 부를 API: `anthropic`(Messages API) 또는 `openai`(Chat Completions와 그 호환 서버, [OpenAI 호환 API](#openai-호환-api)) |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | `provider = openai`의 API 주소. https만, 평문 http는 localhost와 루프백 주소에만 |
-| `OPENAI_API_KEY` | (없음, 또는 설정 파일 `openai_api_key`) | `provider = openai`의 키. 루프백 주소의 서버(Ollama 등)는 없어도 된다 |
+| `OPENAI_API_KEY` | (없음, 또는 설정 파일 `openai_api_key`) | `provider = openai`의 키. 주소와 같은 곳(둘 다 환경 변수 또는 둘 다 설정 파일)에서만 읽는다. 루프백 주소의 서버(Ollama 등)는 없어도 된다 |
 | `JUNEES_OPENAI_REASONING_EFFORT` | (없음: 보내지 않음) | `provider = openai`의 `reasoning_effort`(`low`, `medium`, `high` 등). [OpenAI 호환 API](#openai-호환-api)의 추론 모델 참고 |
 | `JUNEES_OPENAI_MAX_TOKENS_FIELD` | `auto` | 출력 상한을 보낼 필드: `auto`(OpenAI와 Azure OpenAI는 `max_completion_tokens`, 그 밖은 `max_tokens`), `max_tokens`, `max_completion_tokens` |
 | `JUNEES_BACKEND` | `api` | 대화와 작업을 돌릴 것: `api`(Junees의 에이전트) 또는 `claude-code`([구독 모드](subscription.md#구독-모드-claude-code-백엔드)) |

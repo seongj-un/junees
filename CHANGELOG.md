@@ -31,7 +31,7 @@
   - 새 설정 `openai_reasoning_effort`(`JUNEES_OPENAI_REASONING_EFFORT`): 정했을 때만 `reasoning_effort`로 보낸다. 정해 두면 압축 요약 호출의 상한에 추론용 25,000 토큰을 더한다.
   - 추론 토큰(`completion_tokens_details.reasoning_tokens`)은 출력과 비용에 그대로 두고 기록에 따로 남기며, 다음 요청에 실리지 않으므로 컨텍스트 크기에서 뺀다.
   - 스트림 중간에 온 크레딧 소진·지출 한도 오류(`insufficient_quota` 등)를 더는 재시도하지 않는다(오류 응답, 200 본문 오류와 같은 기준). `type`만 `insufficient_quota`인 오류도 재시도하지 않는다.
-  - 환경 변수와 설정 파일의 우선순위(키마다 환경 변수가 이김)를 문서에 적었다.
+  - 환경 변수와 설정 파일의 우선순위(키마다 환경 변수가 이김)를 문서에 적었다. 다만 OpenAI 키는 주소와 같은 곳에서만 읽는다: `openai_base_url`이 설정 파일에 있으면 `openai_api_key`만, `OPENAI_BASE_URL`이 환경 변수에 있으면 `OPENAI_API_KEY`만 쓴다. 다른 도구 때문에 셸에 둔 `OPENAI_API_KEY`가 설정 파일의 다른 서버(OpenRouter 등)로 가지 않는다.
 - 디스코드와 텔레그램 승인 버튼 (#79), Slack Block Kit 승인 버튼 (#80)
 - `junees setup`의 Slack 단계(봇 토큰, 앱 토큰, 허용할 member id) (#80)
 - 웹훅 실행 전용 읽기 설정 `webhook_sandbox_read` (#78)

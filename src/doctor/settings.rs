@@ -3,7 +3,7 @@
 
 use crate::claude_code::Backend;
 use crate::config::Config;
-use crate::config_file::Settings;
+use crate::config_file::{Origin, Settings};
 use crate::gateway::config::{ALLOWED_USERS_ENV, DiscordConfig, TOKEN_ENV};
 use crate::notify::Notifier;
 
@@ -214,10 +214,10 @@ pub(super) fn provider(report: &mut Report, settings: &Settings, read: &Read) {
 
 /// Where the value of `name` comes from.
 fn source(settings: &Settings, name: &str) -> &'static str {
-    if settings.env(name).is_some() {
-        "environment"
-    } else {
+    if settings.origin(name) == Some(Origin::File) {
         "config.toml"
+    } else {
+        "environment"
     }
 }
 
@@ -283,6 +283,16 @@ pub(super) fn keys(report: &mut Report, settings: &Settings, backend: Backend) {
                 } else {
                     "not set (the claude-code backend does not need it)"
                 },
+            );
+        } else if settings.env(openai::API_KEY_ENV).is_some()
+            || settings.file().env_value(openai::API_KEY_ENV).is_some()
+        {
+            report.fail(
+                AREA,
+                "OpenAI API key",
+                "set, but not where the address is set, so it is not used",
+                "put the key in the same place as the address: openai_api_key with \
+                 openai_base_url in config.toml, or OPENAI_API_KEY with OPENAI_BASE_URL",
             );
         } else {
             report.fail(

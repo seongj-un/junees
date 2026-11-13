@@ -93,7 +93,8 @@ Environment (each also a key of config.toml, named in brackets):
                       (Chat Completions: OpenAI, OpenRouter, Ollama, vLLM, LM Studio)
   OPENAI_BASE_URL     [openai_base_url] its address (default https://api.openai.com/v1;
                       plain http only on localhost)
-  OPENAI_API_KEY      [openai_api_key] its key (a server on localhost may need none)
+  OPENAI_API_KEY      [openai_api_key] its key, read from where the address is set
+                      (a server on localhost may need none)
   JUNEES_OPENAI_REASONING_EFFORT  [openai_reasoning_effort] reasoning_effort of a
                       reasoning model (low, medium, high, ...; not sent unless set)
   JUNEES_OPENAI_MAX_TOKENS_FIELD  [openai_max_tokens_field] auto (default:

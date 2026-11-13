@@ -559,6 +559,67 @@ async fn the_agent_runs_parallel_tool_calls_and_sends_results_and_images_back() 
     assert_eq!(messages.len(), 6, "{second}");
 }
 
+/// Runs `junees -p hello` with `provider = openai`, `config` as its
+/// config.toml and `env` set, and returns the request the server got.
+async fn binary_request(config: &str, env: &[(&str, &str)]) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let work = home.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    let (url, server) = fake_api(vec![(200, answer("hi"))]).await;
+    let junees_home = home.path().join("junees");
+    std::fs::create_dir(&junees_home).unwrap();
+    let file = junees_home.join("config.toml");
+    let config = config.replace("{url}", &format!("{url}/v1"));
+    std::fs::write(
+        &file,
+        format!("provider = \"openai\"\nmodel = \"m\"\n{config}"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut command = common::junees_binary(&work, home.path());
+    command
+        .args(["-p", "hello"])
+        .env("JUNEES_HOME", &junees_home)
+        .env("JUNEES_STREAM", "false")
+        .stdin(Stdio::null());
+    for (name, value) in env {
+        command.env(name, value.replace("{url}", &format!("{url}/v1")));
+    }
+    let out = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .expect("junees did not exit")
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    served(server).await.remove(0).to_lowercase()
+}
+
+#[tokio::test]
+async fn the_key_goes_only_to_the_address_set_in_the_same_place() {
+    // A key exported for other tools stays away from the file's server,
+    // which gets the file's key.
+    let head = binary_request(
+        "openai_base_url = \"{url}\"\nopenai_api_key = \"sk-fake-file\"\n",
+        &[("OPENAI_API_KEY", "sk-fake-env")],
+    )
+    .await;
+    assert!(
+        head.contains("authorization: bearer sk-fake-file"),
+        "{head}"
+    );
+    assert!(!head.contains("sk-fake-env"), "{head}");
+
+    // The file's key stays away from an exported address (a server on
+    // loopback needs none, so it is asked without one).
+    let head = binary_request(
+        "openai_api_key = \"sk-fake-file\"\n",
+        &[("OPENAI_BASE_URL", "{url}")],
+    )
+    .await;
+    assert!(!head.contains("authorization:"), "{head}");
+}
+
 #[tokio::test]
 async fn the_binary_uses_an_openai_compatible_server_and_counts_its_usage() {
     let home = tempfile::tempdir().unwrap();

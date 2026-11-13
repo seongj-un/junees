@@ -161,8 +161,10 @@ impl Settings {
     pub fn require_key(&self) -> Result<()> {
         if self.api_key.is_none() && !self.is_local() {
             bail!(
-                "no API key for {}: set openai_api_key or {API_KEY_ENV} (a server on this \
-                 machine, such as Ollama on http://localhost:11434/v1, needs none)",
+                "no API key for {}: set openai_api_key or {API_KEY_ENV}, in the same place \
+                 as the address (config.toml's openai_api_key goes with openai_base_url, \
+                 {API_KEY_ENV} with {BASE_URL_ENV}; a server on this machine, such as \
+                 Ollama on http://localhost:11434/v1, needs none)",
                 self.base_url
             );
         }
