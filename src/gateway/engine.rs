@@ -181,6 +181,12 @@ pub struct ApiEngines {
 }
 
 impl ApiEngines {
+    /// The file tools' write rules of these agents (an undo of their
+    /// checkpoints writes through them too).
+    pub fn file_access(&self) -> crate::tools::FileAccess {
+        crate::tools::FileAccess::new(&self.config.tools)
+    }
+
     /// The agent on the API `config` names, as it sets it up.
     pub fn new(config: Config, cwd: PathBuf) -> Self {
         let config = Arc::new(config);
