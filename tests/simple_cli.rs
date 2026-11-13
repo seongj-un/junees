@@ -111,6 +111,45 @@ async fn a_bare_question_runs_once_with_the_key_from_the_settings_file() {
 }
 
 #[tokio::test]
+async fn the_anthropic_key_goes_only_to_the_address_set_in_the_same_place() {
+    let home = tempfile::tempdir().unwrap();
+    let (url, server) = fake_api(vec![(200, text_reply("Env pair."))]).await;
+
+    // The file's key does not go to an exported address: without a key
+    // next to it, nothing is sent.
+    write_settings(home.path(), "api_key = \"sk-fake-file\"\n");
+    let mut run = junees(home.path(), home.path(), &["hello"]);
+    run.env("ANTHROPIC_BASE_URL", &url);
+    let (out, stdout, stderr) = output(run).await;
+    assert!(!out.status.success(), "{stdout}");
+    assert!(
+        stderr.contains(&format!("no API key for {url}:")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("in the same place as the address"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("sk-fake-file"), "{stderr}");
+
+    // With the key next to it, the exported address gets that key.
+    let mut run = junees(home.path(), home.path(), &["hello"]);
+    run.env("ANTHROPIC_BASE_URL", &url)
+        .env("ANTHROPIC_API_KEY", "sk-fake-env");
+    let (out, stdout, stderr) = output(run).await;
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(stdout, "Env pair.\n");
+
+    let requests = tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("the fake API got fewer requests")
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(api_key_of(&requests[0]), "sk-fake-env");
+    assert!(!requests[0].contains("sk-fake-file"), "{}", requests[0]);
+}
+
+#[tokio::test]
 async fn a_bad_settings_file_names_the_line() {
     let home = tempfile::tempdir().unwrap();
     write_settings(home.path(), "# mine\nmodel = claude-sonnet-4-6\n");
