@@ -86,31 +86,51 @@ function renderList(root, data, ctx, { target, field, noun, caption, columns }) 
   const cols = columns(ctx.now, actionButton);
   const rowKey = (item) => t.key(item);
 
+  // The list this render owns. The view element is shared by every screen,
+  // so an answer that comes back after the user moved on must not touch it.
+  const list = el("div", { class: "action-list" });
+  const myUrl = ctx.url;
+
   const act = async (item, action, button) => {
-    const result = await runAction({ target, item, action, opener: button });
+    const done = ctx.beginWrite();
+    let result;
+    try {
+      result = await runAction({ target, item, action, opener: button });
+    } finally {
+      done();
+    }
+    const here = list.isConnected;
     if (result.outcome === "lock") return ctx.lock();
-    if (result.outcome === "reload") return ctx.reload();
+    if (result.outcome === "reload") return here ? ctx.reload() : ctx.forget(myUrl);
     if (result.outcome === "failed") {
       ctx.announce(result.message);
-      button.focus();
+      if (here) button.focus();
       return;
     }
     if (result.outcome !== "done") {
-      button.focus();
+      if (here) button.focus();
       return;
     }
+    const message = `${t.label(item)} ${t.object} ${ACTION_TEXT[action].done}.`;
     const index = items.findIndex((other) => t.key(other) === t.key(item));
     const changed = result.item && typeof result.item === "object" ? result.item : item;
     if (index >= 0) items[index] = changed;
+    if (!here) {
+      // Shown on another screen now: load this list again on the way back.
+      ctx.forget(myUrl);
+      ctx.announce(message);
+      return;
+    }
     const key = CSS.escape(String(t.key(item)));
-    root.querySelector(`tr[data-key="${key}"]`)?.replaceWith(tableRow(cols, changed, rowKey));
-    root.querySelector("[data-summary]")?.replaceWith(summary(items, noun));
-    const next = root.querySelector(`[data-action-key="${key}"]`);
-    (next ?? root.querySelector(`tr[data-key="${key}"] th`))?.focus();
-    ctx.announce(`${t.label(item)} ${t.object} ${ACTION_TEXT[action].done}.`);
+    list.querySelector(`tr[data-key="${key}"]`)?.replaceWith(tableRow(cols, changed, rowKey));
+    list.querySelector("[data-summary]")?.replaceWith(summary(items, noun));
+    const next = list.querySelector(`[data-action-key="${key}"]`);
+    (next ?? list.querySelector(`tr[data-key="${key}"] th`))?.focus();
+    ctx.announce(message);
   };
 
-  root.replaceChildren(summary(items, noun), dataTable({ caption, rowKey, rows: items, columns: cols }));
+  list.append(summary(items, noun), dataTable({ caption, rowKey, rows: items, columns: cols }));
+  root.replaceChildren(list);
 }
 
 export function renderCron(root, data, ctx) {

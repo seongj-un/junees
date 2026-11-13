@@ -81,6 +81,8 @@ const state = {
   seq: 0,
   controller: null,
   locked: false,
+  /** Write actions in progress; the 30-second refresh waits for them. */
+  writes: 0,
 };
 
 function announce(text) {
@@ -99,6 +101,28 @@ function ctx() {
     announce,
     lock,
     reload: () => load({ manual: true }),
+    /**
+     * A write is about to start: stop the refresh until `done` is called,
+     * and drop a GET already on its way, whose answer would predate the
+     * write and redraw the row in its old state.
+     */
+    beginWrite: () => {
+      state.writes += 1;
+      if (state.loading) {
+        state.controller?.abort();
+        state.seq += 1;
+        setBusy(false);
+      }
+      let open = true;
+      return () => {
+        if (!open) return;
+        open = false;
+        state.writes -= 1;
+      };
+    },
+    /** Forget the cached answer for `url`, so the next visit loads it again. */
+    forget: (url) => state.cache.delete(url),
+    url: currentUrl(),
     setTitle: (text) => {
       ui.title.textContent = text;
       document.title = `${text} - Junees 대시보드`;
@@ -323,7 +347,7 @@ function start() {
   else lock();
 
   const refreshIfDue = () => {
-    if (state.locked || document.hidden || state.loading) return;
+    if (state.locked || document.hidden || state.loading || state.writes > 0) return;
     if (state.route?.autoRefresh === false) return;
     if (Date.now() - state.lastAttempt >= REFRESH_MS) load();
   };
