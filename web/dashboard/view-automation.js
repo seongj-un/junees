@@ -3,8 +3,14 @@
 import { badge, code, dataTable, el, notice, pathCode, whenCell } from "./dom.js";
 import { formatInt, parseTime } from "./format.js";
 
-const RUN_STATUS = { ok: ["성공", "ok"], failed: ["실패", "fail"] };
-const KINDS = { github: "GitHub", template: "템플릿" };
+const RUN_STATUS = {
+  ok: ["성공", "ok"],
+  failed: ["실패", "fail"],
+  running: ["실행 중", "info"],
+  // A one-time job whose time passed while nothing was running to start it.
+  missed: ["놓침", "warn"],
+};
+const KINDS = { github: "GitHub", generic: "일반" };
 
 function lastRunCell(lastRun, now) {
   if (!lastRun) return el("span", { class: "muted" }, "아직 실행하지 않음");
