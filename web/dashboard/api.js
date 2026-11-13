@@ -21,15 +21,19 @@ export class ApiError extends Error {
 }
 
 /**
- * Reads `#token=...` from the address once, keeps it for this tab and
- * takes it out of the address so it is not left in history or on screen.
+ * Reads `#token=...` from the address, keeps it for this tab (replacing an
+ * older one) and takes it out of the address so it is not left in history
+ * or on screen. Called on load and on every hash change, because a
+ * restarted server keeps the same origin and the user may paste its new
+ * address into the open tab. Returns whether a token was taken.
  */
 export function takeTokenFromAddress(win = window) {
   const hash = win.location.hash.replace(/^#/, "");
-  if (!hash.includes("token=")) return;
+  if (!hash.includes("token=")) return false;
   const token = new URLSearchParams(hash).get("token");
   if (token) win.sessionStorage.setItem(TOKEN_KEY, token);
   win.history.replaceState(null, "", win.location.pathname + win.location.search);
+  return Boolean(token);
 }
 
 export function getToken(win = window) {

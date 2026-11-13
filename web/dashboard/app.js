@@ -207,6 +207,20 @@ function lock() {
   announce("토큰이 맞지 않아 대시보드를 열 수 없습니다. 터미널에 나온 주소로 다시 여세요.");
 }
 
+/** A new token arrived in the address: start over with it, on the same screen. */
+function acceptToken() {
+  const keep = state.route?.id;
+  if (keep) window.history.replaceState(null, "", `#${keep}`);
+  state.locked = false;
+  state.route = null;
+  state.cache.clear();
+  state.error = null;
+  state.lastAttempt = 0;
+  document.body.classList.remove("is-locked");
+  route(false);
+  announce("새 토큰으로 대시보드를 다시 열었습니다.");
+}
+
 function route(fromUser) {
   if (state.locked) return;
   const id = window.location.hash.replace(/^#/, "");
@@ -237,13 +251,13 @@ function start() {
     event.preventDefault();
     ui.title.focus();
   });
-  window.addEventListener("hashchange", () => route(true));
+  window.addEventListener("hashchange", () => {
+    if (takeTokenFromAddress()) acceptToken();
+    else route(true);
+  });
 
-  if (!getToken()) {
-    lock();
-    return;
-  }
-  route(false);
+  if (getToken()) route(false);
+  else lock();
 
   const refreshIfDue = () => {
     if (state.locked || document.hidden || state.loading) return;
