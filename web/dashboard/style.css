@@ -1570,7 +1570,7 @@ a.button {
 
 /* Whole, never clipped: long lines wrap and a tall box scrolls. */
 .approval-summary {
-  max-height: min(50vh, 420px);
+  max-height: min(40vh, 320px);
   margin: 4px 0 0;
   padding: 10px 12px;
   overflow: auto;
@@ -1593,6 +1593,15 @@ a.button {
   color: var(--warn);
   font-size: 13px;
   font-weight: 600;
+}
+
+.approval-tail {
+  max-height: none;
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+
+.chat.has-question .chat-form {
+  position: static;
 }
 
 .approval-reasons {

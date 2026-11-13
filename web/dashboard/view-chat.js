@@ -39,6 +39,8 @@ let mounts = 0;
 const TARGET_LABEL = { bash: "실행할 명령", write_file: "쓸 파일", edit_file: "고칠 파일" };
 /** From this length on, say that the box scrolls, so the end is not missed. */
 const LONG_TARGET = 400;
+/** How much of a long command's end to show again on its own, never scrolled away. */
+const TAIL = 240;
 
 /**
  * The parts of a question: its target (the command or path), why it is
@@ -56,12 +58,16 @@ function approvalDetails(event, idBase) {
     el("pre", { class: "approval-summary", tabindex: "0", "aria-labelledby": `${idBase}-target` }, event.target),
   ];
   if (event.target.length >= LONG_TARGET) {
+    // What runs last is where a long command can hide something; show it
+    // again where it cannot be scrolled out of sight.
     parts.push(
       el(
         "p",
         { class: "approval-long" },
-        `${formatInt(event.target.length)}자로 깁니다. 상자를 끝까지 내려 전부 확인한 뒤 답해 주세요.`,
+        `${formatInt(event.target.length)}자로 깁니다. 위 상자를 끝까지 내려 전부 확인한 뒤 답해 주세요.`,
       ),
+      el("p", { class: "approval-label", id: `${idBase}-tail` }, `명령의 끝 ${formatInt(TAIL)}자`),
+      el("pre", { class: "approval-summary approval-tail", "aria-labelledby": `${idBase}-tail` }, `…${event.target.slice(-TAIL)}`),
     );
   }
   const reasons = Array.isArray(event.reasons) ? event.reasons.filter((r) => typeof r === "string" && r) : [];
@@ -230,6 +236,9 @@ class ChatView {
   /** "Waiting for your answer" while a question is open, else "making the answer". */
   updateRunningNote() {
     const waiting = [...this.questions.values()].some((q) => !q.closed);
+    // The message box stops floating while a question is open, so it never
+    // covers the question's buttons.
+    this.root.querySelector(".chat")?.classList.toggle("has-question", waiting);
     this.runningNote.lastChild.textContent = waiting ? "승인을 기다리는 중입니다" : "답을 만드는 중입니다";
   }
 
@@ -719,6 +728,8 @@ class ChatView {
   }
 
   usage(event) {
+    // A turn cancelled before the model answered used nothing: no line for it.
+    if (!event.input_tokens && !event.output_tokens) return;
     const entry = this.current ?? this.turn(null);
     const tokens = `입력 ${formatInt(event.input_tokens)} · 출력 ${formatInt(event.output_tokens)} 토큰`;
     const cost = typeof event.cost_usd === "number" ? formatUsd(event.cost_usd) : "가격 정보 없음";
@@ -746,6 +757,7 @@ class ChatView {
     }
     this.current = null;
     this.setRunning(false);
+    this.updateRunningNote();
     if (this.connected) this.ctx.announce(note ? `답이 끝났습니다. ${note}` : "답이 끝났습니다.");
   }
 
