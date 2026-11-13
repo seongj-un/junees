@@ -906,7 +906,10 @@ async fn pause_and_resume_need_the_page_and_change_the_stores() {
     let reply = post(&dashboard, &pause, &page, "").await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     let job: Value = serde_json::from_str(&reply.body).unwrap();
-    assert_eq!((&job["paused"], &job["paused_for_home"]), (&json!(true), &json!(true)));
+    assert_eq!(
+        (&job["paused"], &job["paused_for_home"]),
+        (&json!(true), &json!(true))
+    );
     let reply = post(&dashboard, &format!("/api/cron/{id}/resume"), &page, "").await;
     assert_eq!(reply.status, 409, "{}", reply.body);
     let routes_path = home.state.join("webhooks/routes.json");
@@ -940,9 +943,9 @@ async fn pause_and_resume_need_the_page_and_change_the_stores() {
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 9, "{log}");
     assert!(lines[0].ends_with(&format!(" pause cron {id} ok")), "{log}");
-    assert!(lines[5].ends_with(&format!(" pause cron {id} ok")), "{log}");
+    assert!(lines[4].ends_with(&format!(" pause cron {id} ok")), "{log}");
     assert!(
-        lines[6].ends_with(&format!(" resume cron {id} 409 conflict")),
+        lines[5].ends_with(&format!(" resume cron {id} 409 conflict")),
         "{log}"
     );
     assert!(
@@ -955,7 +958,7 @@ async fn pause_and_resume_need_the_page_and_change_the_stores() {
         "{log}"
     );
     assert!(
-        lines[4].ends_with(" resume webhook gh 409 conflict"),
+        lines[6].ends_with(" resume webhook gh 409 conflict"),
         "{log}"
     );
     assert!(
@@ -970,4 +973,114 @@ async fn pause_and_resume_need_the_page_and_change_the_stores() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn an_opened_browser_gets_a_one_time_code_not_the_token() {
+    let home = Home::new();
+    // A fake opener (xdg-open on Linux, open on macOS) that writes down
+    // the address it was given.
+    let bin = home.root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let opened = home.root.join("opened");
+    for name in ["xdg-open", "open"] {
+        let script = bin.join(name);
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s' \"$1\" > {}\n", opened.display()),
+        )
+        .unwrap();
+        set_mode(&script, 0o755);
+    }
+    let mut child = home
+        .command(&["dashboard", "--listen", "127.0.0.1:0"])
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = tokio::time::timeout(Duration::from_secs(30), lines.next_line())
+        .await
+        .expect("nothing printed")
+        .unwrap()
+        .expect("the dashboard exited");
+    let second = lines.next_line().await.unwrap().unwrap_or_default();
+    tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+    let base = first
+        .strip_prefix("Junees dashboard: opening ")
+        .and_then(|rest| rest.strip_suffix(" in the browser; Ctrl-C stops it."))
+        .unwrap_or_else(|| panic!("not the opening line: {first}"));
+    assert!(second.contains("junees dashboard --no-open"), "{second}");
+    let mut address = String::new();
+    for _ in 0..100 {
+        address = std::fs::read_to_string(&opened).unwrap_or_default();
+        if !address.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let code = address
+        .strip_prefix(&format!("{base}#code="))
+        .unwrap_or_else(|| panic!("not a code address: {address}"))
+        .to_string();
+    assert_eq!(code.len(), 43);
+    let host = base
+        .strip_prefix("http://")
+        .and_then(|rest| rest.strip_suffix('/'))
+        .unwrap();
+    let port: u16 = host.rsplit_once(':').unwrap().1.parse().unwrap();
+    let dashboard = Dashboard {
+        child,
+        port,
+        token: String::new(),
+    };
+    let origin = format!("Origin: http://{host}");
+    let body = format!("{{\"code\":\"{code}\"}}");
+
+    // The write rules first, then the code.
+    let reply = post(
+        &dashboard,
+        "/api/token",
+        "Content-Type: application/json",
+        &body,
+    )
+    .await;
+    assert_eq!(
+        (reply.status, reply.error()),
+        (403, json!("forbidden_origin"))
+    );
+    let reply = post(
+        &dashboard,
+        "/api/token",
+        &origin,
+        "{\"code\":\"x\",\"y\":1}",
+    )
+    .await;
+    assert_eq!((reply.status, reply.error()), (400, json!("bad_body")));
+    let reply = post(&dashboard, "/api/token", &origin, "{\"code\":\"wrong\"}").await;
+    assert_eq!((reply.status, reply.error()), (401, json!("bad_code")));
+    let reply = dashboard.get("/api/token").await;
+    assert_eq!((reply.status, reply.header("allow")), (405, Some("POST")));
+
+    let reply = post(
+        &dashboard,
+        "/api/token",
+        &format!("{origin}\nContent-Type: application/json"),
+        &body,
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    has_security_headers(&reply, "token");
+    let token = serde_json::from_str::<Value>(&reply.body).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(token.len(), 43);
+    assert_ne!(token, code);
+    assert!(!first.contains(&token) && !second.contains(&token));
+    let dashboard = Dashboard { token, ..dashboard };
+    assert_eq!(dashboard.json("/api/status").await["backend"], "api");
+    // Once only.
+    let reply = post(&dashboard, "/api/token", &origin, &body).await;
+    assert_eq!((reply.status, reply.error()), (401, json!("bad_code")));
 }
