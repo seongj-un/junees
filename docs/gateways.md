@@ -58,7 +58,8 @@ Restart=on-failure
 RestartSec=10
 # 설정은 ~/.junees/config.toml. 환경 변수로 줄 때는 0600 파일에:
 # EnvironmentFile=%h/.config/junees/gateway.env
-# OpenAI 키(OPENAI_API_KEY)를 이 파일에 두면 주소(OPENAI_BASE_URL)도 같은 파일에 둔다.
+# API 키는 주소와 같은 곳에서만 읽는다. 키(ANTHROPIC_API_KEY, OPENAI_API_KEY)를
+# 이 파일에 두고 주소를 바꿨다면 주소(ANTHROPIC_BASE_URL, OPENAI_BASE_URL)도 이 파일에 둔다.
 
 [Install]
 WantedBy=default.target

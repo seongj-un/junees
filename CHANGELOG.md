@@ -4,6 +4,13 @@
 
 ### 업그레이드할 때 확인할 것
 
+- **Anthropic 키는 주소와 같은 곳에서만 읽음 (#88)**
+  - `ANTHROPIC_API_KEY`(`api_key`)를 이제 주소 `ANTHROPIC_BASE_URL`(`base_url`)과 같은 곳에서만 읽습니다. 주소가 설정 파일에 있으면 `api_key`만, 환경 변수에 있으면 `ANTHROPIC_API_KEY`만 씁니다. 주소를 바꾸지 않았으면(기본 `https://api.anthropic.com`) 지금처럼 환경 변수, 설정 파일 순서로 찾습니다. 지금까지는 둘을 따로 읽어서, 셸에 export한 키가 설정 파일에 적은 프록시로 가거나 설정 파일의 키가 셸에 적은 주소로 갈 수 있었습니다.
+  - 다음 두 경우는 올린 뒤 `no API key for <주소>` 오류로 시작하지 않습니다.
+    - `base_url`은 설정 파일에, 키는 환경 변수(셸, systemd `EnvironmentFile`)에만 둔 경우: 키를 `api_key`로 옮기거나, 주소도 `ANTHROPIC_BASE_URL`로 옮깁니다.
+    - `ANTHROPIC_BASE_URL`은 환경 변수에, 키는 설정 파일 `api_key`에만 둔 경우: 키도 `ANTHROPIC_API_KEY`로 주거나, 주소를 `base_url`로 옮깁니다.
+  - 양쪽에 키가 다 있으면 오류 없이 주소 쪽 키를 씁니다. 그래서 예전에 환경 변수 키가 이기던 설정(파일에 `base_url`과 `api_key`, 셸에 `ANTHROPIC_API_KEY`)은 이제 파일의 키를 씁니다.
+  - 올리기 전에 `junees doctor`를 돌려 `Anthropic API key` 줄을 확인합니다. "set, but not where the address is set"이면 위처럼 옮깁니다.
 - **작업 폴더가 홈인 예약 작업과 웹훅 경로는 거절 (#84)**
   - 예약 작업, 웹훅 경로, GitHub 흐름(`add-github`)의 작업 폴더가 홈 자체이거나 홈을 품은 폴더(`/home`, `/`)면, 추가할 때 거절하고 이미 있는 것은 처음 실행할 때 실패로 기록하고 전달한 뒤 멈춥니다(`paused`. 일정이나 요청마다 실패가 다시 오지 않습니다). 막을 경로 목록(셸 시작 파일, systemd, `~/.ssh` 등)으로는 파이썬 `.pth`, 에디터 설정, 다른 저장소의 git 훅 같은 나중에 실행되는 파일을 다 막을 수 없기 때문입니다.
   - 올리기 전에 `junees doctor`를 돌려 `job <이름> folder`, `route <이름> folder` 경고가 있는지 봅니다. `junees cron list`와 `junees webhook list`의 폴더 줄로도 확인할 수 있습니다.

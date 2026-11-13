@@ -434,7 +434,12 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
   - 테스트: 단위 `provider/openai/{mod,convert,stream}.rs`(지역/Azure 호스트와 비슷한 가짜 호스트, 설정값 검사, 요약 여유, 추론 토큰, 오류 조각 재시도 규칙), `message.rs`, `config_file.rs`(`the_openai_settings_follow_the_same_order`, `the_openai_key_comes_from_where_the_address_does`), `doctor/tests.rs`(`the_provider_and_its_settings`), `provider/openai/convert.rs`(`the_reasoning_room_can_be_taken_back`). 통합 `tests/openai_client.rs`(`a_quota_error_inside_a_stream_is_not_retried`, `a_reasoning_model_gets_its_settings_and_its_reasoning_is_not_conversation`, `a_summary_refused_for_its_reasoning_room_goes_again_without_it`, `the_key_goes_only_to_the_address_set_in_the_same_place`)
   - 결정(#85 리뷰): OpenAI 키는 주소와 같은 곳에서만 읽는다(`config_file::Settings::get`). 주소가 설정 파일이면 `openai_api_key`, 환경 변수면 `OPENAI_API_KEY`, 기본 주소면 환경 변수 > 파일. 출처가 다를 때 시작을 거절하는 대신 짝을 지은 것은, 다른 도구용으로 `OPENAI_API_KEY`를 export한 채 파일에 주소와 키를 모두 적은 흔한 경우를 그대로 돌게 하기 위해서다. 짝이 맞는 키가 없고 원격 주소면 시작할 때 "in the same place as the address" 오류, `junees doctor`는 "set, but not where the address is set"
   - 결정(#85 리뷰): Foundry의 OpenAI 외 모델이 `max_completion_tokens`를 받는지는 실제 배포 없이 확인할 수 없고, 배포 이름은 사용자가 정해 모델을 가려낼 수 없어서 `auto`는 그대로 두고 `openai_max_tokens_field = "max_tokens"` 우회를 문서에 적었다
-  - 남은 위험: 실제 OpenAI, Azure 서버로는 돌려 보지 않았다. Azure의 `api-key` 헤더와 옛 배포 주소는 지원하지 않는다. `ANTHROPIC_BASE_URL`과 `ANTHROPIC_API_KEY`는 여전히 키마다 따로 읽는다
+  - 남은 위험: 실제 OpenAI, Azure 서버로는 돌려 보지 않았다. Azure의 `api-key` 헤더와 옛 배포 주소는 지원하지 않는다. `ANTHROPIC_BASE_URL`과 `ANTHROPIC_API_KEY`는 여전히 키마다 따로 읽는다(아래 #88에서 고침)
+- 후속(#88): Anthropic 키도 주소와 짝을 짓는다
+  - 결정: 짝 규칙은 `config_file::PAIRED_KEYS`(키, 주소) 표 하나로 두고 OpenAI와 Anthropic이 같은 `Settings::paired_key`를 쓴다. 기본 주소면 지금처럼 환경 변수 > 파일
+  - 결정: Anthropic API는 언제나 키가 필요하므로 루프백 예외를 두지 않는다. 짝이 맞는 키가 없고 주소를 정했으면 `no API key for <주소>: ... in the same place as the address`, 주소를 정하지 않았으면 예전 `no API key: run junees setup` 오류
+  - 결정: `junees setup`은 주소를 묻지 않으므로 그대로 두고, 저장한 뒤 환경에 `ANTHROPIC_BASE_URL`이 있으면 "파일의 키는 그 주소로 가지 않는다"고 알린다
+  - 테스트: 단위 `config_file.rs`(`the_anthropic_key_comes_from_where_the_address_does`), `doctor/tests.rs`(`the_anthropic_key_and_its_address`). 통합 `tests/simple_cli.rs`(`a_bare_question_runs_once_with_the_key_from_the_settings_file`: 셸의 키가 파일의 주소로 가지 않음, `the_anthropic_key_goes_only_to_the_address_set_in_the_same_place`)
 
 ## 상태
 
