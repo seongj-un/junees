@@ -36,7 +36,7 @@ test("actionFor offers no resume for an item paused for the home folder", () => 
 test("describeActionError says what each refusal means", () => {
   const conflict = describeActionError(new ApiError("http", "run `junees cron allow-home c3`", { status: 409 }));
   assert.equal(conflict.detail, "run `junees cron allow-home c3`");
-  assert.deepEqual([conflict.outcome, conflict.retry], ["stay", false]);
+  assert.deepEqual([conflict.outcome, conflict.retry], ["reload", false]);
 
   const forbidden = describeActionError(new ApiError("http", "no origin", { status: 403 }));
   assert.match(forbidden.text, /출처/);
@@ -46,8 +46,11 @@ test("describeActionError says what each refusal means", () => {
   assert.equal(describeActionError(new ApiError("unauthorized", "x", { status: 401 })).outcome, "lock");
   assert.equal(describeActionError(new ApiError("http", "", { status: 404 })).outcome, "reload");
 
-  const fault = describeActionError(new ApiError("http", "", { status: 503 }));
+  const fault = describeActionError(new ApiError("http", "", { status: 500 }));
   assert.equal(fault.retry, true);
+  const busy = describeActionError(new ApiError("http", "jobs file is busy", { status: 503, code: "busy" }));
+  assert.deepEqual([busy.outcome, busy.retry], ["stay", true]);
+  assert.match(busy.text, /바뀐 것은 없습니다/);
   for (const status of [400, 405, 413, 415, 421]) {
     assert.equal(describeActionError(new ApiError("http", "", { status })).retry, false, String(status));
   }

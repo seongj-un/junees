@@ -46,7 +46,8 @@ export const ACTION_TEXT = {
  * What to tell the user about a failed action: `{ text, detail, outcome,
  * retry }`. `detail` is the server's own message, shown as it is (409).
  * `outcome` is what the list does after the dialog closes: `stay`,
- * `reload` (the item is gone) or `lock` (the token is no longer accepted).
+ * `reload` (the item is gone, changed, or the result is unknown) or `lock`
+ * (the token is no longer accepted).
  * `retry` says whether sending the same request again can help.
  */
 export function describeActionError(err) {
@@ -61,9 +62,12 @@ export function describeActionError(err) {
     }
     if (err.kind === "http" && err.status === 409) {
       return {
-        text: "지금 상태에서는 바꿀 수 없습니다. 서버가 보낸 이유는 다음과 같습니다.",
+        // The item is not in the state the list showed (paused for the home
+        // folder since, or a one-time job whose time has passed): reload so
+        // the row shows what it is now, with its allow-home command.
+        text: "지금 상태에서는 바꿀 수 없습니다. 창을 닫으면 목록을 새로 불러와 지금 상태를 보여 줍니다. 서버가 보낸 이유는 다음과 같습니다.",
         detail: err.message || null,
-        outcome: "stay",
+        outcome: "reload",
         retry: false,
       };
     }
@@ -81,6 +85,15 @@ export function describeActionError(err) {
         detail: null,
         outcome: "reload",
         retry: false,
+      };
+    }
+    if (err.kind === "http" && err.status === 503) {
+      // The server gave up waiting for the jobs file lock: nothing changed.
+      return {
+        text: "다른 junees가 저장 파일을 쓰고 있어 지금은 바꾸지 못했습니다. 바뀐 것은 없습니다. 잠시 뒤 다시 시도해 주세요.",
+        detail: null,
+        outcome: "stay",
+        retry: true,
       };
     }
     if (err.kind === "http") {
@@ -187,8 +200,10 @@ export function runAction({ target, item, action, opener }) {
         changed = await postJson(`${t.path(item)}/${action}`, { timeoutMs: WRITE_TIMEOUT_MS });
         after = "done";
         busy = false;
-        if (closedWhileBusy) settle({ outcome: "done", item: changed });
-        else dialog.close();
+        // Settle here, not only from the close event: a page in the
+        // background may not get that event until it is shown again.
+        if (!closedWhileBusy) dialog.close();
+        settle({ outcome: "done", item: changed });
       } catch (err) {
         busy = false;
         const said = describeActionError(err);

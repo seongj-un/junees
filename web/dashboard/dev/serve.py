@@ -22,6 +22,7 @@ Modes (also switchable while running: GET /__dev/mode/<mode>):
     unauthorized  every API answers 401
     forbidden     every write answers 403
     conflict      every write answers 409
+    busy          every write answers 503 busy (the jobs file lock)
 
 Timestamps in the fixtures are shifted so that 2026-11-13 09:00 UTC is now.
 """
@@ -40,7 +41,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-MODES = {"ok", "empty", "error", "slow", "hang", "unauthorized", "forbidden", "conflict"}
+MODES = {"ok", "empty", "error", "slow", "hang", "unauthorized", "forbidden", "conflict", "busy"}
 SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ACTION = re.compile(r"/api/(cron|webhooks)/([^/]+)/(pause|resume)")
 STATIC = {
@@ -222,6 +223,8 @@ class Handler(BaseHTTPRequestHandler):
         if mode == "error":
             return self.send_json(500, {"error": "internal", "message": "fixture error mode"})
         kind, key, action = match.group(1), unquote(match.group(2)), match.group(3)
+        if mode == "busy":
+            return self.send_json(503, {"error": "busy", "message": "the jobs file is busy (another junees holds its lock); nothing was changed"})
         if mode == "conflict":
             return self.send_json(409, {"error": "conflict", "message": f"fixture conflict mode: cannot {action} {key}"})
         items = self.server.fixtures[kind]["jobs" if kind == "cron" else "routes"]
