@@ -640,6 +640,9 @@ impl CommandPolicy {
         if let Some(command) = self_command::find(words) {
             found.push(caution(self_command::KIND, command.caution()));
         }
+        if let Some(reason) = self_command::allows_home(words) {
+            found.push(caution(self_command::HOME_KIND, reason));
+        }
         if let Some(write) = gh_command::find(words) {
             found.push(caution(write.kind(), write.caution()));
         }
@@ -3482,6 +3485,28 @@ mod tests {
             policy
                 .cautions("junees cron list && junees status", &workspace)
                 .is_empty()
+        );
+        // `--allow-home` gets a caution of its own, asked every time.
+        for command in [
+            "junees cron add 'every 1h' x --allow-home",
+            "bash -c 'junees webhook add pr --prompt x --no-secret --allow-home'",
+            "cd /tmp && junees webhook add-github f --repo o/n --review --allow-home",
+        ] {
+            assert_eq!(policy.check(command), Verdict::Allow, "{command}");
+            assert_eq!(
+                kinds(&policy, command, &workspace),
+                [self_command::KIND, self_command::HOME_KIND],
+                "{command}"
+            );
+            // Where no one is asked it is refused like any `cron add`.
+            assert!(
+                matches!(CommandPolicy::default().check(command), Verdict::Deny(_)),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            kinds(&policy, "junees cron add 'every 1h' x", &workspace),
+            [self_command::KIND]
         );
     }
 

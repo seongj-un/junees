@@ -151,6 +151,20 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
 /// The approval kind of these commands ([`super::Caution::kind`]).
 pub const KIND: &str = "change Junees's own state";
 
+/// The approval kind of `--allow-home` on a subcommand that takes it
+/// ([`allows_home`]): asked about every time, so an "always" for
+/// [`KIND`] or an earlier `--allow-home` does not cover it
+/// ([`crate::approval::ASKED_EVERY_TIME`]).
+pub const HOME_KIND: &str = "let unattended runs work in the home folder (asked every time)";
+
+/// The subcommands that take `--allow-home` (a job or route whose
+/// unattended runs may work in the home folder).
+const TAKES_ALLOW_HOME: &[&[&str]] = &[
+    &["cron", "add"],
+    &["webhook", "add"],
+    &["webhook", "add-github"],
+];
+
 impl SelfCommand {
     /// The command as the user would type it: `junees cron add`.
     pub fn command(&self) -> String {
@@ -189,6 +203,23 @@ pub fn find(words: &[String]) -> Option<&'static SelfCommand> {
                 .zip(command.words)
                 .all(|(arg, word)| arg == word)
     })
+}
+
+/// What the approval question says when `words` (as for [`find`]) adds a
+/// job or route with `--allow-home`: the model may add the option itself
+/// after the refusal names it, so it gets a question of its own
+/// ([`HOME_KIND`]). Any `--allow-home` word counts, even one after `--`
+/// (asking more is harmless).
+pub fn allows_home(words: &[String]) -> Option<String> {
+    let command = find(words)?;
+    (TAKES_ALLOW_HOME.contains(&command.words) && words.iter().any(|word| word == "--allow-home"))
+        .then(|| {
+            format!(
+                "`{} --allow-home` lets the unattended runs of what it adds work in the home \
+                 folder: their tools may change everything there but the protected paths",
+                command.command()
+            )
+        })
 }
 
 /// Whether `program`, as written in a command, runs Junees: `junees`
@@ -296,6 +327,39 @@ mod tests {
         ] {
             assert_eq!(find(&words(command)), None, "{command}");
         }
+    }
+
+    #[test]
+    fn allow_home_is_found_on_the_subcommands_that_take_it() {
+        for (command, expected) in [
+            (
+                "junees cron add 'every 1h' x --allow-home",
+                "junees cron add",
+            ),
+            (
+                "junees webhook add pr --prompt x --allow-home --no-secret",
+                "junees webhook add",
+            ),
+            (
+                "junees webhook add-github f --repo o/n --review --allow-home",
+                "junees webhook add-github",
+            ),
+        ] {
+            let caution = allows_home(&words(command)).unwrap_or_default();
+            assert!(
+                caution.starts_with(&format!("`{expected} --allow-home` lets")),
+                "{command}: {caution}"
+            );
+        }
+        for command in [
+            "junees cron add 'every 1h' x",
+            "junees cron resume a1 --allow-home",
+            "junees cron list --allow-home",
+            "echo junees cron add x --allow-home",
+        ] {
+            assert_eq!(allows_home(&words(command)), None, "{command}");
+        }
+        assert!(HOME_KIND.ends_with(crate::approval::ASKED_EVERY_TIME));
     }
 
     #[test]
