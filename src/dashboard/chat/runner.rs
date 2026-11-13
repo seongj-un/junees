@@ -106,17 +106,25 @@ pub fn start(engines: ApiEngines, shared: Shared) -> mpsc::UnboundedSender<Comma
                             let agent = agents.borrow_mut().remove(&room.id);
                             let (agents, shared) = (Rc::clone(&agents), Rc::clone(&shared));
                             tokio::task::spawn_local(async move {
+                                let mut guard = TurnGuard {
+                                    shared: &shared,
+                                    room: &room,
+                                    turn,
+                                    ended: false,
+                                };
                                 let Some(mut agent) = agent else {
+                                    guard.ended = true;
                                     end_turn(
                                         &shared,
                                         &room,
                                         turn,
                                         "error",
-                                        Some("the chat is closed"),
+                                        Some("this chat lost its agent; open it again with its session_id"),
                                     );
                                     return;
                                 };
                                 run_turn(&shared, &room, &mut agent, &text, turn).await;
+                                guard.ended = true;
                                 agents.borrow_mut().insert(room.id.clone(), agent);
                             });
                         }
@@ -182,7 +190,6 @@ fn preview(shared: &Shared, text: &str, chars: usize) -> String {
 
 /// Runs one turn of `room`, as events.
 async fn run_turn(shared: &Shared, room: &Room, agent: &mut Agent, text: &str, turn: u64) {
-    room.cancel.reset();
     room.push(json!({ "type": "turn_start", "turn": turn }));
     let before = agent.usage();
     let mut out = TextOut::default();
@@ -212,6 +219,30 @@ async fn run_turn(shared: &Shared, room: &Room, agent: &mut Agent, text: &str, t
             end_turn(shared, room, turn, "cancelled", None)
         }
         Err(err) => end_turn(shared, room, turn, "error", Some(&format!("{err:#}"))),
+    }
+}
+
+/// Ends a turn that did not end itself (a panic in the agent unwinds
+/// through it): the chat is freed, and the page told. The agent is gone;
+/// the next message says to open the session again.
+struct TurnGuard<'a> {
+    shared: &'a Shared,
+    room: &'a Room,
+    turn: u64,
+    ended: bool,
+}
+
+impl Drop for TurnGuard<'_> {
+    fn drop(&mut self) {
+        if !self.ended {
+            end_turn(
+                self.shared,
+                self.room,
+                self.turn,
+                "error",
+                Some("the turn stopped on an internal error"),
+            );
+        }
     }
 }
 
@@ -350,6 +381,35 @@ impl ChatAsk {
     }
 }
 
+/// The question in plain lines for the page: the command or path, then
+/// each reason after `- `, then the preview; not the terminal's layout.
+fn summary(request: &Request) -> String {
+    let mut text = request.target.clone();
+    for reason in &request.reasons {
+        text.push_str("\n- ");
+        text.push_str(reason);
+    }
+    if let Some(preview) = &request.preview {
+        text.push('\n');
+        text.push_str(preview.trim_end());
+    }
+    text
+}
+
+#[cfg(test)]
+pub(super) fn summary_for_test(request: &Request) -> String {
+    shown(&summary(request))
+}
+
+/// `text` with control characters (ANSI escapes, `\r`, direction marks)
+/// written out, line by line, as the terminal question shows them.
+fn shown(text: &str) -> String {
+    text.split('\n')
+        .map(crate::approval::visible)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Closes a question that is still open when its asker goes away (the
 /// turn was dropped).
 struct Closer<'a> {
@@ -376,23 +436,28 @@ impl Ask for ChatAsk {
             .iter()
             .any(|kind| !kind.ends_with(ASKED_EVERY_TIME));
         let answer = room.ask(&id, always);
-        let summary = cut(
-            &self.settings,
-            &crate::approval::render(request),
-            PREVIEW_CHARS,
-        )
-        .0;
         let options: Vec<&str> = if always {
             vec!["y", "a", "n"]
         } else {
             vec!["y", "n"]
         };
+        let hide = |text: &str, chars| cut(&self.settings, &shown(text), chars).0;
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + self.time.as_secs();
         room.push(json!({
             "type": "approval",
             "question_id": id,
             "kind": request.tool,
-            "summary": summary,
+            "summary": hide(&summary(request), PREVIEW_CHARS),
+            "target": hide(&request.target, PREVIEW_CHARS),
+            "reasons": request.reasons.iter().map(|reason| hide(reason, NAME_CHARS)).collect::<Vec<_>>(),
+            "preview": request.preview.as_deref().map(|preview| hide(preview, PREVIEW_CHARS)),
             "options": options,
+            "expires_in": self.time.as_secs(),
+            "expires_at": crate::session::format_utc_seconds(expires_at),
         }));
         let _closer = Closer {
             room: &room,

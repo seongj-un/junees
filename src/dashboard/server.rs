@@ -223,7 +223,8 @@ async fn connection(mut stream: TcpStream, context: &Arc<Context>) {
             let _ = tokio::time::timeout(CONNECTION_TIME, send(&mut stream, &answer)).await;
         }
         Reply::Events(events) => {
-            chat::stream::serve(&mut stream, events, SECURITY_HEADERS).await;
+            let (mut input, mut output) = stream.split();
+            chat::stream::serve(&mut input, &mut output, events, SECURITY_HEADERS).await;
             let _ = stream.shutdown().await;
         }
     }

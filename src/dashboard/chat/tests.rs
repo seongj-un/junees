@@ -58,22 +58,49 @@ fn routes_are_read_strictly() {
 #[test]
 fn events_are_numbered_and_only_the_last_are_kept() {
     let room = Room::new("r".into());
-    for n in 0..MAX_EVENTS + 5 {
-        assert_eq!(
-            room.push(json!({ "type": "text", "delta": n })),
-            n as u64 + 1
-        );
+    let first = room.push(json!({ "type": "text", "delta": 0 }));
+    for n in 1..MAX_EVENTS + 5 {
+        // Other chats may number events meanwhile: rising, not consecutive.
+        assert!(room.push(json!({ "type": "text", "delta": n })) > first);
     }
     let kept = room.after(0);
     assert_eq!(kept.len(), MAX_EVENTS);
-    assert_eq!(kept[0].0, 6);
-    let tail = room.after(MAX_EVENTS as u64 + 3);
-    assert_eq!(
-        tail.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
-        [1004, 1005]
-    );
-    assert!(room.after(1005).is_empty());
-    assert_eq!(*room.seq.borrow(), 1005);
+    assert!(kept.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    let last = kept.last().unwrap().0;
+    assert_eq!(*room.seq.borrow(), last);
+    let before_last = kept[kept.len() - 2].0;
+    assert_eq!(room.after(before_last).len(), 1);
+    assert!(room.after(last).is_empty());
+    // An `after` past this chat's last event is from another run.
+    assert_eq!(room.start_after(last + 10), 0);
+    assert_eq!(room.start_after(before_last), before_last);
+}
+
+#[test]
+fn a_chat_opened_again_numbers_on() {
+    let old = Room::new("s".into());
+    let seen = old.push(json!({ "type": "turn_start", "turn": 1 }));
+    old.shut();
+    assert!(old.is_closed() && old.cancel.is_cancelled());
+    let again = Room::new("s".into());
+    let next = again.push(json!({ "type": "turn_start", "turn": 1 }));
+    assert!(next > seen);
+    // The page's `after` from the old chat still finds the new events.
+    assert_eq!(again.start_after(seen), seen);
+    assert_eq!(again.after(again.start_after(seen)).len(), 1);
+}
+
+#[test]
+fn the_summary_is_plain_lines_with_control_characters_shown() {
+    let request = Request {
+        tool: "bash".into(),
+        target: "rm a.txt\u{1b}[2K".into(),
+        reasons: vec!["`rm` deletes files".into()],
+        preview: Some("+ x\n".into()),
+        kinds: vec![],
+    };
+    let text = super::runner::summary_for_test(&request);
+    assert_eq!(text, "rm a.txt\\u{1b}[2K\n- `rm` deletes files\n+ x");
 }
 
 #[tokio::test]

@@ -4,13 +4,16 @@
 //!
 //! Each event is `id: <seq>` and one `data:` line of JSON. The stream
 //! starts after `after` (all kept events without it), then waits for new
-//! ones; a `: keepalive` comment goes out every [`KEEPALIVE`]. It ends
-//! when the page goes away or a write stalls for [`WRITE_TIME`].
+//! ones; a `: keepalive` comment goes out every [`KEEPALIVE`]. Numbers
+//! come from one counter of the process, so they rise across chats and a
+//! chat opened again. It ends when the page closes the connection (seen at
+//! once, which frees its place), a write stalls for [`WRITE_TIME`], or the
+//! chat is closed.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::OwnedSemaphorePermit;
 
 use super::Room;
@@ -57,15 +60,24 @@ async fn write<W: AsyncWrite + Unpin>(io: &mut W, bytes: &[u8]) -> bool {
     )
 }
 
-/// Serves `stream` on `io` until the reader goes away.
-pub async fn serve<W: AsyncWrite + Unpin>(io: &mut W, stream: Stream, headers: &[(&str, &str)]) {
+/// Serves `stream`, writing to `io` and watching `input` for the page
+/// closing the connection, until the reader goes away.
+pub async fn serve<R, W>(input: &mut R, io: &mut W, stream: Stream, headers: &[(&str, &str)])
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     if !write(io, &head(headers)).await {
         return;
     }
     let mut seen = stream.room.seq.subscribe();
     let mut after = stream.after;
+    let mut scratch = [0u8; 256];
     loop {
         seen.borrow_and_update();
+        if stream.room.is_closed() {
+            return;
+        }
         let events = stream.room.after(after);
         if let Some((last, _)) = events.last() {
             after = *last;
@@ -74,12 +86,21 @@ pub async fn serve<W: AsyncWrite + Unpin>(io: &mut W, stream: Stream, headers: &
             }
             continue;
         }
-        match tokio::time::timeout(KEEPALIVE, seen.changed()).await {
-            Ok(Ok(())) => {}
-            // The chat is gone.
-            Ok(Err(_)) => return,
-            Err(_) => {
-                if !write(io, b": keepalive\n\n").await {
+        tokio::select! {
+            waited = tokio::time::timeout(KEEPALIVE, seen.changed()) => match waited {
+                Ok(Ok(())) => {}
+                // The chat is gone.
+                Ok(Err(_)) => return,
+                Err(_) => {
+                    if !write(io, b": keepalive\n\n").await {
+                        return;
+                    }
+                }
+            },
+            // A request has no more to say: anything read is ignored, and
+            // the end (or an error) is the page going away.
+            read = input.read(&mut scratch) => {
+                if !matches!(read, Ok(n) if n > 0) {
                     return;
                 }
             }

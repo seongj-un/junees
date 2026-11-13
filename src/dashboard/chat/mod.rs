@@ -57,6 +57,11 @@ pub const MAX_STREAMS: usize = 8;
 /// Questions remembered per chat, closed ones included.
 const MAX_QUESTIONS: usize = 256;
 
+/// The last event number given, over every chat of this process: a chat
+/// opened again goes on from here, so a page's `after` from before still
+/// means "what I have seen".
+static LAST_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// What `junees dashboard --chat` serves the chat with.
 pub struct Setup {
     /// The agents: Junees's own on the API, with the tools, MCP servers
@@ -95,6 +100,8 @@ pub struct Room {
     turns: AtomicU64,
     cancel: Cancel,
     questions: Mutex<Questions>,
+    /// Set when the chat is closed: its streams end.
+    closed: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -136,15 +143,30 @@ impl Room {
             turns: AtomicU64::new(0),
             cancel: Cancel::new(),
             questions: Mutex::default(),
+            closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
-    /// Records `event` (an object with `type`), numbered; streams wake.
+    /// Ends the chat's streams and stops its turn.
+    fn shut(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.cancel.cancel();
+        let last = *self.seq.borrow();
+        self.seq.send_replace(last);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Records `event` (an object with `type`), numbered from the process
+    /// counter; streams wake.
     pub fn push(&self, event: Value) -> u64 {
         let seq = {
             let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-            log.last += 1;
-            let seq = log.last;
+            // Under the lock: numbers rise in the order events are kept.
+            let seq = LAST_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            log.last = seq;
             log.events.push_back((seq, event.to_string()));
             while log.events.len() > MAX_EVENTS {
                 log.events.pop_front();
@@ -153,6 +175,14 @@ impl Room {
         };
         self.seq.send_replace(seq);
         seq
+    }
+
+    /// Where a stream asked to start after `after` starts: past this
+    /// chat's last event, `after` is from another run of the dashboard,
+    /// and the stream starts from the oldest kept event.
+    pub fn start_after(&self, after: u64) -> u64 {
+        let log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+        if after > log.last { 0 } else { after }
     }
 
     /// The kept events after `after`, oldest first.
@@ -355,10 +385,10 @@ impl Chat {
         &self.dir
     }
 
-    /// Stops the running turn and the MCP servers.
+    /// Stops the running turn, ends the streams and stops the MCP servers.
     pub async fn shutdown(&self) {
         for (room, _) in self.rooms().values() {
-            room.cancel.cancel();
+            room.shut();
         }
         self.mcp.shutdown().await;
     }
@@ -464,8 +494,10 @@ impl Chat {
             .filter(|(id, _)| running.as_deref() != Some(id.as_str()))
             .min_by_key(|(_, (_, used))| *used)
             .map(|(id, _)| id.clone());
-        if let Some(id) = oldest {
-            rooms.remove(&id);
+        if let Some(id) = oldest
+            && let Some((room, _)) = rooms.remove(&id)
+        {
+            room.shut();
             let _ = self.commands.send(runner::Command::Close { id });
         }
     }
@@ -539,6 +571,9 @@ impl Chat {
             }
             *running = Some(id.to_string());
         }
+        // Here, not on the chat's thread: a cancel sent right after the 202
+        // must not be cleared when the turn starts.
+        room.cancel.reset();
         let turn = room.turns.fetch_add(1, Ordering::SeqCst) + 1;
         if self
             .commands
@@ -651,8 +686,8 @@ impl Chat {
             )
         })?;
         Ok(stream::Stream {
+            after: room.start_after(after),
             room,
-            after,
             _permit: permit,
         })
     }

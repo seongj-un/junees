@@ -450,7 +450,7 @@ pub fn render(request: &Request) -> String {
 /// One line of `text` with control characters (other than tab) and
 /// bidirectional formatting characters written out as escapes (`\r`,
 /// `\u{1b}`, `\u{202e}`), so they show instead of acting on the terminal.
-fn visible(line: &str) -> String {
+pub(crate) fn visible(line: &str) -> String {
     let mut shown = String::with_capacity(line.len());
     for c in line.chars() {
         let hidden = (c.is_control() && c != '\t')

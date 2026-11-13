@@ -607,3 +607,177 @@ async fn the_claude_code_backend_is_refused() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("claude-code backend"), "{stderr}");
 }
+
+#[tokio::test]
+async fn with_chat_no_browser_is_opened_unless_asked() {
+    let home = Home::new();
+    let bin = home.root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let opened = home.root.join("opened");
+    for name in ["xdg-open", "open"] {
+        let script = bin.join(name);
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s' \"$1\" > {}\n", opened.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let mut command = common::junees_binary(&home.work, &home.root);
+    let mut child = command
+        .args(["dashboard", "--listen", "127.0.0.1:0", "--chat"])
+        .env("JUNEES_HOME", &home.state)
+        .env("ANTHROPIC_API_KEY", "sk-fake")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+        .env("PATH", &path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = tokio::time::timeout(WAIT, lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        first.starts_with("Junees dashboard: http://127.0.0.1:") && first.contains("/#token="),
+        "{first}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!opened.exists(), "no opener ran");
+    drop(child);
+
+    // --open opens, with a warning.
+    let mut command = common::junees_binary(&home.work, &home.root);
+    let mut child = command
+        .args(["dashboard", "--listen", "127.0.0.1:0", "--chat", "--open"])
+        .env("JUNEES_HOME", &home.state)
+        .env("ANTHROPIC_API_KEY", "sk-fake")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+        .env("PATH", &path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = tokio::time::timeout(WAIT, lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(first.contains("opening"), "{first}");
+    let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
+    let mut warned = String::new();
+    while let Ok(Ok(Some(line))) =
+        tokio::time::timeout(Duration::from_secs(5), errors.next_line()).await
+    {
+        if line.contains("--open with --chat") {
+            warned = line;
+            break;
+        }
+    }
+    assert!(warned.contains("command line"), "{warned}");
+}
+
+#[tokio::test]
+async fn closed_streams_free_their_place_at_once() {
+    let home = Home::new();
+    let api = silent_api().await;
+    let dashboard = Dashboard::start(&home, &api, &["--chat"]).await;
+    let id = dashboard.post("/api/chat", json!({})).await.1["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for _ in 0..3 {
+        let streams: Vec<Events> = {
+            let mut streams = Vec::new();
+            for _ in 0..8 {
+                streams.push(dashboard.events(&id, None).await);
+            }
+            streams
+        };
+        drop(streams);
+        // Freed within a moment, not after the 30 s write timeout.
+        let mut opened = false;
+        for _ in 0..40 {
+            let auth = format!("Authorization: Bearer {}", dashboard.token);
+            let mut stream = TcpStream::connect(("127.0.0.1", dashboard.port))
+                .await
+                .unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "GET /api/chat/{id}/events HTTP/1.1\r\nHost: {}\r\n{auth}\r\n\r\n",
+                        dashboard.host()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut head = [0u8; 12];
+            stream.read_exact(&mut head).await.unwrap();
+            if &head == b"HTTP/1.1 200" {
+                opened = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(opened, "a place was free within 2 s");
+    }
+}
+
+#[tokio::test]
+async fn a_chat_closed_for_room_ends_its_stream_and_numbers_on_when_opened_again() {
+    let home = Home::new();
+    let (api, _served) = common::fake_api(vec![
+        (200, common::text_reply("first")),
+        (200, common::text_reply("second")),
+    ])
+    .await;
+    let dashboard = Dashboard::start(&home, &api, &["--chat"]).await;
+    let id = dashboard.post("/api/chat", json!({})).await.1["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut events = dashboard.events(&id, None).await;
+    dashboard
+        .post(&format!("/api/chat/{id}/messages"), json!({"text": "one"}))
+        .await;
+    events.until("turn_end").await;
+    let last = events.seen.last().unwrap().0;
+    // 16 more chats close the one unused longest: this one.
+    for _ in 0..16 {
+        assert_eq!(dashboard.post("/api/chat", json!({})).await.0, 200);
+    }
+    let mut rest = String::new();
+    let ended = tokio::time::timeout(WAIT, events.reader.read_to_string(&mut rest)).await;
+    assert!(matches!(ended, Ok(Ok(_))), "the closed chat's stream ended");
+    assert_eq!(
+        dashboard
+            .post(&format!("/api/chat/{id}/messages"), json!({"text": "x"}))
+            .await
+            .0,
+        404
+    );
+    // Opened again by its session id, it numbers on from the page's `after`.
+    let (status, again) = dashboard.post("/api/chat", json!({"session_id": id})).await;
+    assert_eq!((status, again["session_id"].clone()), (200, json!(id)));
+    let mut events = dashboard.events(&id, Some(last)).await;
+    dashboard
+        .post(&format!("/api/chat/{id}/messages"), json!({"text": "two"}))
+        .await;
+    let (seq, first) = events.next().await;
+    assert!(seq > last, "{seq} > {last}");
+    assert_eq!(first, json!({"type": "turn_start", "turn": 1}));
+    events.until("turn_end").await;
+    // An `after` from another run of the dashboard starts from the oldest.
+    let mut fresh = dashboard.events(&id, Some(u64::MAX / 2)).await;
+    assert_eq!(fresh.next().await.1["type"], "turn_start");
+}
