@@ -225,7 +225,7 @@ async fn turns_are_listed_rewound_and_told_to_the_conversation() {
     let requests = server.await.unwrap();
     let first = last_user_text(&requests[0]);
     assert!(
-        first.starts_with("[되돌림] 턴 2의 파일 변경을 되돌렸습니다: "),
+        first.starts_with("[되돌림] 변경 기록 2의 파일 변경을 되돌렸습니다: "),
         "{first}"
     );
     assert!(
@@ -303,7 +303,7 @@ async fn a_file_undone_part_of_the_way_is_reported_as_changed() {
     assert_eq!(read(&c).as_deref(), Some("C1x\n"), "{said}");
     assert!(
         said.contains(&format!(
-            "partly   {} (턴 2까지 되돌림, 턴 1은 건너뜀: ",
+            "partly   {} (변경 기록 2까지 되돌림, 변경 기록 1은 건너뜀: ",
             c.display()
         )),
         "{said}"
@@ -315,7 +315,7 @@ async fn a_file_undone_part_of_the_way_is_reported_as_changed() {
     let first = last_user_text(&server.await.unwrap()[0]);
     assert!(
         first.starts_with(&format!(
-            "[되돌림] 턴 1, 2의 파일 변경을 되돌렸습니다: {} (턴 2까지 되돌림, 턴 1은 건너뜀: ",
+            "[되돌림] 변경 기록 1, 2의 파일 변경을 되돌렸습니다: {} (변경 기록 2까지 되돌림, 변경 기록 1은 건너뜀: ",
             c.display()
         )),
         "{first}"
@@ -511,7 +511,7 @@ async fn the_chat_serves_checkpoints_and_undo() {
     );
     assert_eq!(
         list,
-        json!([{"turn": 1, "created_at": null, "files": [
+        json!([{"turn": 1, "created_at": null, "undid": [], "files": [
             {"path": made.display().to_string(), "change": "created", "restorable": true}
         ]}])
     );
@@ -541,9 +541,11 @@ async fn the_chat_serves_checkpoints_and_undo() {
         .post(&format!("/api/chat/{id}/undo"), json!({"turn": 1}))
         .await;
     assert_eq!(status, 200, "{answer}");
+    // The answer names the checkpoint the undo itself recorded ...
     assert_eq!(
         answer,
-        json!({"restored": [made.display().to_string()], "skipped": [], "partial": []})
+        json!({"restored": [made.display().to_string()], "skipped": [], "partial": [],
+               "checkpoint": 2})
     );
     assert!(!made.exists());
     let log = std::fs::read_to_string(home.state().join("dashboard.log")).unwrap();
@@ -553,6 +555,33 @@ async fn the_chat_serves_checkpoints_and_undo() {
         )),
         "{log}"
     );
+    // ... and the list says what that checkpoint undid, also to a page
+    // opened later (a reload, another tab), which knows nothing else.
+    let (status, list) = dashboard.get(&format!("/api/chat/{id}/checkpoints")).await;
+    assert_eq!(status, 200);
+    let undid: Vec<_> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| (turn["turn"].clone(), turn["undid"].clone()))
+        .collect();
+    assert_eq!(undid, [(json!(1), json!([])), (json!(2), json!([1]))]);
+
+    // An undo that changes nothing records no checkpoint and names none.
+    std::fs::write(&made, "mine\n").unwrap();
+    let (status, answer) = dashboard
+        .post(&format!("/api/chat/{id}/undo"), json!({"turn": 2}))
+        .await;
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["restored"], json!([]), "{answer}");
+    assert_eq!(
+        answer["skipped"][0]["path"],
+        json!(made.display().to_string())
+    );
+    assert!(answer.get("checkpoint").is_none(), "{answer}");
+    assert_eq!(read(&made).as_deref(), Some("mine\n"));
+    let (_, list) = dashboard.get(&format!("/api/chat/{id}/checkpoints")).await;
+    assert_eq!(list.as_array().unwrap().len(), 2, "{list}");
 }
 
 #[tokio::test]
