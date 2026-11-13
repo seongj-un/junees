@@ -101,8 +101,8 @@ junees update --version v0.1.0 # 그 릴리스로(더 오래된 것도)
 2. 그 커밋에 태그를 달아 push한다. 태그는 `v` + `Cargo.toml` 버전이어야 한다.
 
    ```sh
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag v0.3.0
+   git push origin v0.3.0
    ```
 
 3. 워크플로:
