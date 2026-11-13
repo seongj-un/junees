@@ -528,8 +528,10 @@ pub(crate) mod testing {
         std::env::join_paths(kept).unwrap_or_default()
     }
 
-    /// Whether the process runs: it exists and is not a zombie (a killed
-    /// child stays a zombie until its parent or init reaps it).
+    /// Whether the process runs: it exists and is neither a zombie (`Z`,
+    /// a killed child stays one until its parent or init reaps it) nor
+    /// dead (`X`, shown while the reap is under way). Every test that
+    /// checks whether a process is gone uses this one rule.
     pub fn alive(pid: u32) -> bool {
         match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             // The state follows the command name, which is in parentheses
@@ -537,20 +539,38 @@ pub(crate) mod testing {
             Ok(stat) => stat
                 .rsplit_once(')')
                 .and_then(|(_, rest)| rest.split_whitespace().next())
-                .is_some_and(|state| state != "Z" && state != "X"),
+                .is_some_and(|state| !matches!(state, "Z" | "X" | "x")),
             Err(_) => false,
         }
     }
 
     /// Waits up to two seconds for the process to stop running.
     pub async fn gone_soon(pid: u32) -> bool {
-        for _ in 0..40 {
+        gone_within(pid, Duration::from_secs(2)).await
+    }
+
+    /// Waits up to `wait` for the process to stop running ([`alive`]),
+    /// looking every 50 ms; whether it did. Decide on this answer alone:
+    /// a later look may see the process at another stage, or its pid
+    /// taken by another process.
+    pub async fn gone_within(pid: u32, wait: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
             if !alive(pid) {
                 return true;
             }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        false
+    }
+
+    /// The pid written in a file by a test command (`echo $! > pid`).
+    pub fn pid_in(text: &str) -> u32 {
+        text.trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("not a pid: {text:?}"))
     }
 }
 
@@ -559,6 +579,30 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn a_killed_child_is_not_alive_before_or_after_its_reap() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(testing::alive(pid));
+        child.kill().unwrap();
+        // Not reaped yet: a zombie, which stays one until the wait below.
+        let mut zombie = false;
+        for _ in 0..200 {
+            zombie = !testing::alive(pid);
+            if zombie {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(zombie, "the killed child still runs");
+        child.wait().unwrap();
+        assert!(!testing::alive(pid));
+        assert_eq!(testing::pid_in(" 42\n"), 42);
+    }
 
     #[tokio::test]
     async fn captures_stdout_and_exit_code() {
