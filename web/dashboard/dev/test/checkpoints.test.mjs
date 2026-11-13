@@ -121,6 +121,10 @@ test("the undo answer is told in words, with how far a file went back", () => {
   );
   assert.deepEqual(outcome.skipped, [{ path: "/w/src/main.rs", reason: "바뀐 뒤 수정됨" }]);
   assert.equal(undoOutcome({ restored: ["/a"], skipped: [], partial: [] }).headline, "파일 1개를 되돌렸습니다.");
+  assert.equal(
+    undoOutcome({ restored: ["/c"], skipped: [], partial: [{ path: "/c", until_turn: 6, skipped_turn: 5, reason: "r" }] }).headline,
+    "파일 1개를 일부만 되돌렸습니다.",
+  );
   assert.equal(undoOutcome({ restored: [], skipped: [{ path: "/a", reason: "" }] }).headline, "되돌린 파일이 없습니다. 파일 1개는 그대로 두었습니다.");
   assert.equal(undoOutcome({ restored: [], skipped: [{ path: "/a", reason: "" }] }).skipped[0].reason, "이유 없음");
   assert.equal(undoOutcome(null).headline, "되돌린 파일이 없습니다.");

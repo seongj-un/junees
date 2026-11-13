@@ -118,7 +118,8 @@ export function undoOutcome(body) {
   } else {
     headline = `파일 ${restored.length}개를 되돌리고, ${skipped.length}개는 그대로 두었습니다.`;
   }
-  if (some) headline += ` 그중 ${some}개는 일부만 되돌렸습니다.`;
+  if (some && some === restored.length && skipped.length === 0) headline = `파일 ${some}개를 일부만 되돌렸습니다.`;
+  else if (some) headline += ` 그중 ${some}개는 일부만 되돌렸습니다.`;
   return { headline, restored, skipped };
 }
 
