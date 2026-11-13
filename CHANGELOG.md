@@ -4,6 +4,16 @@
 
 ### 업그레이드할 때 확인할 것
 
+- **Anthropic 키는 주소와 같은 곳에서만 읽음 (#88)**
+  - `ANTHROPIC_API_KEY`(`api_key`)를 이제 주소 `ANTHROPIC_BASE_URL`(`base_url`)과 같은 곳에서만 읽습니다. 주소가 설정 파일에 있으면 `api_key`만, 환경 변수에 있으면 `ANTHROPIC_API_KEY`만 씁니다. 주소를 적지 않았거나 기본 주소(`https://api.anthropic.com`, 끝의 `/`는 상관없음)를 그대로 적었으면 지금처럼 환경 변수, 설정 파일 순서로 찾습니다. OpenAI 키도 같아서, `OPENAI_BASE_URL`이나 `openai_base_url`에 기본 주소 `https://api.openai.com/v1`을 적었으면 어느 쪽 키든 씁니다. 지금까지는 둘을 따로 읽어서, 셸에 export한 키가 설정 파일에 적은 프록시로 가거나 설정 파일의 키가 셸에 적은 주소로 갈 수 있었습니다.
+  - 다음 두 경우는 올린 뒤 `no API key for <주소>` 오류로 시작하지 않습니다.
+    - `base_url`은 설정 파일에, 키는 환경 변수(셸, systemd `EnvironmentFile`)에만 둔 경우: 키를 `api_key`로 옮기거나, 주소도 `ANTHROPIC_BASE_URL`로 옮깁니다.
+    - `ANTHROPIC_BASE_URL`은 환경 변수에, 키는 설정 파일 `api_key`에만 둔 경우: 키도 `ANTHROPIC_API_KEY`로 주거나, 주소를 `base_url`로 옮깁니다.
+  - 양쪽에 키가 다 있으면 오류 없이 주소 쪽 키를 씁니다. 그래서 예전에 환경 변수 키가 이기던 설정(파일에 `base_url`과 `api_key`, 셸에 `ANTHROPIC_API_KEY`)은 이제 파일의 키를 씁니다.
+  - 올리기 전에 `junees doctor`를 돌려 `Anthropic API key` 줄을 확인합니다. "set, but not where the address is set"이면 위처럼 옮깁니다.
+- **Anthropic 주소 검사와 리다이렉트 (#88)**
+  - api 백엔드의 `ANTHROPIC_BASE_URL`(`base_url`)은 이제 OpenAI 주소처럼 `https://`이거나 이 컴퓨터의 `http://`(`localhost`, `127.0.0.1`, `::1`)여야 하고, 사용자 이름이나 비밀번호(`https://user:pass@proxy`)를 담을 수 없습니다. 아니면 시작할 때 `ANTHROPIC_BASE_URL (`base_url`) must use https ...` 오류로 끝나고 `junees doctor`의 `provider` 줄이 실패로 알립니다. 다른 컴퓨터의 프록시를 평문 `http://`로 쓰고 있었다면 https로 바꾸거나 이 컴퓨터에서 터널을 거쳐 씁니다. claude-code 백엔드는 이 주소를 쓰지 않으므로 검사하지 않습니다(`claude`가 이 변수를 따로 읽어도 그대로입니다).
+  - Anthropic 요청은 이제 리다이렉트(3xx)를 따라가지 않습니다. reqwest는 다른 호스트로 넘어갈 때 `x-api-key`를 떼지 않으므로, 프록시가 3xx로 다른 곳을 가리키면 키가 그곳으로 갔습니다. 3xx를 돌려주는 프록시는 이제 `API error 307` 같은 오류가 되니, 최종 주소를 `base_url`에 직접 적습니다.
 - **작업 폴더가 홈인 예약 작업과 웹훅 경로는 거절 (#84)**
   - 예약 작업, 웹훅 경로, GitHub 흐름(`add-github`)의 작업 폴더가 홈 자체이거나 홈을 품은 폴더(`/home`, `/`)면, 추가할 때 거절하고 이미 있는 것은 처음 실행할 때 실패로 기록하고 전달한 뒤 멈춥니다(`paused`. 일정이나 요청마다 실패가 다시 오지 않습니다). 막을 경로 목록(셸 시작 파일, systemd, `~/.ssh` 등)으로는 파이썬 `.pth`, 에디터 설정, 다른 저장소의 git 훅 같은 나중에 실행되는 파일을 다 막을 수 없기 때문입니다.
   - 올리기 전에 `junees doctor`를 돌려 `job <이름> folder`, `route <이름> folder` 경고가 있는지 봅니다. `junees cron list`와 `junees webhook list`의 폴더 줄로도 확인할 수 있습니다.

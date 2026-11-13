@@ -260,3 +260,37 @@ async fn thinking_blocks_go_back_with_the_tool_results_unchanged() {
     assert_eq!(result["cache_control"], json!({"type": "ephemeral"}));
     assert_eq!(second.to_string().matches("cache_control").count(), 3);
 }
+
+#[tokio::test]
+async fn a_redirect_is_not_followed_and_the_key_stays() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    // Where the redirect points: it must never get a connection.
+    let elsewhere = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = format!("http://{}/v1/messages", elsewhere.local_addr().unwrap());
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", proxy.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut requests = 0;
+        // One answer per attempt the client makes.
+        while let Ok(Ok((mut socket, _))) =
+            tokio::time::timeout(Duration::from_secs(2), proxy.accept()).await
+        {
+            let mut buf = vec![0u8; 65536];
+            let _ = socket.read(&mut buf).await;
+            requests += 1;
+            let reply = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nlocation: {target}\r\n\
+                 content-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+        }
+        requests
+    });
+    let err = complete_hi(url).await.unwrap_err();
+    assert!(err.to_string().contains("307"), "{err}");
+    let followed = tokio::time::timeout(Duration::from_millis(500), elsewhere.accept()).await;
+    assert!(followed.is_err(), "the client followed the redirect");
+    assert_eq!(server.await.unwrap(), 1, "a 3xx is not retried");
+}

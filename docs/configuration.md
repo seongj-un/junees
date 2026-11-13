@@ -14,7 +14,7 @@
 
 Ctrl-C나 입력 끝(Ctrl-D)이면 아무것도 저장하지 않고 끝난다. 터미널이 아니면(cron, 파이프) 마법사를 띄우지 않고 `no API key: run `junees setup`, or set ANTHROPIC_API_KEY` 오류로 끝난다. 백엔드가 `claude-code`면(설정, `JUNEES_BACKEND`, 작업의 `--backend`) 키가 필요 없으므로 대화든 작업이든 마법사 없이 실행한다. `JUNEES_PROVIDER=openai`일 때도 마법사를 띄우지 않는다(질문이 Claude에 관한 것뿐이라, [OpenAI 호환 API](#openai-호환-api)는 설정 파일이나 환경 변수로 정한다).
 
-파일은 TOML의 단순한 부분만 쓴다: 한 줄에 `키 = 값`, 값은 따옴표 문자열이나 숫자, `true`/`false`, `#` 주석. 표(`[...]`)와 배열은 받지 않는다. 키마다 환경 변수 하나에 대응하고, **환경 변수가 있으면 파일보다 우선한다**(`/model`, `/backend`로 바꾼 값은 그보다도 우선하지만 이 실행에만 적용되고 파일은 바꾸지 않는다). 모르는 키, 따옴표 없는 문자열(`model = claude-...`), 같은 키 두 번은 `<경로> is not a valid settings file ... line N: ...` 오류로 알려 준다.
+파일은 TOML의 단순한 부분만 쓴다: 한 줄에 `키 = 값`, 값은 따옴표 문자열이나 숫자, `true`/`false`, `#` 주석. 표(`[...]`)와 배열은 받지 않는다. 키마다 환경 변수 하나에 대응하고, **환경 변수가 있으면 파일보다 우선한다**(`/model`, `/backend`로 바꾼 값은 그보다도 우선하지만 이 실행에만 적용되고 파일은 바꾸지 않는다). API 키만은 예외로, 주소와 한 쌍으로 읽는다(아래 [API 키와 주소](#api-키와-주소)). 모르는 키, 따옴표 없는 문자열(`model = claude-...`), 같은 키 두 번은 `<경로> is not a valid settings file ... line N: ...` 오류로 알려 준다.
 
 ```toml
 backend = "claude-code"          # JUNEES_BACKEND
@@ -26,7 +26,17 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 
 그 밖의 키: `base_url`, `provider`, `openai_base_url`, `openai_api_key`, `openai_reasoning_effort`, `openai_max_tokens_field`([OpenAI 호환 API](#openai-호환-api)), `prices`([사용량과 비용](usage.md#사용량과-비용)), `max_tokens`, `max_turns`, `context_window`, `compact_threshold`, `thinking_budget`, `task_skill_manage`, `subagents`, `subagent_max_turns`, `subagent_max_tokens`, `approval`, `stream`, `deny_commands`, `allow_dangerous`, `hidden_env`(쉼표로 구분한 문자열), `sandbox`, `sandbox_write`, `sandbox_read`, `webhook_sandbox_read`(쉼표로 구분한 문자열), `sandbox_network`, `notify_webhook`, `notify_each_session`, `claude_bin`, `claude_model`, `claude_code_unattended`(예약 작업과 웹훅에서 claude-code 백엔드 허용, [실행 격리](safety.md#실행-격리-landlock)), `web_search`, `web_search_max_uses`, `web_search_allowed_domains`, `web_search_blocked_domains`(쉼표로 구분한 문자열), `memory_user_chars`, `memory_notes_chars`, `memory_project_chars`, `context_files`(쉼표로 구분한 문자열, [프로젝트 지침 파일](memory-and-skills.md#프로젝트-지침-파일)), `discord_token`, `discord_allowed_users`, `discord_channels`, `discord_parallel`, `discord_approval_timeout`, `telegram_token`, `telegram_allowed_users`, `telegram_parallel`, `telegram_approval_timeout`, `telegram_format`(`html` 또는 `plain`, [텔레그램 게이트웨이](gateways.md#대화와-출력)), `timezone`, `cron_max_time`, `cron_max_tokens`, `webhook_max_time`, `webhook_max_tokens`, `github_token`, `github_api_url`, `github_repos`, `github_allow_unattended`, `github_flow_merge`. 각각 `JUNEES_` 접두 환경 변수(`base_url`은 `ANTHROPIC_BASE_URL`, `openai_base_url`은 `OPENAI_BASE_URL`, `openai_api_key`는 `OPENAI_API_KEY`, `discord_*`는 `JUNEES_DISCORD_*`, `telegram_*`는 `JUNEES_TELEGRAM_*`, `cron_*`는 `JUNEES_CRON_*`, `webhook_*`는 `JUNEES_WEBHOOK_*`, `github_*`는 `JUNEES_GITHUB_*`)와 같다. `JUNEES_HOME`과 `HOME`은 파일 위치를 정하므로 파일에 둘 수 없고, Junees가 읽지 않는 변수(`ANTHROPIC_TOKEN` 등)는 파일로도 설정되지 않는다.
 
-파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령과, 이 파일이 든 폴더(`$JUNEES_HOME`)를 통째로 다루는 명령을 막는다([명령 정책](safety.md#명령-정책) 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽 명령 정책은 차단 목록일 뿐이어서 다른 변수나 실행 중에 만든 경로, 더 위 폴더를 통째로 다루는 명령은 놓친다. 그런 읽기는 [실행 격리](safety.md#실행-격리-landlock)(Landlock, 지원하는 커널에서 기본으로 켜짐)가 커널에서 막는다. 꺼져 있거나 지원하지 않는 커널에서는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
+파일은 API 키를 담을 수 있으므로 `0600`, 새로 만드는 폴더는 `0700`으로 만들고, 임시 파일에 쓴 뒤 이름을 바꿔서 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 마법사는 저장한 뒤 `ANTHROPIC_API_KEY`나 `JUNEES_BACKEND`가 환경에 있으면 그쪽이 이긴다고 알려 준다. 환경에 `ANTHROPIC_BASE_URL`이 있으면 파일에 저장한 키는 그 주소로 가지 않는다고 알려 준다(아래 [API 키와 주소](#api-키와-주소)). 파일의 키는 환경 변수가 아니므로 bash 도구의 환경에는 처음부터 없다. 모델의 도구도 이 파일에 손대지 못한다: `read_file`/`write_file`/`edit_file`은 이 파일을 가리키는 경로(`..`, 심볼릭 링크, 아직 없는 파일을 가리키는 링크, 하드 링크 포함)를 "사용자의 비공개 설정 파일"이라는 오류로 거절하고, `bash` 명령 정책은 이 파일을 인자나 리다이렉트 대상으로 쓰는 명령과, 이 파일이 든 폴더(`$JUNEES_HOME`)를 통째로 다루는 명령을 막는다([명령 정책](safety.md#명령-정책) 참고). 쓰기까지 막는 것은 파일에 `allow_dangerous = "1"`을 넣어 다음 실행의 명령 규칙을 끄는 일도 막기 위해서다. `$JUNEES_HOME`의 나머지(세션 기록 등)는 그대로 읽을 수 있다. 다만 bash 쪽 명령 정책은 차단 목록일 뿐이어서 다른 변수나 실행 중에 만든 경로, 더 위 폴더를 통째로 다루는 명령은 놓친다. 그런 읽기는 [실행 격리](safety.md#실행-격리-landlock)(Landlock, 지원하는 커널에서 기본으로 켜짐)가 커널에서 막는다. 꺼져 있거나 지원하지 않는 커널에서는 여전히 읽을 수 있다(`~/.ssh`처럼 같은 사용자의 파일이다).
+
+### API 키와 주소
+
+API 키는 그 키를 보낼 주소와 같은 곳에서만 읽는다. Anthropic은 `api_key`(`ANTHROPIC_API_KEY`)와 `base_url`(`ANTHROPIC_BASE_URL`), OpenAI 호환 provider는 `openai_api_key`(`OPENAI_API_KEY`)와 `openai_base_url`(`OPENAI_BASE_URL`)이 한 쌍이다.
+
+- 주소를 설정 파일에 적었으면 키도 설정 파일에서만 읽는다. 다른 도구 때문에 셸에 export해 둔 키가 설정 파일의 프록시나 다른 서버로 가지 않는다.
+- 주소를 환경 변수로 줬으면 키도 환경 변수에서만 읽는다. 설정 파일의 키가 셸의 다른 주소로 가지 않는다.
+- 주소를 어디에도 적지 않았거나 기본 주소(`https://api.anthropic.com`, `https://api.openai.com/v1`. 대소문자와 끝의 `/`는 상관없다)를 그대로 적었으면 키는 다른 설정처럼 환경 변수, 설정 파일 순서로 찾는다. 기본 주소는 공식 API라서 어느 키를 쓰든 그 회사로만 간다.
+- Anthropic 주소도 OpenAI 주소처럼 https만 받고, 평문 http는 이 컴퓨터의 서버(`localhost`, `127.0.0.0/8`, `::1`)만 받는다. 사용자 이름이나 비밀번호가 든 주소는 거절한다. 요청은 리다이렉트를 따라가지 않는다(다른 호스트로 넘어갈 때 `x-api-key`가 따라가므로). 이 검사는 api 백엔드에서만 하고, claude-code 백엔드는 이 주소를 쓰지 않으므로 하지 않는다.
+- 짝이 맞는 키가 없으면 시작할 때 `no API key for <주소>: ... in the same place as the address` 오류로 끝난다(OpenAI 호환 provider는 이 컴퓨터의 서버면 키 없이 돈다). `junees doctor`는 키가 다른 쪽에만 있으면 "set, but not where the address is set"로 어디로 옮길지 알려 주고, 키가 어디서 왔는지(환경 변수 / config.toml)를 보여 준다. 키 값은 출력하지 않는다.
 
 ## OpenAI 호환 API
 
@@ -60,7 +70,7 @@ model = "openai/gpt-4o-mini"                       # JUNEES_MODEL, 이 provider�
 
 | 환경 변수 | 기본값 | 설명 |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | (api 백엔드에서 필수, 또는 설정 파일 `api_key`) | Anthropic API 키 |
+| `ANTHROPIC_API_KEY` | (api 백엔드에서 필수, 또는 설정 파일 `api_key`) | Anthropic API 키. 주소와 같은 곳(둘 다 환경 변수 또는 둘 다 설정 파일)에서만 읽는다([API 키와 주소](#api-키와-주소)) |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API 주소 |
 | `JUNEES_PROVIDER` | `anthropic` | api 백엔드가 부를 API: `anthropic`(Messages API) 또는 `openai`(Chat Completions와 그 호환 서버, [OpenAI 호환 API](#openai-호환-api)) |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | `provider = openai`의 API 주소. https만, 평문 http는 localhost와 루프백 주소에만 |

@@ -1355,10 +1355,12 @@ async fn fake_api(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<St
 
 #[tokio::test]
 async fn online_asks_the_api_whether_it_takes_the_key() {
-    let mut fixture = Fixture::new();
-    fixture.config("api_key = \"sk-doctor-online-key\"\n");
+    let fixture = Fixture::new();
     let (url, server) = fake_api(vec![200, 401, 500]).await;
-    fixture.set("ANTHROPIC_BASE_URL", &format!("{url}/"));
+    // The key goes with its address, both in the file.
+    fixture.config(&format!(
+        "api_key = \"sk-doctor-online-key\"\nbase_url = \"{url}/\"\n"
+    ));
     let report = fixture.run(true).await;
     expect(
         &report,
@@ -1457,12 +1459,11 @@ async fn online_says_whether_a_newer_release_is_out() {
 
 #[tokio::test]
 async fn offline_sends_nothing() {
-    let mut fixture = Fixture::new();
-    fixture.config("api_key = \"sk-test\"\n");
+    let fixture = Fixture::new();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    fixture.set("ANTHROPIC_BASE_URL", &url);
+    fixture.config(&format!("api_key = \"sk-test\"\nbase_url = \"{url}\"\n"));
     let report = fixture.run(false).await;
     assert!(!has(&report, "online", "API key"));
     let err = listener.accept().unwrap_err();
@@ -1881,6 +1882,83 @@ async fn the_browser_program_and_its_version() {
     fixture.set("JUNEES_SANDBOX", "require");
     let report = fixture.run_landlock(false, none).await;
     assert!(!has(&report, "browser", "pipe"), "{}", report.text());
+}
+
+#[tokio::test]
+async fn the_anthropic_key_and_its_address() {
+    // A key exported for other tools does not go to the file's address.
+    let mut fixture = Fixture::new();
+    fixture.set("ANTHROPIC_API_KEY", "sk-fake");
+    fixture.config("base_url = \"https://proxy.example\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Fail,
+        "set, but not where the address is set",
+    );
+    // Nor the file's key to an exported address.
+    let mut exported = Fixture::new();
+    exported.set("ANTHROPIC_BASE_URL", "https://gateway.example");
+    exported.config("api_key = \"sk-fake-file\"\n");
+    let report = exported.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Fail,
+        "set, but not where the address is set",
+    );
+
+    // With the key next to the address, that key is used and its place
+    // is shown.
+    fixture.config("base_url = \"https://proxy.example\"\napi_key = \"sk-fake-file\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Ok,
+        "set (config.toml)",
+    );
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Ok,
+        "anthropic: the Messages API at https://proxy.example",
+    );
+    // With the default address the environment's key wins, as before.
+    fixture.config("api_key = \"sk-fake-file\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Ok,
+        "set (environment)",
+    );
+    // An address that would send the key in plain text is a failure.
+    fixture.config("base_url = \"http://proxy.example\"\napi_key = \"sk-fake-file\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "provider",
+        Status::Fail,
+        "must use https unless the server is on this machine",
+    );
+    // The claude-code backend needs no key.
+    fixture.config("backend = \"claude-code\"\nbase_url = \"https://proxy.example\"\n");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "keys",
+        "Anthropic API key",
+        Status::Skip,
+        "not set (the claude-code backend does not need it)",
+    );
 }
 
 #[tokio::test]

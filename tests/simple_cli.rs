@@ -74,7 +74,7 @@ async fn a_bare_question_runs_once_with_the_key_from_the_settings_file() {
     let home = tempfile::tempdir().unwrap();
     let (url, server) = fake_api(vec![
         (200, text_reply("From the file key.")),
-        (200, text_reply("From the env key.")),
+        (200, text_reply("Still the file key.")),
     ])
     .await;
     write_settings(
@@ -87,14 +87,16 @@ async fn a_bare_question_runs_once_with_the_key_from_the_settings_file() {
     assert!(out.status.success(), "{stderr}");
     assert_eq!(stdout, "From the file key.\n");
 
-    // The environment wins over the file.
+    // The environment wins over the file, but a key exported for other
+    // tools does not go to the file's address: the key comes from where
+    // the address is set.
     let mut again = junees(home.path(), home.path(), &["again"]);
     again
         .env("ANTHROPIC_API_KEY", "sk-ant-from-env")
         .env("JUNEES_MODEL", "env-model");
     let (out, stdout, stderr) = output(again).await;
     assert!(out.status.success(), "{stderr}");
-    assert_eq!(stdout, "From the env key.\n");
+    assert_eq!(stdout, "Still the file key.\n");
 
     let requests = server.await.unwrap();
     assert_eq!(api_key_of(&requests[0]), "sk-ant-from-file");
@@ -103,8 +105,48 @@ async fn a_bare_question_runs_once_with_the_key_from_the_settings_file() {
         body_of(&requests[0])["messages"][0]["content"][0]["text"],
         "이 폴더에 뭐가 있어?"
     );
-    assert_eq!(api_key_of(&requests[1]), "sk-ant-from-env");
+    assert_eq!(api_key_of(&requests[1]), "sk-ant-from-file");
+    assert!(!requests[1].contains("sk-ant-from-env"), "{}", requests[1]);
     assert_eq!(body_of(&requests[1])["model"], "env-model");
+}
+
+#[tokio::test]
+async fn the_anthropic_key_goes_only_to_the_address_set_in_the_same_place() {
+    let home = tempfile::tempdir().unwrap();
+    let (url, server) = fake_api(vec![(200, text_reply("Env pair."))]).await;
+
+    // The file's key does not go to an exported address: without a key
+    // next to it, nothing is sent.
+    write_settings(home.path(), "api_key = \"sk-fake-file\"\n");
+    let mut run = junees(home.path(), home.path(), &["hello"]);
+    run.env("ANTHROPIC_BASE_URL", &url);
+    let (out, stdout, stderr) = output(run).await;
+    assert!(!out.status.success(), "{stdout}");
+    assert!(
+        stderr.contains(&format!("no API key for {url}:")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("in the same place as the address"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("sk-fake-file"), "{stderr}");
+
+    // With the key next to it, the exported address gets that key.
+    let mut run = junees(home.path(), home.path(), &["hello"]);
+    run.env("ANTHROPIC_BASE_URL", &url)
+        .env("ANTHROPIC_API_KEY", "sk-fake-env");
+    let (out, stdout, stderr) = output(run).await;
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(stdout, "Env pair.\n");
+
+    let requests = tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("the fake API got fewer requests")
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(api_key_of(&requests[0]), "sk-fake-env");
+    assert!(!requests[0].contains("sk-fake-file"), "{}", requests[0]);
 }
 
 #[tokio::test]
@@ -273,7 +315,15 @@ async fn the_first_run_on_a_terminal_sets_up_without_showing_the_key() {
     type_line("");
     let at = wait_for(&screen, "(junees gateway slack, optional)? [y/N] > ", at).await;
     type_line("");
-    wait_for(&screen, "Hi from the fake API.", at).await;
+    // The address is exported, so the key saved in the file does not go
+    // there: the key comes from where the address is set.
+    let at = wait_for(
+        &screen,
+        "Note: ANTHROPIC_BASE_URL is set in your environment, so the key comes from",
+        at,
+    )
+    .await;
+    wait_for(&screen, "in the same place as the address", at).await;
 
     let status = tokio::time::timeout(Duration::from_secs(20), child.wait())
         .await
@@ -283,7 +333,7 @@ async fn the_first_run_on_a_terminal_sets_up_without_showing_the_key() {
         .await
         .unwrap();
     let shown = screen.lock().unwrap().clone();
-    assert!(status.success(), "{shown}");
+    assert!(!status.success(), "{shown}");
     // Plain answers show as typed; the key never does.
     assert!(shown.contains("choice [1/2] > 2\n"), "{shown}");
     assert!(!shown.contains("typed-on-the-terminal"), "{shown}");
@@ -299,7 +349,12 @@ async fn the_first_run_on_a_terminal_sets_up_without_showing_the_key() {
     assert!(text.contains("task_max_time = \"2h\"\n"), "{text}");
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
-    // Then the question ran with that key.
+    // With the address next to it in the file, the question runs with
+    // that key.
+    std::fs::write(&path, format!("{text}base_url = \"{url}\"\n")).unwrap();
+    let (out, stdout, stderr) = output(junees(home.path(), home.path(), &["hello"])).await;
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(stdout, "Hi from the fake API.\n");
     let requests = server.await.unwrap();
     assert_eq!(api_key_of(&requests[0]), KEY);
 }

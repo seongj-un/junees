@@ -15,7 +15,37 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::provider::openai::{API_KEY_ENV, BASE_URL_ENV};
+use crate::provider::openai;
+
+/// The API keys read only from where their address is set: (key,
+/// address, the address used when none is set), as environment variable
+/// names ([`Settings::get`]).
+pub const PAIRED_KEYS: &[(&str, &str, &str)] = &[
+    (
+        ANTHROPIC_KEY_ENV,
+        ANTHROPIC_BASE_URL_ENV,
+        crate::config::DEFAULT_BASE_URL,
+    ),
+    (
+        openai::API_KEY_ENV,
+        openai::BASE_URL_ENV,
+        openai::DEFAULT_BASE_URL,
+    ),
+];
+
+/// Whether `address` is `default` as written down (case of letters and a
+/// trailing `/` aside): such an address counts as not set, since every
+/// key it could take goes to the same official API.
+pub fn is_default_address(address: &str, default: &str) -> bool {
+    address
+        .trim()
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(default)
+}
+
+/// The Anthropic key and the address it goes to.
+pub const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+pub const ANTHROPIC_BASE_URL_ENV: &str = "ANTHROPIC_BASE_URL";
 
 /// The file's name inside the state folder.
 pub const FILE_NAME: &str = "config.toml";
@@ -112,8 +142,9 @@ pub const KEYS: &[(&str, &str)] = &[
 
 const HEADER: &str = "\
 # Junees settings, written by `junees setup` (run it again to change them).
-# Environment variables win over this file: ANTHROPIC_API_KEY over api_key,
-# JUNEES_MODEL over model, and so on (see docs/configuration.md).
+# Environment variables win over this file: JUNEES_MODEL over model, and so
+# on. An API key comes from where its address is set: api_key with base_url,
+# ANTHROPIC_API_KEY with ANTHROPIC_BASE_URL (see docs/configuration.md).
 ";
 
 /// The state folder: `JUNEES_HOME`, else `$HOME/.junees`; `None` when
@@ -436,8 +467,9 @@ impl Settings {
     }
 
     /// The value of the environment variable `name`, from the first source
-    /// that sets it to something other than blanks; `OPENAI_API_KEY` only
-    /// from the place the address comes from ([`Settings::openai_key`]).
+    /// that sets it to something other than blanks; an API key
+    /// ([`PAIRED_KEYS`]) only from the place its address comes from
+    /// ([`Settings::paired_key`]).
     pub fn get(&self, name: &str) -> Option<String> {
         self.lookup(name).map(|(value, _)| value)
     }
@@ -448,10 +480,10 @@ impl Settings {
     }
 
     fn lookup(&self, name: &str) -> Option<(String, Origin)> {
-        if name == API_KEY_ENV {
-            return self.openai_key();
+        match PAIRED_KEYS.iter().find(|(key, _, _)| *key == name) {
+            Some((key, address, default)) => self.paired_key(key, address, default),
+            None => self.first(name),
         }
-        self.first(name)
     }
 
     /// The first source's value of `name`, by the plain order.
@@ -471,21 +503,31 @@ impl Settings {
         Some((value.to_string(), Origin::File))
     }
 
-    /// The OpenAI key goes with its address: from the file when
-    /// `openai_base_url` comes from the file, from the environment when
-    /// `OPENAI_BASE_URL` does. Taken key by key, an `OPENAI_API_KEY`
-    /// exported for other tools would go to the file's server (OpenRouter,
-    /// a proxy), or the file's key to an exported address. With the
-    /// default address either one is taken, the environment first.
-    fn openai_key(&self) -> Option<(String, Origin)> {
-        let key = API_KEY_ENV;
-        match self.first(BASE_URL_ENV).map(|(_, origin)| origin) {
+    /// An API key goes with its address: from the file when the address
+    /// comes from the file, from the environment when the address
+    /// variable does. Taken key by key, a key exported for other tools
+    /// would go to the file's server (OpenRouter, a proxy), or the file's
+    /// key to an exported address. With the default address, unset or
+    /// written down ([`is_default_address`]), either one is taken, the
+    /// environment first.
+    fn paired_key(&self, key: &str, address: &str, default: &str) -> Option<(String, Origin)> {
+        let set = self
+            .first(address)
+            .filter(|(value, _)| !is_default_address(value, default));
+        match set.map(|(_, origin)| origin) {
             None | Some(Origin::Override) => self.first(key),
             Some(Origin::Env) => self
                 .overridden(key)
                 .or_else(|| self.env(key).map(|value| (value, Origin::Env))),
             Some(Origin::File) => self.overridden(key).or_else(|| self.in_file(key)),
         }
+    }
+
+    /// Whether the key `name` is set in the environment or the file but
+    /// [`Settings::get`] leaves it out, because its address is set in the
+    /// other place.
+    pub fn key_away_from_address(&self, name: &str) -> bool {
+        self.get(name).is_none() && (self.env(name).is_some() || self.in_file(name).is_some())
     }
 
     /// Only the environment's value of `name`.
@@ -775,6 +817,21 @@ mod tests {
         assert_eq!(default.get(KEY).as_deref(), Some("env-key"));
         let default = settings(&[], &[("openai_api_key", "file-key")]);
         assert_eq!(default.get(KEY).as_deref(), Some("file-key"));
+        // So does the default address written down.
+        let written = settings(
+            &[("OPENAI_BASE_URL", "https://api.openai.com/v1/")],
+            &[("openai_api_key", "file-key")],
+        );
+        assert_eq!(written.get(KEY).as_deref(), Some("file-key"));
+        let written = settings(
+            &[(KEY, "env-key")],
+            &[("openai_base_url", "https://api.openai.com/v1")],
+        );
+        assert_eq!(written.get(KEY).as_deref(), Some("env-key"));
+        assert!(!is_default_address(
+            "https://api.openai.com",
+            openai::DEFAULT_BASE_URL
+        ));
 
         // Starting refuses a remote address without its own key.
         let mut file = ConfigFile::default();
@@ -787,6 +844,122 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(err.contains("same place"), "{err}");
+    }
+
+    #[test]
+    fn the_anthropic_key_comes_from_where_the_address_does() {
+        const KEY: &str = "ANTHROPIC_API_KEY";
+        let settings = |env_pairs: &[(&str, &str)], file_pairs: &[(&str, &str)]| {
+            let mut file = ConfigFile::default();
+            for (key, value) in file_pairs {
+                file.set(key, *value);
+            }
+            let mut env_pairs = env_pairs.to_vec();
+            env_pairs.push(("HOME", "/home/u"));
+            Settings::new(env(&env_pairs), file, None, true)
+        };
+        let file_server = ("base_url", "https://proxy.example");
+        let env_server = ("ANTHROPIC_BASE_URL", "https://gateway.example");
+
+        // A key exported for other tools does not go to the file's server.
+        let both = settings(
+            &[(KEY, "sk-ant-env")],
+            &[file_server, ("api_key", "sk-ant-file")],
+        );
+        assert_eq!(both.get(KEY).as_deref(), Some("sk-ant-file"));
+        assert_eq!(both.origin(KEY), Some(Origin::File));
+        let file_address_only = settings(&[(KEY, "sk-ant-env")], &[file_server]);
+        assert_eq!(file_address_only.get(KEY), None);
+        assert!(file_address_only.key_away_from_address(KEY));
+
+        // Nor the file's key to an exported address.
+        let env_address = settings(&[env_server], &[("api_key", "sk-ant-file")]);
+        assert_eq!(env_address.get(KEY), None);
+        assert!(env_address.key_away_from_address(KEY));
+        let env_pair = settings(
+            &[env_server, (KEY, "sk-ant-env")],
+            &[file_server, ("api_key", "sk-ant-file")],
+        );
+        assert_eq!(env_pair.get(KEY).as_deref(), Some("sk-ant-env"));
+        assert_eq!(env_pair.origin(KEY), Some(Origin::Env));
+        assert!(!env_pair.key_away_from_address(KEY));
+
+        // The default address takes either, the environment first.
+        let default = settings(&[(KEY, "sk-ant-env")], &[("api_key", "sk-ant-file")]);
+        assert_eq!(default.get(KEY).as_deref(), Some("sk-ant-env"));
+        assert_eq!(default.origin(KEY), Some(Origin::Env));
+        let default = settings(&[], &[("api_key", "sk-ant-file")]);
+        assert_eq!(default.get(KEY).as_deref(), Some("sk-ant-file"));
+        assert_eq!(default.origin(KEY), Some(Origin::File));
+        assert!(!settings(&[], &[]).key_away_from_address(KEY));
+
+        // Starting on the api backend refuses an address without its own
+        // key and says where the key goes.
+        let err = Config::from_lookup(|key| file_address_only.get(key))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.starts_with("no API key for https://proxy.example:"),
+            "{err}"
+        );
+        assert!(err.contains("same place"), "{err}");
+        let config = Config::from_lookup(|key| both.get(key)).unwrap();
+        assert_eq!(config.base_url, "https://proxy.example");
+        assert_eq!(config.api_key, "sk-ant-file");
+        // A password in the address is not shown.
+        let secret_address = settings(
+            &[("ANTHROPIC_BASE_URL", "https://u:hunter2@proxy.example")],
+            &[],
+        );
+        let err = Config::from_lookup(|key| secret_address.get(key))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.starts_with("no API key for the address in base_url:"),
+            "{err}"
+        );
+        assert!(!err.contains("hunter2"), "{err}");
+        // The default address written down counts as not set: the key may
+        // come from either place, since both go to the official API.
+        for (env_pairs, file_pairs, expected) in [
+            (
+                &[("ANTHROPIC_BASE_URL", "https://api.anthropic.com")][..],
+                &[("api_key", "sk-ant-file")][..],
+                "sk-ant-file",
+            ),
+            (
+                &[(KEY, "sk-ant-env")][..],
+                &[("base_url", "https://API.anthropic.com/ ")][..],
+                "sk-ant-env",
+            ),
+        ] {
+            let settings = settings(env_pairs, file_pairs);
+            assert_eq!(settings.get(KEY).as_deref(), Some(expected));
+            assert!(!settings.key_away_from_address(KEY));
+            let config = Config::from_lookup(|key| settings.get(key)).unwrap();
+            assert_eq!(config.api_key, expected);
+        }
+        // Without any key that is the plain error, not "same place".
+        let none = settings(&[("ANTHROPIC_BASE_URL", "https://api.anthropic.com/")], &[]);
+        let err = Config::from_lookup(|key| none.get(key))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.starts_with("no API key: run `junees setup`"), "{err}");
+        // A path after it is another address.
+        let other = settings(
+            &[(KEY, "sk-ant-env")],
+            &[("base_url", "https://api.anthropic.com/proxy")],
+        );
+        assert_eq!(other.get(KEY), None);
+
+        // The claude-code backend reads no key, so the pairing changes
+        // nothing there.
+        let config = Config::from_lookup_without_key(|key| env_address.get(key)).unwrap();
+        assert_eq!(config.api_key, "");
+        assert_eq!(config.base_url, "https://gateway.example");
     }
 
     #[test]

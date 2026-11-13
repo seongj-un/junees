@@ -47,7 +47,8 @@ RestartSec=10
 # 설정(timezone, api_key, discord_token, notify_webhook)은 ~/.junees/config.toml.
 # 환경 변수로 줄 때는 0600 파일에:
 # EnvironmentFile=%h/.config/junees/cron.env
-# OpenAI 키(OPENAI_API_KEY)를 이 파일에 두면 주소(OPENAI_BASE_URL)도 같은 파일에 둔다.
+# API 키는 주소와 같은 곳에서만 읽는다. 키(ANTHROPIC_API_KEY, OPENAI_API_KEY)를
+# 이 파일에 두고 주소를 바꿨다면 주소(ANTHROPIC_BASE_URL, OPENAI_BASE_URL)도 이 파일에 둔다.
 
 [Install]
 WantedBy=default.target
@@ -124,7 +125,8 @@ TimeoutStopSec=35min
 # 시크릿 변수(PR_HOOK_SECRET 등)는 0600 파일에. 모델의 도구가 읽지 못하는
 # $JUNEES_HOME/secrets/ 안에 둔다(기본 ~/.junees, 다른 곳이면 그 경로로):
 EnvironmentFile=%h/.junees/secrets/webhook.env
-# 그 밖의 설정(api_key, discord_token)은 ~/.junees/config.toml.
+# 그 밖의 설정(api_key, discord_token)은 ~/.junees/config.toml. api_key는 base_url과
+# 같은 곳에서만 읽으므로, 주소를 바꿨다면 base_url도 config.toml에 둔다.
 
 [Install]
 WantedBy=default.target

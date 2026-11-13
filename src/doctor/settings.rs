@@ -137,6 +137,18 @@ pub(super) fn provider(report: &mut Report, settings: &Settings, read: &Read) {
             let base = settings
                 .get("ANTHROPIC_BASE_URL")
                 .unwrap_or_else(|| crate::config::DEFAULT_BASE_URL.to_string());
+            if let Err(err) =
+                crate::provider::check_base_url(&base, &crate::config::ANTHROPIC_ADDRESS)
+            {
+                report.fail(
+                    AREA,
+                    NAME,
+                    format!("anthropic: {err:#}"),
+                    "set base_url to an https:// URL, or http:// on localhost for a server on \
+                     this machine",
+                );
+                return;
+            }
             report.ok(
                 AREA,
                 NAME,
@@ -238,6 +250,13 @@ pub(super) fn keys(report: &mut Report, settings: &Settings, backend: Backend) {
             "Anthropic API key",
             "not set (provider = openai does not need it)",
         ),
+        (false, Backend::Api) if settings.key_away_from_address(KEY) => report.fail(
+            AREA,
+            "Anthropic API key",
+            "set, but not where the address is set, so it is not used",
+            "put the key in the same place as the address: api_key with base_url in \
+             config.toml, or ANTHROPIC_API_KEY with ANTHROPIC_BASE_URL",
+        ),
         (false, Backend::Api) => report.fail(
             AREA,
             "Anthropic API key",
@@ -284,9 +303,7 @@ pub(super) fn keys(report: &mut Report, settings: &Settings, backend: Backend) {
                     "not set (the claude-code backend does not need it)"
                 },
             );
-        } else if settings.env(openai::API_KEY_ENV).is_some()
-            || settings.file().env_value(openai::API_KEY_ENV).is_some()
-        {
+        } else if settings.key_away_from_address(openai::API_KEY_ENV) {
             report.fail(
                 AREA,
                 "OpenAI API key",

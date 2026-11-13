@@ -85,6 +85,55 @@ pub(super) fn backoff(attempt: u32, retry_after_secs: Option<u64>) -> Duration {
     }
 }
 
+/// The names a provider's address and key go by, for messages:
+/// environment variable and settings-file key of each.
+pub struct AddressNames {
+    pub env: &'static str,
+    pub setting: &'static str,
+    pub key_env: &'static str,
+    pub key_setting: &'static str,
+}
+
+/// Refuses an API address that is not https, or http on loopback, or that
+/// holds a user name or password: the key and the whole conversation go
+/// there, and the address shows up in errors and in `junees doctor`.
+pub fn check_base_url(raw: &str, names: &AddressNames) -> anyhow::Result<()> {
+    use anyhow::{Context, bail};
+    let AddressNames {
+        env,
+        setting,
+        key_env,
+        key_setting,
+    } = names;
+    let url = reqwest::Url::parse(raw.trim()).with_context(|| {
+        // A URL with a user name or password in it is not shown.
+        let shown = if raw.contains('@') {
+            "(not shown)"
+        } else {
+            raw
+        };
+        format!("{env} (`{setting}`) is not a URL: `{shown}`")
+    })?;
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!(
+            "{env} (`{setting}`) must not hold a user name or password: put the key in \
+             {key_setting} ({key_env})"
+        );
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if crate::mcp::http::target::is_loopback(&url) => Ok(()),
+        "http" => bail!(
+            "{env} (`{setting}`) must use https unless the server is on this machine \
+             (localhost, 127.0.0.1 or ::1): the key and the conversation would cross the \
+             network in plain text"
+        ),
+        scheme => {
+            bail!("{env} (`{setting}`) must be an https:// (or local http://) URL, not {scheme}:")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
