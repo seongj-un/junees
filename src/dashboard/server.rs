@@ -73,6 +73,8 @@ pub struct Context {
     pub(crate) sessions: std::sync::Mutex<api::SessionCache>,
     /// One `/api/doctor` at a time.
     pub(crate) doctor: Arc<Semaphore>,
+    /// The code an opened browser trades for `token`.
+    pub(crate) codes: std::sync::Mutex<super::code::Codes>,
 }
 
 impl Context {
@@ -85,6 +87,7 @@ impl Context {
             started: Instant::now(),
             sessions: Default::default(),
             doctor: Arc::new(Semaphore::new(1)),
+            codes: Default::default(),
         }
     }
 }
@@ -252,7 +255,8 @@ pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer 
             "requests from other sites are refused",
         );
     }
-    let write = actions::is_write_path(&head.path);
+    let trade = head.path == TOKEN_PATH;
+    let write = trade || actions::is_write_path(&head.path);
     match (head.method.as_str(), write) {
         ("GET", false) | ("POST", true) => {}
         (_, false) => {
@@ -267,8 +271,11 @@ pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer 
     if let Some(answer) = body_refused(head) {
         return answer;
     }
-    if write && let Some(answer) = write_refused(head, body) {
+    if write && let Some(answer) = write_refused(head, body, trade) {
         return answer;
+    }
+    if trade {
+        return trade_code(body, context);
     }
     if head.path == "/api" || head.path.starts_with("/api/") {
         if !authorized(head.header("authorization"), &context.token) {
@@ -299,7 +306,7 @@ pub async fn answer(head: &Head, body: &[u8], context: &Arc<Context>) -> Answer 
 /// `Origin` (the same origin was checked already), so only this page's
 /// script can send it; a `Content-Type`, when given, must be JSON; the
 /// body must be empty or `{}`.
-fn write_refused(head: &Head, body: &[u8]) -> Option<Answer> {
+fn write_refused(head: &Head, body: &[u8], trade: bool) -> Option<Answer> {
     if head.header("origin").is_none() {
         return Some(Answer::error(
             403,
@@ -317,20 +324,56 @@ fn write_refused(head: &Head, body: &[u8]) -> Option<Answer> {
             ));
         }
     }
-    let empty = match std::str::from_utf8(body).map(str::trim) {
+    let fits = match std::str::from_utf8(body).map(str::trim) {
+        Ok(text) if trade => serde_json::from_str::<CodeBody>(text).is_ok(),
         Ok("") => true,
         Ok(text) => serde_json::from_str::<serde_json::Map<String, Value>>(text)
             .is_ok_and(|object| object.is_empty()),
         Err(_) => false,
     };
-    if !empty {
-        return Some(Answer::error(
-            400,
-            "bad_body",
-            "a write takes no body, or `{}`",
-        ));
+    if !fits {
+        let message = if trade {
+            "the body is {\"code\": \"<code>\"}"
+        } else {
+            "a write takes no body, or `{}`"
+        };
+        return Some(Answer::error(400, "bad_body", message));
     }
     None
+}
+
+/// Where an opened browser trades its one-time code for the token.
+pub const TOKEN_PATH: &str = "/api/token";
+
+/// The body of [`TOKEN_PATH`].
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeBody {
+    code: String,
+}
+
+/// The answer to a `POST` of [`TOKEN_PATH`] that passed the write checks:
+/// the token for the current one-time code ([`super::code`]), or 401
+/// `bad_code`. It needs no bearer token: it is how the page gets one.
+fn trade_code(body: &[u8], context: &Context) -> Answer {
+    let given = std::str::from_utf8(body)
+        .ok()
+        .and_then(|text| serde_json::from_str::<CodeBody>(text.trim()).ok())
+        .map(|body| body.code)
+        .unwrap_or_default();
+    let traded = context
+        .codes
+        .lock()
+        .is_ok_and(|mut codes| codes.redeem(&given, Instant::now()));
+    if traded {
+        Answer::json(200, &json!({ "token": context.token }))
+    } else {
+        Answer::error(
+            401,
+            "bad_code",
+            "the code is wrong, used or expired; run `junees dashboard` again",
+        )
+    }
 }
 
 /// Why a request with a body is refused: one announced in pieces, or
@@ -402,7 +445,7 @@ pub fn authorized(header: Option<&str>, token: &str) -> bool {
 
 /// `a == b`, taking as long whatever byte differs. The length is not
 /// hidden: every token has 43 characters.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
