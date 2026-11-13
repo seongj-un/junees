@@ -659,7 +659,21 @@ async fn transcribe_all<P: Platform>(
     transcriber: &crate::transcribe::Transcriber,
     audio: &[P::Attachment],
 ) -> Result<Vec<String>, String> {
-    let limit = transcriber.settings().max_bytes;
+    let own = transcriber.settings().max_bytes;
+    // The platform's own download limit, when it is the smaller one.
+    let platform = shared
+        .platform
+        .download_limit()
+        .filter(|(bytes, _)| *bytes < own);
+    let limit = platform.map_or(own, |(bytes, _)| bytes);
+    let too_large = |name: &str, len: u64| match platform {
+        Some((bytes, why)) => format!(
+            "{name}: the audio is {}; {why} (up to {})",
+            crate::images::human_bytes(len),
+            crate::images::human_bytes(bytes)
+        ),
+        None => crate::transcribe::too_large(name, len, own),
+    };
     let mut texts = Vec::new();
     for file in audio {
         let name = file.name();
@@ -667,11 +681,11 @@ async fn transcribe_all<P: Platform>(
             continue;
         };
         if file.size() > limit {
-            return Err(crate::transcribe::too_large(name, file.size(), limit));
+            return Err(too_large(name, file.size()));
         }
         let bytes = match shared.platform.fetch_audio(file, limit).await {
             Ok(bytes) => bytes,
-            Err(Ok(len)) => return Err(crate::transcribe::too_large(name, len, limit)),
+            Err(Ok(len)) => return Err(too_large(name, len)),
             Err(Err(why)) => return Err(why),
         };
         let size = bytes.len() as u64;
@@ -700,7 +714,8 @@ async fn transcribe_all<P: Platform>(
 /// attachments were left out, and returns the text and images to run;
 /// `None` when nothing is left to run, a voice message could not be
 /// transcribed (the model is not asked about words it never got), or a
-/// stop came meanwhile.
+/// stop came meanwhile. With transcription off, audio is only named in
+/// the notes, and the rest of the message runs.
 async fn prepare<P: Platform>(
     shared: &Shared<P>,
     channel: &str,
@@ -718,38 +733,47 @@ async fn prepare<P: Platform>(
         .partition(|file| matches!(file.kind(), Kind::Audio { .. }));
     if !audio.is_empty() {
         let place = shared.platform.place();
-        let Some(transcriber) = shared.transcriber.as_deref() else {
-            (shared.log)(&format!(
-                "{place} {channel}: a voice message, but transcription is off"
-            ));
-            let mut say = crate::transcribe::OFF_NOTE.to_string();
-            if !notes.is_empty() {
-                say.push_str(&format!("\n{}", notes_text(&notes)));
-            }
-            shared.say(channel, &say).await;
-            return None;
-        };
-        state.preparing.store(true, Ordering::SeqCst);
-        let got = tokio::select! {
-            got = transcribe_all(shared, channel, transcriber, &audio) => Some(got),
-            _ = cancel.cancelled() => None,
-        };
-        state.preparing.store(false, Ordering::SeqCst);
-        match got {
+        match shared.transcriber.as_deref() {
+            // Off: the audio is named in the notes and not downloaded; the
+            // text and images that came with it run as before.
             None => {
-                shared.say(channel, "(stopped before it started)").await;
-                return None;
+                (shared.log)(&format!(
+                    "{place} {channel}: audio left out, transcription is off"
+                ));
+                notes.extend(
+                    audio
+                        .iter()
+                        .map(|file| crate::transcribe::off_note(file.name())),
+                );
             }
-            Some(Err(why)) => {
-                (shared.log)(&format!("{place} {channel}: transcription failed: {why}"));
-                let mut say = format!("(the voice message could not be transcribed: {why})");
-                if !notes.is_empty() {
-                    say.push_str(&format!("\n{}", notes_text(&notes)));
+            Some(transcriber) => {
+                state.preparing.store(true, Ordering::SeqCst);
+                let got = tokio::select! {
+                    got = transcribe_all(shared, channel, transcriber, &audio) => Some(got),
+                    _ = cancel.cancelled() => None,
+                };
+                state.preparing.store(false, Ordering::SeqCst);
+                match got {
+                    None => {
+                        shared.say(channel, "(stopped before it started)").await;
+                        return None;
+                    }
+                    // The model is not asked about words it never got.
+                    Some(Err(why)) => {
+                        (shared.log)(&format!("{place} {channel}: transcription failed: {why}"));
+                        let mut say = format!(
+                            "(the voice message could not be transcribed, so this message was \
+                             not run: {why})"
+                        );
+                        if !notes.is_empty() {
+                            say.push_str(&format!("\n{}", notes_text(&notes)));
+                        }
+                        shared.say(channel, &say).await;
+                        return None;
+                    }
+                    Some(Ok(texts)) => text = crate::transcribe::message(&text, &texts),
                 }
-                shared.say(channel, &say).await;
-                return None;
             }
-            Some(Ok(texts)) => text = crate::transcribe::message(&text, &texts),
         }
     }
     let images = if attachments.is_empty() {

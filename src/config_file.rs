@@ -149,6 +149,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("transcribe_model", "JUNEES_TRANSCRIBE_MODEL"),
     ("transcribe_language", "JUNEES_TRANSCRIBE_LANGUAGE"),
     ("transcribe_max_bytes", "JUNEES_TRANSCRIBE_MAX_BYTES"),
+    ("transcribe_timeout", "JUNEES_TRANSCRIBE_TIMEOUT"),
 ];
 
 const HEADER: &str = "\

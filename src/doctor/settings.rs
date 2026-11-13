@@ -424,11 +424,12 @@ pub(super) fn transcribe(report: &mut Report, settings: &Settings) {
                 AREA,
                 NAME,
                 format!(
-                    "{} ({}), model {}{language}, files up to {}, {key}",
+                    "{} ({}), model {}{language}, files up to {}, timeout {} s, {key}",
                     set.endpoint(),
                     source(settings, voice::BASE_URL_ENV),
                     set.model,
-                    crate::images::human_bytes(set.max_bytes)
+                    crate::images::human_bytes(set.max_bytes),
+                    set.timeout.as_secs()
                 ),
             );
         }

@@ -2242,7 +2242,7 @@ async fn transcription_is_shown_without_its_key_and_asked_online() {
         Status::Ok,
         &format!(
             "{base}/audio/transcriptions (config.toml), model whisper-1, language ko, files up \
-             to 25.0 MB, key set (config.toml)"
+             to 25.0 MB, timeout 120 s, key set (config.toml)"
         ),
     );
     expect(

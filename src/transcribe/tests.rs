@@ -129,6 +129,9 @@ fn checks_the_address_key_language_and_size() {
         (MAX_BYTES_ENV, "0"),
         (MAX_BYTES_ENV, "25MB"),
         (MAX_BYTES_ENV, "999999999999"),
+        (TIMEOUT_ENV, "5"),
+        (TIMEOUT_ENV, "99999"),
+        (TIMEOUT_ENV, "2m"),
     ] {
         let got = settings(&[(BASE_URL_ENV, "http://localhost:8000/v1"), (key, value)]);
         assert!(got.is_err(), "{key}={value}");
@@ -328,4 +331,80 @@ async fn other_refusals_and_empty_text_are_failures() {
     // A redirect is not followed: the key would go along.
     let err = transcriber.transcribe(&voice()).await.unwrap_err();
     assert!(err.0.contains("HTTP 307"), "{err}");
+}
+
+#[tokio::test]
+async fn a_spent_quota_and_a_wrong_address_say_so_without_retrying() {
+    let (base, seen) = fake(vec![
+        (
+            429,
+            "Retry-After: 0",
+            r#"{"error":{"message":"You exceeded your current quota.","type":"insufficient_quota","code":"insufficient_quota"}}"#,
+        ),
+        (404, "", r#"{"error":{"message":"Not Found"}}"#),
+        (308, "Location: https://elsewhere.example/v1/audio/transcriptions", ""),
+        (503, "Retry-After: 0", r#"{"error":{"message":"overloaded"}}"#),
+        (503, "Retry-After: 0", r#"{"error":{"message":"overloaded"}}"#),
+        (503, "Retry-After: 0", r#"{"error":{"message":"still overloaded"}}"#),
+    ])
+    .await;
+    let transcriber =
+        Transcriber::new(settings(&[(BASE_URL_ENV, &base)]).unwrap().unwrap()).unwrap();
+    let err = transcriber.transcribe(&voice()).await.unwrap_err();
+    assert!(
+        err.0
+            .contains("quota or billing limit is reached (HTTP 429): You exceeded"),
+        "{err}"
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "a spent quota is not tried again"
+    );
+    let err = transcriber.transcribe(&voice()).await.unwrap_err();
+    assert!(
+        err.0
+            .contains("HTTP 404): check transcribe_base_url, which usually ends in /v1"),
+        "{err}"
+    );
+    let err = transcriber.transcribe(&voice()).await.unwrap_err();
+    assert!(
+        err.0.contains("redirect (HTTP 308), which is not followed"),
+        "{err}"
+    );
+    let err = transcriber.transcribe(&voice()).await.unwrap_err();
+    assert!(
+        err.0.ends_with("(HTTP 503, 3 tries): still overloaded"),
+        "{err}"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 6);
+}
+
+#[tokio::test]
+async fn a_request_that_runs_out_of_time_is_not_sent_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            // Read nothing back: a slow whisper server still at work.
+            held.push(stream);
+        }
+    });
+    let mut slow = settings(&[(BASE_URL_ENV, &base)]).unwrap().unwrap();
+    slow.timeout = std::time::Duration::from_secs(1);
+    let transcriber = Transcriber::new(slow).unwrap();
+    let err = transcriber.transcribe(&voice()).await.unwrap_err();
+    assert!(
+        err.0
+            .contains("no answer from the transcription service within 1 s"),
+        "{err}"
+    );
+    assert!(err.0.contains("transcribe_timeout"), "{err}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
 }

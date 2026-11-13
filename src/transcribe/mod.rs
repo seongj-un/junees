@@ -23,6 +23,7 @@ pub const API_KEY_ENV: &str = "JUNEES_TRANSCRIBE_API_KEY";
 pub const MODEL_ENV: &str = "JUNEES_TRANSCRIBE_MODEL";
 pub const LANGUAGE_ENV: &str = "JUNEES_TRANSCRIBE_LANGUAGE";
 pub const MAX_BYTES_ENV: &str = "JUNEES_TRANSCRIBE_MAX_BYTES";
+pub const TIMEOUT_ENV: &str = "JUNEES_TRANSCRIBE_TIMEOUT";
 
 /// The model asked for when `transcribe_model` is not set.
 pub const DEFAULT_MODEL: &str = "whisper-1";
@@ -35,16 +36,22 @@ pub const MAX_MAX_BYTES: u64 = 200 * 1024 * 1024;
 /// What the transcribed text starts with in the user's message.
 pub const PREFIX: &str = "[음성 메시지 받아쓰기]";
 
-/// The note for a voice message while transcription is off.
-pub const OFF_NOTE: &str = "(voice messages are not read here: transcription is off. Set \
-     transcribe_base_url to an OpenAI-compatible transcription API, such as \
-     https://api.openai.com/v1 or a whisper server on this machine; see docs/gateways.md)";
+/// The note for an audio file while transcription is off.
+pub fn off_note(name: &str) -> String {
+    format!(
+        "{name}: audio is not read, transcription is off (set transcribe_base_url to an \
+         OpenAI-compatible transcription API; see docs/gateways.md)"
+    )
+}
 
 /// Tries of one transcription: the first and the retries after a 429, a
 /// 5xx or a lost connection.
 pub const MAX_ATTEMPTS: u32 = 3;
-/// Time one request may take, upload and answer.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Time one request may take, upload and answer, when
+/// `transcribe_timeout` is not set.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The longest `transcribe_timeout` taken, in seconds.
+pub const MAX_TIMEOUT_SECS: u64 = 3600;
 /// The longest `retry-after` waited for.
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 /// The largest answer read.
@@ -66,6 +73,9 @@ pub struct Settings {
     /// An ISO-639-1 code, sent as is.
     pub language: Option<String>,
     pub max_bytes: u64,
+    /// Time one request may take; a request that runs out is not sent
+    /// again (the server may still be working on it).
+    pub timeout: Duration,
 }
 
 impl Settings {
@@ -97,8 +107,19 @@ impl Settings {
                 ),
             },
         };
+        let timeout = match get(TIMEOUT_ENV) {
+            None => DEFAULT_TIMEOUT,
+            Some(text) => match text.parse::<u64>() {
+                Ok(secs) if (10..=MAX_TIMEOUT_SECS).contains(&secs) => Duration::from_secs(secs),
+                _ => bail!(
+                    "{TIMEOUT_ENV} (`transcribe_timeout`) must be whole seconds from 10 to \
+                     {MAX_TIMEOUT_SECS}, got `{text}`"
+                ),
+            },
+        };
         let settings = Self {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
+            timeout,
             api_key: get(API_KEY_ENV),
             model: get(MODEL_ENV).unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             language,
@@ -177,7 +198,7 @@ impl Transcriber {
     pub fn new(settings: Settings) -> Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(settings.timeout)
             .redirect(Policy::none())
             .build()
             .context("cannot set up the HTTP client for transcription")?;
@@ -216,20 +237,30 @@ impl Transcriber {
                 Ok(response) => {
                     let status = response.status();
                     let wait = retry_after(&response);
-                    if !retryable(status) || attempt >= MAX_ATTEMPTS {
-                        return Err(refused(status, response, attempt).await);
+                    let said = Said::read(response).await;
+                    // A spent quota (OpenAI's 429 insufficient_quota) does
+                    // not come back by trying again.
+                    if !retryable(status) || said.quota || attempt >= MAX_ATTEMPTS {
+                        return Err(refused(status, &said, attempt));
                     }
                     wait
                 }
+                // Only a connection that never opened is tried again: a
+                // request that was sent may still be running on the server.
+                Err(err) if err.is_connect() && attempt < MAX_ATTEMPTS => None,
+                Err(err) if err.is_timeout() && !err.is_connect() => {
+                    return Err(Failure(format!(
+                        "no answer from the transcription service within {} s; it may still \
+                         be working on it (a long recording on a slow server: raise \
+                         transcribe_timeout)",
+                        self.settings.timeout.as_secs()
+                    )));
+                }
                 Err(err) => {
-                    let worth = err.is_connect() || err.is_timeout() || err.is_request();
-                    if !worth || attempt >= MAX_ATTEMPTS {
-                        return Err(Failure(format!(
-                            "cannot reach the transcription service ({})",
-                            describe(&err)
-                        )));
-                    }
-                    None
+                    return Err(Failure(format!(
+                        "cannot reach the transcription service ({})",
+                        describe(&err)
+                    )));
                 }
             };
             let wait = retry_after.unwrap_or(Duration::from_millis(500 * 2u64.pow(attempt - 1)));
@@ -254,43 +285,85 @@ fn retry_after(response: &reqwest::Response) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
-/// A refused request, in words: a key problem, the service's own short
-/// message, or a status.
-async fn refused(status: StatusCode, response: reqwest::Response, attempts: u32) -> Failure {
-    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        return Failure(format!(
-            "the transcription service refused the key (HTTP {}): check transcribe_api_key \
-             and transcribe_base_url",
-            status.as_u16()
-        ));
+/// What a refusing service said: its short message, if it gave one that
+/// does not look like a secret, and whether it is about a spent quota.
+struct Said {
+    message: Option<String>,
+    quota: bool,
+}
+
+impl Said {
+    async fn read(response: reqwest::Response) -> Self {
+        let json = read_capped(response)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let Some(json) = json else {
+            return Self {
+                message: None,
+                quota: false,
+            };
+        };
+        let quota = ["/error/code", "/error/type"]
+            .iter()
+            .any(|at| json.pointer(at).and_then(Value::as_str) == Some("insufficient_quota"));
+        let message = json
+            .pointer("/error/message")
+            .or_else(|| json.get("detail"))
+            .and_then(Value::as_str)
+            .filter(|text| crate::secrets::find_secret(text).is_none())
+            .map(|text| {
+                let short: String = text.chars().take(200).collect();
+                crate::prompt_text::escape_hidden(&short)
+            });
+        Self { message, quota }
     }
-    if retryable(status) {
-        return Failure(format!(
-            "the transcription service kept failing (HTTP {}, {attempts} tries)",
-            status.as_u16()
-        ));
+
+    /// `: <message>`, or nothing.
+    fn suffix(&self) -> String {
+        self.message
+            .as_deref()
+            .map_or(String::new(), |text| format!(": {text}"))
     }
-    let message = read_capped(response)
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|json| {
-            json.pointer("/error/message")
-                .or_else(|| json.get("detail"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        // The service's words, unless they look like a secret.
-        .filter(|text| crate::secrets::find_secret(text).is_none())
-        .map(|text| {
-            let short: String = text.chars().take(200).collect();
-            format!(": {}", crate::prompt_text::escape_hidden(&short))
-        })
-        .unwrap_or_default();
-    Failure(format!(
-        "the transcription service refused the audio (HTTP {}){message}",
-        status.as_u16()
-    ))
+}
+
+/// A refused request, in words: a key problem, a wrong address, a spent
+/// quota, a service that kept failing, or the service's own reason.
+fn refused(status: StatusCode, said: &Said, attempts: u32) -> Failure {
+    let code = status.as_u16();
+    let text = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        format!(
+            "the transcription service refused the key (HTTP {code}): check \
+             transcribe_api_key and transcribe_base_url"
+        )
+    } else if status.is_redirection() {
+        format!(
+            "the transcription service answered with a redirect (HTTP {code}), which is not \
+             followed: check transcribe_base_url"
+        )
+    } else if matches!(code, 404 | 405) {
+        format!(
+            "the transcription service has no /audio/transcriptions at this address (HTTP \
+             {code}): check transcribe_base_url, which usually ends in /v1{}",
+            said.suffix()
+        )
+    } else if said.quota {
+        format!(
+            "the transcription service's quota or billing limit is reached (HTTP {code}){}",
+            said.suffix()
+        )
+    } else if retryable(status) {
+        format!(
+            "the transcription service kept failing (HTTP {code}, {attempts} tries){}",
+            said.suffix()
+        )
+    } else {
+        format!(
+            "the transcription service refused the audio (HTTP {code}){}",
+            said.suffix()
+        )
+    };
+    Failure(text)
 }
 
 async fn answer(response: reqwest::Response) -> Result<String, Failure> {
@@ -323,12 +396,10 @@ async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, String>
 
 /// A request error without its URL.
 fn describe(err: &reqwest::Error) -> String {
-    if err.is_timeout() {
-        format!("timed out after {} s", REQUEST_TIMEOUT.as_secs())
-    } else if err.is_connect() {
+    if err.is_connect() {
         "cannot connect".to_string()
-    } else if err.is_redirect() {
-        "it answered with a redirect, which is not followed".to_string()
+    } else if err.is_timeout() {
+        "timed out".to_string()
     } else {
         "the connection failed".to_string()
     }
@@ -348,7 +419,9 @@ pub fn file_name(audio: &Audio) -> String {
     let known = match mime.as_str() {
         "audio/ogg" | "audio/opus" | "application/ogg" => Some("ogg"),
         "audio/mpeg" | "audio/mp3" => Some("mp3"),
-        "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac" => Some("m4a"),
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => Some("m4a"),
+        // ADTS, not an MP4 container.
+        "audio/aac" | "audio/x-aac" => Some("aac"),
         "audio/wav" | "audio/x-wav" | "audio/wave" => Some("wav"),
         "audio/webm" => Some("webm"),
         "audio/flac" | "audio/x-flac" => Some("flac"),

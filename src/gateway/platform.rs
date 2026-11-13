@@ -78,6 +78,12 @@ pub trait Platform: Send + Sync + 'static {
     /// own hosts: its bytes, `Err(Ok(len))` when it holds more than
     /// `limit` (`len` as far as known), or `Err(Err(why))` in words that
     /// name the file but never its URL.
+    /// The largest file the platform lets a bot download, and why, when it
+    /// has such a limit (Telegram's Bot API: 20 MB).
+    fn download_limit(&self) -> Option<(u64, &'static str)> {
+        None
+    }
+
     async fn fetch_audio(
         &self,
         attachment: &Self::Attachment,
