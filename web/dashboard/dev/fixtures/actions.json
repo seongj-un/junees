@@ -1,0 +1,42 @@
+{
+  "_comment": "Example answers of the write API. serve.py uses resume_home_conflict and resume_once_conflict as the 409 messages.",
+  "pause_ok": {
+    "status": 200,
+    "body": "the changed item, shaped like /api/cron jobs[] or /api/webhooks routes[]"
+  },
+  "resume_home_conflict": {
+    "status": 409,
+    "body": {
+      "error": "conflict",
+      "message": "job {id} is paused because it works in the home folder: run `junees cron allow-home {id}` to accept this, or remove the job and add it again with --dir"
+    }
+  },
+  "resume_home_conflict_webhook": {
+    "status": 409,
+    "body": {
+      "error": "conflict",
+      "message": "route {name} is paused because it works in the home folder: run `junees webhook allow-home {name}` to accept this"
+    }
+  },
+  "resume_once_conflict": {
+    "status": 409,
+    "body": {
+      "error": "conflict",
+      "message": "job {id} was to run once, at a time that has passed; add it again"
+    }
+  },
+  "no_origin": {
+    "status": 403,
+    "body": {
+      "error": "forbidden",
+      "message": "a write needs an Origin from this server"
+    }
+  },
+  "not_found": {
+    "status": 404,
+    "body": {
+      "error": "not_found",
+      "message": "no such job"
+    }
+  }
+}
