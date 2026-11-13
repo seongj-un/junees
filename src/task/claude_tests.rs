@@ -549,18 +549,15 @@ async fn cancel_stops_a_claude_code_session_and_the_run() {
     assert_eq!(verifies(&fake), checked);
     assert_eq!(State::load(root).unwrap().usage.input_tokens, 15);
     let pid = fs::read_to_string(fake.path("pid")).unwrap();
-    let stat = format!("/proc/{}/stat", pid.trim());
-    for _ in 0..100 {
-        let gone = fs::read_to_string(&stat).map_or(true, |stat| {
-            stat.rsplit_once(')')
-                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
-        });
-        if gone {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("the session's command {pid} is still running");
+    assert!(
+        crate::tools::testing::gone_within(
+            crate::tools::testing::pid_in(&pid),
+            Duration::from_secs(5)
+        )
+        .await,
+        "the session's command {} is still running",
+        pid.trim()
+    );
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 //! the protocol (`FAKE_MCP_MODE`), logging every message it reads to
 //! `FAKE_MCP_LOG`.
 
+use crate::tools::testing::alive;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -114,15 +115,6 @@ async fn eventually(mut done: impl FnMut() -> bool) -> bool {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     done()
-}
-
-fn alive(pid: u32) -> bool {
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => stat
-            .rsplit_once(')')
-            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z')),
-        Err(_) => false,
-    }
 }
 
 #[tokio::test]
