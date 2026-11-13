@@ -367,6 +367,7 @@ fn body<T: for<'de> Deserialize<'de>>(body: &[u8], shape: &str) -> Result<T, Ans
 fn turn_json(manifest: &crate::checkpoints::Manifest) -> Value {
     json!({
         "turn": manifest.turn,
+        "created_at": manifest.created_at,
         "files": manifest.files.iter().map(|file| json!({
             "path": file.path,
             "change": file.change().word(),
