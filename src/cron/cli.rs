@@ -14,6 +14,9 @@ Usage:
   junees cron remove <id>        (also rm)
   junees cron pause <id>
   junees cron resume <id>
+  junees cron allow-home <id>    let the job work in the home folder (resumes it
+                                 if a refused run paused it)
+  junees cron disallow-home <id> take that back (pauses it if it works there)
   junees cron run <id>           run it now, once, and print the answer
   junees cron daemon             run the jobs when they are due (keep it running)
 
@@ -29,7 +32,8 @@ Schedules (local times in the `timezone` setting, default the system's):
 Each run is a new session in the job's folder (default: the current one),
 which may not be the home folder (or a folder holding it, such as /)
 unless --allow-home: the run's tools could change everything there but
-the protected paths. Like `junees -p`: no approval questions, the command policy applies, the
+the protected paths. A job added before that rule is paused at its first
+refused run; `allow-home` marks it and resumes it. Like `junees -p`: no approval questions, the command policy applies, the
 memory and skills can be read but not changed. A run stops at
 cron_max_time (default 30m) or cron_max_tokens (default 1000000). The
 answer goes to $JUNEES_HOME/cron/output/<id>/ and to --deliver (default
@@ -53,6 +57,11 @@ pub enum CronCommand {
     Remove(String),
     Pause(String),
     Resume(String),
+    /// `allow-home`: mark the job as allowed to work in the home folder,
+    /// and resume it if a refused run paused it.
+    AllowHome(String),
+    /// `disallow-home`: take that mark back.
+    DisallowHome(String),
     /// Run now. The daemon passes the id of the run and its time.
     Run {
         job: String,
@@ -96,6 +105,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<CronCommand> {
         "remove" | "rm" => CronCommand::Remove(job(&rest, "remove")?),
         "pause" => CronCommand::Pause(job(&rest, "pause")?),
         "resume" => CronCommand::Resume(job(&rest, "resume")?),
+        "allow-home" => CronCommand::AllowHome(job(&rest, "allow-home")?),
+        "disallow-home" => CronCommand::DisallowHome(job(&rest, "disallow-home")?),
         "run" => run(rest)?,
         "daemon" => {
             none(&rest, "daemon")?;
@@ -228,6 +239,14 @@ mod tests {
             parse_words(&["resume", "ab"]).unwrap(),
             CronCommand::Resume("ab".into())
         );
+        assert_eq!(
+            parse_words(&["allow-home", "ab"]).unwrap(),
+            CronCommand::AllowHome("ab".into())
+        );
+        assert_eq!(
+            parse_words(&["disallow-home", "ab"]).unwrap(),
+            CronCommand::DisallowHome("ab".into())
+        );
         assert_eq!(parse_words(&["daemon"]).unwrap(), CronCommand::Daemon);
         assert_eq!(parse_words(&["--help"]).unwrap(), CronCommand::Help);
         assert_eq!(parse_words(&["list", "-h"]).unwrap(), CronCommand::Help);
@@ -290,6 +309,8 @@ mod tests {
             (&["add", "every 30m", "hi", "--name"][..], "needs a value"),
             (&["add", "every 30m", "hi", "--color"][..], "unknown option"),
             (&["rm"][..], "needs a job id"),
+            (&["allow-home"][..], "needs a job id"),
+            (&["disallow-home", "a", "b"][..], "one job id"),
             (&["rm", "a", "b"][..], "one job id"),
             (&["list", "x"][..], "no arguments"),
             (&["run"][..], "needs a job id"),

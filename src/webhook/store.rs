@@ -126,13 +126,19 @@ pub struct Route {
     pub events: Vec<String>,
     /// The folder a run works in (absolute).
     pub dir: PathBuf,
-    /// Added with `--allow-home`: `dir` may be the home folder or hold it
+    /// Added with `--allow-home`, or marked by `junees webhook allow-home`:
+    /// `dir` may be the home folder or hold it
     /// ([`crate::cron::command::check_home_folder`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_home: bool,
     pub deliver: Delivery,
     #[serde(default)]
     pub paused: bool,
+    /// Paused by a run refused for its home folder
+    /// ([`crate::cron::command::check_home_folder`]), not by `pause`:
+    /// `junees webhook allow-home` resumes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused_for_home: bool,
     /// Unix time.
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,6 +339,7 @@ pub(crate) mod tests {
             allow_home: false,
             deliver: Delivery::Local,
             paused: false,
+            paused_for_home: false,
             created_at: 0,
             last: None,
             last_event: None,

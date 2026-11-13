@@ -93,31 +93,23 @@ pub async fn main(command: CronCommand, settings: Settings) -> Result<ExitCode> 
         CronCommand::Pause(key) => {
             let mut locked = store.lock()?;
             let index = locked.find(&key)?;
-            locked.jobs[index].paused = true;
+            let job = &mut locked.jobs[index];
+            job.paused = true;
+            // The user's pause now: `allow-home` does not undo it.
+            job.paused_for_home = false;
             locked.save()?;
             println!("paused job {}", locked.jobs[index].id);
         }
         CronCommand::Resume(key) => {
             let mut locked = store.lock()?;
             let index = locked.find(&key)?;
-            let job = &mut locked.jobs[index];
-            let tz = job.zone(&tz);
-            let next = job.schedule.next_after(unix_now(), &tz);
-            if next.is_none() {
-                bail!(
-                    "job {} was to run once, at a time that has passed; add it again",
-                    job.id
-                );
-            }
-            job.paused = false;
-            job.next_run = next;
-            let id = job.id.clone();
+            let next = resume(&mut locked.jobs[index], &tz)?;
+            let id = locked.jobs[index].id.clone();
             locked.save()?;
-            println!(
-                "resumed job {id}, next run {}",
-                next.map_or_else(String::new, |next| tz.format(next))
-            );
+            println!("resumed job {id}, next run {next}");
         }
+        CronCommand::AllowHome(key) => allow_home(&store, &tz, &lookup, &key)?,
+        CronCommand::DisallowHome(key) => disallow_home(&store, &lookup, &key)?,
         CronCommand::Run { job, run_id, due } => {
             return run_now(&home, &tz, &lookup, &job, run_id, due).await;
         }
@@ -227,6 +219,7 @@ fn new_job(store: &Store, tz: &TimeZone, lookup: &Lookup, new: NewJob) -> Result
         allow_home,
         deliver,
         paused: false,
+        paused_for_home: false,
         created_at: now,
         last: None,
     };
@@ -308,7 +301,8 @@ async fn run_now(
         job.id,
         escape_hidden(&job.dir.display().to_string())
     );
-    let outcome = match check_home_folder(lookup, &job.dir, job.allow_home, Some("job")) {
+    let outcome = match check_home_folder(lookup, &job.dir, job.allow_home, Some(("job", &job.id)))
+    {
         Err(err) => Outcome::failed(format!("{err:#}; {}", pause_refused(home, &job.id))),
         Ok(()) => match prepare(lookup, &job).await {
             Ok((engine, limits)) => engine.run(&job.spec(), &cancel, limits).await,
@@ -338,6 +332,90 @@ async fn run_now(
     })
 }
 
+/// Resumes `job`: not paused, and its next run the next time of its
+/// schedule from now. That time, in the job's zone. Fails, changing
+/// nothing, for a one-time job whose time has passed.
+fn resume(job: &mut Job, tz: &TimeZone) -> Result<String> {
+    let tz = job.zone(tz);
+    let next = job.schedule.next_after(unix_now(), &tz).with_context(|| {
+        format!(
+            "job {} was to run once, at a time that has passed; add it again",
+            job.id
+        )
+    })?;
+    job.paused = false;
+    job.paused_for_home = false;
+    job.next_run = Some(next);
+    Ok(tz.format(next))
+}
+
+/// `junees cron allow-home <job>`: marks a job in the home folder (or a
+/// folder holding it) like `cron add --allow-home` would have, and
+/// resumes it when a run refused for that folder paused it. A pause
+/// made with `cron pause` stays. A job elsewhere is refused: the mark
+/// would change nothing.
+fn allow_home(store: &Store, tz: &TimeZone, lookup: &Lookup, key: &str) -> Result<()> {
+    let mut locked = store.lock()?;
+    let index = locked.find(key)?;
+    let job = &mut locked.jobs[index];
+    let dir = escape_hidden(&job.dir.display().to_string());
+    if !crate::tools::holds_home(&job.dir, user_home(lookup).as_deref()) {
+        bail!(
+            "job {} works in {dir}, which is not the home folder or a folder holding it: it \
+             needs no allow-home",
+            job.id
+        );
+    }
+    job.allow_home = true;
+    let resumed = job.paused_for_home.then(|| resume(job, tz));
+    let (id, paused) = (job.id.clone(), job.paused);
+    locked.save()?;
+    println!(
+        "job {id} may work in the home folder now: the tools of its runs may change \
+         everything in {dir} but the protected paths"
+    );
+    match resumed {
+        Some(Ok(next)) => println!("resumed job {id}, next run {next}"),
+        Some(Err(err)) => eprintln!("it stays paused: {err:#}"),
+        None if paused => println!(
+            "job {id} stays paused (paused with `junees cron pause`; `junees cron resume {id}` \
+             resumes it)"
+        ),
+        None => {}
+    }
+    Ok(())
+}
+
+/// `junees cron disallow-home <job>`: takes the `allow-home` mark back.
+/// A job whose folder is the home folder (or holds it) is paused at
+/// once, as its next run would be refused and delivered as a failure;
+/// `allow-home` resumes it.
+fn disallow_home(store: &Store, lookup: &Lookup, key: &str) -> Result<()> {
+    let mut locked = store.lock()?;
+    let index = locked.find(key)?;
+    let job = &mut locked.jobs[index];
+    let id = job.id.clone();
+    if !job.allow_home {
+        println!("job {id} has no allow-home mark");
+        return Ok(());
+    }
+    job.allow_home = false;
+    let pause = !job.paused && crate::tools::holds_home(&job.dir, user_home(lookup).as_deref());
+    if pause {
+        job.paused = true;
+        job.paused_for_home = true;
+    }
+    locked.save()?;
+    println!("job {id} may no longer work in the home folder");
+    if pause {
+        println!(
+            "paused job {id}: it works in the home folder (or a folder holding it); \
+             `junees cron allow-home {id}` resumes it"
+        );
+    }
+    Ok(())
+}
+
 /// The engine of the `backend` setting and the limits, in the job's
 /// folder (checked with [`check_home_folder`] first).
 async fn prepare(lookup: &Lookup, job: &Job) -> Result<(Box<dyn Engine>, super::run::Limits)> {
@@ -352,6 +430,8 @@ async fn prepare(lookup: &Lookup, job: &Job) -> Result<(Box<dyn Engine>, super::
 fn pause_refused(home: &Path, id: &str) -> String {
     let paused = Store::new(home).lock().and_then(|mut locked| {
         if let Some(job) = locked.jobs.iter_mut().find(|job| job.id == id) {
+            // A pause the user made stays theirs: `allow-home` keeps it.
+            job.paused_for_home |= !job.paused;
             job.paused = true;
             locked.save()?;
         }
@@ -364,7 +444,7 @@ fn pause_refused(home: &Path, id: &str) -> String {
 }
 
 /// The user's home folder (HOME).
-fn user_home(lookup: &Lookup) -> Option<std::path::PathBuf> {
+pub fn user_home(lookup: &Lookup) -> Option<std::path::PathBuf> {
     lookup("HOME")
         .filter(|home| !home.trim().is_empty())
         .map(|home| std::path::PathBuf::from(home.trim()))
@@ -375,13 +455,14 @@ fn user_home(lookup: &Lookup) -> Option<std::path::PathBuf> {
 /// and the job or route was not added with `--allow-home` (`allow_home`):
 /// its tools could change everything in the home folder but the
 /// protected paths, and the files there that run code later cannot all
-/// be protected. `existing` names what holds `dir` (`job`, `route`) when
-/// it was added before (a run), `None` while it is being added.
+/// be protected. `existing` names what holds `dir` when it was added
+/// before (a run): `job` or `route`, and its id or name; `None` while it
+/// is being added.
 pub fn check_home_folder(
     lookup: &Lookup,
     dir: &Path,
     allow_home: bool,
-    existing: Option<&str>,
+    existing: Option<(&str, &str)>,
 ) -> Result<()> {
     if allow_home || !crate::tools::holds_home(dir, user_home(lookup).as_deref()) {
         return Ok(());
@@ -390,9 +471,10 @@ pub fn check_home_folder(
         None => {
             "give it a project folder with --dir, or add --allow-home to accept this".to_string()
         }
-        Some(what) => format!(
-            "remove the {what} and add it again with a project folder (--dir), or with \
-             --allow-home to accept this"
+        Some((what, label)) => format!(
+            "remove the {what} and add it again with a project folder (--dir), or run `{}` \
+             to accept this",
+            allow_home_command(what, label)
         ),
     };
     bail!(
@@ -401,6 +483,13 @@ pub fn check_home_folder(
          protected (python's .pth files, editor settings, other repositories' git hooks); {fix}",
         escape_hidden(&dir.display().to_string())
     )
+}
+
+/// The command that marks the existing `what` (`job`, `route`) `label`
+/// with `allow-home`.
+pub fn allow_home_command(what: &str, label: &str) -> String {
+    let group = if what == "route" { "webhook" } else { "cron" };
+    format!("junees {group} allow-home {}", escape_hidden(label))
 }
 
 /// Moves to `dir` (the tools work in the current folder) and makes the

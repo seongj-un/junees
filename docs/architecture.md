@@ -145,7 +145,7 @@ src/
     output.rs          실행 기록 파일 cron/output/<id>/<시각>.md (작업마다 100개)
     deliver.rs         전달: 디스코드 채널(봇 REST), 웹훅, 로컬
     daemon.rs          junees cron daemon: 매 분 틱, 따라잡기 한 번, 놓친 한 번짜리 기록, 작업마다 자식 프로세스, 결과 없이 끝난 실행 기록, 종료
-    cli.rs, command.rs junees cron 인자 파싱과 명령(add/list/remove/pause/resume/run/daemon)
+    cli.rs, command.rs junees cron 인자 파싱과 명령(add/list/remove/pause/resume/allow-home/disallow-home/run/daemon)
     mod.rs             설정(timezone, cron_max_time, cron_max_tokens), 실행 마무리(finish), /cron과 !cron 목록
   github/            GitHub REST 도구 (github)
     mod.rs             설정(JUNEES_GITHUB_*, 토큰 Token은 Debug에서 숨김), repo 이름과 origin 원격 읽기, 허용 repo, 도구 등록(웹훅 실행은 register_webhook), /github 보기
@@ -179,7 +179,7 @@ src/
     template.rs        프롬프트 템플릿({{event}}, {{payload.a.b}} 등), 값 정리와 상한, 무작위 이름의 데이터 태그
     server.rs          junees webhook serve: 경로/메서드/서명/이벤트/중복 판단, 시크릿 없는 경로의 요청 검사(Host, 브라우저/프록시 헤더, JSON), 동시 연결 상한, 경로마다 줄 세우기(대기 20, 429), 실행마다 자식 프로세스, 결과 없이 끝난 실행 기록, 종료
     run.rs             실행 하나: running 기록, 프롬프트, cron 엔진(세션 source webhook), 출력 파일 webhooks/output/<이름>/, 전달, 마지막 실행 기록
-    cli.rs, command.rs junees webhook 인자 파싱과 명령(serve/add/add-github/list/remove/pause/resume/test/run), 흐름 경로의 실행 연결
+    cli.rs, command.rs junees webhook 인자 파싱과 명령(serve/add/add-github/list/remove/pause/resume/allow-home/disallow-home/test/run), 흐름 경로의 실행 연결
     mod.rs             설정(webhook_max_time, webhook_max_tokens), /webhooks와 !webhooks 목록
   update/            junees update, /update: 최신 릴리스로 바이너리 바꾸기
     mod.rs             인자(--check, --version), Place(바꿀 파일, 지금 버전, 타깃, 상태 폴더, cargo 폴더: 테스트가 가짜 바이너리를 넣는 이음새), 비교 문구, 확인과 설치 순서

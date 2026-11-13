@@ -223,7 +223,11 @@ async fn adds_lists_runs_and_delivers_a_job() {
 async fn a_job_in_the_home_folder_needs_allow_home() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
-    let (api, requests) = fake_api(vec![(200, text_reply("홈에서 끝"))]).await;
+    let (api, requests) = fake_api(vec![
+        (200, text_reply("홈에서 끝")),
+        (200, text_reply("다시 홈에서")),
+    ])
+    .await;
     let run = |args: &[&str]| {
         let mut command = junees(home.path(), work.path(), &api, "http://127.0.0.1:9");
         command.args(args);
@@ -278,7 +282,10 @@ async fn a_job_in_the_home_folder_needs_allow_home() {
     let last = &jobs(home.path())["jobs"][0]["last"];
     assert_eq!(last["status"], "failed");
     assert!(
-        last["note"].as_str().unwrap().contains("--allow-home"),
+        last["note"]
+            .as_str()
+            .unwrap()
+            .contains("junees cron allow-home"),
         "{last}"
     );
     // ... and paused, so the daemon does not start it (and deliver the
@@ -288,11 +295,83 @@ async fn a_job_in_the_home_folder_needs_allow_home() {
         last["note"].as_str().unwrap().contains("the job is paused"),
         "{last}"
     );
+    let id = jobs(home.path())["jobs"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        last["note"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("run `junees cron allow-home {id}`")),
+        "{last}"
+    );
+    let (ok, stdout, _) = run(&["cron", "list"]).await;
+    assert!(ok);
+    assert!(
+        stdout.contains(&format!(
+            "paused: works in the home folder (`junees cron allow-home {id}`)"
+        )),
+        "{stdout}"
+    );
+
+    // `allow-home` marks the job and resumes it, without adding it again.
+    let (ok, stdout, stderr) = run(&["cron", "allow-home", "home"]).await;
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.starts_with(&format!("job {id} may work in the home folder now"))
+            && stdout.contains(&format!("\nresumed job {id}, next run ")),
+        "{stdout}"
+    );
+    let job = &jobs(home.path())["jobs"][0];
+    assert_eq!(job["allow_home"], true, "{job}");
+    assert_eq!(job["paused"], false, "{job}");
+    assert_eq!(job.get("paused_for_home"), None, "{job}");
+    let (ok, stdout, stderr) = run(&["cron", "run", "home"]).await;
+    assert!(ok, "{stderr}");
+    assert_eq!(stdout, "다시 홈에서\n");
+
+    // `disallow-home` takes the mark back and pauses the job at once, so
+    // its next scheduled run is not a delivered failure.
+    let (ok, stdout, stderr) = run(&["cron", "disallow-home", &id]).await;
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains(&format!("job {id} may no longer work in the home folder"))
+            && stdout.contains(&format!("paused job {id}")),
+        "{stdout}"
+    );
+    let job = &jobs(home.path())["jobs"][0];
+    assert_eq!(job.get("allow_home"), None, "{job}");
+    assert_eq!(job["paused"], true, "{job}");
+    assert_eq!(job["paused_for_home"], true, "{job}");
+
+    // A pause the user made stays: `allow-home` only marks the job.
+    let (ok, _, stderr) = run(&["cron", "pause", &id]).await;
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = run(&["cron", "allow-home", &id]).await;
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains(&format!("job {id} stays paused")),
+        "{stdout}"
+    );
+    let job = &jobs(home.path())["jobs"][0];
+    assert_eq!(job["allow_home"], true, "{job}");
+    assert_eq!(job["paused"], true, "{job}");
+
+    // A job elsewhere needs no mark, and an unknown one is an error.
+    let (ok, _, stderr) = run(&["cron", "add", "every 2h", "hi", "--name", "work"]).await;
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = run(&["cron", "allow-home", "work"]).await;
+    assert!(!ok && stderr.contains("needs no allow-home"), "{stderr}");
+    assert_eq!(jobs(home.path())["jobs"][1].get("allow_home"), None);
+    let (ok, _, stderr) = run(&["cron", "allow-home", "nope"]).await;
+    assert!(!ok && stderr.contains("no job"), "{stderr}");
+
     let requests = tokio::time::timeout(Duration::from_secs(10), requests)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
 }
 
 #[tokio::test]

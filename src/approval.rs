@@ -870,7 +870,13 @@ mod tests {
     #[tokio::test]
     async fn allow_home_is_asked_about_every_time_despite_always() {
         let (_dir, workspace) = workspace();
-        let asker = Scripted::new([Answer::Always, Answer::Always, Answer::Yes]);
+        let asker = Scripted::new([
+            Answer::Always,
+            Answer::Always,
+            Answer::Yes,
+            Answer::Always,
+            Answer::Yes,
+        ]);
         let gate = approval(ApprovalMode::Risky, &workspace).asking(Box::new(asker.clone()));
         assert_eq!(
             gate.check("bash", &bash("junees cron add 'in 1h' x")).await,
@@ -895,6 +901,21 @@ mod tests {
             ]
         );
         assert!(asked[1].reasons[1].starts_with("`junees cron add --allow-home` lets"));
+        // So is marking an existing job; taking the mark back is not.
+        let mark = "junees cron allow-home a1";
+        assert_eq!(gate.check("bash", &bash(mark)).await, None);
+        assert_eq!(gate.check("bash", &bash(mark)).await, None);
+        assert_eq!(
+            gate.check("bash", &bash("junees cron disallow-home a1"))
+                .await,
+            None
+        );
+        assert_eq!(
+            asker.asked(),
+            ["junees cron add 'in 1h' x", home, home, mark, mark]
+        );
+        let asked = asker.asked.lock().unwrap().clone();
+        assert!(asked[3].reasons[1].starts_with("`junees cron allow-home` lets"));
     }
 
     #[tokio::test]

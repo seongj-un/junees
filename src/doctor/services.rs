@@ -56,7 +56,8 @@ fn home_folder(
             area,
             &check,
             format!(
-                "works in {}, the home folder or a folder holding it (added with --allow-home)",
+                "works in {}, the home folder or a folder holding it (allowed with --allow-home \
+                 or allow-home)",
                 shown(dir)
             ),
         );
@@ -69,8 +70,9 @@ fn home_folder(
                 shown(dir)
             ),
             format!(
-                "remove the {what} and add it again with a project folder (--dir), or with \
-                 --allow-home to accept that its runs may change the home folder"
+                "remove the {what} and add it again with a project folder (--dir), or run `{}` \
+                 to accept that its runs may change the home folder",
+                crate::cron::command::allow_home_command(what, name)
             ),
         );
     }

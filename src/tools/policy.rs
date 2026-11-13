@@ -3491,6 +3491,8 @@ mod tests {
             "junees cron add 'every 1h' x --allow-home",
             "bash -c 'junees webhook add pr --prompt x --no-secret --allow-home'",
             "cd /tmp && junees webhook add-github f --repo o/n --review --allow-home",
+            "junees cron allow-home a1",
+            "junees webhook allow-home pr",
         ] {
             assert_eq!(policy.check(command), Verdict::Allow, "{command}");
             assert_eq!(
@@ -3508,6 +3510,17 @@ mod tests {
             kinds(&policy, "junees cron add 'every 1h' x", &workspace),
             [self_command::KIND]
         );
+        // Taking the mark back is an ordinary change of Junees's state.
+        for command in [
+            "junees cron disallow-home a1",
+            "junees webhook disallow-home pr",
+        ] {
+            assert_eq!(
+                kinds(&policy, command, &workspace),
+                [self_command::KIND],
+                "{command}"
+            );
+        }
     }
 
     /// GitHub writes through `gh`, in the forms the policy sees through.

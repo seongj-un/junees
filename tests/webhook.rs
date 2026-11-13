@@ -342,6 +342,53 @@ async fn a_route_in_the_home_folder_needs_allow_home() {
     assert!(!ok && stderr.contains("is the home folder"), "{stderr}");
     assert_eq!(outputs(), 1);
     assert_eq!(routes(home.path())["routes"][0]["last"]["status"], "failed");
+    assert!(
+        stderr.contains("run `junees webhook allow-home pr`"),
+        "{stderr}"
+    );
+
+    // `allow-home` marks the route and resumes it, keeping its secret
+    // (no new one to copy to GitHub, as adding it again would need).
+    let before = routes(home.path())["routes"][0]["secret"].clone();
+    let (ok, stdout, stderr) = run(&["webhook", "allow-home", "pr"]).await;
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.starts_with("route pr may work in the home folder now")
+            && stdout.ends_with("\nresumed route pr\n"),
+        "{stdout}"
+    );
+    let route = &routes(home.path())["routes"][0];
+    assert_eq!(route["allow_home"], true, "{route}");
+    assert_eq!(route["paused"], false, "{route}");
+    assert_eq!(route["secret"], before, "{route}");
+
+    // `disallow-home` takes it back and pauses the route at once.
+    let (ok, stdout, stderr) = run(&["webhook", "disallow-home", "pr"]).await;
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("route pr may no longer work in the home folder")
+            && stdout.contains("paused route pr"),
+        "{stdout}"
+    );
+    let route = &routes(home.path())["routes"][0];
+    assert_eq!(route.get("allow_home"), None, "{route}");
+    assert_eq!(route["paused"], true, "{route}");
+    assert_eq!(route["paused_for_home"], true, "{route}");
+    let (ok, stdout, _) = run(&["webhook", "list"]).await;
+    assert!(ok);
+    assert!(
+        stdout.contains("paused: works in the home folder (`junees webhook allow-home pr`)"),
+        "{stdout}"
+    );
+    // A pause by hand stays through `allow-home`.
+    let (ok, _, stderr) = run(&["webhook", "pause", "pr"]).await;
+    assert!(ok, "{stderr}");
+    let (ok, stdout, stderr) = run(&["webhook", "allow-home", "pr"]).await;
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("route pr stays paused"), "{stdout}");
+    assert_eq!(routes(home.path())["routes"][0]["paused"], true);
+    let (ok, _, stderr) = run(&["webhook", "allow-home", "nope"]).await;
+    assert!(!ok, "{stderr}");
 }
 
 #[tokio::test]

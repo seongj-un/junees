@@ -45,13 +45,19 @@ pub struct Job {
     pub prompt: String,
     /// The folder the job works in (absolute).
     pub dir: PathBuf,
-    /// Added with `--allow-home`: `dir` may be the home folder or hold it
+    /// Added with `--allow-home`, or marked by `junees cron allow-home`:
+    /// `dir` may be the home folder or hold it
     /// ([`crate::cron::command::check_home_folder`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_home: bool,
     pub deliver: Delivery,
     #[serde(default)]
     pub paused: bool,
+    /// Paused by a run refused for its home folder
+    /// ([`crate::cron::command::check_home_folder`]), not by `pause`:
+    /// `junees cron allow-home` resumes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused_for_home: bool,
     /// Unix time.
     pub created_at: i64,
     /// When it runs next (unix time); `None` once a one-time job is over.
@@ -386,6 +392,7 @@ pub(crate) mod tests {
             allow_home: false,
             deliver: Delivery::Local,
             paused: false,
+            paused_for_home: false,
             created_at: 0,
             next_run,
             last: None,

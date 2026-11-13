@@ -197,7 +197,12 @@ pub fn overview(jobs: &[Job], tz: &TimeZone, detail: bool) -> String {
             line.push_str(&format!(" {}", escape_hidden(name)));
         }
         line.push_str(&format!(": {}", job.schedule.describe(tz)));
-        if job.paused {
+        if job.paused_for_home {
+            line.push_str(&format!(
+                ", paused: works in the home folder (`junees cron allow-home {}`)",
+                job.id
+            ));
+        } else if job.paused {
             line.push_str(", paused");
         } else if let Some(next) = job.next_run {
             line.push_str(&format!(", next {}", tz.format(next)));

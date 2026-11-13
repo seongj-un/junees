@@ -12,12 +12,14 @@ junees cron add "weekdays 09:00" "어제 들어온 이슈를 요약해 줘" --na
 junees cron list                 # 작업, 다음/마지막 실행, 프롬프트, 폴더, 전달처
 junees cron run issues           # 지금 한 번 실행하고 답을 출력
 junees cron pause issues         # 멈춤 (resume으로 다시)
+junees cron allow-home issues    # 홈 폴더에서 일하도록 허용 (disallow-home으로 거둠)
 junees cron remove issues        # (rm)
 junees cron daemon               # 때가 된 작업을 실행 (계속 띄워 둔다)
 ```
 
 - 작업은 id(8자리 hex), `--name`, id 앞부분(겹치지 않을 때)으로 가리키고, 이 순서로 찾는다. 그래서 이름이 다른 작업의 id 앞부분과 같아도 이름이 같은 작업을 고른다(손으로 고친 `jobs.json`에서 두 작업의 이름이 같으면 모호하다는 오류). 폴더는 `--dir`(기본은 `cron add`를 실행한 폴더)이고 실행은 그 폴더에서 한다. 대화 안 `/cron`과 게이트웨이 `!cron`은 목록만 보여 준다(`!cron`은 서버 채널에서 프롬프트와 폴더를 빼고, DM에서는 다 보여 준다).
-- 홈 폴더 거절(#84): 작업 폴더가 홈 자체이거나 홈을 품은 폴더(`/home`, `/`)면 `cron add`가 거절한다(`... is the home folder (or a folder holding it): ...; give it a project folder with --dir, or add --allow-home to accept this`). 무인 실행의 도구는 작업 폴더 안 어디든 쓸 수 있고, Junees가 막는 것은 정해 둔 목록([실행 격리](safety.md#실행-격리-landlock)의 셸 시작 파일, systemd, `~/.ssh` 등)뿐이다. 나중에 코드를 실행하는 홈의 파일(파이썬 `.pth`와 `usercustomize.py`, vim/emacs 설정, 다른 저장소의 `.git/hooks`)은 목록으로 다 막을 수 없으므로, 홈을 작업 폴더로 쓰는 것 자체를 기본으로 막는다. 그래도 홈에서 돌려야 하면 `--allow-home`을 준다. 작업에 `"allow_home": true`로 저장되고(`--no-secret`처럼 작업마다), 실행을 시작할 때 `!! this unattended run works in ... (the home folder)` 경고는 계속 나온다. 이 표시 없이 저장된 작업(이 기능 전에 추가한 작업)은 처음 실행할 때 실패로 기록하고 전달한 뒤(`... remove the job and add it again with a project folder (--dir), or with --allow-home to accept this; the job is paused ...`) 작업을 멈춘다(`paused`). 그래서 고칠 때까지 일정마다 실패가 다시 전달되지 않는다. `junees doctor`도 경고한다. 웹훅 경로와 GitHub 흐름(`webhook add`, `add-github`)도 같다: 처음 거절한 실행에서 경로를 멈추고(이후 요청은 503), 멈추기 전에 대기열에 들어 있던 요청은 실패로 기록만 하고 전달하지 않는다. 대화, `-p`, `task` 모드는 사람이 보고 있으므로 해당 없다.
+- 홈 폴더 거절(#84): 작업 폴더가 홈 자체이거나 홈을 품은 폴더(`/home`, `/`)면 `cron add`가 거절한다(`... is the home folder (or a folder holding it): ...; give it a project folder with --dir, or add --allow-home to accept this`). 무인 실행의 도구는 작업 폴더 안 어디든 쓸 수 있고, Junees가 막는 것은 정해 둔 목록([실행 격리](safety.md#실행-격리-landlock)의 셸 시작 파일, systemd, `~/.ssh` 등)뿐이다. 나중에 코드를 실행하는 홈의 파일(파이썬 `.pth`와 `usercustomize.py`, vim/emacs 설정, 다른 저장소의 `.git/hooks`)은 목록으로 다 막을 수 없으므로, 홈을 작업 폴더로 쓰는 것 자체를 기본으로 막는다. 그래도 홈에서 돌려야 하면 `--allow-home`을 준다. 작업에 `"allow_home": true`로 저장되고(`--no-secret`처럼 작업마다), 실행을 시작할 때 `!! this unattended run works in ... (the home folder)` 경고는 계속 나온다. 이 표시 없이 저장된 작업(이 기능 전에 추가한 작업)은 처음 실행할 때 실패로 기록하고 전달한 뒤(`... remove the job and add it again with a project folder (--dir), or run `junees cron allow-home <id>` to accept this; the job is paused ...`) 작업을 멈춘다(`paused`). 그래서 고칠 때까지 일정마다 실패가 다시 전달되지 않는다. `junees cron list`는 이 작업을 `paused: works in the home folder (`junees cron allow-home <id>`)`로 보여 주고, `junees doctor`도 경고한다.
+- 홈 폴더 허용을 나중에 붙이기(#89): `junees cron allow-home <작업>`은 이미 있는 작업에 `--allow-home`과 같은 표시를 붙인다. 지우고 다시 추가하지 않으므로 id, 일정, 마지막 실행이 그대로다. 홈 폴더 때문에 거절된 실행이 멈춘 작업이면 다시 시작하고 다음 실행 시각을 알려 준다(한 번만 돌 작업의 시각이 지났으면 멈춘 채 두고 이유를 알려 준다). `junees cron pause`로 직접 멈춘 작업은 표시만 붙이고 멈춘 채 둔다(`resume`으로 시작). 작업 폴더가 홈도, 홈을 품은 폴더도 아니면 표시가 아무것도 바꾸지 않으므로 거절한다. 거두려면 `junees cron disallow-home <작업>`: 표시를 지우고, 작업 폴더가 홈(또는 홈을 품은 폴더)이면 다음 실행이 거절되어 실패가 전달되기 전에 바로 멈춘다(이 멈춤은 `allow-home`이 다시 푼다). 웹훅 경로와 GitHub 흐름도 `junees webhook allow-home <이름>`, `disallow-home <이름>`으로 같다. 시크릿이 그대로라 GitHub 웹훅 설정의 Secret을 바꾸지 않아도 된다. 모델이 bash로 `allow-home`을 실행하면 `--allow-home`처럼 "항상 허용"과 상관없이 매번 승인을 묻고(`let unattended runs work in the home folder (asked every time)`), 물어볼 사람이 없는 실행에서는 다른 상태 변경 명령처럼 막는다. `disallow-home`은 막는 쪽이라 보통의 상태 변경 명령으로만 묻는다. 웹훅 경로와 GitHub 흐름(`webhook add`, `add-github`)도 같다: 처음 거절한 실행에서 경로를 멈추고(이후 요청은 503), 멈추기 전에 대기열에 들어 있던 요청은 실패로 기록만 하고 전달하지 않는다. 대화, `-p`, `task` 모드는 사람이 보고 있으므로 해당 없다.
 - 일정(따옴표로 한 덩어리로 준다):
   - `every 30m`, `every 2h`, `every 1h30m`: 추가한 때부터 그 간격마다(1분 이상, 10년 이하).
   - `in 20m`: 지금부터 그만큼 뒤 한 번(10년 이하).
@@ -79,6 +81,7 @@ junees webhook add pr-review --secret-env PR_HOOK_SECRET \
 junees webhook list                 # 경로, 이벤트, 마지막 실행, 프롬프트, 폴더, 전달처, 시크릿 위치
 junees webhook test pr-review payload.json --event pull_request   # 서버 없이 한 번 실행 (전달 id는 --delivery <id>)
 junees webhook pause pr-review      # 멈춤 (resume으로 다시, 그동안 요청은 503)
+junees webhook allow-home pr-review # 홈 폴더에서 일하도록 허용 (disallow-home으로 거둠)
 junees webhook remove pr-review     # (rm)
 junees webhook serve                # 127.0.0.1:8650에서 받기 (계속 띄워 둔다)
 ```
