@@ -140,6 +140,7 @@ pub async fn main(options: Options) -> Result<ExitCode> {
     let env: Env = Arc::new(|key: &str| std::env::var(key).ok());
     let context = Arc::new(Context {
         token,
+        ip: address.ip(),
         port: address.port(),
         env,
         started: Instant::now(),

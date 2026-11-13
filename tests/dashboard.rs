@@ -594,6 +594,39 @@ async fn a_closed_stdout_does_not_stop_the_dashboard() {
     assert!(child.try_wait().unwrap().is_none(), "the dashboard exited");
 }
 
+// macOS gives loopback 127.0.0.1 only; Linux routes all of 127.0.0.0/8.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn another_loopback_address_serves_its_own_host() {
+    let home = Home::new();
+    let mut child = home
+        .command(&["dashboard", "--no-open", "--listen", "127.0.0.2:0"])
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let line = tokio::time::timeout(Duration::from_secs(30), lines.next_line())
+        .await
+        .expect("no address printed")
+        .unwrap()
+        .expect("the dashboard exited");
+    tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+    let rest = line
+        .strip_prefix("Junees dashboard: http://")
+        .unwrap_or_else(|| panic!("not an address: {line}"));
+    let (address, token) = rest.split_once("/#token=").unwrap();
+    assert!(address.starts_with("127.0.0.2:"), "{address}");
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    let request =
+        format!("GET /api/status HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await.unwrap();
+    let reply = Reply::parse(&bytes);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    drop(child);
+}
+
 #[tokio::test]
 async fn an_address_off_loopback_is_refused() {
     let home = Home::new();

@@ -17,6 +17,7 @@
 //!
 //! Every answer carries [`SECURITY_HEADERS`].
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,7 +59,8 @@ pub type Env = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 pub struct Context {
     /// The token of this run (base64url).
     pub token: String,
-    /// The port it listens on, which `Host` must name.
+    /// The address and port it listens on, which `Host` must name.
+    pub ip: IpAddr,
     pub port: u16,
     pub env: Env,
     pub started: Instant,
@@ -159,7 +161,7 @@ async fn send<W: AsyncWrite + Unpin>(io: &mut W, answer: &Answer) {
 pub async fn answer(head: &Head, context: &Context) -> Answer {
     let Some(host) = head
         .header("host")
-        .filter(|host| own_host(host, context.port))
+        .filter(|host| own_host(host, context.ip, context.port))
     else {
         return Answer::error(
             421,
@@ -231,14 +233,30 @@ fn body_refused(head: &Head) -> Option<Answer> {
     }
 }
 
-/// Whether `host` (a `Host` header) is this server: `127.0.0.1`,
-/// `localhost` or `[::1]` with `port`.
-pub fn own_host(host: &str, port: u16) -> bool {
-    let Some((name, given)) = host.rsplit_once(':') else {
-        return false;
+/// Whether `host` (a `Host` header) is this server, listening on `ip`
+/// and `port`: `127.0.0.1`, `localhost`, `[::1]` or `ip` itself
+/// (`127.0.0.2`), with `:port`, or without a port when it is 80, which
+/// browsers leave out.
+pub fn own_host(host: &str, ip: IpAddr, port: u16) -> bool {
+    let (name, given) = match host.strip_prefix('[') {
+        Some(rest) => match rest.split_once(']') {
+            Some((inside, after)) => (&host[..inside.len() + 2], after),
+            None => return false,
+        },
+        None => host.split_once(':').map_or((host, ""), |(name, rest)| {
+            (name, &host[name.len()..][..rest.len() + 1])
+        }),
     };
-    given == port.to_string()
-        && (name == "127.0.0.1" || name == "[::1]" || name.eq_ignore_ascii_case("localhost"))
+    let port_ok = given == format!(":{port}") || (given.is_empty() && port == 80);
+    let own = match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    port_ok
+        && (name == "127.0.0.1"
+            || name == "[::1]"
+            || name == own
+            || name.eq_ignore_ascii_case("localhost"))
 }
 
 /// Whether `origin` (an `Origin` header) is the page of `host`.
@@ -272,6 +290,8 @@ mod tests {
 
     #[test]
     fn hosts_must_name_this_server() {
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let own_host = |host: &str, port: u16| own_host(host, local, port);
         for host in [
             "127.0.0.1:7878",
             "localhost:7878",
@@ -290,9 +310,26 @@ mod tests {
             "0.0.0.0:7878",
             "127.0.0.2:7878",
             "",
+            "[::1",
+            "127.0.0.1:7878:1",
         ] {
             assert!(!own_host(host, 7878), "{host}");
         }
+        // Port 80: browsers send no port.
+        assert!(own_host("127.0.0.1", 80));
+        assert!(own_host("localhost:80", 80));
+        assert!(!own_host("127.0.0.1", 81));
+    }
+
+    #[test]
+    fn the_listening_address_names_this_server_too() {
+        let other: IpAddr = "127.0.0.2".parse().unwrap();
+        assert!(own_host("127.0.0.2:9000", other, 9000));
+        assert!(own_host("localhost:9000", other, 9000));
+        assert!(!own_host("127.0.0.3:9000", other, 9000));
+        let v6: IpAddr = "::1".parse().unwrap();
+        assert!(own_host("[::1]:9000", v6, 9000));
+        assert!(!own_host("[::2]:9000", v6, 9000));
     }
 
     #[test]
