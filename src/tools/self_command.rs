@@ -58,6 +58,14 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
         does: "resumes a scheduled job",
     },
     SelfCommand {
+        words: &["cron", "allow-home"],
+        does: "lets a scheduled job work in the home folder and resumes it",
+    },
+    SelfCommand {
+        words: &["cron", "disallow-home"],
+        does: "takes back a scheduled job's leave to work in the home folder",
+    },
+    SelfCommand {
         words: &["cron", "run"],
         does: "runs a scheduled job now and delivers its answer",
     },
@@ -88,6 +96,14 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
     SelfCommand {
         words: &["webhook", "resume"],
         does: "resumes a webhook route",
+    },
+    SelfCommand {
+        words: &["webhook", "allow-home"],
+        does: "lets a webhook route work in the home folder and resumes it",
+    },
+    SelfCommand {
+        words: &["webhook", "disallow-home"],
+        does: "takes back a webhook route's leave to work in the home folder",
     },
     SelfCommand {
         words: &["webhook", "serve"],
@@ -151,9 +167,9 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
 /// The approval kind of these commands ([`super::Caution::kind`]).
 pub const KIND: &str = "change Junees's own state";
 
-/// The approval kind of `--allow-home` on a subcommand that takes it
-/// ([`allows_home`]): asked about every time, so an "always" for
-/// [`KIND`] or an earlier `--allow-home` does not cover it
+/// The approval kind of `--allow-home` on a subcommand that takes it,
+/// and of `allow-home` ([`allows_home`]): asked about every time, so an
+/// "always" for [`KIND`] or an earlier one does not cover it
 /// ([`crate::approval::ASKED_EVERY_TIME`]).
 pub const HOME_KIND: &str = "let unattended runs work in the home folder (asked every time)";
 
@@ -164,6 +180,10 @@ const TAKES_ALLOW_HOME: &[&[&str]] = &[
     &["webhook", "add"],
     &["webhook", "add-github"],
 ];
+
+/// The subcommands that mark an existing job or route the way
+/// `--allow-home` does.
+const MARKS_ALLOW_HOME: &[&[&str]] = &[&["cron", "allow-home"], &["webhook", "allow-home"]];
 
 impl SelfCommand {
     /// The command as the user would type it: `junees cron add`.
@@ -206,12 +226,20 @@ pub fn find(words: &[String]) -> Option<&'static SelfCommand> {
 }
 
 /// What the approval question says when `words` (as for [`find`]) adds a
-/// job or route with `--allow-home`: the model may add the option itself
-/// after the refusal names it, so it gets a question of its own
-/// ([`HOME_KIND`]). Any `--allow-home` word counts, even one after `--`
-/// (asking more is harmless).
+/// job or route with `--allow-home`, or marks an existing one with
+/// `allow-home`: the model may run either after a refusal names it, so it
+/// gets a question of its own ([`HOME_KIND`]). Any `--allow-home` word
+/// counts, even one after `--` (asking more is harmless).
 pub fn allows_home(words: &[String]) -> Option<String> {
     let command = find(words)?;
+    if MARKS_ALLOW_HOME.contains(&command.words) {
+        return Some(format!(
+            "`{}` lets the unattended runs of an existing job or route work in the home \
+             folder (and resumes it): their tools may change everything there but the \
+             protected paths",
+            command.command()
+        ));
+    }
     (TAKES_ALLOW_HOME.contains(&command.words) && words.iter().any(|word| word == "--allow-home"))
         .then(|| {
             format!(
@@ -267,6 +295,13 @@ mod tests {
             ("junees webhook add pr --prompt x", "junees webhook add"),
             ("junees webhook rm pr", "junees webhook rm"),
             ("junees webhook resume pr", "junees webhook resume"),
+            ("junees cron allow-home a1", "junees cron allow-home"),
+            ("junees cron disallow-home a1", "junees cron disallow-home"),
+            ("junees webhook allow-home pr", "junees webhook allow-home"),
+            (
+                "junees webhook disallow-home pr",
+                "junees webhook disallow-home",
+            ),
             (
                 "junees webhook serve --listen 0.0.0.0:80",
                 "junees webhook serve",
@@ -351,7 +386,23 @@ mod tests {
                 "{command}: {caution}"
             );
         }
+        // Marking an existing one needs no option.
+        for (command, expected) in [
+            ("junees cron allow-home a1", "junees cron allow-home"),
+            ("junees webhook allow-home pr", "junees webhook allow-home"),
+        ] {
+            let caution = allows_home(&words(command)).unwrap_or_default();
+            assert!(
+                caution.starts_with(&format!(
+                    "`{expected}` lets the unattended runs of an existing"
+                )),
+                "{command}: {caution}"
+            );
+        }
         for command in [
+            "junees cron disallow-home a1",
+            "junees webhook disallow-home pr",
+            "echo junees cron allow-home a1",
             "junees cron add 'every 1h' x",
             "junees cron resume a1 --allow-home",
             "junees cron list --allow-home",
