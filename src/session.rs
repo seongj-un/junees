@@ -61,6 +61,10 @@ pub const CRON: &str = "cron";
 /// webhook`); its [`Meta::channel`] is the route name.
 pub const WEBHOOK: &str = "webhook";
 
+/// [`Meta::source`] of a `junees_run` call of `junees mcp serve`; its
+/// [`Meta::channel`] is `mcp`.
+pub const MCP: &str = "mcp";
+
 /// Result recorded for a tool call the process died in the middle of.
 pub const INTERRUPTED: &str = "interrupted: Junees stopped before this tool finished";
 

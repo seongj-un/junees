@@ -61,13 +61,14 @@ pub const HUMAN_TIME_LIMIT: Duration = Duration::from_secs(15);
 pub const TERMINAL: &str = "terminal";
 
 /// Every source a search can be limited to.
-pub const SOURCES: [&str; 6] = [
+pub const SOURCES: [&str; 7] = [
     TERMINAL,
     session::DISCORD,
     session::TELEGRAM,
     session::SLACK,
     session::CRON,
     session::WEBHOOK,
+    session::MCP,
 ];
 
 /// What to search and where.

@@ -38,6 +38,9 @@ pub const CRON_NOTE: &str = "\n\nYou are running a scheduled job (`junees cron`)
     about. Do the job, then end with the result: your final message is delivered as the \
     job's output. The saved memory and skills can be read but not changed here.";
 
+/// The tools `junees mcp serve` leaves out without `--allow-write`.
+pub const MCP_WRITE_TOOLS: [&str; 2] = ["write_file", "edit_file"];
+
 /// What started an unattended run. It decides the GitHub writes that run
 /// without a question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +62,15 @@ pub enum Trigger<'a> {
         /// Logins whose pull request comments the `github` tool shows
         /// besides people with write access (a flow's `--approver`).
         approvers: &'a [String],
+    },
+    /// A `junees_run` call of `junees mcp serve`: another agent's prompt,
+    /// so the webhook rules for bash, no GitHub writes, and only the tools
+    /// the server was started with (`--allow-write`, `--allow-bash`).
+    /// `gh_config` is the server's empty GitHub CLI configuration folder.
+    Mcp {
+        gh_config: &'a Path,
+        allow_write: bool,
+        allow_bash: bool,
     },
 }
 
@@ -85,7 +97,7 @@ impl<'a> Trigger<'a> {
                 sandbox: unattended(settings),
                 ..settings.clone()
             },
-            Trigger::Webhook { gh_config, .. } => ToolSettings {
+            Trigger::Webhook { gh_config, .. } | Trigger::Mcp { gh_config, .. } => ToolSettings {
                 webhook: true,
                 gh_config_dir: Some(gh_config.to_path_buf()),
                 sandbox: unattended(settings),
@@ -108,7 +120,7 @@ impl<'a> Trigger<'a> {
         'a: 'b,
     {
         match self {
-            Trigger::Cron => dir,
+            Trigger::Cron | Trigger::Mcp { .. } => dir,
             Trigger::Webhook { context_dir, .. } => context_dir,
         }
     }
@@ -120,7 +132,8 @@ impl<'a> Trigger<'a> {
     /// ([`ContextFiles::load_committed`]).
     pub fn context_files(&self, config: &Config, dir: &Path) -> ContextFiles {
         match self {
-            Trigger::Cron => config.context_files.load(dir),
+            // The folder `--dir` names is the user's own project.
+            Trigger::Cron | Trigger::Mcp { .. } => config.context_files.load(dir),
             Trigger::Webhook { context_dir, .. } => {
                 config.context_files.load_committed(context_dir)
             }
@@ -197,13 +210,13 @@ pub trait Engine {
 
 /// Keeps the text after the last tool call: the final answer.
 #[derive(Default)]
-struct Answer {
+pub(crate) struct Answer {
     blocks: Vec<String>,
     current: String,
 }
 
 impl Answer {
-    fn event(&mut self, event: Event<'_>) {
+    pub(crate) fn event(&mut self, event: Event<'_>) {
         match event {
             Event::TextDelta(text) => self.current.push_str(text),
             Event::TextEnd => self.blocks.push(std::mem::take(&mut self.current)),
@@ -216,7 +229,7 @@ impl Answer {
         }
     }
 
-    fn text(mut self) -> String {
+    pub(crate) fn text(mut self) -> String {
         if !self.current.trim().is_empty() {
             self.blocks.push(self.current);
         }
@@ -308,7 +321,7 @@ impl ApiEngine {
     }
 
     /// The run's agent and the MCP servers whose tools it left out.
-    fn agent(
+    pub(crate) fn agent(
         &self,
         spec: &Spec<'_>,
         mcp: &Mcp,
@@ -321,6 +334,21 @@ impl ApiEngine {
         let memory = home.map(|home| Memory::for_folder(home, dir, config.memory));
         let settings = spec.trigger.tool_settings(&config.tools);
         let mut tools = ToolRegistry::with_defaults(&settings);
+        if let Trigger::Mcp {
+            allow_write,
+            allow_bash,
+            ..
+        } = spec.trigger
+        {
+            let mut left: Vec<&str> = Vec::new();
+            if !allow_write {
+                left.extend(MCP_WRITE_TOOLS);
+            }
+            if !allow_bash {
+                left.push("bash");
+            }
+            tools = tools.without(&left);
+        }
         #[cfg(test)]
         if self.sandbox {
             tools.register(crate::tools::Bash::with_settings(&settings).sandboxed(dir));
@@ -342,6 +370,10 @@ impl ApiEngine {
         }
         match spec.trigger {
             Trigger::Cron => crate::github::register(&mut tools, &config.github, dir, false),
+            // Reading only: the server's caller is another agent.
+            Trigger::Mcp { .. } => {
+                crate::github::register_webhook(&mut tools, &config.github, dir, "mcp", &[], &[])
+            }
             Trigger::Webhook {
                 route,
                 github_allow,

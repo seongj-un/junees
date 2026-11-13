@@ -511,7 +511,7 @@ fn the_terminal_list_is_numbered() {
     assert_eq!(
         lines[0],
         "2 sessions match `needle` in this folder (/w) from terminal, discord, telegram, slack, \
-         cron, webhook, newest first:"
+         cron, webhook, mcp, newest first:"
     );
     assert!(lines[1].starts_with(&format!("  1  {new}  ")), "{text}");
     assert!(lines[1].ends_with(" UTC  /w  [cron j]"), "{text}");
