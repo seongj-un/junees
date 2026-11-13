@@ -33,6 +33,9 @@ Usage:
   junees usage            tokens and estimated cost of the saved sessions
                           (--days N, --by day|model|folder|source, --all; see
                           `junees usage --help`)
+  junees rewind --session <id>
+                          undo the file changes of a session's turns (--list,
+                          --turn <n>, --force, --yes; see `junees rewind --help`)
   junees dashboard        a page about this Junees in the browser, on
                           127.0.0.1 (--listen, --no-open; --chat to talk with
                           Junees there; see `junees dashboard --help`)
@@ -188,6 +191,11 @@ pub const REPL_HELP: &str = "\
                    project instruction files the session read
 /usage             show the tokens and estimated cost of this session (with its
                    subagents); `junees usage` covers past days
+/checkpoints       show the file changes write_file and edit_file made in this
+                   session, turn by turn
+/undo [N]          undo the file changes of the last turn that made some (or
+                   of the last N such turns), after asking; bash's changes are
+                   not recorded (`junees rewind` has --force)
 /memory            show what the persistent memory holds
 /memory clear user|notes|project
                    empty one memory (asks first)
@@ -248,6 +256,10 @@ pub enum Command {
     Update(crate::update::Options),
     /// `junees update --help`.
     UpdateHelp,
+    /// `junees rewind ...`: undo a session's file changes.
+    Rewind(crate::checkpoints::cli::Options),
+    /// `junees rewind --help`.
+    RewindHelp,
     Help,
     Version,
 }
@@ -376,6 +388,15 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
             args.next();
             return Ok(
                 crate::dashboard::parse(args)?.map_or(Command::DashboardHelp, Command::Dashboard)
+            );
+        }
+        Some("rewind") => {
+            args.next();
+            return Ok(
+                match crate::checkpoints::cli::parse(args).map_err(anyhow::Error::msg)? {
+                    Some(options) => Command::Rewind(options),
+                    None => Command::RewindHelp,
+                },
             );
         }
         Some("usage") => {

@@ -158,6 +158,26 @@ async fn run() -> Result<ExitCode> {
         }
         // Needs no API key and no settings.
         Command::Update(options) => return update(&options).await,
+        Command::RewindHelp => {
+            print!("{}", junees::checkpoints::cli::HELP);
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Reads the settings for the write rules; needs no API key.
+        Command::Rewind(options) => {
+            let settings = Settings::from_env()?;
+            let home = junees::config_file::home_dir(|key| settings.get(key))
+                .context("neither JUNEES_HOME nor HOME is set, so there are no checkpoints")?;
+            let config = Config::from_lookup_without_key(|key| settings.get(key))?;
+            let access = junees::tools::FileAccess::new(&config.tools);
+            junees::checkpoints::cli::run(
+                &options,
+                &home,
+                &access,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+            )?;
+            return Ok(ExitCode::SUCCESS);
+        }
         // Reads the journals and the settings only; needs no API key.
         Command::Usage(args) => {
             print!("{}", usage_report(&args)?);
@@ -231,7 +251,9 @@ async fn run() -> Result<ExitCode> {
         | Command::Dashboard(_)
         | Command::DashboardHelp
         | Command::Update(_)
-        | Command::UpdateHelp => {
+        | Command::UpdateHelp
+        | Command::Rewind(_)
+        | Command::RewindHelp => {
             unreachable!("handled above")
         }
     }
@@ -1415,6 +1437,18 @@ impl Repl {
             Slash::Model(model) => self.model(model),
             Slash::Backend(backend) => self.backend(backend).await,
             Slash::Usage => self.usage(),
+            Slash::Checkpoints => {
+                if let Some(session) = self.checkpoints() {
+                    match session.list() {
+                        Ok(list) if list.is_empty() => {
+                            println!("(no file changes recorded in this session yet)")
+                        }
+                        Ok(list) => print!("{}", junees::checkpoints::cli::render(&list)),
+                        Err(err) => eprintln!("cannot read the file checkpoints: {err}"),
+                    }
+                }
+            }
+            Slash::Undo(count) => return self.undo(count).await,
             // Nothing is recorded until the summary is back, so the
             // compaction can simply be dropped.
             Slash::Compact => match &mut self.engine {
@@ -1722,6 +1756,72 @@ impl Repl {
 
     /// `/usage`: the tokens and estimated cost of this session, from its
     /// journal, and what the journal missed (all of it without one).
+    /// This session's file checkpoints, or why there are none.
+    fn checkpoints(&self) -> Option<junees::checkpoints::SessionStore> {
+        let Some(store) = junees::checkpoints::store() else {
+            eprintln!(
+                "file checkpoints are off (checkpoints = false, or no state folder), so there \
+                 is nothing to undo"
+            );
+            return None;
+        };
+        let Some(id) = &self.session_id else {
+            eprintln!(
+                "this session is not saved (--no-session), so its file changes are not recorded"
+            );
+            return None;
+        };
+        store.session(id)
+    }
+
+    /// `/undo [N]`: the last `count` turns that changed files, after
+    /// asking; returns whether SIGTERM came meanwhile.
+    async fn undo(&mut self, count: usize) -> bool {
+        let Some(session) = self.checkpoints() else {
+            return false;
+        };
+        let list = match session.list() {
+            Ok(list) => list,
+            Err(err) => {
+                eprintln!("cannot read the file checkpoints: {err}");
+                return false;
+            }
+        };
+        if list.is_empty() {
+            println!("(no file changes recorded in this session yet; bash's changes never are)");
+            return false;
+        }
+        let from = list[list.len().saturating_sub(count)].turn;
+        let chosen = junees::checkpoints::cli::from_turn(&list, from);
+        if count > chosen.len() {
+            println!("(only {} turns changed files)", chosen.len());
+        }
+        println!("undo these changes, newest turn first:");
+        print!("{}", junees::checkpoints::cli::render(&chosen));
+        print!("undo? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let answer = tokio::select! {
+            line = self.input.next_line() => line.ok().flatten(),
+            signal = self.signals.next() => {
+                println!();
+                return signal == libc::SIGTERM;
+            }
+        };
+        let yes = answer.is_some_and(|answer| {
+            matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        });
+        if !yes {
+            println!("(nothing undone)");
+            return false;
+        }
+        let access = junees::tools::FileAccess::new(&self.config.tools);
+        match junees::checkpoints::cli::undo(&session, from, false, &access) {
+            Ok(undone) => print!("{}", junees::checkpoints::cli::report(&undone)),
+            Err(err) => report(&err),
+        }
+        false
+    }
+
     fn usage(&self) {
         let live = match &self.engine {
             Engine::Api(agent) => junees::usage::Live {

@@ -27,6 +27,7 @@
 //! agent opens a [`Turn`] for each input ([`begin`]) and the file tools find
 //! it with [`current`].
 
+pub mod cli;
 #[cfg(test)]
 mod tests;
 
