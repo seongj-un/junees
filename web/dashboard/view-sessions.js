@@ -5,10 +5,22 @@ import { formatInt, formatUsd, parseTime } from "./format.js";
 
 export const LIMIT = 50;
 
+/**
+ * The preview without the title it starts with: the server takes the title
+ * from the first line of the same message, so showing both repeats it.
+ */
+export function previewAfterTitle(title, preview) {
+  const text = (preview ?? "").trim();
+  const head = (title ?? "").trim();
+  if (!head || !text.startsWith(head)) return text;
+  return text.slice(head.length).trim();
+}
+
 function titleCell(session) {
+  const rest = previewAfterTitle(session.title, session.preview);
   return [
     el("span", { class: "row-title" }, session.title || "제목 없음"),
-    session.preview ? el("span", { class: "row-sub clamp-2" }, session.preview) : null,
+    rest ? el("span", { class: "row-sub clamp-2" }, rest) : null,
   ];
 }
 
