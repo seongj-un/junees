@@ -102,6 +102,9 @@ junees mcp serve [--dir <폴더>] [--allow-write] [--allow-bash] [--allow-home]
   - `initialize` 전의 요청(`ping` 빼고)은 `-32002`로 답한다.
   - 배치(배열)는 `-32600`, 모르는 메서드는 `-32601`, 모르는 도구는 `-32602`로 답한다.
   - 4 MiB를 넘는 줄은 읽어서 버린다.
+- 종료
+  - 클라이언트가 stdin을 닫으면 끝낸다(MCP stdio 종료 절차). 실행 중이던 호출은 멈추고 답하지 않으며, 기다리던 호출은 버린다. 무엇을 멈추고 버렸는지는 stderr에 남는다. 그래서 요청을 보내자마자 stdin을 닫는 스크립트는 `junees_run`의 답을 받지 못한다. 답을 받을 때까지 stdin을 열어 두어야 한다.
+  - stdin 읽기 자체가 3번 연달아 실패하면(stdin이 폴더이거나 끊긴 터미널) stderr에 이유를 남기고 종료 코드 1로 끝낸다.
 - `tools/call`은 한 번에 하나만 실행하고, 동시에 온 호출은 들어온 순서대로 처리한다. `ping`과 `tools/list`는 실행 중에도 바로 답한다.
 
 ### 도구
@@ -109,10 +112,13 @@ junees mcp serve [--dir <폴더>] [--allow-write] [--allow-bash] [--allow-home]
 - `junees_run` `{"prompt": 문자열, "session_id"?: 문자열, "max_turns"?: 1~200}`
   - Junees 에이전트 한 턴을 끝까지 돌리고 마지막 답을 돌려준다.
   - `structuredContent`는 `{session_id, text, input_tokens, output_tokens, cost_usd, stop_reason}`이다. `stop_reason`은 `end_turn`, `max_turns`, `token_limit`, `time_limit`(30분) 중 하나다.
+  - `content`의 첫 글 블록은 답이고, 두 번째 글 블록은 `text`를 뺀 나머지 필드의 JSON이다. `structuredContent`가 없는 `2025-03-26` 이하 클라이언트나 `content`만 모델에 넘기는 클라이언트도 `session_id`를 받아 세션을 이어 갈 수 있다.
+  - 사용량과 비용은 이번 호출의 것이다. 세션을 이어 가도 앞선 호출의 사용량을 다시 세지 않는다.
   - 실행마다 세션(source `mcp`)을 남긴다. `session_id`를 주면 그 세션을 이어 가는데, 이 폴더에서 `junees_run`이 시작한 세션만 이을 수 있다.
   - 답과 오류 문구의 비밀 값은 가린다. `cost_usd`는 가격표에 없는 모델이면 `null`이다.
 - `junees_sessions` `{"limit"?: 1~100}`: 이 폴더의 최근 세션 목록이다. id, 제목(첫 메시지 첫 줄 80자, 비밀 값 가림), source, 갱신 시각을 준다.
 - `junees_session` `{"session_id": 문자열, "offset"?: 0 이상, "limit"?: 1~200}`: 이 폴더의 세션 하나를 페이지로 준다. 형식은 [대시보드](dashboard.md)의 `GET /api/sessions/<id>`와 같다(가린 뒤 자름).
+- 두 세션 도구는 `junees_run`이 만든 세션만이 아니라 이 폴더의 **모든** 세션을 클라이언트에 보여 준다. 사용자가 그 폴더에서 터미널로 쓴 세션과 웹훅, 예약 작업 세션도 포함되고, 대화와 도구 출력이 나간다. 비밀 값은 가리지만, 가림은 설정에 있는 값과 알려진 형식만 잡는다. Claude Code처럼 원래 파일을 읽을 수 있는 클라이언트에는 새 권한이 아니다. 하지만 Claude Desktop처럼 파일 접근이 없는 클라이언트에 붙이면 그 폴더의 대화 기록을 새로 읽게 된다. 남에게 보이면 안 되는 세션이 있는 폴더는 `--dir`로 주지 않는다.
 - 잘못된 인자(빠진 `prompt`, 모르는 인자, 범위 밖 숫자, 이 폴더의 것이 아닌 세션)는 JSON-RPC 오류가 아니라 `isError: true` 결과로 돌려준다.
 
 ### 무인 실행 규칙
@@ -125,7 +131,7 @@ junees mcp serve [--dir <폴더>] [--allow-write] [--allow-bash] [--allow-home]
   - GitHub CLI 설정 폴더는 실행마다 비어 있는 것을 쓴다.
   - 상태 폴더와 Claude Code 설정 폴더를 읽고 쓰지 못한다.
   - 홈 폴더의 지속 실행 경로를 막는다.
-- 신뢰(`"trust": true`)하지 않은 MCP 서버의 도구는 뺀다. `github` 도구는 읽기만 하고 쓰기는 모두 거절한다. 세션 검색 도구는 없다.
+- 신뢰(`"trust": true`)하지 않은 MCP 서버의 도구는 뺀다. `github` 도구는 읽기만 하고, 쓰기는 설정과 관계없이 모두 거절한다(`JUNEES_GITHUB_ALLOW_UNATTENDED`도 적용하지 않는다). 세션 검색 도구는 없다.
 - 메모리와 스킬은 읽기만 한다. 프로젝트 지침 파일은 `--dir`에서 읽는다.
 - claude-code 백엔드는 거절한다(Junees의 무인 규칙 밖에서 명령을 실행하므로). `backend = "api"`로 쓴다.
 
