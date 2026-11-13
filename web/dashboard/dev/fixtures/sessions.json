@@ -49,7 +49,7 @@
       "title": "cron 작업 실패 원인 찾기",
       "cwd": "/home/u/work/very/long/path/that/keeps/going/and/going/project-with-a-long-name",
       "updated_at": "2026-11-11T09:20:31Z",
-      "messages": 58,
+      "messages": 230,
       "input_tokens": 912003,
       "output_tokens": 88214,
       "cost_usd": 4.1287,

@@ -2,6 +2,7 @@
 
 import { code, dataTable, el, notice, pathCode, whenCell } from "./dom.js";
 import { formatInt, formatUsd, parseTime } from "./format.js";
+import { SESSION_ID, sessionHash } from "./routes.js";
 
 export const LIMIT = 50;
 
@@ -18,10 +19,35 @@ export function previewAfterTitle(title, preview) {
 
 function titleCell(session) {
   const rest = previewAfterTitle(session.title, session.preview);
+  const title = session.title || "제목 없음";
+  // Only ids in the server's own format become links.
+  const linked = typeof session.id === "string" && SESSION_ID.test(session.id);
   return [
-    el("span", { class: "row-title" }, session.title || "제목 없음"),
+    linked
+      ? el(
+          "a",
+          {
+            class: "row-title row-link",
+            href: sessionHash(session.id),
+            // An id lets focus come back here, and survive a refresh.
+            id: `session-link-${session.id}`,
+            "data-session-link": session.id,
+          },
+          title,
+        )
+      : el("span", { class: "row-title" }, title),
     rest ? el("span", { class: "row-sub clamp-2" }, rest) : null,
   ];
+}
+
+/** A click anywhere on a row opens the session, like its title link. */
+function openOnRowClick(table) {
+  table.addEventListener("click", (event) => {
+    if (event.target.closest("a, button, summary")) return;
+    if (window.getSelection()?.toString()) return;
+    const link = event.target.closest("tr")?.querySelector("[data-session-link]");
+    if (link) link.click();
+  });
 }
 
 function tokensCell(session) {
@@ -45,6 +71,26 @@ export function render(root, data, { now }) {
     return;
   }
 
+  const table = dataTable({
+    caption: "최근 세션. 제목을 누르면 대화를 엽니다.",
+    rowKey: (s) => s.id,
+    rows: sessions,
+    columns: [
+      { label: "세션", cell: titleCell, className: "col-main col-wide" },
+      { label: "폴더", cell: (s) => pathCode(s.cwd), className: "col-path" },
+      {
+        label: "갱신",
+        cell: (s) => whenCell(parseTime(s.updated_at), now),
+        className: "col-time",
+      },
+      { label: "메시지", cell: (s) => el("span", { class: "num" }, formatInt(s.messages)), className: "col-num" },
+      { label: "토큰", cell: tokensCell, className: "col-num" },
+      { label: "비용", cell: (s) => el("span", { class: "num" }, formatUsd(s.cost_usd)), className: "col-num" },
+    ],
+  });
+  table.classList.add("table-clickable");
+  openOnRowClick(table);
+
   root.replaceChildren(
     el(
       "p",
@@ -53,22 +99,6 @@ export function render(root, data, { now }) {
         ? `최근에 바뀐 세션 ${formatInt(sessions.length)}개를 보여 줍니다.`
         : `세션 ${formatInt(sessions.length)}개`,
     ),
-    dataTable({
-      caption: "최근 세션",
-      rowKey: (s) => s.id,
-      rows: sessions,
-      columns: [
-        { label: "세션", cell: titleCell, className: "col-main col-wide" },
-        { label: "폴더", cell: (s) => pathCode(s.cwd), className: "col-path" },
-        {
-          label: "갱신",
-          cell: (s) => whenCell(parseTime(s.updated_at), now),
-          className: "col-time",
-        },
-        { label: "메시지", cell: (s) => el("span", { class: "num" }, formatInt(s.messages)), className: "col-num" },
-        { label: "토큰", cell: tokensCell, className: "col-num" },
-        { label: "비용", cell: (s) => el("span", { class: "num" }, formatUsd(s.cost_usd)), className: "col-num" },
-      ],
-    }),
+    table,
   );
 }

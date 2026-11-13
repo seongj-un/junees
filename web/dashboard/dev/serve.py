@@ -5,6 +5,14 @@ check, security headers). Not part of the binary.
 
     python3 web/dashboard/dev/serve.py [--port 8787] [--mode ok] [--token T]
 
+One-time codes: the second line it prints opens with #code=, which the page
+trades at POST /api/token (60 seconds, once, 5 wrong tries end it), as the
+browser `junees dashboard` opens does. GET /__dev/code makes another.
+
+Writes: POST /api/cron/<id>/pause|resume and /api/webhooks/<name>/pause|resume
+change the fixtures in memory (restart to reset). They need the token, an
+Origin from this server and an empty or {} body, as the contract says.
+
 Modes (also switchable while running: GET /__dev/mode/<mode>):
     ok            fixtures as they are
     empty         empty lists everywhere
@@ -12,6 +20,9 @@ Modes (also switchable while running: GET /__dev/mode/<mode>):
     slow          answers after 3 seconds
     hang          answers after 30 seconds (the page gives up first)
     unauthorized  every API answers 401
+    forbidden     every write answers 403
+    conflict      every write answers 409
+    busy          every write answers 503 busy (the jobs file lock)
 
 Timestamps in the fixtures are shifted so that 2026-11-13 09:00 UTC is now.
 """
@@ -21,15 +32,18 @@ import copy
 import datetime as dt
 import hmac
 import json
+import re
 import secrets
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-MODES = {"ok", "empty", "error", "slow", "hang", "unauthorized"}
+MODES = {"ok", "empty", "error", "slow", "hang", "unauthorized", "forbidden", "conflict", "busy"}
+SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+ACTION = re.compile(r"/api/(cron|webhooks)/([^/]+)/(pause|resume)")
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
 }
@@ -87,6 +101,19 @@ def api_body(name, query, mode, fixtures):
         body = copy.deepcopy(fixtures["status"])
         body["uptime_secs"] = int(time.monotonic() - STARTED)
         return 200, body
+    if name.startswith("sessions/"):
+        session_id = unquote(name[len("sessions/"):])
+        if not SESSION_ID.fullmatch(session_id):
+            return 400, {"error": "bad_id", "message": "a session id is [A-Za-z0-9_-]{1,64}"}
+        detail = fixtures["session_details"].get(session_id)
+        if detail is None or mode == "empty":
+            return 404, {"error": "not_found", "message": "no such session"}
+        offset = bounded(query, "offset", 0, 0, 10**9)
+        limit = bounded(query, "limit", 100, 1, 200)
+        body = {key: value for key, value in detail.items() if key != "messages"}
+        body["offset"] = offset
+        body["messages"] = detail["messages"][offset : offset + limit]
+        return 200, body
     if name == "sessions":
         limit = bounded(query, "limit", 50, 1, 200)
         sessions = [] if mode == "empty" else fixtures["sessions"]["sessions"][:limit]
@@ -116,6 +143,29 @@ class DevServer(ThreadingHTTPServer):
     token = ""
     mode = "ok"
     fixtures: dict = {}
+    # One-time codes for the address: code -> [expires (monotonic), wrong tries]
+    codes: dict = {}
+
+    def new_code(self):
+        code = secrets.token_urlsafe(32)
+        self.codes[code] = [time.monotonic() + CODE_SECONDS, 0]
+        return code
+
+    def trade(self, given):
+        """Uses up `given` if it is a live code; a wrong one counts against every live code."""
+        now = time.monotonic()
+        for code, (expires, _) in list(self.codes.items()):
+            if expires < now:
+                del self.codes[code]
+        for code in list(self.codes):
+            if hmac.compare_digest(code.encode(), given.encode()):
+                del self.codes[code]
+                return True
+        for code in list(self.codes):
+            self.codes[code][1] += 1
+            if self.codes[code][1] >= 5:
+                del self.codes[code]
+        return False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -135,10 +185,93 @@ class Handler(BaseHTTPRequestHandler):
     def send_json(self, status, obj):
         self.send(status, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
-    def do_POST(self):
-        self.send_json(405, {"error": "method_not_allowed", "message": "only GET"})
+    def do_PUT(self):
+        self.send_json(405, {"error": "method_not_allowed", "message": "only GET and the POST actions"})
 
-    do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_POST
+    do_DELETE = do_PATCH = do_OPTIONS = do_PUT
+
+    def do_POST(self):
+        """Pause or resume a fixture job or route, with the write rules of the contract."""
+        port = self.server.server_address[1]
+        host = self.headers.get("Host")
+        if host not in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}:
+            return self.send_json(421, {"error": "misdirected", "message": "unexpected Host"})
+        if urlsplit(self.path).path == "/api/token":
+            return self.trade_code(host)
+        match = ACTION.fullmatch(urlsplit(self.path).path)
+        if not match:
+            return self.send_json(405 if self.path.startswith("/api/") else 404, {"error": "method_not_allowed", "message": "only GET here"})
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 1024:
+            return self.send_json(413, {"error": "too_large", "message": "the body may be 1KB"})
+        body = self.rfile.read(length).decode("utf-8", "replace").strip() if length else ""
+        # The real server checks Origin before the token.
+        mode = self.server.mode
+        if mode == "forbidden" or self.headers.get("Origin") != f"http://{host}":
+            return self.send_json(403, {"error": "forbidden_origin", "message": "a write needs an Origin from this server"})
+        if not self.authorized():
+            return self.send_json(401, {"error": "unauthorized", "message": "missing or wrong token"})
+        content_type = self.headers.get("Content-Type")
+        if content_type is not None and content_type.split(";")[0].strip() != "application/json":
+            return self.send_json(415, {"error": "unsupported_media_type", "message": "application/json only"})
+        if body not in ("", "{}"):
+            return self.send_json(400, {"error": "bad_body", "message": "the body must be empty or {}"})
+        if mode == "slow":
+            time.sleep(3)
+        elif mode == "hang":
+            time.sleep(30)
+        if mode == "error":
+            return self.send_json(500, {"error": "internal", "message": "fixture error mode"})
+        kind, key, action = match.group(1), unquote(match.group(2)), match.group(3)
+        if mode == "busy":
+            return self.send_json(503, {"error": "busy", "message": "the jobs file is busy (another junees holds its lock); nothing was changed"})
+        if mode == "conflict":
+            return self.send_json(409, {"error": "conflict", "message": f"fixture conflict mode: cannot {action} {key}"})
+        items = self.server.fixtures[kind]["jobs" if kind == "cron" else "routes"]
+        field = "id" if kind == "cron" else "name"
+        item = next((it for it in items if it[field] == key), None)
+        if item is None:
+            return self.send_json(404, {"error": "not_found", "message": f"no such {'job' if kind == 'cron' else 'route'}"})
+        examples = self.server.fixtures["actions"]
+        if action == "pause":
+            item["paused"] = True
+            item["paused_for_home"] = False
+        elif item.get("paused_for_home"):
+            example = examples["resume_home_conflict" if kind == "cron" else "resume_home_conflict_webhook"]["body"]
+            return self.send_json(409, {**example, "message": example["message"].format(id=key, name=key)})
+        elif kind == "cron" and len(item["schedule"].split()) != 5:
+            # A one-time job whose time has passed cannot resume, as in the CLI.
+            example = examples["resume_once_conflict"]["body"]
+            return self.send_json(409, {**example, "message": example["message"].format(id=key)})
+        else:
+            item["paused"] = False
+            if kind == "cron":
+                soon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+                item["next_run"] = soon.replace(minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.send_json(200, item)
+
+    def trade_code(self, host):
+        """POST /api/token: a one-time code from the address for the token."""
+        if self.headers.get("Origin") != f"http://{host}":
+            return self.send_json(403, {"error": "forbidden_origin", "message": "a write needs an Origin from this server"})
+        content_type = self.headers.get("Content-Type")
+        if content_type is not None and content_type.split(";")[0].strip() != "application/json":
+            return self.send_json(415, {"error": "unsupported_media_type", "message": "application/json only"})
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 1024:
+            return self.send_json(413, {"error": "too_large", "message": "the body may be 1KB"})
+        try:
+            code = json.loads(self.rfile.read(length) or b"{}").get("code")
+        except (ValueError, AttributeError):
+            return self.send_json(400, {"error": "bad_body", "message": "send {\"code\": \"...\"}"})
+        if self.server.trade(code if isinstance(code, str) else ""):
+            return self.send_json(200, {"token": self.server.token})
+        self.send_json(401, {"error": "bad_code", "message": "the code is wrong, used or expired"})
+
+    def authorized(self):
+        auth = self.headers.get("Authorization", "")
+        expected = f"Bearer {self.server.token}"
+        return self.server.mode != "unauthorized" and hmac.compare_digest(auth.encode(), expected.encode())
 
     def do_HEAD(self):
         self.do_GET()
@@ -149,12 +282,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(421, {"error": "misdirected", "message": "unexpected Host"})
         url = urlsplit(self.path)
 
+        if url.path == "/__dev/code":
+            # A fresh one-time address, as `junees dashboard` gives the browser it opens.
+            return self.send_json(200, {"url": f"http://{self.headers.get('Host')}/#code={self.server.new_code()}"})
+
         if url.path.startswith("/__dev/mode/"):
             mode = url.path.rsplit("/", 1)[1]
             if mode not in MODES:
                 return self.send_json(400, {"error": "bad_mode", "message": f"one of {sorted(MODES)}"})
             self.server.mode = mode
             return self.send_json(200, {"mode": mode})
+
+        origin = self.headers.get("Origin")
+        if origin is not None and origin != f"http://{self.headers.get('Host')}":
+            return self.send_json(403, {"error": "forbidden_origin", "message": "another site's page"})
 
         if url.path.startswith("/api/"):
             return self.api(url)
@@ -172,10 +313,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, path.read_bytes(), content_type)
 
     def api(self, url):
-        auth = self.headers.get("Authorization", "")
-        expected = f"Bearer {self.server.token}"
         mode = self.server.mode
-        if mode == "unauthorized" or not hmac.compare_digest(auth.encode(), expected.encode()):
+        if not self.authorized():
             return self.send_json(401, {"error": "unauthorized", "message": "missing or wrong token"})
         if mode == "slow":
             time.sleep(3)
@@ -194,6 +333,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 STARTED = time.monotonic()
+CODE_SECONDS = 60
 
 
 def main():
@@ -206,8 +346,11 @@ def main():
     server = DevServer(("127.0.0.1", args.port), Handler)
     server.token = args.token or secrets.token_urlsafe(32)
     server.mode = args.mode
+    server.codes = {}
     server.fixtures = load_fixtures()
-    print(f"http://127.0.0.1:{server.server_address[1]}/#token={server.token}", flush=True)
+    base = f"http://127.0.0.1:{server.server_address[1]}/"
+    print(f"{base}#token={server.token}", flush=True)
+    print(f"{base}#code={server.new_code()}  (one-time, 60 s; GET /__dev/code for another)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

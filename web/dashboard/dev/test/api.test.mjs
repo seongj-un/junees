@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { getToken, takeTokenFromAddress } from "../../api.js";
+import { ApiError, exchangeCode, getToken, takeCodeFromAddress, takeTokenFromAddress } from "../../api.js";
 
 /** The parts of `window` the token helpers use. */
 function fakeWindow(hash) {
@@ -48,4 +48,40 @@ test("route hashes and an empty token are not taken", () => {
   assert.equal(takeTokenFromAddress(empty), false);
   assert.equal(getToken(empty), null);
   assert.equal(empty.location.hash, "");
+});
+
+test("takeCodeFromAddress takes #code= once and clears the address", () => {
+  const win = fakeWindow("#code=one-TIME_code");
+  assert.equal(takeCodeFromAddress(win), "one-TIME_code");
+  assert.equal(win.location.hash, "");
+  assert.equal(getToken(win), null, "a code is not a token");
+  assert.equal(takeCodeFromAddress(fakeWindow("#/sessions")), null);
+  assert.equal(takeCodeFromAddress(fakeWindow("#token=abc")), null);
+});
+
+test("exchangeCode keeps the token it gets for the code, without a Bearer", async () => {
+  const win = fakeWindow("");
+  const sent = [];
+  globalThis.fetch = async (path, init) => {
+    sent.push({ path, init });
+    return new Response(JSON.stringify({ token: "tok" }), { status: 200 });
+  };
+  assert.equal(await exchangeCode("c0de", win), "tok");
+  assert.equal(getToken(win), "tok");
+  assert.equal(sent[0].path, "/api/token");
+  assert.equal(sent[0].init.method, "POST");
+  assert.equal(sent[0].init.body, JSON.stringify({ code: "c0de" }));
+  assert.equal(sent[0].init.headers.Authorization, undefined);
+  assert.equal(sent[0].init.headers["Content-Type"], "application/json");
+});
+
+test("a refused code is a 401 bad_code, not a lock of the tab's token", async () => {
+  const win = fakeWindow("");
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: "bad_code" }), { status: 401 });
+  await assert.rejects(exchangeCode("old", win), (err) => {
+    assert.ok(err instanceof ApiError);
+    assert.deepEqual([err.kind, err.status, err.code], ["http", 401, "bad_code"]);
+    return true;
+  });
+  assert.equal(getToken(win), null);
 });
