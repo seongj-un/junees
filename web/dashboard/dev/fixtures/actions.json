@@ -1,0 +1,72 @@
+{
+  "_comment": "Example answers of the write API. serve.py uses the resume_*_conflict messages for its 409s.",
+  "pause_ok": {
+    "status": 200,
+    "body": {
+      "id": "a1",
+      "name": "daily-report",
+      "schedule": "0 9 * * *",
+      "dir": "/home/u/work/reports",
+      "paused": true,
+      "paused_for_home": false,
+      "allow_home": false,
+      "next_run": "2026-11-14T00:00:00Z",
+      "last_run": {
+        "at": "2026-11-13T00:00:04Z",
+        "status": "ok",
+        "note": null
+      }
+    }
+  },
+  "resume_home_conflict": {
+    "status": 409,
+    "body": {
+      "error": "conflict",
+      "message": "job {id} is paused because it works in the home folder: run `junees cron allow-home {id}` to accept this, or remove the job and add it again with --dir"
+    }
+  },
+  "resume_home_conflict_webhook": {
+    "status": 409,
+    "body": {
+      "error": "conflict",
+      "message": "route {name} is paused because it works in the home folder: run `junees webhook allow-home {name}` to accept this"
+    }
+  },
+  "resume_once_conflict": {
+    "status": 409,
+    "body": {
+      "error": "conflict",
+      "message": "job {id} was to run once, at a time that has passed; add it again"
+    }
+  },
+  "no_origin": {
+    "status": 403,
+    "body": {
+      "error": "forbidden_origin",
+      "message": "a write needs an Origin from this server"
+    }
+  },
+  "not_found": {
+    "status": 404,
+    "body": {
+      "error": "not_found",
+      "message": "no such job"
+    }
+  },
+  "token_ok": {
+    "status": 200,
+    "request": {
+      "code": "<one-time code from #code=>"
+    },
+    "body": {
+      "token": "<token>"
+    }
+  },
+  "token_bad_code": {
+    "status": 401,
+    "body": {
+      "error": "bad_code",
+      "message": "the code is wrong, used or expired"
+    }
+  }
+}
