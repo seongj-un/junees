@@ -200,7 +200,7 @@ tests/
   common/              테스트용 가짜 Anthropic API 서버 (JSON 응답과 SSE 스트림), 테스트 환경의 JUNEES_*/ANTHROPIC_*/OPENAI_*/CLAUDE_CODE_* 변수와 GH_TOKEN/GITHUB_TOKEN/GH_ENTERPRISE_TOKEN/GITHUB_ENTERPRISE_TOKEN/GH_CONFIG_DIR을 지우고, 인자로 받은 임시 cwd와 HOME에서 도는 바이너리 명령(junees_binary(cwd, home), 크레이트 폴더나 그 안, 그 위의 폴더는 거부, 모든 바이너리 테스트가 이것으로 시작)
   binary_env.rs        junees_binary가 지우는 변수와 남기는 변수, 주어진 임시 폴더에서만 돌고 크레이트 쪽 폴더는 거부하는지, 모든 바이너리 테스트가 그 헬퍼를 쓰는지 검증(명령은 실행하지 않음)
   anthropic_client.rs  가짜 API 서버로 실제 클라이언트와 루프를 끝까지 검증 (thinking 블록이 signature까지 그대로 돌아가는지 포함)
-  openai_client.rs     가짜 Chat Completions 서버로 OpenAI 호환 클라이언트 검증 (Bearer 키와 루프백에서 키 없이, 재시도와 재시도하지 않는 오류, 조각난 스트림과 include_usage, 병렬 도구 호출과 tool 메시지·이미지 왕복, 바이너리 -p와 junees usage 비용)
+  openai_client.rs     가짜 Chat Completions 서버로 OpenAI 호환 클라이언트 검증 (Bearer 키와 루프백에서 키 없이, 재시도와 재시도하지 않는 오류(스트림 중간의 한도 오류 포함), 조각난 스트림과 include_usage, reasoning_effort와 상한 필드 설정, 추론 토큰, 병렬 도구 호출과 tool 메시지·이미지 왕복, 바이너리 -p와 junees usage 비용)
   session_resume.rs    실제 바이너리로 -c, --resume <앞부분>, --no-session, HOME 없는 실행, 이어 간 세션의 thinking 블록 보존 검증
   secret_env.rs        기본 bash에서 API 키, 웹훅 URL, 디스코드 토큰, GitHub 토큰, Claude Code 토큰이 보이지 않는지 검증
   sandbox.rs           실제 바이너리와 가짜 API로 모델의 bash 명령이 Landlock 안에서 도는지(실행 중에 만든 경로로도 설정 파일, secrets 읽기와 memory 쓰기 실패, 작업 폴더 쓰기 성공)

@@ -17,6 +17,7 @@ fn usage(input: u64, write: u64, read: u64, output: u64, searches: u64) -> Usage
         output_tokens: output,
         cache_creation_input_tokens: write,
         cache_read_input_tokens: read,
+        reasoning_tokens: 0,
         server_tool_use: ServerToolUsage {
             web_search_requests: searches,
         },

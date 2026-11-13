@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use super::convert::{ApiError, ApiUsage, Call, response, stream_status};
 use crate::message::Usage;
+use crate::provider::http::Failure;
 use crate::provider::{CompletionResponse, ProviderError, StreamEvent};
 
 /// The answer so far.
@@ -52,26 +53,27 @@ impl PartialCall {
 
 impl Chunks {
     /// Applies the data of one event, reporting text as it comes. Returns
-    /// whether it was the `[DONE]` that ends the stream.
+    /// whether it was the `[DONE]` that ends the stream. An error chunk
+    /// fails the way the same error in a whole answer does
+    /// ([`super::api_failure`]): an account out of credit is not retried.
     pub fn apply(
         &mut self,
         data: &str,
         report: &mut impl FnMut(StreamEvent),
-    ) -> Result<bool, ProviderError> {
+    ) -> Result<bool, Failure> {
         if data.trim() == "[DONE]" {
             return Ok(true);
         }
         let chunk: Value = serde_json::from_str(data)
-            .map_err(|err| ProviderError::Decode(format!("a chunk is not JSON: {err}")))?;
+            .map_err(|err| decode_failure(format!("a chunk is not JSON: {err}")))?;
         if chunk["error"].is_object() {
             let error = ApiError::from_value(&chunk["error"]);
-            let status = stream_status(&error);
-            return Err(error.into_error(status));
+            return Err(super::api_failure(stream_status(&error), None, error));
         }
         if let Some(usage) = chunk.get("usage").filter(|usage| !usage.is_null()) {
             self.usage = Some(
                 serde_json::from_value(usage.clone())
-                    .map_err(|err| ProviderError::Decode(format!("chunk usage: {err}")))?,
+                    .map_err(|err| decode_failure(format!("chunk usage: {err}")))?,
             );
         }
         // Only the first choice: Junees asks for one.
@@ -199,6 +201,15 @@ impl Chunks {
     }
 }
 
+/// A chunk that does not read: another attempt gets the same.
+fn decode_failure(message: String) -> Failure {
+    Failure {
+        retryable: false,
+        retry_after: None,
+        error: ProviderError::Decode(message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -213,10 +224,10 @@ mod tests {
         for chunk in chunks {
             match assembled.apply(&chunk.to_string(), &mut report) {
                 Ok(_) => {}
-                Err(err) => return (Err(err), events),
+                Err(failure) => return (Err(failure.error), events),
             }
         }
-        assert!(assembled.apply("[DONE]", &mut report).unwrap());
+        assert!(assembled.apply("[DONE]", &mut report).ok().unwrap());
         let response = assembled.finish(&mut report);
         (Ok(response), events)
     }
@@ -384,8 +395,49 @@ mod tests {
         );
         assert_eq!(events, vec![StreamEvent::TextDelta("Hal".into())]);
         let mut chunks = Chunks::default();
-        let err = chunks.apply("{not json", &mut |_| {}).unwrap_err();
-        assert!(matches!(err, ProviderError::Decode(_)), "{err}");
+        let Err(failure) = chunks.apply("{not json", &mut |_| {}) else {
+            panic!("a broken chunk was taken");
+        };
+        assert!(!failure.retryable);
+        assert!(
+            matches!(failure.error, ProviderError::Decode(_)),
+            "{}",
+            failure.error
+        );
+    }
+
+    #[test]
+    fn an_error_chunk_is_retried_by_the_rules_of_a_whole_answer() {
+        let retryable = |error: Value| {
+            let mut chunks = Chunks::default();
+            let data = json!({"error": error}).to_string();
+            match chunks.apply(&data, &mut |_| {}) {
+                Err(failure) => failure.retryable,
+                Ok(_) => panic!("an error chunk was taken"),
+            }
+        };
+        assert!(retryable(
+            json!({"code": 502, "message": "Provider returned error"})
+        ));
+        assert!(retryable(
+            json!({"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "slow"})
+        ));
+        assert!(retryable(
+            json!({"type": "server_error", "message": "oops"})
+        ));
+        // An account out of credit or over its spend limit: waiting does
+        // not help, in a stream as in a whole answer.
+        for quota in [
+            json!({"type": "insufficient_quota", "code": "insufficient_quota",
+                   "message": "You exceeded your current quota"}),
+            json!({"code": 429, "type": "insufficient_quota", "message": "no credit"}),
+            json!({"type": "insufficient_quota", "code": "credit_balance_exhausted",
+                   "message": "no credit"}),
+            json!({"code": "project_spend_limit_exceeded", "message": "limit"}),
+        ] {
+            assert!(!retryable(quota.clone()), "{quota}");
+        }
+        assert!(!retryable(json!({"code": 400, "message": "bad request"})));
     }
 
     #[test]
@@ -410,6 +462,7 @@ mod tests {
                     .to_string(),
                 &mut |_| {},
             )
+            .ok()
             .unwrap();
         assert!(chunks.finished());
     }

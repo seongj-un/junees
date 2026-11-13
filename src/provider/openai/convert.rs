@@ -43,31 +43,82 @@ pub(super) struct ChatRequest<'a> {
     /// deprecated `max_tokens`, and its reasoning models refuse it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u32>,
+    /// How hard a reasoning model thinks, when the user set it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'a str>,
     #[serde(skip_serializing_if = "is_false")]
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<Value>,
+    /// The [`REASONING_ROOM`] added to the output limit, if any.
+    #[serde(skip)]
+    pub reasoning_room: u32,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Room for reasoning added to the output limit of a call that asks for
+/// no thinking (a summary, whose small limit is meant for its text) when a
+/// reasoning effort is set: `max_completion_tokens` counts reasoning
+/// tokens too (the Chat Completions reference), and the reasoning guide
+/// recommends reserving at least 25,000 tokens for reasoning and output.
+pub(super) const REASONING_ROOM: u32 = 25_000;
+
+/// What the provider's settings add to each request.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Options<'a> {
+    /// The output limit goes as `max_completion_tokens`
+    /// ([`super::Settings::uses_max_completion_tokens`]).
+    pub max_completion_tokens: bool,
+    /// `reasoning_effort`, when set.
+    pub reasoning_effort: Option<&'a str>,
+}
+
 impl<'a> ChatRequest<'a> {
-    /// The body for `request`. `official` says the server is OpenAI's own
-    /// API ([`super::is_official`]), which takes the output limit as
-    /// `max_completion_tokens`. The request's `cache`, `thinking` and
-    /// `web_search` are Anthropic's features and left out: OpenAI caches
-    /// long prompts on its own.
-    pub fn new(model: &'a str, request: CompletionRequest<'a>, official: bool) -> Self {
+    /// The body for `request`. The request's `cache`, `thinking` and
+    /// `web_search` are Anthropic's features and not sent: OpenAI caches
+    /// long prompts on its own. `thinking: false` (a summary) only gets
+    /// [`REASONING_ROOM`] when a reasoning effort other than `none` is set.
+    pub fn new(model: &'a str, request: CompletionRequest<'a>, options: Options<'a>) -> Self {
+        let reasons = options
+            .reasoning_effort
+            .is_some_and(|effort| effort != "none");
+        let reasoning_room = if reasons && !request.thinking {
+            REASONING_ROOM
+        } else {
+            0
+        };
+        let limit = request.max_tokens.saturating_add(reasoning_room);
         Self {
             model,
             messages: messages(request.system, request.messages),
             tools: request.tools.iter().map(tool).collect(),
-            max_tokens: (!official).then_some(request.max_tokens),
-            max_completion_tokens: official.then_some(request.max_tokens),
+            max_tokens: (!options.max_completion_tokens).then_some(limit),
+            max_completion_tokens: options.max_completion_tokens.then_some(limit),
+            reasoning_effort: options.reasoning_effort,
             stream: false,
             stream_options: None,
+            reasoning_room,
+        }
+    }
+
+    /// The same request with the output limit the caller asked for: a
+    /// server that refuses input + limit beyond the model's window (vLLM,
+    /// llama-server) may take it without the reasoning room.
+    pub fn without_reasoning_room(&self) -> Self {
+        let less = |limit: Option<u32>| limit.map(|limit| limit - self.reasoning_room);
+        Self {
+            model: self.model,
+            messages: self.messages.clone(),
+            tools: self.tools.clone(),
+            max_tokens: less(self.max_tokens),
+            max_completion_tokens: less(self.max_completion_tokens),
+            reasoning_effort: self.reasoning_effort,
+            stream: self.stream,
+            stream_options: self.stream_options.clone(),
+            reasoning_room: 0,
         }
     }
 
@@ -294,6 +345,16 @@ pub(super) struct ApiUsage {
     completion_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionDetails>,
+}
+
+#[derive(Deserialize, Default, Clone, Copy)]
+struct CompletionDetails {
+    /// Part of `completion_tokens`: reasoning, which Chat Completions never
+    /// returns, so it is not sent back either.
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Deserialize, Default, Clone, Copy)]
@@ -307,16 +368,26 @@ struct PromptDetails {
 impl From<ApiUsage> for Usage {
     /// Junees counts input without the cached prompt tokens, which are
     /// priced apart; Chat Completions counts them in `prompt_tokens`.
+    /// `completion_tokens` holds the reasoning tokens too, which are billed
+    /// as output (the reasoning guide), so output keeps them and
+    /// `reasoning_tokens` says how many there were.
     fn from(usage: ApiUsage) -> Self {
         let prompt = usage.prompt_tokens.unwrap_or(0);
         let details = usage.prompt_tokens_details.unwrap_or_default();
         let read = details.cached_tokens.unwrap_or(0).min(prompt);
         let written = details.cache_write_tokens.unwrap_or(0).min(prompt - read);
+        let output = usage.completion_tokens.unwrap_or(0);
+        let reasoning = usage
+            .completion_tokens_details
+            .and_then(|details| details.reasoning_tokens)
+            .unwrap_or(0)
+            .min(output);
         Usage {
             input_tokens: prompt - read - written,
-            output_tokens: usage.completion_tokens.unwrap_or(0),
+            output_tokens: output,
             cache_creation_input_tokens: written,
             cache_read_input_tokens: read,
+            reasoning_tokens: reasoning,
             ..Usage::default()
         }
     }
@@ -482,18 +553,22 @@ impl ApiError {
     }
 
     /// A 429 that waiting does not fix: the account is out of credit or
-    /// over a spend limit (the API's error code guide).
+    /// over a spend limit. The error code guide
+    /// (developers.openai.com/api/docs/guides/error-codes) names the
+    /// codes, says `type` can still be `insufficient_quota` for any of
+    /// them, and that retrying them won't restore access.
     pub fn is_quota(&self) -> bool {
-        matches!(
-            self.code.as_deref(),
-            Some(
-                "insufficient_quota"
-                    | "credit_balance_exhausted"
-                    | "organization_spend_limit_exceeded"
-                    | "project_spend_limit_exceeded"
-                    | "organization_usage_limit_exceeded"
+        self.kind.as_deref() == Some("insufficient_quota")
+            || matches!(
+                self.code.as_deref(),
+                Some(
+                    "insufficient_quota"
+                        | "credit_balance_exhausted"
+                        | "organization_spend_limit_exceeded"
+                        | "project_spend_limit_exceeded"
+                        | "organization_usage_limit_exceeded"
+                )
             )
-        )
     }
 
     /// The error Junees reacts to. `kind` is the error's `type`, or
@@ -565,7 +640,11 @@ mod tests {
             thinking: true,
             web_search: true,
         };
-        serde_json::to_value(ChatRequest::new("m", request, official)).unwrap()
+        let options = Options {
+            max_completion_tokens: official,
+            reasoning_effort: None,
+        };
+        serde_json::to_value(ChatRequest::new("m", request, options)).unwrap()
     }
 
     fn png(data: &str) -> Image {
@@ -614,7 +693,7 @@ mod tests {
                     thinking: false,
                     web_search: false,
                 },
-                false,
+                Options::default(),
             )
             .streamed(),
         )
@@ -622,6 +701,81 @@ mod tests {
         assert_eq!(streamed["stream"], true);
         assert_eq!(streamed["stream_options"], json!({"include_usage": true}));
         assert_eq!(streamed["messages"], json!([]));
+        assert!(streamed.get("reasoning_effort").is_none(), "{streamed}");
+    }
+
+    #[test]
+    fn a_reasoning_effort_is_sent_and_a_summary_gets_room_to_reason() {
+        let body = |effort: Option<&'static str>, thinking: bool, completion: bool| {
+            let request = CompletionRequest {
+                system: "",
+                messages: &[],
+                tools: &[],
+                max_tokens: 4096,
+                cache: false,
+                thinking,
+                web_search: false,
+            };
+            let options = Options {
+                max_completion_tokens: completion,
+                reasoning_effort: effort,
+            };
+            serde_json::to_value(ChatRequest::new("o", request, options)).unwrap()
+        };
+        // A turn: the limit as set, the effort along.
+        let turn = body(Some("low"), true, true);
+        assert_eq!(turn["reasoning_effort"], "low");
+        assert_eq!(turn["max_completion_tokens"], 4096);
+        // A summary: its limit plus room for the reasoning it cannot skip.
+        let summary = body(Some("high"), false, true);
+        assert_eq!(summary["reasoning_effort"], "high");
+        assert_eq!(summary["max_completion_tokens"], 4096 + REASONING_ROOM);
+        let summary = body(Some("medium"), false, false);
+        assert_eq!(summary["max_tokens"], 4096 + REASONING_ROOM);
+        // No reasoning: no room.
+        let none = body(Some("none"), false, true);
+        assert_eq!(none["reasoning_effort"], "none");
+        assert_eq!(none["max_completion_tokens"], 4096);
+        let unset = body(None, false, false);
+        assert!(unset.get("reasoning_effort").is_none(), "{unset}");
+        assert_eq!(unset["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn the_reasoning_room_can_be_taken_back() {
+        for completion in [true, false] {
+            let request = CompletionRequest {
+                system: "s",
+                messages: &[],
+                tools: &[],
+                max_tokens: 4096,
+                cache: false,
+                thinking: false,
+                web_search: false,
+            };
+            let options = Options {
+                max_completion_tokens: completion,
+                reasoning_effort: Some("low"),
+            };
+            let roomy = ChatRequest::new("o", request, options);
+            assert_eq!(roomy.reasoning_room, REASONING_ROOM);
+            let plain = roomy.without_reasoning_room();
+            assert_eq!(plain.reasoning_room, 0);
+            let (roomy, plain) = (
+                serde_json::to_value(roomy).unwrap(),
+                serde_json::to_value(plain).unwrap(),
+            );
+            let field = if completion {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            assert_eq!(plain[field], 4096, "{plain}");
+            // Everything else stays.
+            let mut expected = roomy.clone();
+            expected[field] = json!(4096);
+            assert_eq!(plain, expected);
+        }
     }
 
     #[test]
@@ -843,6 +997,30 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(Usage::from(nulls).output_tokens, 3);
+    }
+
+    #[test]
+    fn reasoning_tokens_stay_in_the_output_and_are_noted() {
+        let usage: ApiUsage = serde_json::from_value(json!({
+            "prompt_tokens": 1000, "completion_tokens": 900,
+            "completion_tokens_details": {"reasoning_tokens": 832, "audio_tokens": 0,
+                "accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0}
+        }))
+        .unwrap();
+        let usage = Usage::from(usage);
+        assert_eq!((usage.output_tokens, usage.reasoning_tokens), (900, 832));
+        assert_eq!(usage.context_tokens(), 1068);
+        // More reasoning than output is not believed.
+        let odd: ApiUsage = serde_json::from_value(json!({
+            "completion_tokens": 5, "completion_tokens_details": {"reasoning_tokens": 50}
+        }))
+        .unwrap();
+        assert_eq!(Usage::from(odd).reasoning_tokens, 5);
+        let null: ApiUsage = serde_json::from_value(json!({
+            "completion_tokens": 5, "completion_tokens_details": null
+        }))
+        .unwrap();
+        assert_eq!(Usage::from(null).reasoning_tokens, 0);
     }
 
     #[test]

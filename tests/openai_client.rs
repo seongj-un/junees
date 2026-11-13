@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use junees::agent::{Agent, AgentOptions};
 use junees::message::{ContentBlock, Message, StopReason};
-use junees::provider::openai::{OpenAiProvider, Settings};
+use junees::provider::openai::{LimitField, OpenAiProvider, Settings};
 use junees::provider::{
     CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent,
 };
@@ -19,10 +19,7 @@ mod common;
 use common::{Served, body_of, fake_api, fake_stream_api};
 
 fn settings(url: &str, key: Option<&str>) -> Settings {
-    Settings {
-        base_url: format!("{url}/v1"),
-        api_key: key.map(str::to_string),
-    }
+    Settings::new(format!("{url}/v1"), key.map(str::to_string))
 }
 
 fn provider(url: &str) -> OpenAiProvider {
@@ -198,6 +195,45 @@ async fn errors_map_to_the_provider_errors_and_only_some_are_retried() {
 }
 
 #[tokio::test]
+async fn a_summary_refused_for_its_reasoning_room_goes_again_without_it() {
+    // vLLM's answer when input + limit exceed the model's window.
+    let too_long = json!({"error": {"message": "This model's maximum context length is \
+        131072 tokens. However, you requested 133196 tokens (104100 in the messages, \
+        29096 in the completion).", "type": "BadRequestError", "param": null, "code": 400}});
+    let (url, server) = fake_api(vec![(400, too_long.clone()), (200, answer("summary"))]).await;
+    let mut reasoning = settings(&url, Some("sk-fake"));
+    reasoning.reasoning_effort = Some("low".into());
+    let provider = OpenAiProvider::new(reasoning.clone(), "gpt-oss".into()).unwrap();
+    let messages = [Message::user_text("the conversation so far")];
+    let summary = CompletionRequest {
+        max_tokens: 4096,
+        thinking: false,
+        cache: false,
+        web_search: false,
+        ..request(&messages)
+    };
+    let response = provider.complete(summary).await.unwrap();
+    assert_eq!(response.content, vec![ContentBlock::text("summary")]);
+    let requests = served(server).await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(body_of(&requests[0])["max_tokens"], 4096 + 25_000);
+    let second = body_of(&requests[1]);
+    assert_eq!(second["max_tokens"], 4096, "{second}");
+    assert_eq!(second["reasoning_effort"], "low", "{second}");
+
+    // A call without the room is refused once and not sent again.
+    let (url, server) = fake_api(vec![(400, too_long)]).await;
+    reasoning.base_url = format!("{url}/v1");
+    let provider = OpenAiProvider::new(reasoning, "gpt-oss".into()).unwrap();
+    let err = provider.complete(request(&messages)).await.unwrap_err();
+    assert!(
+        matches!(err, ProviderError::Api { status: 400, .. }),
+        "{err}"
+    );
+    assert_eq!(served(server).await.len(), 1);
+}
+
+#[tokio::test]
 async fn an_error_in_a_200_body_maps_to_its_status_and_is_retried_when_it_may_help() {
     let messages = [Message::user_text("hi")];
     // OpenRouter: an error after the model started comes with status 200.
@@ -302,6 +338,29 @@ fn streaming(url: &str) -> OpenAiProvider {
     provider(url).with_streaming(true)
 }
 
+#[tokio::test]
+async fn a_reasoning_model_gets_its_settings_and_its_reasoning_is_not_conversation() {
+    let mut reasoned = answer("42");
+    reasoned["usage"] = json!({"prompt_tokens": 5000, "completion_tokens": 700,
+        "completion_tokens_details": {"reasoning_tokens": 640}});
+    let (url, server) = fake_api(vec![(200, reasoned)]).await;
+    let mut settings = settings(&url, Some("sk-fake"));
+    // A proxy on loopback in front of a reasoning model.
+    settings.limit_field = LimitField::MaxCompletionTokens;
+    settings.reasoning_effort = Some("low".into());
+    let provider = OpenAiProvider::new(settings, "o-model".into()).unwrap();
+    let mut agent = agent(provider);
+    assert_eq!(agent.run("think", |_| {}).await.unwrap(), "42");
+    // The reasoning is billed as output but never sent back.
+    assert_eq!(agent.context_tokens(), 5060);
+
+    let requests = served(server).await;
+    let body = body_of(&requests[0]);
+    assert_eq!(body["max_completion_tokens"], 64, "{body}");
+    assert!(body.get("max_tokens").is_none(), "{body}");
+    assert_eq!(body["reasoning_effort"], "low", "{body}");
+}
+
 async fn stream_call(
     provider: &OpenAiProvider,
     messages: &[Message],
@@ -394,6 +453,34 @@ async fn a_stream_cut_off_is_retried_and_a_whole_answer_is_taken() {
         "{response:?}"
     );
     assert_eq!(served(server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_quota_error_inside_a_stream_is_not_retried() {
+    let messages = [Message::user_text("hi")];
+    for error in [
+        json!({"message": "You exceeded your current quota", "type": "insufficient_quota",
+               "param": null, "code": "insufficient_quota"}),
+        // OpenRouter's shape: the status as a number.
+        json!({"code": 429, "type": "insufficient_quota", "message": "Insufficient credits"}),
+    ] {
+        let body = sse(&[delta(json!({"content": "Hal"})), json!({"error": error})]);
+        // A second answer the client must not ask for.
+        let (url, server) = fake_stream_api(vec![
+            Served::Stream { body, chunk: 64 },
+            Served::Json(200, answer("Hello")),
+        ])
+        .await;
+        let (response, events) = stream_call(&streaming(&url), &messages).await;
+        assert!(
+            matches!(&response, Err(ProviderError::Api { status: 429, .. })),
+            "{error}: {response:?}"
+        );
+        assert!(!events.contains(&StreamEvent::Retrying), "{events:?}");
+        // The fake still waits for the second request: none came.
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 /// A PNG header Junees takes for a 2x2 picture.
@@ -509,6 +596,67 @@ async fn the_agent_runs_parallel_tool_calls_and_sends_results_and_images_back() 
         ]})
     );
     assert_eq!(messages.len(), 6, "{second}");
+}
+
+/// Runs `junees -p hello` with `provider = openai`, `config` as its
+/// config.toml and `env` set, and returns the request the server got.
+async fn binary_request(config: &str, env: &[(&str, &str)]) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let work = home.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    let (url, server) = fake_api(vec![(200, answer("hi"))]).await;
+    let junees_home = home.path().join("junees");
+    std::fs::create_dir(&junees_home).unwrap();
+    let file = junees_home.join("config.toml");
+    let config = config.replace("{url}", &format!("{url}/v1"));
+    std::fs::write(
+        &file,
+        format!("provider = \"openai\"\nmodel = \"m\"\n{config}"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut command = common::junees_binary(&work, home.path());
+    command
+        .args(["-p", "hello"])
+        .env("JUNEES_HOME", &junees_home)
+        .env("JUNEES_STREAM", "false")
+        .stdin(Stdio::null());
+    for (name, value) in env {
+        command.env(name, value.replace("{url}", &format!("{url}/v1")));
+    }
+    let out = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .expect("junees did not exit")
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    served(server).await.remove(0).to_lowercase()
+}
+
+#[tokio::test]
+async fn the_key_goes_only_to_the_address_set_in_the_same_place() {
+    // A key exported for other tools stays away from the file's server,
+    // which gets the file's key.
+    let head = binary_request(
+        "openai_base_url = \"{url}\"\nopenai_api_key = \"sk-fake-file\"\n",
+        &[("OPENAI_API_KEY", "sk-fake-env")],
+    )
+    .await;
+    assert!(
+        head.contains("authorization: bearer sk-fake-file"),
+        "{head}"
+    );
+    assert!(!head.contains("sk-fake-env"), "{head}");
+
+    // The file's key stays away from an exported address (a server on
+    // loopback needs none, so it is asked without one).
+    let head = binary_request(
+        "openai_api_key = \"sk-fake-file\"\n",
+        &[("OPENAI_BASE_URL", "{url}")],
+    )
+    .await;
+    assert!(!head.contains("authorization:"), "{head}");
 }
 
 #[tokio::test]

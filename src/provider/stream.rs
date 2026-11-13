@@ -562,6 +562,7 @@ data: {"type":"message_stop"}
                 output_tokens: 70,
                 cache_read_input_tokens: 900,
                 cache_creation_input_tokens: 0,
+                reasoning_tokens: 0,
                 server_tool_use: ServerToolUsage {
                     web_search_requests: 1
                 },
