@@ -84,11 +84,30 @@ export function describeActionError(err) {
       };
     }
     if (err.kind === "http") {
-      return { text: `서버가 요청을 처리하지 못했습니다 (HTTP ${err.status}).`, detail: err.message || null, outcome: "stay", retry: true };
+      // The same request gets the same 4xx; only a server fault may pass.
+      return {
+        text: `서버가 요청을 처리하지 못했습니다 (HTTP ${err.status}).`,
+        detail: err.message || null,
+        outcome: "stay",
+        retry: err.status >= 500,
+      };
+    }
+    if (err.kind === "timeout" || err.kind === "network" || err.kind === "parse") {
+      // The request may have reached the server and been applied anyway
+      // (a write waits for the jobs file lock), so do not call it a failure.
+      return {
+        text: "서버의 답을 받지 못해, 바뀌었는지 확인하지 못했습니다. 창을 닫으면 목록을 새로 불러와 지금 상태를 보여 줍니다.",
+        detail: null,
+        outcome: "reload",
+        retry: false,
+      };
     }
   }
-  return { text: describeError(err).replace("불러오지 못했습니다", "바꾸지 못했습니다"), detail: null, outcome: "stay", retry: true };
+  return { text: describeError(err).replace("불러오지 못했습니다", "바꾸지 못했습니다"), detail: null, outcome: "stay", retry: false };
 }
+
+/** Writes may wait for the jobs file lock, so they get longer than reads. */
+export const WRITE_TIMEOUT_MS = 30000;
 
 let dialogCount = 0;
 
@@ -149,6 +168,13 @@ export function runAction({ target, item, action, opener }) {
       else settle(after === "done" ? { outcome: "done", item: changed } : { outcome: after });
     });
     cancel.addEventListener("click", () => dialog.close());
+    // Leaving the screen (Back) closes an unanswered dialog, so it never
+    // acts on a list that is no longer shown. A sent request still settles.
+    const onLeave = () => {
+      if (!busy && dialog.open) dialog.close();
+    };
+    window.addEventListener("hashchange", onLeave);
+    dialog.addEventListener("close", () => window.removeEventListener("hashchange", onLeave), { once: true });
 
     confirm.addEventListener("click", async () => {
       busy = true;
@@ -158,7 +184,7 @@ export function runAction({ target, item, action, opener }) {
       confirm.textContent = words.busy;
       error.hidden = true;
       try {
-        changed = await postJson(`${t.path(item)}/${action}`);
+        changed = await postJson(`${t.path(item)}/${action}`, { timeoutMs: WRITE_TIMEOUT_MS });
         after = "done";
         busy = false;
         if (closedWhileBusy) settle({ outcome: "done", item: changed });
