@@ -8,6 +8,7 @@ pub mod openai;
 mod stream;
 
 pub use error::ProviderError;
+pub use http::{AddressNames, check_base_url};
 
 use async_trait::async_trait;
 use serde::Serialize;

@@ -83,7 +83,7 @@ impl Settings {
     /// and the whole conversation go there.
     pub fn read(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let base_url = get(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        check_base_url(&base_url)?;
+        super::check_base_url(&base_url, &NAMES)?;
         let limit_field = match get(MAX_TOKENS_FIELD_ENV).as_deref() {
             None | Some("auto") => LimitField::Auto,
             Some("max_tokens") => LimitField::MaxTokens,
@@ -180,39 +180,13 @@ impl Settings {
     }
 }
 
-/// Refuses an address that is not https, or http on loopback.
-fn check_base_url(raw: &str) -> Result<()> {
-    let url = reqwest::Url::parse(raw.trim()).with_context(|| {
-        // A URL with a user name or password in it is not shown.
-        let shown = if raw.contains('@') {
-            "(not shown)"
-        } else {
-            raw
-        };
-        format!("{BASE_URL_ENV} (`openai_base_url`) is not a URL: `{shown}`")
-    })?;
-    // The address shows up in errors and in `junees doctor`, and a
-    // password in it would go along: the key goes in `openai_api_key`.
-    if !url.username().is_empty() || url.password().is_some() {
-        bail!(
-            "{BASE_URL_ENV} (`openai_base_url`) must not hold a user name or password: put \
-             the key in openai_api_key ({API_KEY_ENV})"
-        );
-    }
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" if is_loopback(&url) => Ok(()),
-        "http" => bail!(
-            "{BASE_URL_ENV} (`openai_base_url`) must use https unless the server is on this \
-             machine (localhost, 127.0.0.1 or ::1): the key and the conversation would cross \
-             the network in plain text"
-        ),
-        scheme => bail!(
-            "{BASE_URL_ENV} (`openai_base_url`) must be an https:// (or local http://) URL, \
-             not {scheme}:"
-        ),
-    }
-}
+/// The names of the address and the key, for [`super::check_base_url`].
+const NAMES: super::AddressNames = super::AddressNames {
+    env: BASE_URL_ENV,
+    setting: "openai_base_url",
+    key_env: API_KEY_ENV,
+    key_setting: "openai_api_key",
+};
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
