@@ -143,7 +143,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [브라우저](docs/browser.md): 모델의 `browser` 도구로 헤드리스 Chromium을 열고 읽고 클릭하고 입력한다(기본 꺼짐, http/https만, 사설 주소와 위험한 입력은 설정과 승인으로만).
 - [플러그인](docs/plugins.md): 명령 도구, 훅, 프롬프트 조각을 폴더 하나로 더한다.
 - [컨텍스트 관리](docs/context.md): 프롬프트 캐싱, 오래된 도구 결과 비우기, 압축.
-- [기본 도구](docs/tools.md): `bash`, `read_file`, `write_file`, `edit_file`.
+- [기본 도구](docs/tools.md): `bash`, `read_file`, `write_file`, `edit_file`, 그리고 bash 없이 코드를 찾는 [`grep`, `glob`, `list_dir`](docs/tools.md#코드-탐색-grep-glob-list_dir)(읽기 규칙을 파일마다 적용, `.gitignore` 존중).
 - [파일 체크포인트](docs/checkpoints.md): `write_file`과 `edit_file`이 바꾼 파일을 턴마다 기록해 `/undo`, `junees rewind`, 대시보드로 되돌린다(bash가 바꾼 파일은 기록하지 않음).
 - [명령 정책](docs/safety.md#명령-정책): 치명적인 명령과 비밀 파일을 다루는 명령을 실행 전에 막는다.
 - [실행 격리](docs/safety.md#실행-격리-landlock): `bash` 명령을 Linux Landlock으로 묶어 작업 폴더 밖 쓰기, 설정과 비밀 파일 읽기, (설정하면) TCP를 커널이 막는다.
@@ -195,6 +195,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 18. MCP 서버: `junees mcp serve`(stdio)로 다른 에이전트(Claude Desktop, Claude Code, Hermes, Cursor)가 Junees에 일을 맡기기, 웹훅과 같은 무인 실행 규칙 ([docs/mcp.md](docs/mcp.md#junees를-mcp-서버로)) (완료)
 19. 대시보드 대화: `junees dashboard --chat`으로 페이지에서 Junees와 대화하고, 승인 질문을 버튼으로 답하기(이벤트 스트림, 터미널과 같은 신뢰 수준, [docs/dashboard.md](docs/dashboard.md#대화---chat)) (완료)
 20. 파일 체크포인트: `write_file`, `edit_file`이 바꾼 파일을 턴 단위로 기록하고 `/undo`, `junees rewind`, 대시보드 API로 되돌리기 ([docs/checkpoints.md](docs/checkpoints.md)) (완료)
+21. 코드 탐색 도구: Junees 안에서 도는 읽기 전용 `grep`, `glob`, `list_dir`(ripgrep의 무시 규칙, 만나는 파일마다 읽기 규칙, 상한과 시간 제한) ([docs/tools.md](docs/tools.md#코드-탐색-grep-glob-list_dir))
 
 ## 개발
 
