@@ -214,6 +214,40 @@ async fn ignore_files_hidden_files_and_build_folders_are_left_out() {
 }
 
 #[tokio::test]
+async fn an_ignore_file_above_a_repository_does_not_hide_its_files() {
+    // A home folder kept as a dotfiles repository ignores everything; a
+    // project below it is a repository of its own.
+    let tree = Tree::new();
+    fs::write(tree.root.join(".gitignore"), "*.md\nnotes_*\n").unwrap();
+    fs::create_dir(tree.work.join(".git")).unwrap();
+    let readme = tree.file("README.md", "hit\n");
+    let notes = tree.file("notes_today.txt", "hit\n");
+    tree.file(".gitignore", "build/\n");
+    tree.file("build/out.txt", "hit\n");
+    let found = ok(grep(open(), json!({"pattern": "hit", "path": tree.at()})).await);
+    let mut lines: Vec<&str> = found.lines().collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        [readme.display().to_string(), notes.display().to_string()]
+    );
+    let globbed = ok(Glob::new(open())
+        .run(json!({"pattern": "*", "path": tree.at()}))
+        .await);
+    assert_eq!(globbed.lines().count(), 2, "{globbed}");
+    let listed = ok(ListDir::new(open()).run(json!({"path": tree.at()})).await);
+    assert!(
+        listed.contains("README.md") && listed.contains("notes_today.txt"),
+        "{listed}"
+    );
+    assert!(!listed.contains("build"), "{listed}");
+    // Outside a repository the same file above does hide them.
+    fs::remove_dir(tree.work.join(".git")).unwrap();
+    let found = ok(grep(open(), json!({"pattern": "hit", "path": tree.at()})).await);
+    assert!(found.starts_with("No matches"), "{found}");
+}
+
+#[tokio::test]
 async fn binary_and_large_files_are_skipped_and_counted() {
     let tree = Tree::new();
     tree.file("bin.dat", "hit\0hit\n");

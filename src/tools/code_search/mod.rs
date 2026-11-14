@@ -96,7 +96,12 @@ impl Search {
         builder
             .hidden(!walk.hidden)
             .follow_links(false)
-            .require_git(false)
+            // In a repository, as ripgrep and git: `.gitignore` files hold
+            // from its root down, and one in a folder above it (a home
+            // folder kept as a dotfiles repository, `*` in `~/.gitignore`)
+            // does not hide the project's files. Outside one, they hold
+            // anyway.
+            .require_git(in_repository(&start.root))
             .max_depth(walk.depth)
             .sort_by_file_name(|a, b| a.cmp(b));
         let access = self.access.clone();
@@ -130,6 +135,12 @@ impl Search {
         }
         stop.ended().unwrap_or(Ended::Done)
     }
+}
+
+/// Whether `dir` is in a git repository: it or a folder above it has
+/// `.git` (a folder, or the file of a worktree).
+fn in_repository(dir: &Path) -> bool {
+    dir.ancestors().any(|folder| folder.join(".git").exists())
 }
 
 /// Where a search starts: the resolved path, and whether it is a folder.
@@ -184,6 +195,13 @@ impl Stop {
             deadline: Instant::now() + limit,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the call was dropped. Showing what a walk found checks only
+    /// this, not the deadline: a walk that ran out of time still shows its
+    /// results (within the output caps).
+    fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
     }
 
     fn ended(&self) -> Option<Ended> {
