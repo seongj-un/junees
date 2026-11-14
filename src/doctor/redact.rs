@@ -91,6 +91,17 @@ impl Hidden {
 
     /// Hides the value of every secret variable, from the settings (the
     /// environment or config.toml) and the environment.
+    /// The secret variables this process has (the search tools, which
+    /// have no settings at hand; the settings file itself is closed to
+    /// them).
+    pub(super) fn add_env(&mut self) {
+        for name in secret_vars() {
+            if let Ok(value) = std::env::var(name) {
+                self.add(&value);
+            }
+        }
+    }
+
     pub(super) fn add_settings(&mut self, settings: &Settings) {
         for name in secret_vars() {
             for value in [settings.get(name), settings.env(name)]
