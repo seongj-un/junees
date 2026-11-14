@@ -54,7 +54,7 @@ node --test web/dashboard/dev/test/
 ## 파일 되돌리기 (20단계)
 
 - `--chat`의 대본에서 메시지에 `만들어`나 `고쳐`가 있으면 메시지에 적힌 파일(`a.txt`, `b.md` 등, 없으면 `notes.md`)을 `write_file`이나 `edit_file`로 씁니다. 파일은 메모리에만 있고(`/home/me/work/junees` 아래), 그 턴의 `turn_end`에 `checkpoint` 번호가 붙습니다.
-- `GET /api/chat/<id>/checkpoints`와 `POST /api/chat/<id>/undo`는 실제 서버(#112)와 같은 모양으로 답합니다. 번호는 파일을 바꾼 턴만 세고, `restorable`은 그 기록부터 되돌릴 때 기준이며, 되돌리기도 기록으로 남고(목록의 `undid`, 응답의 `checkpoint`, #118), 다음 메시지 앞에 `[되돌림]` 줄이 붙습니다. 턴이 돌고 있으면 409 `turn_running`입니다.
+- `GET /api/chat/<id>/checkpoints`와 `POST /api/chat/<id>/undo`는 실제 서버(#112)와 같은 모양으로 답합니다. 번호는 파일을 바꾼 턴만 세고, `restorable`은 그 기록부터 되돌릴 때 기준이며, 되돌리기도 기록으로 남고(목록의 `undid`, 응답의 `checkpoint`, #118), 다음 메시지 앞에 `[되돌림]` 줄이 `"notice": true` 블록으로 따로 붙습니다(#124). 턴이 돌고 있으면 409 `turn_running`입니다.
 - `GET /__dev/edit?path=a.txt`는 bash처럼 밖에서 파일을 고칩니다(기록 없음). 건너뜀과 부분 되돌림을 볼 때 씁니다.
 - `GET /__dev/undo-late/35`는 되돌리기를 한 뒤 35초 늦게 답합니다. 화면은 30초에서 기다림을 끝내므로, 답을 받지 못한 되돌리기를 볼 때 씁니다. `/__dev/undo-late/0`으로 되돌립니다.
 - `GET /__dev/undo-slow/35`는 되돌리기 자체가 35초 걸리게 합니다(그동안 새 턴은 409). 화면이 30초에 기다림을 끝낸 뒤에야 되돌리기가 끝나므로, 화면이 목록을 몇 번 더 받아 확인하는지 볼 때 씁니다. 60초 이상이면 화면은 "확인하지 못했습니다"와 "다시 확인" 버튼을 보여 줍니다.

@@ -1,6 +1,6 @@
 // 세션 상세: one session's conversation, 100 messages at a time.
 
-import { splitUndoNotes } from "./checkpoints.js";
+import { noticeLines } from "./checkpoints.js";
 import { code, el, notice, pathCode, timeEl } from "./dom.js";
 import { formatDateTime, formatInt, parseTime } from "./format.js";
 import { chatHash } from "./routes.js";
@@ -94,23 +94,24 @@ function blockView(block, messageIndex, n) {
   // A stable id keeps a folded block open across a refresh.
   const id = `blk-${messageIndex}-${n}`;
   switch (block.type) {
-    case "text": {
+    case "text":
       if (isHiddenBlock(block.text)) return el("p", { class: "msg-note" }, HIDDEN_NOTE);
-      // After an undo the server puts "[되돌림] ..." lines before the next
-      // message; the person did not write them.
-      const { notes, rest } = splitUndoNotes(block.text);
-      return [
-        notes.length
-          ? el("div", { class: "undo-note" }, el("p", { class: "undo-note-head" }, "되돌린 파일을 Junees에게 알린 내용"), notes.map((line) => el("p", null, line)))
-          : null,
-        el(
+      // What Junees put before the message after an undo, marked by the
+      // server. Anything else is the person's, "[되돌림] " at its start too.
+      if (block.notice === true) {
+        return el(
           "div",
-          { class: "msg-text" },
-          rest,
-          block.truncated ? el("p", { class: "msg-cut" }, cut(block), " 긴 글이라 앞부분만 보여 줍니다.") : null,
-        ),
-      ];
-    }
+          { class: "undo-note" },
+          el("p", { class: "undo-note-head" }, "되돌린 파일을 Junees에게 알린 내용"),
+          noticeLines(block.text).map((line) => el("p", null, line)),
+        );
+      }
+      return el(
+        "div",
+        { class: "msg-text" },
+        block.text ?? "",
+        block.truncated ? el("p", { class: "msg-cut" }, cut(block), " 긴 글이라 앞부분만 보여 줍니다.") : null,
+      );
     case "tool_use":
       return el(
         "details",

@@ -190,16 +190,16 @@ export function describeUndoError(err) {
 }
 
 /**
- * The lines `[되돌림] ...` the server puts before the next message after an
- * undo, so the model knows the files changed, and the message itself.
+ * The lines of a notice block (`"notice": true`: what Junees put before
+ * the next message after an undo, so the model knows the files changed),
+ * without their `[되돌림] ` prefix. Only the server's mark makes a block a
+ * notice; text a person wrote is never read for the prefix.
  */
-export function splitUndoNotes(text) {
-  const lines = String(text ?? "").split("\n");
-  const notes = [];
-  while (lines.length && lines[0].startsWith("[되돌림] ")) notes.push(lines.shift().slice("[되돌림] ".length));
-  if (!notes.length) return { notes, rest: String(text ?? "") };
-  while (lines.length && lines[0] === "") lines.shift();
-  return { notes, rest: lines.join("\n") };
+export function noticeLines(text) {
+  return String(text ?? "")
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => (line.startsWith("[되돌림] ") ? line.slice("[되돌림] ".length) : line));
 }
 
 /**
