@@ -120,6 +120,7 @@ junees dashboard --chat --dir ~/work/x # 페이지에서 ~/work/x의 Junees와 �
 {"id":"20261113-010203-abcd","title":"Fix the login bug","cwd":"/home/u/work/x","updated_at":"2026-11-13T01:05:00Z","total":42,"offset":0,
  "messages":[{"index":0,"role":"user","at":"2026-11-13T01:02:03Z","blocks":[
     {"type":"text","text":"...","truncated":true},
+    {"type":"text","text":"[되돌림] 변경 기록 2의 파일 변경을 되돌렸습니다: ...","notice":true},
     {"type":"tool_use","name":"bash","input_preview":"ls -la"},
     {"type":"tool_result","is_error":false,"text_preview":"..."},
     {"type":"image","media_type":"image/png"},
@@ -132,6 +133,7 @@ junees dashboard --chat --dir ~/work/x # 페이지에서 ~/work/x의 Junees와 �
 - `input_preview`는 `bash`처럼 `command`가 있으면 그 명령, 문자열 필드 하나뿐이면 그 값, 그 밖에는 입력 JSON입니다.
 - `tool_result`에 이미지(브라우저 스크린샷 등)가 붙어 있으면 `"images":["image/png"]`처럼 형식만 보냅니다. 없으면 이 필드가 없습니다.
 - `thinking`은 내용 없이 종류만 보냅니다. 서버 도구 호출과 결과(웹 검색 등)는 `"type":"other"`와 그 종류(`kind`)만 보냅니다.
+- `"notice": true`는 사람이 쓴 글이 아니라 Junees가 입력 앞에 붙인 안내라는 표시입니다(되돌리기의 `[되돌림]` 줄, [파일 체크포인트](checkpoints.md)). 그 user 메시지의 `text` 블록으로 사람이 쓴 입력보다 앞에 오고, 여러 줄이면 줄바꿈으로 이어집니다. 표시가 없는 블록은 사람이 쓴 글입니다. 사람이 `[되돌림] `으로 시작하는 글을 써도 표시가 붙지 않습니다. 기록 형식 9 전의 세션(안내 줄이 입력 글 앞부분에 들어 있음)에는 표시가 없습니다. 제목(`title`)은 표시가 없는 글에서 정합니다. MCP의 `junees_session`도 같은 모양입니다.
 
 ### `POST /api/token`
 
