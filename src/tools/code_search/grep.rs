@@ -383,7 +383,7 @@ fn content(
     let mut matches_out = 0;
     let mut full = false;
     for file in found {
-        if full || stop.ended().is_some() {
+        if full || stop.cancelled() {
             break;
         }
         // Read again: only the files shown are kept in full.
@@ -506,5 +506,39 @@ impl Tool for Grep {
             Ok(Ok(out)) => ToolOutput::ok(out),
             Ok(Err(err)) | Err(err) => ToolOutput::error(err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::tools::file_access::FileAccess;
+
+    #[test]
+    fn lines_found_before_the_time_limit_are_still_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one\nhit\n").unwrap();
+        let rules = Search::with_access(FileAccess::default(), Duration::ZERO);
+        let query = Query::parse(&json!({"pattern": "hit", "output": "content"})).unwrap();
+        let found = vec![Found {
+            path: path.clone(),
+            modified: SystemTime::now(),
+            count: 1,
+        }];
+        // The deadline has passed: the walk stopped, its results stand.
+        let stop = Stop::new(Duration::ZERO);
+        assert!(stop.ended().is_some());
+        let out = content(&rules, &found, &query, &stop, &mut Skipped::default());
+        assert_eq!(out, format!("{}:2:hit\n", path.display()));
+        // A dropped call shows nothing more.
+        drop(stop.guard());
+        let out = content(&rules, &found, &query, &stop, &mut Skipped::default());
+        assert!(
+            out.starts_with("[1 more matching line(s) not shown"),
+            "{out}"
+        );
     }
 }
