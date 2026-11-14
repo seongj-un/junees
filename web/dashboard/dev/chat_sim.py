@@ -138,7 +138,9 @@ class Chats:
             detail["total"] = len(detail["messages"])
             detail["updated_at"] = now
             if not detail.get("title") and role == "user":
-                detail["title"] = blocks[0]["text"][:60]
+                # The title comes from what the person wrote, never a notice.
+                own = [b["text"] for b in blocks if not b.get("notice")]
+                detail["title"] = (own[0] if own else "")[:60]
 
     def send(self, chat, text):
         """(status, body) for POST /api/chat/<id>/messages."""
@@ -250,9 +252,11 @@ class Chats:
 
     def run_turn(self, chat, turn, text):
         chat.emit({"type": "turn_start", "turn": turn})
-        # After an undo the next message carries its [되돌림] lines, as the session file has it.
+        # After an undo the next message carries its [되돌림] lines in a block
+        # of their own marked notice, as the session API sends them (#124).
         notes = self.cp.take_notes(chat.id)
-        self.record(chat, "user", [{"type": "text", "text": "\n".join(notes) + "\n\n" + text if notes else text}])
+        blocks = [{"type": "text", "text": "\n".join(notes), "notice": True}] if notes else []
+        self.record(chat, "user", blocks + [{"type": "text", "text": text}])
         checkpoint = None
         chat.reply = []
         time.sleep(0.3)

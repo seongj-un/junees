@@ -6,10 +6,10 @@ import {
   changeLabel,
   describeUndoError,
   linkHistory,
+  noticeLines,
   parseCheckpoints,
   partialText,
   relPath,
-  splitUndoNotes,
   undoneBy,
   undoOutcome,
   undoPlan,
@@ -151,14 +151,14 @@ test("undo failures say what happened and what comes next", () => {
   assert.match(lost.text, /이미 되돌렸을 수 있습니다/);
 });
 
-test("the undo lines before a message are taken apart from it", () => {
-  const text = "[되돌림] 턴 1의 파일 변경을 되돌렸습니다: /w/a.txt. bash로 바꾼 파일은 기록되지 않아 되돌리지 않았습니다.\n[되돌림] 둘째\n\n이어서 해 줘";
-  assert.deepEqual(splitUndoNotes(text), {
-    notes: ["턴 1의 파일 변경을 되돌렸습니다: /w/a.txt. bash로 바꾼 파일은 기록되지 않아 되돌리지 않았습니다.", "둘째"],
-    rest: "이어서 해 줘",
-  });
-  assert.deepEqual(splitUndoNotes("그냥 [되돌림] 글"), { notes: [], rest: "그냥 [되돌림] 글" });
-  assert.deepEqual(splitUndoNotes(undefined), { notes: [], rest: "" });
+test("a notice block's lines are shown without their [되돌림] prefix", () => {
+  const text = "[되돌림] 변경 기록 1의 파일 변경을 되돌렸습니다: /w/a.txt. bash로 바꾼 파일은 기록되지 않아 되돌리지 않았습니다.\n[되돌림] 둘째\n";
+  assert.deepEqual(noticeLines(text), [
+    "변경 기록 1의 파일 변경을 되돌렸습니다: /w/a.txt. bash로 바꾼 파일은 기록되지 않아 되돌리지 않았습니다.",
+    "둘째",
+  ]);
+  assert.deepEqual(noticeLines("안내 한 줄"), ["안내 한 줄"]);
+  assert.deepEqual(noticeLines(undefined), []);
 });
 
 test("an undo marks the checkpoints it put back, until it is undone itself", () => {
