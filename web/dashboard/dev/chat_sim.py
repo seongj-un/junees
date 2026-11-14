@@ -174,6 +174,9 @@ class Chats:
                 return 409, {"error": "turn_running", "message": "a turn of this chat is running; wait for it or cancel it"}
             self.turn_running = True
         try:
+            # GET /__dev/undo-slow/<seconds>: an undo that takes that long, as with
+            # many big files; no turn starts meanwhile.
+            time.sleep(getattr(self, "undo_slow", 0))
             return self.cp.undo(chat.id, turn)
         finally:
             with self.lock:

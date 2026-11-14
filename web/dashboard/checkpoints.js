@@ -146,7 +146,8 @@ export function describeUndoError(err) {
     }
     if (err.status === 409) {
       return {
-        text: "답을 만드는 중인 대화가 있어 되돌리지 않았습니다. 바뀐 파일은 없습니다. 답이 끝난 뒤 다시 시도해 주세요.",
+        // A turn of any chat, or another undo still being done, holds it.
+        text: "답을 만드는 대화나 다른 되돌리기가 진행 중이라 되돌리지 않았습니다. 바뀐 파일은 없습니다. 끝난 뒤 다시 시도해 주세요.",
         detail: null,
         retry: false,
         after: "stay",
@@ -213,4 +214,30 @@ export function undoneBy(list) {
     for (const turn of item.undid) if (turn < item.turn && !by.has(turn)) by.set(turn, item.turn);
   }
   return by;
+}
+
+/**
+ * When to look at the list again after an undo got no answer, counted
+ * from the first look: the server may still be undoing (a timed-out
+ * request does not stop it), so one list without the undo proves nothing.
+ */
+export const UNKNOWN_RECHECKS_MS = [2000, 5000, 10000];
+
+/**
+ * What a fetched list says about an undo that got no answer
+ * (`pending = { newest, turns, since }`): `{ state: "done", made }` when a
+ * checkpoint made after it undid exactly `turns`; `{ state: "wait", next }`
+ * (ms until the next look) while the rechecks last; then `{ state: "none" }`.
+ */
+export function unknownVerdict(list, pending, now) {
+  const want = [...pending.turns].sort((a, b) => a - b).join(",");
+  const made = list.find((item) => item.turn > pending.newest && [...item.undid].sort((a, b) => a - b).join(",") === want);
+  if (made) return { state: "done", made: made.turn };
+  const elapsed = now - pending.since;
+  let at = 0;
+  for (const step of UNKNOWN_RECHECKS_MS) {
+    at += step;
+    if (at > elapsed) return { state: "wait", next: at - elapsed };
+  }
+  return { state: "none" };
 }

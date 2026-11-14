@@ -13,6 +13,8 @@ import {
   undoneBy,
   undoOutcome,
   undoPlan,
+  unknownVerdict,
+  UNKNOWN_RECHECKS_MS,
 } from "../../checkpoints.js";
 
 const LIST = parseCheckpoints([
@@ -168,4 +170,23 @@ test("an undo marks the checkpoints it put back, until it is undone itself", () 
   // Undoing the undo (4 undid 3) brings 1 and 2 back.
   assert.deepEqual([...undoneBy(list([[1], [2], [3, [2, 1]], [4, [3]]]))], [[3, 4]]);
   assert.equal(undoneBy(list([[1], [2]])).size, 0);
+});
+
+test("an unanswered undo is not called off on the first list without it", () => {
+  const before = parseCheckpoints([{ turn: 1, files: [] }, { turn: 2, files: [] }]);
+  const pending = { newest: 2, turns: [2, 1], since: 1000 };
+  assert.deepEqual(UNKNOWN_RECHECKS_MS, [2000, 5000, 10000]);
+  // Right after the timeout, then between the looks: wait for the remaining time.
+  assert.deepEqual(unknownVerdict(before, pending, 1000), { state: "wait", next: 2000 });
+  assert.deepEqual(unknownVerdict(before, pending, 3500), { state: "wait", next: 4500 });
+  assert.deepEqual(unknownVerdict(before, pending, 10000), { state: "wait", next: 8000 });
+  // After the last look (17 s): not confirmed.
+  assert.deepEqual(unknownVerdict(before, pending, 18000), { state: "none" });
+  // The undo's checkpoint, whenever it shows up, settles it.
+  const after = parseCheckpoints([...before.map((i) => ({ turn: i.turn, files: [] })), { turn: 3, files: [], undid: [1, 2] }]);
+  assert.deepEqual(unknownVerdict(after, pending, 9000), { state: "done", made: 3 });
+  assert.deepEqual(unknownVerdict(after, pending, 60000), { state: "done", made: 3 });
+  // Another undo (of other checkpoints) is not this one.
+  const other = parseCheckpoints([{ turn: 1, files: [] }, { turn: 2, files: [] }, { turn: 3, files: [], undid: [2] }]);
+  assert.equal(unknownVerdict(other, pending, 3000).state, "wait");
 });
