@@ -374,16 +374,11 @@ impl Agent {
             .and_then(|id| crate::checkpoints::store()?.session(id))
             .map(|session| session.take_notes())
             .unwrap_or_default();
-        let with_notes;
-        let sent = if notes.is_empty() {
-            input
-        } else {
-            with_notes = format!("{}\n\n{input}", notes.join("\n"));
-            with_notes.as_str()
-        };
-        let result =
-            crate::checkpoints::scope(turn.clone(), self.run_turn(sent, images, &mut on_event))
-                .await;
+        let result = crate::checkpoints::scope(
+            turn.clone(),
+            self.run_turn(notes, input, images, &mut on_event),
+        )
+        .await;
         self.last_checkpoint = turn.as_ref().and_then(|turn| turn.number());
         if let Some(turn) = turn {
             turn.finish();
@@ -397,13 +392,19 @@ impl Agent {
         result
     }
 
+    /// One turn: `notes` (Junees's own lines, [`Entry::Notes`]) and the
+    /// person's `input` go in as blocks of their own, notes first.
     async fn run_turn(
         &mut self,
+        notes: Vec<String>,
         input: &str,
         images: Vec<crate::images::Image>,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
         self.drop_open_server_calls(&mut on_event);
+        if !notes.is_empty() {
+            self.record(Entry::Notes { notes }, &mut on_event);
+        }
         let entry = self.transcript.user_input_entry(input, images);
         self.record(entry, &mut on_event);
         let specs = self.tools.specs();

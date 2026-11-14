@@ -70,10 +70,24 @@ pub(super) fn detail(
     let head = crate::session::read_meta(&path).ok_or_else(not_found)?;
     let conversation =
         crate::session::read_conversation(&path).map_err(|err| Failure::internal(&err))?;
+    // The title is what the person wrote first, not a note of Junees's.
     let first_line = conversation
         .first()
         .filter(|logged| logged.message.role == Role::User)
-        .map(|logged| logged.message.text())
+        .map(|logged| {
+            logged
+                .message
+                .content
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !logged.notices.contains(index))
+                .filter_map(|(_, block)| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
         .unwrap_or_default();
     let first_line = first_line
         .lines()
@@ -103,7 +117,16 @@ pub(super) fn detail(
                     .message
                     .content
                     .iter()
-                    .map(|block| block_json(settings, block))
+                    .enumerate()
+                    .map(|(index, block)| {
+                        let mut out = block_json(settings, block);
+                        // A note Junees put before the input (an undo's
+                        // `[되돌림]` line), not the person's words.
+                        if logged.notices.contains(&index) {
+                            out["notice"] = Value::Bool(true);
+                        }
+                        out
+                    })
                     .collect::<Vec<Value>>(),
             })
         })

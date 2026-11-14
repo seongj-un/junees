@@ -61,7 +61,7 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - `--resume`으로 다른 폴더에서 시작한 세션을 열면 `resumed <id> (N messages, started in <폴더>)`로 알려 준다(claude-code 세션은 `N Claude Code turns`). 기록 속 상대 경로는 그 폴더 기준이다.
 - 세션 파일은 그 세션을 쓰는 Junees가 `flock`으로 잠근다. 아직 실행 중인 세션을 다른 터미널에서 `-c`나 `--resume`으로 열면 "session <id> is in use by another Junees" 오류로 끝나고 파일은 건드리지 않는다. 프로세스가 죽으면 잠금은 커널이 풀어 준다.
 - 이어 갈 때 마지막 줄이 줄바꿈 없이 끝나고 읽히지 않으면(쓰는 도중 죽은 흔적) 그 줄만 버린다. 줄바꿈까지 있는 줄이 읽히지 않으면 위치와 상관없이 오류로 멈추고 파일을 고치지 않는다. 도구 실행 중에 끊겨서 결과가 없는 도구 호출은 `interrupted` 오류 결과로 채우고 그것도 기록한다.
-- 첫 줄(`meta`)에 기록 형식 버전 `format`(현재 8)이 있고, 각 줄에 기록 시각 `ts`(unix 초)가 붙는다. 이 버전보다 새 형식의 세션은 "written by a newer Junees" 오류로 열지 않는다. 형식 1(L1) 세션도 그대로 읽고 이어 쓴다.
+- 첫 줄(`meta`)에 기록 형식 버전 `format`(현재 9)이 있고, 각 줄에 기록 시각 `ts`(unix 초)가 붙는다. 이 버전보다 새 형식의 세션은 "written by a newer Junees" 오류로 열지 않는다. 형식 1(L1) 세션도 그대로 읽고 이어 쓴다.
 - 이어 쓸 때 첫 줄은 바꾸지 않으므로(덧붙이기만 함), 형식 1 세션을 이 버전으로 이어 쓴 뒤 L1 바이너리로 열면 "newer Junees"가 아니라 `line N is corrupt` 오류가 난다(파일은 그대로). 이 버전부터는 모르는 종류의 항목을 만나면 "continued by a newer Junees" 오류로 원인을 알려 준다.
 - 항목 종류: `meta`, `message`, `append_text`, `usage`, 그리고 형식 2에서 추가된 `clear_tool_results`, `compact`, `summary_usage`([컨텍스트 관리](context.md#컨텍스트-관리)).
 - 형식 3: 메시지 안의 thinking, redacted_thinking, 서버 도구 블록처럼 Junees가 직접 다루지 않는 블록을 API가 보낸 JSON 그대로 저장한다([확장 사고](#확장-사고)). 이전 버전은 이런 블록을 API가 거절하는 자리표시로 읽기 때문에 형식을 올렸고, 이전 바이너리는 형식 3 세션을 "newer Junees" 오류로 열지 않는다. 형식 1, 2 세션도 그대로 읽는다. 이런 세션을 이 버전으로 이어 쓰면 첫 새 줄 앞에 `{"type":"format","format":4}` 항목을 한 번 덧붙인다. 이전 바이너리는 이 모르는 항목에서 "continued by a newer Junees" 오류로 멈추므로, thinking 블록을 자리표시로 잘못 읽어 400을 받는 일이 없다. 기록을 바꾸는 일도 항목으로 덧붙이기만 하고 파일을 새로 쓰지 않으므로, 재생 결과가 실행 중 기록과 같다.
@@ -70,6 +70,7 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - 형식 6: 서브에이전트가 쓴 토큰을 세는 `subagent_usage` 항목([서브에이전트](memory-and-skills.md#서브에이전트-delegate)). `summary_usage`처럼 사용량에만 더하고 컨텍스트 크기에는 쓰지 않는다. 서브에이전트의 기록은 `sessions/<id>/sub-<n>.jsonl`에 따로 있다.
 - 형식 7: 이미지([이미지 입력](#이미지-입력)). `image` 블록과 이미지가 든 도구 결과(`content`가 목록)를 쓰고, 이미지는 세션 폴더의 파일을 가리킨다(`junees_file` 소스). 이미지가 든 입력을 실패한 턴 뒤 user 메시지에 붙이는 `append_content { content }` 항목도 생겼다. 형식 6 바이너리는 파일을 가리키는 소스를 API에 그대로 보내거나 목록인 `content`를 깨진 줄로 보므로 형식을 올렸다.
 - 형식 8: API가 거절한 이미지를 마지막 user 메시지에서 빼는 `clear_images { note }` 항목([이미지 입력](#이미지-입력)). 형식 7 바이너리는 이 항목을 깨진 줄로 보므로 형식을 올렸다.
+- 형식 9: Junees가 입력 앞에 붙이는 안내(되돌리기의 `[되돌림]` 줄)를 사람이 쓴 입력과 따로 남기는 `notes { notes }` 항목([파일 체크포인트](checkpoints.md)). 모델에게는 입력 앞의 별도 글 블록(`<junees_notice>`로 감쌈)으로 가고, 입력은 그 뒤 `append_text`/`append_content`로 붙는다. 형식 8 바이너리는 이 항목을 모르므로 형식을 올렸다. 형식 8까지의 세션은 안내 줄이 입력 글 앞에 붙은 그대로 읽는다.
 - 세션 파일에는 도구 출력이 그대로 들어가므로 파일은 `0600`, 새로 만드는 `$JUNEES_HOME`과 `sessions` 폴더는 `0700`으로 만든다.
 - `JUNEES_HOME`과 `HOME`이 둘 다 없으면(cron, 일부 서비스와 컨테이너) 기록 없이 실행하고 "session not saved" 한 줄로 알린다. 이때 `-c`와 `--resume`만 오류다.
 - 토큰 사용량도 기록되고, 이어 가면 그 세션의 누적값부터 다시 센다.
@@ -85,7 +86,7 @@ junees sessions search --all --limit 10 배포     # 모든 폴더, 10개까지
 junees sessions search --source discord 회의록   # 디스코드 채널 세션만
 ```
 
-대화 안에서는 `/search "빌드 실패" clippy`처럼 쓴다(옵션도 같다. 큰따옴표 안의 낱말은 `/search "run --all tests"`처럼 옵션 모양이어도 구절의 낱말로 읽는다). 결과는 번호, 세션 id, 마지막 기록 시각(UTC), 작업 폴더, 출처 표시(`[discord <채널>]`, `[cron <작업>]`), 맞는 곳의 한 줄 스니펫(`user:`, `assistant:`, `summary:`, `tool bash:`)이고, 끝에 `junees --resume <id>`로 이어 가라는 안내가 붙는다.
+대화 안에서는 `/search "빌드 실패" clippy`처럼 쓴다(옵션도 같다. 큰따옴표 안의 낱말은 `/search "run --all tests"`처럼 옵션 모양이어도 구절의 낱말로 읽는다). 결과는 번호, 세션 id, 마지막 기록 시각(UTC), 작업 폴더, 출처 표시(`[discord <채널>]`, `[cron <작업>]`), 맞는 곳의 한 줄 스니펫(`user:`, `assistant:`, `summary:`, `tool bash:`, Junees가 붙인 안내는 `notice:`)이고, 끝에 `junees --resume <id>`로 이어 가라는 안내가 붙는다.
 
 - 찾는 곳: `$JUNEES_HOME/sessions/*.jsonl`과 서브에이전트 기록(`sessions/<id>/*.jsonl`)의 사용자 입력, 모델 텍스트, 압축 요약, Claude Code 턴의 입력과 답, 도구 결과의 앞부분. 입력과 텍스트는 메시지마다 앞 64 KiB, 도구 결과는 앞 4 KiB만 본다(명령이 찍은 모든 줄이나 읽은 파일 전체가 아니라 무엇에 대한 결과인지). 비워진 도구 결과와 이전 `session_search`의 결과는 빼서, 검색이 자기 결과를 다시 찾지 않는다.
 - 맞추기: 공백으로 나눈 낱말이 모두 한 메시지(텍스트 블록이나 도구 결과 하나) 안에 있어야 한다. 대소문자는 무시하고 한글은 그대로 찾는다. `"빌드 실패"`처럼 큰따옴표로 묶으면 구절로 찾는다(공백과 줄바꿈 차이는 무시). 낱말은 16개, 질의는 500자까지.

@@ -34,8 +34,24 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// `append_content`; a format 6 Junees would send such sources to the API,
 /// or refuse a tool result whose content is a list as corrupt. Format 8
 /// added `clear_images`, which a format 7 Junees would refuse as a corrupt
-/// line.
-pub const FORMAT: u32 = 8;
+/// line. Format 9 added `notes`, the lines Junees itself puts before an
+/// input (an undo's `[되돌림]` line), kept apart from what the person wrote.
+pub const FORMAT: u32 = 9;
+
+/// How the model sees the lines of an [`Entry::Notes`]: a text block of
+/// their own, before the person's input, between these tags. What the
+/// person types goes in a block of its own and is never wrapped, so a line
+/// of theirs that starts like a note (`[되돌림] ...`) stays theirs.
+pub const NOTICE_OPEN: &str = "<junees_notice>";
+pub const NOTICE_CLOSE: &str = "</junees_notice>";
+
+/// The text block the model gets for `notes` ([`Entry::Notes`]).
+pub fn notice_block(notes: &[String]) -> ContentBlock {
+    ContentBlock::text(format!(
+        "{NOTICE_OPEN}\nJunees가 붙인 안내입니다. 사용자가 쓴 글이 아닙니다.\n{}\n{NOTICE_CLOSE}",
+        notes.join("\n")
+    ))
+}
 
 /// [`Meta::backend`] of a conversation Claude Code runs (the `claude-code`
 /// backend).
@@ -123,7 +139,7 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 13] = [
+const ENTRY_TYPES: [&str; 14] = [
     "meta",
     "message",
     "append_text",
@@ -137,6 +153,7 @@ const ENTRY_TYPES: [&str; 13] = [
     "claude_turn",
     "subagent_usage",
     "clear_images",
+    "notes",
 ];
 
 /// One line of a journal.
@@ -216,6 +233,15 @@ pub enum Entry {
     /// gets the note after its output.
     ClearImages {
         note: String,
+    },
+    /// Lines Junees itself put before the next input (an undo's
+    /// `[되돌림]` line, [`crate::checkpoints`]), one per item. They join the
+    /// trailing user message, or start one, as a text block of their own
+    /// ([`notice_block`]); the input follows in its own entry. Kept as an
+    /// entry, not as text in the input, so readers of the journal can tell
+    /// them from what the person wrote ([`Logged::notices`]).
+    Notes {
+        notes: Vec<String>,
     },
 }
 
@@ -339,6 +365,18 @@ impl Transcript {
                     _ => self.messages.push(Message {
                         role: Role::User,
                         content,
+                    }),
+                }
+            }
+            Entry::Notes { notes } => {
+                let block = notice_block(&notes);
+                self.unmeasured_tokens += estimate_tokens(std::slice::from_ref(&block));
+                self.reply_measured = false;
+                match self.messages.last_mut() {
+                    Some(last) if last.role == Role::User => last.content.push(block),
+                    _ => self.messages.push(Message {
+                        role: Role::User,
+                        content: vec![block],
                     }),
                 }
             }
@@ -1431,6 +1469,11 @@ fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<(PathBu
 pub struct Logged {
     pub message: Message,
     pub at: Option<u64>,
+    /// The indexes of the blocks of `message` that Junees put there itself
+    /// ([`Entry::Notes`]): text blocks holding the note lines, unwrapped.
+    /// Empty for journals from before format 9, whose notes are part of the
+    /// input's text.
+    pub notices: Vec<usize>,
 }
 
 /// The conversation the journal at `path` records, every message as it
@@ -1456,24 +1499,47 @@ pub fn read_conversation(path: &Path) -> Result<Vec<Logged>> {
         let Ok(LineIn { entry, ts }) = serde_json::from_str::<LineIn>(&line) else {
             continue;
         };
+        // Adds `content` to the trailing user message, or starts one; the
+        // index its first block got.
         let mut append = |content: Vec<ContentBlock>| match messages.last_mut() {
-            Some(last) if last.message.role == Role::User => last.message.content.extend(content),
-            _ => messages.push(Logged {
-                message: Message {
-                    role: Role::User,
-                    content,
-                },
-                at: ts,
-            }),
+            Some(last) if last.message.role == Role::User => {
+                let at = last.message.content.len();
+                last.message.content.extend(content);
+                (messages.len() - 1, at)
+            }
+            _ => {
+                messages.push(Logged {
+                    message: Message {
+                        role: Role::User,
+                        content,
+                    },
+                    at: ts,
+                    notices: Vec::new(),
+                });
+                (messages.len() - 1, 0)
+            }
         };
         match entry {
-            Entry::Message(message) => messages.push(Logged { message, at: ts }),
-            Entry::AppendText { text } => append(vec![ContentBlock::text(text)]),
-            Entry::AppendContent { content } => append(content),
+            Entry::Message(message) => messages.push(Logged {
+                message,
+                at: ts,
+                notices: Vec::new(),
+            }),
+            Entry::AppendText { text } => {
+                append(vec![ContentBlock::text(text)]);
+            }
+            Entry::AppendContent { content } => {
+                append(content);
+            }
+            Entry::Notes { notes } => {
+                let (message, block) = append(vec![ContentBlock::text(notes.join("\n"))]);
+                messages[message].notices.push(block);
+            }
             Entry::ClaudeTurn(turn) => {
                 messages.push(Logged {
                     message: Message::user_text(turn.input),
                     at: ts,
+                    notices: Vec::new(),
                 });
                 messages.push(Logged {
                     message: Message {
@@ -1481,6 +1547,7 @@ pub fn read_conversation(path: &Path) -> Result<Vec<Logged>> {
                         content: vec![ContentBlock::text(turn.text)],
                     },
                     at: ts,
+                    notices: Vec::new(),
                 });
             }
             _ => {}
@@ -2012,6 +2079,9 @@ mod tests {
             Entry::ClaudeTurn(claude_turn(Some("c-1"), "hi")),
             Entry::SubagentUsage(Usage::default()),
             Entry::ClearImages { note: "n".into() },
+            Entry::Notes {
+                notes: vec!["n".into()],
+            },
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -2027,7 +2097,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 8);
+        assert_eq!(value["format"], 9);
         // An API conversation has no backend field.
         assert!(value.get("backend").is_none(), "{value}");
         // Journals written before the field existed are format 1.
@@ -3515,5 +3585,117 @@ mod tests {
             ]
         );
         assert_eq!(count_messages(&path).unwrap(), 5);
+    }
+
+    #[test]
+    fn notes_are_a_block_of_their_own_and_logged_as_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let note = "[되돌림] 변경 기록 2의 파일 변경을 되돌렸습니다: /w/a.txt".to_string();
+        let lines = [
+            line(&meta()),
+            line(&Entry::Message(Message::user_text("first"))),
+            line(&Entry::Message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text("ok")],
+            })),
+            line(&Entry::Notes {
+                notes: vec![note.clone()],
+            }),
+            // The person's input after it, written like a note.
+            line(&Entry::AppendText {
+                text: "[되돌림] 이건 제가 쓴 글".into(),
+            }),
+        ];
+        write_lines(&path, &lines, "");
+
+        // The model gets the notes wrapped, in a block before the input.
+        let session = Session::load(&path).unwrap();
+        let last = session.transcript.messages.last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert_eq!(
+            last.content,
+            [
+                notice_block(std::slice::from_ref(&note)),
+                ContentBlock::text("[되돌림] 이건 제가 쓴 글"),
+            ]
+        );
+        let ContentBlock::Text { text, .. } = &last.content[0] else {
+            panic!("{last:?}");
+        };
+        assert!(text.starts_with(&format!("{NOTICE_OPEN}\n")), "{text}");
+        assert!(
+            text.ends_with(&format!("\n{note}\n{NOTICE_CLOSE}")),
+            "{text}"
+        );
+
+        // Readers of the journal tell the note from the person's words.
+        let messages = read_conversation(&path).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].notices, [0]);
+        assert_eq!(
+            messages[2].message.content,
+            [
+                ContentBlock::text(note),
+                ContentBlock::text("[되돌림] 이건 제가 쓴 글"),
+            ]
+        );
+        assert!(messages[0].notices.is_empty() && messages[1].notices.is_empty());
+    }
+
+    #[test]
+    fn notes_after_a_reply_start_the_user_message() {
+        let mut transcript = Transcript::default();
+        transcript.apply(Entry::Message(Message::user_text("a")));
+        transcript.apply(Entry::Message(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::text("b")],
+        }));
+        let notes = vec!["[되돌림] x".to_string()];
+        transcript.apply(Entry::Notes {
+            notes: notes.clone(),
+        });
+        // The input then joins the message the notes started.
+        let input = transcript.user_text_entry("c");
+        assert_eq!(input, Entry::AppendText { text: "c".into() });
+        transcript.apply(input);
+        assert_eq!(transcript.messages.len(), 3);
+        assert_eq!(
+            transcript.messages[2].content,
+            [notice_block(&notes), ContentBlock::text("c")]
+        );
+        assert!(transcript.context_size() > 0);
+    }
+
+    #[test]
+    fn a_format_8_session_with_notes_in_its_text_still_resumes() {
+        // Before format 9 the undo line was part of the input's text.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.jsonl");
+        let lines = [
+            r#"{"type":"meta","id":"old","format":8,"created_at":1,"cwd":"/w","model":"m","version":"0.4.0"}"#,
+            r#"{"type":"message","role":"user","content":[{"type":"text","text":"[되돌림] 변경 기록 1의 파일 변경을 되돌렸습니다: /w/a\n\nnext"}],"ts":10}"#,
+        ];
+        fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let (session, mut writer) = Session::resume(&path).unwrap();
+        assert_eq!(session.meta.format, 8);
+        assert_eq!(session.transcript.messages.len(), 1);
+        let messages = read_conversation(&path).unwrap();
+        assert!(messages[0].notices.is_empty());
+        assert!(messages[0].message.text().starts_with("[되돌림]"));
+        // Continuing it marks the newer format before the first new line.
+        writer
+            .record(&Entry::Notes {
+                notes: vec!["[되돌림] y".into()],
+            })
+            .unwrap();
+        drop(writer);
+        let text = fs::read_to_string(&path).unwrap();
+        let added: Vec<&str> = text.lines().skip(2).collect();
+        assert!(added[0].contains(&format!("\"format\":{FORMAT}")), "{text}");
+        assert!(added[1].contains("\"type\":\"notes\""), "{text}");
+        let reloaded = Session::load(&path).unwrap();
+        assert_eq!(reloaded.meta.format, FORMAT);
+        assert_eq!(reloaded.transcript.messages[0].content.len(), 2);
     }
 }

@@ -724,3 +724,30 @@ fn subagents_get_the_tool() {
     register(&mut none, None, Path::new("/w"), true);
     assert!(none.specs().is_empty());
 }
+
+#[test]
+fn notes_junees_added_are_found_as_notices() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let id = session(
+        home,
+        "/w",
+        None,
+        &[
+            user("make the needle file"),
+            assistant(vec![]),
+            Entry::Notes {
+                notes: vec!["[되돌림] needle.txt를 되돌렸습니다".into()],
+            },
+        ],
+        0,
+    );
+    let found = search(home, &options("needle", Some("/w"))).unwrap();
+    assert_eq!(ids(&found), [&id]);
+    let labels: Vec<&str> = found.hits[0]
+        .snippets
+        .iter()
+        .map(|s| s.label.as_str())
+        .collect();
+    assert_eq!(labels, ["user", "notice"]);
+}

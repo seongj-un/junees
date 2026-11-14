@@ -674,6 +674,41 @@ fn from_page(dashboard: &Dashboard) -> String {
 }
 
 #[tokio::test]
+async fn a_note_junees_added_is_marked_and_a_lookalike_the_person_wrote_is_not() {
+    let home = Home::new();
+    let id = "20261113-020304-beef";
+    let note = "[되돌림] 변경 기록 1의 파일 변경을 되돌렸습니다: /w/a.txt";
+    home.journal(
+        id,
+        &[
+            json!({"type": "message", "role": "user", "content": [{"type": "text", "text": "make a"}]}),
+            assistant("made"),
+            // An undo's line before the next input, then the input.
+            json!({"type": "notes", "notes": [note]}),
+            json!({"type": "append_text", "text": "next"}),
+            assistant("ok"),
+            // The person typing what looks like one.
+            json!({"type": "message", "role": "user", "content": [{"type": "text", "text": "[되돌림] 제가 쓴 글"}]}),
+        ],
+    );
+    let dashboard = Dashboard::start(&home).await;
+    let page = dashboard.json(&format!("/api/sessions/{id}")).await;
+    assert_eq!(page["total"], 5, "{page}");
+    let messages = page["messages"].as_array().unwrap();
+    assert_eq!(
+        messages[2]["blocks"],
+        json!([
+            {"type": "text", "text": note, "notice": true},
+            {"type": "text", "text": "next"},
+        ])
+    );
+    assert_eq!(
+        messages[4]["blocks"],
+        json!([{"type": "text", "text": "[되돌림] 제가 쓴 글"}])
+    );
+}
+
+#[tokio::test]
 async fn a_session_reads_page_by_page_without_secrets_or_thinking() {
     let home = Home::new();
     let id = "20261113-010203-abcd";
