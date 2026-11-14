@@ -161,7 +161,7 @@ impl Server {
 
     /// The tools, for `tools/list`.
     pub fn list(&self) -> Vec<Value> {
-        let mut tools_of_run = vec!["read_file"];
+        let mut tools_of_run = vec!["read_file", "grep", "glob", "list_dir"];
         if self.allow_write {
             tools_of_run.extend(crate::cron::run::MCP_WRITE_TOOLS);
         }

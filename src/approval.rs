@@ -235,6 +235,21 @@ impl Approval {
                     )
                 }
             }
+            // Read only: asked about only when they leave the working
+            // folder, in every mode.
+            "grep" | "glob" | "list_dir" => {
+                let path = input.get("path").and_then(Value::as_str);
+                if !crate::tools::code_search::names_outside(path, &self.workspace) {
+                    return None;
+                }
+                let path = path.unwrap_or(".");
+                (
+                    path.to_string(),
+                    vec![format!("작업 폴더 밖을 탐색합니다: `{path}`")],
+                    vec![format!("{tool}: search outside the working folder")],
+                    None,
+                )
+            }
             crate::github::TOOL_NAME => crate::github::question(input)?,
             name if self.questions.contains_key(name) => self.questions[name].question(input)?,
             name => {
@@ -723,6 +738,23 @@ mod tests {
             gate.request("read_file", &json!({"path": "/etc/hosts"})),
             None
         );
+        // The search tools ask only when they leave the working folder.
+        for tool in ["grep", "glob", "list_dir"] {
+            assert_eq!(gate.request(tool, &json!({"pattern": "x"})), None);
+            assert_eq!(
+                gate.request(tool, &json!({"pattern": "x", "path": "src"})),
+                None
+            );
+            let request = gate
+                .request(tool, &json!({"pattern": "x", "path": "/etc"}))
+                .unwrap();
+            assert_eq!(request.target, "/etc");
+            assert_eq!(request.reasons, ["작업 폴더 밖을 탐색합니다: `/etc`"]);
+            assert_eq!(
+                request.kinds,
+                [format!("{tool}: search outside the working folder")]
+            );
+        }
         assert_eq!(
             gate.request("mark_feature_passing", &json!({"id": 1})),
             None

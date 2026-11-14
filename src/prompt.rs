@@ -22,6 +22,8 @@ pub fn system_prompt(cwd: &Path) -> String {
          plain language. Reply in the language the user writes in.\n\
          Use edit_file to change part of a file and write_file for new files \
          or full rewrites.\n\
+         To find code, use the grep, glob and list_dir tools instead of grep, find, \
+         rg or ls in bash.\n\
          \n\
          Environment:\n\
          - Working directory: {}\n\
@@ -92,6 +94,7 @@ mod tests {
         assert!(prompt.starts_with("You are Junees"));
         assert!(prompt.contains("Working directory: /tmp/project"));
         assert!(prompt.contains("Use edit_file to change part of a file"));
+        assert!(prompt.contains("use the grep, glob and list_dir tools instead"));
     }
 
     #[test]
