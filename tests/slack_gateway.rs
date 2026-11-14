@@ -1064,7 +1064,7 @@ async fn risky_calls_wait_for_an_answer_in_the_dm_and_the_thread() {
     std::fs::remove_file(&file).unwrap();
 
     s.push(dm(USER, "once more"));
-    s.wait_post(DM, |p| p == "(1s 안에 답이 없어 거절했습니다)")
+    s.wait_post(DM, |p| p == "(1초 안에 답이 없어 거절했습니다)")
         .await;
     s.wait_post(DM, |p| p == "timed out").await;
     assert!(!file.exists());
@@ -1258,7 +1258,7 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     .await;
     assert_eq!(
         ephemerals(&s, STRANGER),
-        ["slack_allowed_users에 있는 사용자만 Junees에 답할 수 있습니다."; 2]
+        ["slack_allowed_users에 있는 사용자만 Junees에게 답할 수 있습니다."; 2]
     );
     let already =
         "이미 답했거나 시간이 지났거나 멈춘 질문이라 이 버튼은 이제 아무것도 하지 않습니다.";
@@ -1335,14 +1335,14 @@ async fn buttons_answer_questions_of_allowed_users_only() {
 
     // No answer: declined, and a press afterwards does nothing.
     s.push(dm(USER, "once more"));
-    s.wait_post(DM, |p| p == "(5s 안에 답이 없어 거절했습니다)")
+    s.wait_post(DM, |p| p == "(5초 안에 답이 없어 거절했습니다)")
         .await;
     s.wait_post(DM, |p| p == "timed out").await;
     s.until("the timed out question closed", || updates(&s).len() == 3)
         .await;
     assert_eq!(
         updates(&s)[2]["blocks"][1]["text"]["text"],
-        "*5s 안에 답이 없어 거절했습니다.*"
+        "*5초 안에 답이 없어 거절했습니다.*"
     );
     let question = buttoned(&s, DM).remove(1);
     s.wait_ack(&s.press(press_on(USER, &question, &button_values(&question)[0])))

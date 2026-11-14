@@ -213,7 +213,7 @@ fn album_key(message: &Value) -> Option<AlbumKey> {
 /// What a press that answered nothing shows.
 pub const ALREADY_HANDLED: &str = "이미 답했거나 시간이 지났거나 멈춘 질문입니다.";
 /// What a press of a user not in `telegram_allowed_users` shows.
-pub const NOT_ALLOWED: &str = "telegram_allowed_users에 있는 사용자만 Junees에 답할 수 있습니다.";
+pub const NOT_ALLOWED: &str = "telegram_allowed_users에 있는 사용자만 Junees에게 답할 수 있습니다.";
 /// What a press of a button that is not Junees's shows.
 const NOT_OURS: &str = "Junees does not know this button.";
 

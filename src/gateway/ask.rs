@@ -370,12 +370,13 @@ impl Ask for DiscordAsk {
             // The channel's worker is going away.
             Ok(Err(_)) => Answer::No,
             Err(_) => {
-                let waited = human(self.timeout);
+                let waited = crate::korean::duration(self.timeout);
                 ended.outcome = format!("{waited} 안에 답이 없어 거절했습니다.");
                 let _ = self.out.send(Progress::Note(format!(
                     "({waited} 안에 답이 없어 거절했습니다)"
                 )));
-                Answer::NoBecause(format!("no answer within {waited}"))
+                // The model reads English, as with every refusal.
+                Answer::NoBecause(format!("no answer within {}", human(self.timeout)))
             }
         }
     }
@@ -423,7 +424,7 @@ pub fn instructions(scope: &str, timeout: Duration) -> String {
         ". `y`는 실행, `n`은 거절(`n <이유>`면 모델에게 이유를 알립니다), `a`는 {scope} 이 \
          종류를 항상 허용합니다. 그 밖의 답장은 그 글을 이유로 거절합니다. {} 안에 답이 없으면 \
          거절합니다.",
-        human(timeout)
+        crate::korean::duration(timeout)
     )
 }
 
@@ -459,7 +460,8 @@ pub fn parse_answer(text: &str) -> Answer {
     }
 }
 
-/// `5m`, `90s`, `1h30m`.
+/// `5m`, `90s`, `1h30m`: for the English log and status lines. What people
+/// are asked says it in Korean ([`crate::korean::duration`]).
 pub fn human(duration: Duration) -> String {
     let secs = duration.as_secs();
     let (hours, minutes, seconds) = (secs / 3600, secs / 60 % 60, secs % 60);
@@ -517,7 +519,7 @@ mod tests {
         let text = question(&request(), Duration::from_secs(300));
         assert_eq!(text.matches("```").count(), 2, "{text}");
         assert!(text.contains("승인 요청 bash: rm -r build"), "{text}");
-        assert!(text.contains("5m 안에 답이 없으면 거절합니다"), "{text}");
+        assert!(text.contains("5분 안에 답이 없으면 거절합니다"), "{text}");
         assert!(
             text.contains("버튼을 누르거나 답장하세요. `y`는 실행"),
             "{text}"
@@ -663,13 +665,13 @@ mod tests {
         };
         assert_eq!(
             rx.recv().await,
-            Some(Progress::Note("(1s 안에 답이 없어 거절했습니다)".into()))
+            Some(Progress::Note("(1초 안에 답이 없어 거절했습니다)".into()))
         );
         assert_eq!(
             rx.recv().await,
             Some(Progress::Answered {
                 id: question.id.clone(),
-                outcome: "1s 안에 답이 없어 거절했습니다.".into()
+                outcome: "1초 안에 답이 없어 거절했습니다.".into()
             })
         );
         assert!(!slot.press(press(&question.id, Choice::Allow, None)));

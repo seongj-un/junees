@@ -445,7 +445,7 @@ pub fn render(request: &Request) -> String {
 /// The line under a question that says what an "always" answer allows:
 /// the kinds, which are the names answers are remembered by.
 pub fn always_line(request: &Request) -> String {
-    format!("     항상 허용하면: {}\n", request.kinds.join(", "))
+    format!("     항상 허용 범위: {}\n", request.kinds.join(", "))
 }
 
 /// What runs an external tool, as the question says it.
@@ -1048,7 +1048,7 @@ mod tests {
             screen,
             format!(
                 "  ?? 승인 요청 bash: rm a\n     | rm b\n     * `rm`: 파일을 지웁니다\n     \
-                 항상 허용하면: bash: delete files\n{CHOICES}"
+                 항상 허용 범위: bash: delete files\n{CHOICES}"
             )
         );
         assert_eq!(ask_with("No\n").await.0, Answer::No);

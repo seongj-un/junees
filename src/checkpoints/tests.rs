@@ -466,3 +466,25 @@ fn a_planted_link_at_the_temporary_name_is_not_followed() {
         .collect();
     assert_eq!(names, vec![std::ffi::OsString::from("manifest.json")]);
 }
+
+#[test]
+fn a_partial_line_takes_the_particle_its_number_is_read_with() {
+    let part = |skipped_turn| Partial {
+        path: "c.txt".into(),
+        until_turn: skipped_turn + 1,
+        skipped_turn,
+        reason: "r".into(),
+    };
+    assert_eq!(
+        part(2).text(),
+        "변경 기록 3까지 되돌림, 변경 기록 2는 건너뜀: r"
+    );
+    assert_eq!(
+        part(3).text(),
+        "변경 기록 4까지 되돌림, 변경 기록 3은 건너뜀: r"
+    );
+    assert_eq!(
+        part(9).text(),
+        "변경 기록 10까지 되돌림, 변경 기록 9는 건너뜀: r"
+    );
+}
