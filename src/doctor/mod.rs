@@ -334,6 +334,16 @@ pub fn hide_secrets_in_user_text<'a>(
     redact::redact_user_text(&hidden, texts);
 }
 
+/// Hides credentials in file text a tool shows the model (`grep`'s
+/// matching lines): the values of the secret variables this process has,
+/// and the words [`crate::secrets::find_secret`] takes for a credential,
+/// as in what a user wrote.
+pub fn hide_credentials<'a>(texts: impl Iterator<Item = &'a mut String>) {
+    let mut hidden = redact::Hidden::default();
+    hidden.add_env();
+    redact::redact_user_text(&hidden, texts);
+}
+
 /// Hides the values of the secret settings and variables in `texts`,
 /// exactly where they are, and nothing else: unlike
 /// [`hide_secrets_in_user_text`] a word that only looks like a credential

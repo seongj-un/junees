@@ -188,6 +188,7 @@ async fn a_run_round_trip_continues_its_session_and_shows_it() {
         .collect();
     assert_eq!(names, ["junees_run", "junees_sessions", "junees_session"]);
     let about = tools[0]["description"].as_str().unwrap();
+    assert!(about.contains("read_file, grep, glob, list_dir"), "{about}");
     assert!(
         about.contains("read_file") && !about.contains("bash") && !about.contains("write_file"),
         "{about}"
@@ -286,7 +287,9 @@ async fn a_run_round_trip_continues_its_session_and_shows_it() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert!(offered.contains(&"read_file"), "{offered:?}");
+    for tool in ["read_file", "grep", "glob", "list_dir"] {
+        assert!(offered.contains(&tool), "{offered:?}");
+    }
     for left_out in ["bash", "write_file", "edit_file"] {
         assert!(!offered.contains(&left_out), "{offered:?}");
     }

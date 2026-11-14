@@ -30,6 +30,7 @@ pub fn session_tools(settings: &ToolSettings) -> ToolRegistry {
     tools.register(ReadFile::with_settings(settings));
     tools.register(WriteFile::with_settings(settings));
     tools.register(EditFile::with_settings(settings));
+    tools.register_search(settings);
     tools
 }
 
@@ -279,7 +280,18 @@ mod tests {
             .into_iter()
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(names, ["bash", "read_file", "write_file", "edit_file"]);
+        assert_eq!(
+            names,
+            [
+                "bash",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "grep",
+                "glob",
+                "list_dir"
+            ]
+        );
     }
 
     #[test]

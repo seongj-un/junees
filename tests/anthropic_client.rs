@@ -187,7 +187,18 @@ async fn agent_runs_bash_through_the_real_client() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(tool_names, ["bash", "read_file", "write_file", "edit_file"]);
+    assert_eq!(
+        tool_names,
+        [
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "grep",
+            "glob",
+            "list_dir"
+        ]
+    );
 
     let second = body_of(&requests[1]);
     let result = &second["messages"][2]["content"][0];

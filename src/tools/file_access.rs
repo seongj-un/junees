@@ -364,6 +364,20 @@ impl FileAccess {
         Ok(())
     }
 
+    /// Whether the search tools may show or go into `real`, an absolute
+    /// path they reached without following links ([`super::code_search`]):
+    /// the read rules of [`FileAccess::open_read`], applied to every file
+    /// and folder a search meets, not only where it starts.
+    pub fn allows_read(&self, real: &Path) -> bool {
+        self.check(real, "", Use::Read).is_ok()
+    }
+
+    /// [`FileAccess::allows_read`] with the refusal, for the folder or
+    /// file a search starts at (`shown` as the model gave it).
+    pub fn check_read(&self, real: &Path, shown: &str) -> Result<(), Refusal> {
+        self.check(real, shown, Use::Read)
+    }
+
     /// Opens the regular file at `path` for reading and checks where the
     /// opened file is.
     pub fn open_read(&self, path: &str) -> Result<Opened, Refusal> {
