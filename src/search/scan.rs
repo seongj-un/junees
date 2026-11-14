@@ -337,6 +337,11 @@ fn texts(entry: Entry, tools: &mut HashMap<String, String>) -> Vec<(String, Stri
         Entry::Compact { summary, .. } => {
             out.push(("summary".to_string(), summary, MAX_TEXT_BYTES));
         }
+        // Junees's own lines before an input (an undo's), apart from what
+        // the person wrote.
+        Entry::Notes { notes } => {
+            out.push(("notice".to_string(), notes.join("\n"), MAX_TEXT_BYTES));
+        }
         _ => {}
     }
     out

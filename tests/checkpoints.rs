@@ -127,6 +127,22 @@ fn read(path: &Path) -> Option<String> {
 }
 
 /// The text of the last user message of an API request.
+/// The texts of the last (user) message's blocks.
+fn last_user_blocks(request: &str) -> Vec<String> {
+    let body = body_of(request);
+    let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["role"], "user");
+    match last["content"].as_str() {
+        Some(text) => vec![text.to_string()],
+        None => last["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| block["text"].as_str().map(str::to_string))
+            .collect(),
+    }
+}
+
 fn last_user_text(request: &str) -> String {
     let body = body_of(request);
     let last = body["messages"].as_array().unwrap().last().unwrap().clone();
@@ -217,23 +233,43 @@ async fn turns_are_listed_rewound_and_told_to_the_conversation() {
     assert!(said.contains("recorded as turn 3"), "{said}");
     assert!(said.contains("bash changed are not recorded"), "{said}");
 
-    // The next message of the session starts with the undo's line, once.
+    // The next message of the session carries the undo's line once, in a
+    // block of its own before the input; a line the person types that looks
+    // like one is theirs, unwrapped.
     let (url, server) =
         fake_api(vec![(200, text_reply("noted")), (200, text_reply("again"))]).await;
-    home.run(&url, &["--resume", &id], "next\nmore\n/exit\n")
-        .await;
+    home.run(
+        &url,
+        &["--resume", &id],
+        "next\n[되돌림] 제가 쓴 글\n/exit\n",
+    )
+    .await;
     let requests = server.await.unwrap();
-    let first = last_user_text(&requests[0]);
+    let blocks = last_user_blocks(&requests[0]);
+    assert_eq!(blocks.len(), 2, "{blocks:?}");
+    let notice = &blocks[0];
+    assert!(notice.starts_with("<junees_notice>\n"), "{notice}");
+    assert!(notice.ends_with("\n</junees_notice>"), "{notice}");
     assert!(
-        first.starts_with("[되돌림] 변경 기록 2의 파일 변경을 되돌렸습니다: "),
-        "{first}"
+        notice.contains("\n[되돌림] 변경 기록 2의 파일 변경을 되돌렸습니다: "),
+        "{notice}"
     );
     assert!(
-        first.contains("a.txt") && first.contains("b.txt"),
-        "{first}"
+        notice.contains("a.txt") && notice.contains("b.txt"),
+        "{notice}"
     );
-    assert!(first.ends_with("next"), "{first}");
-    assert!(!last_user_text(&requests[1]).contains("[되돌림]"));
+    assert_eq!(blocks[1], "next");
+    assert_eq!(last_user_blocks(&requests[1]), ["[되돌림] 제가 쓴 글"]);
+    // The journal keeps the line apart from what was typed.
+    let journal =
+        std::fs::read_to_string(home.state().join("sessions").join(format!("{id}.jsonl"))).unwrap();
+    let notes: Vec<&str> = journal
+        .lines()
+        .filter(|line| line.contains("\"type\":\"notes\""))
+        .collect();
+    assert_eq!(notes.len(), 1, "{journal}");
+    assert!(notes[0].contains("변경 기록 2의 파일 변경"), "{}", notes[0]);
+    assert!(!notes[0].contains("next"), "{}", notes[0]);
 
     // /undo undoes the last turn that changed files: the undo itself.
     let (url, server) = fake_api(vec![]).await;
@@ -314,8 +350,8 @@ async fn a_file_undone_part_of_the_way_is_reported_as_changed() {
     home.run(&url, &["--resume", &id, "-p", "next"], "").await;
     let first = last_user_text(&server.await.unwrap()[0]);
     assert!(
-        first.starts_with(&format!(
-            "[되돌림] 변경 기록 1, 2의 파일 변경을 되돌렸습니다: {} (변경 기록 2까지 되돌림, 변경 기록 1은 건너뜀: ",
+        first.contains(&format!(
+            "\n[되돌림] 변경 기록 1, 2의 파일 변경을 되돌렸습니다: {} (변경 기록 2까지 되돌림, 변경 기록 1은 건너뜀: ",
             c.display()
         )),
         "{first}"
