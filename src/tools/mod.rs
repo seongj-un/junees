@@ -1,6 +1,7 @@
 //! Tools the model can call, and the registry that dispatches them.
 
 mod bash;
+pub mod code_search;
 mod edit_file;
 mod file_access;
 pub mod gh_command;
@@ -17,6 +18,7 @@ pub use bash::Bash;
 #[cfg(test)]
 pub(crate) use bash::testing;
 pub(crate) use bash::{Capture, GroupGuard, own_session};
+pub use code_search::{Glob, Grep, ListDir, Search};
 pub use edit_file::EditFile;
 pub use file_access::{
     FileAccess, Refusal, Scope, Target, UNATTENDED_CREDENTIALS, holds_home, program_folders,
@@ -275,7 +277,8 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// bash, read_file, write_file and edit_file. bash never sees [`SECRET_ENV_VARS`]
+    /// bash, read_file, write_file, edit_file and the code search tools
+    /// (grep, glob, list_dir). bash never sees [`SECRET_ENV_VARS`]
     /// or the extra hidden variables, and runs only commands its
     /// [`CommandPolicy`] allows.
     pub fn with_defaults(settings: &ToolSettings) -> Self {
@@ -284,7 +287,16 @@ impl ToolRegistry {
         registry.register(ReadFile::with_settings(settings));
         registry.register(WriteFile::with_settings(settings));
         registry.register(EditFile::with_settings(settings));
+        registry.register_search(settings);
         registry
+    }
+
+    /// grep, glob and list_dir, with the read rules of `settings`.
+    pub fn register_search(&mut self, settings: &ToolSettings) {
+        let search = Search::new(settings);
+        self.register(Grep::new(search.clone()));
+        self.register(Glob::new(search.clone()));
+        self.register(ListDir::new(search));
     }
 
     /// Adds a tool. A tool with the same name replaces the earlier one.
@@ -795,8 +807,11 @@ mod tests {
             .into_iter()
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(names, ["read_file", "write_file"]);
-        assert_eq!(registry.specs().len(), 4);
+        assert_eq!(
+            names,
+            ["read_file", "write_file", "grep", "glob", "list_dir"]
+        );
+        assert_eq!(registry.specs().len(), 7);
     }
 
     #[test]
@@ -808,13 +823,24 @@ mod tests {
     }
 
     #[test]
-    fn defaults_have_four_tools() {
+    fn defaults_have_the_file_and_search_tools() {
         let names: Vec<String> = ToolRegistry::with_defaults(&ToolSettings::default())
             .specs()
             .into_iter()
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(names, ["bash", "read_file", "write_file", "edit_file"]);
+        assert_eq!(
+            names,
+            [
+                "bash",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "grep",
+                "glob",
+                "list_dir"
+            ]
+        );
     }
 
     #[tokio::test]
