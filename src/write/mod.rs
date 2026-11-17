@@ -43,7 +43,8 @@ use tokio::time::Instant;
 
 use crate::cancel::Cancel;
 use crate::message::{ContentBlock, Message, Role, StopReason, Usage};
-use crate::provider::{CompletionRequest, Provider};
+use crate::provider::fallback::Switch;
+use crate::provider::{CompletionRequest, Provider, StreamEvent};
 
 /// The setting for requests that run at once (`write_parallel`).
 pub const PARALLEL_ENV: &str = "JUNEES_WRITE_PARALLEL";
@@ -233,10 +234,19 @@ pub enum Stop {
     Cancelled,
     /// Failed before any text was made (bad request, no plan).
     Failed(String),
+    /// The run's token limit ([`Budget`]) stopped it, with the limit's
+    /// reason: the draft holds the levels finished before, and the calls
+    /// left were not made.
+    Limit(String),
 }
 
+/// Asked before each call with the tokens the draft's finished calls used;
+/// a reason stops the draft there ([`Stop::Limit`]). The agent passes its
+/// run's limit, with the tokens used before the draft added.
+pub type Budget = dyn Fn(Usage) -> Option<String> + Send + Sync;
+
 /// The result of [`run`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
     pub title: String,
     pub sections: Vec<SectionDraft>,
@@ -248,6 +258,10 @@ pub struct Draft {
     pub stop: Stop,
     pub calls: Vec<Call>,
     pub elapsed: Duration,
+    /// The first switch to the fallback model while the draft ran
+    /// ([`crate::provider::fallback::Switching`]), to report once at the
+    /// end.
+    pub switch: Option<Switch>,
 }
 
 /// Reported after each finished level.
@@ -279,13 +293,14 @@ pub fn check_request(request: &str) -> Result<(), String> {
 
 /// Makes a draft of `request` through `provider`. Never fails as a whole:
 /// [`Draft::stop`] says how it ended, and the calls made are in
-/// [`Draft::calls`] either way.
+/// [`Draft::calls`] either way. `budget` is asked before each call.
 pub async fn run(
     provider: &dyn Provider,
     request: &str,
     options: &Options,
     cancel: &Cancel,
     progress: Option<&ProgressSender>,
+    budget: Option<&Budget>,
 ) -> Draft {
     let started = Instant::now();
     let request = request.trim();
@@ -300,6 +315,7 @@ pub async fn run(
         stop: Stop::Done,
         calls: Vec::new(),
         elapsed: Duration::ZERO,
+        switch: None,
     };
     if let Err(reason) = check_request(request) {
         draft.stop = Stop::Failed(reason);
@@ -311,6 +327,9 @@ pub async fn run(
         permits: Semaphore::new(parallel),
         parallel,
         made: Mutex::default(),
+        budget,
+        halted: Mutex::default(),
+        switches: Mutex::default(),
     };
     let stop = tokio::select! {
         biased;
@@ -320,11 +339,24 @@ pub async fn run(
             Err(reason) => Stop::Failed(reason),
         },
     };
-    draft.stop = stop;
-    draft.calls = calls
-        .made
+    let Calls {
+        made,
+        halted,
+        switches,
+        ..
+    } = calls;
+    let halted = halted.into_inner().unwrap_or_else(PoisonError::into_inner);
+    draft.stop = match (stop, halted) {
+        (Stop::Cancelled, _) => Stop::Cancelled,
+        (_, Some(reason)) => Stop::Limit(reason),
+        (stop, None) => stop,
+    };
+    draft.calls = made.into_inner().unwrap_or_else(PoisonError::into_inner);
+    draft.switch = switches
         .into_inner()
-        .unwrap_or_else(PoisonError::into_inner);
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_iter()
+        .next();
     draft.elapsed = started.elapsed();
     draft
 }
@@ -335,6 +367,11 @@ struct Calls<'a> {
     permits: Semaphore,
     parallel: usize,
     made: Mutex<Vec<Call>>,
+    budget: Option<&'a Budget>,
+    /// Why the budget stopped the draft; no call is made after it is set.
+    halted: Mutex<Option<String>>,
+    /// Switches to the fallback model the calls reported.
+    switches: Mutex<Vec<Switch>>,
 }
 
 /// One request of a level.
@@ -356,21 +393,42 @@ impl Calls<'_> {
             .acquire()
             .await
             .map_err(|_| "closed".to_string())?;
+        // Checked once the call may go: calls that ended while this one
+        // waited for a permit count too.
+        self.check_budget()?;
         let started = Instant::now();
+        // Streaming only to hear about switches and which model answered;
+        // the text is taken from the response.
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
         let result = self
             .provider
-            .complete(CompletionRequest {
-                system: ask.system,
-                messages,
-                tools: &[],
-                max_tokens: ask.max_tokens,
-                cache: ask.cache,
-                thinking: false,
-                web_search: false,
-            })
+            .complete_streaming(
+                CompletionRequest {
+                    system: ask.system,
+                    messages,
+                    tools: &[],
+                    max_tokens: ask.max_tokens,
+                    cache: ask.cache,
+                    thinking: false,
+                    web_search: false,
+                },
+                &events,
+            )
             .await;
         let elapsed = started.elapsed();
         drop(permit);
+        let mut answered = None;
+        while let Ok(event) = received.try_recv() {
+            match event {
+                StreamEvent::ModelSwitch(switch) => self
+                    .switches
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(switch),
+                StreamEvent::AnsweredBy(model) => answered = Some(model),
+                _ => {}
+            }
+        }
         let (usage, text) = match result {
             Ok(response) => {
                 let text = response
@@ -400,12 +458,49 @@ impl Calls<'_> {
                 level: ask.level,
                 kind: ask.kind,
                 unit: ask.unit.clone(),
-                model: self.provider.model().map(str::to_string),
+                // The model that answered this call, not the one another
+                // call running at the same time left the provider on.
+                model: answered.or_else(|| self.provider.model().map(str::to_string)),
                 usage,
                 elapsed,
                 ok: text.is_ok(),
             });
         text
+    }
+
+    /// Fails when the draft was stopped, or the budget stops it now with
+    /// the tokens the calls so far used.
+    fn check_budget(&self) -> Result<(), String> {
+        let mut halted = self.halted.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(reason) = halted.as_ref() {
+            return Err(reason.clone());
+        }
+        let Some(budget) = self.budget else {
+            return Ok(());
+        };
+        let mut used = Usage::default();
+        for call in self
+            .made
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+        {
+            used.add(call.usage);
+        }
+        match budget(used) {
+            Some(reason) => {
+                *halted = Some(reason.clone());
+                Err(reason)
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn halted(&self) -> bool {
+        self.halted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
     }
 
     /// A unit's text: asked once more when the first call fails or its
@@ -553,6 +648,10 @@ async fn levels(
             )
         }))
         .await;
+        // A stopped level is dropped whole, like a cancelled one.
+        if calls.halted() {
+            return Ok(());
+        }
         for (section, gist) in draft.sections.iter_mut().zip(gists) {
             section.gist = Some(gist.unwrap_or_else(|| {
                 section.failed.push(2);
@@ -587,6 +686,10 @@ async fn levels(
             )
         }))
         .await;
+        // A stopped level is dropped whole, like a cancelled one.
+        if calls.halted() {
+            return Ok(());
+        }
         for (section, outline) in draft.sections.iter_mut().zip(outlines) {
             section.outline = match outline {
                 Some(text) => outline_points(&text),
@@ -627,6 +730,10 @@ async fn levels(
             )
         }))
         .await;
+        // A stopped level is dropped whole, like a cancelled one.
+        if calls.halted() {
+            return Ok(());
+        }
         let mut bodies: Vec<Vec<String>> = vec![Vec::new(); count];
         for (&(i, j), paragraph) in units.iter().zip(written) {
             let text = paragraph.unwrap_or_else(|| {
@@ -661,6 +768,10 @@ async fn levels(
             )
         }))
         .await;
+        // A stopped level is dropped whole, like a cancelled one.
+        if calls.halted() {
+            return Ok(());
+        }
         for (section, body) in draft.sections.iter_mut().zip(bodies) {
             section.body = Some(body.unwrap_or_else(|| {
                 section.failed.push(levels);
@@ -676,6 +787,9 @@ async fn levels(
 
     if options.polish && count >= 2 {
         polish(calls, lang, draft).await;
+        if calls.halted() {
+            return Ok(());
+        }
         draft.polished = true;
         report(progress, draft, levels + 1, Kind::Polish);
     }
@@ -753,6 +867,9 @@ async fn polish(calls: &Calls<'_>, lang: Lang, draft: &mut Draft) {
         )
     }))
     .await;
+    if calls.halted() {
+        return;
+    }
     // The sections whose first paragraph a seam already changed.
     let mut start_changed = vec![false; texts.len()];
     for (&i, edit) in seams.iter().zip(edits) {
@@ -876,6 +993,23 @@ impl Draft {
             total.add(call.usage);
         }
         total
+    }
+
+    /// Every call's tokens added up per model that answered, in the order
+    /// the models first answered; calls that used no tokens are left out.
+    pub fn usage_by_model(&self) -> Vec<(Option<String>, Usage)> {
+        let mut models: Vec<(Option<String>, Usage)> = Vec::new();
+        for call in self
+            .calls
+            .iter()
+            .filter(|call| call.usage != Usage::default())
+        {
+            match models.iter_mut().find(|(model, _)| *model == call.model) {
+                Some((_, usage)) => usage.add(call.usage),
+                None => models.push((call.model.clone(), call.usage)),
+            }
+        }
+        models
     }
 
     /// The calls' time added up: about what the draft would have taken

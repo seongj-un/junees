@@ -153,7 +153,7 @@ pub async fn main(args: Args, get: impl Fn(&str) -> Option<String>) -> Result<u8
     });
     let mut screen = std::io::stdout().is_terminal().then(Screen::enter);
     let (sender, mut levels) = tokio::sync::mpsc::unbounded_channel();
-    let work = super::run(&*provider, &request, &options, &cancel, Some(&sender));
+    let work = super::run(&*provider, &request, &options, &cancel, Some(&sender), None);
     tokio::pin!(work);
     let mut view = View::default();
     let draft = loop {
@@ -185,8 +185,12 @@ pub async fn main(args: Args, get: impl Fn(&str) -> Option<String>) -> Result<u8
 /// Writes the result where it goes and the usage to standard error.
 fn finish(draft: &Draft, out: Option<&Path>, prices: &crate::usage::Prices) -> Result<u8> {
     let text = draft.text();
+    if let Some(switch) = &draft.switch {
+        eprintln!("  !! {}", switch.line());
+    }
     let code = match &draft.stop {
-        Stop::Failed(reason) => {
+        // No budget is given here; kept apart from the failure in case.
+        Stop::Failed(reason) | Stop::Limit(reason) => {
             eprintln!("{}", draft.summary(Some(prices)));
             bail!("draft failed: {reason}");
         }

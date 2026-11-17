@@ -324,9 +324,9 @@ impl ApiEngines {
         if let Some(settings) = config.subagents {
             agent = agent.with_delegate(settings);
         }
-        agent = agent.with_draft(crate::write::tool::Settings {
-            parallel: config.write_parallel,
-        });
+        agent = agent.with_draft(crate::write::tool::Settings::attended(
+            config.write_parallel,
+        ));
         if config.approval != ApprovalMode::Off {
             let gate = Approval::new(
                 config.approval,

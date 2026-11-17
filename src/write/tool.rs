@@ -25,14 +25,32 @@ pub struct Settings {
     /// Requests at once ([`super::PARALLEL_ENV`]; at most
     /// [`super::UNATTENDED_PARALLEL`] in runs nobody watches).
     pub parallel: usize,
+    /// A run nobody watches, whose input may come from anyone (a webhook):
+    /// at most [`UNATTENDED_LEVELS`] levels and no seam pass, so one call
+    /// cannot ask for the most calls a draft can make.
+    pub unattended: bool,
 }
 
+/// The most levels a `draft` call gets in a run nobody watches.
+pub const UNATTENDED_LEVELS: u8 = 3;
+
 impl Settings {
+    /// The settings for a person's conversation (terminal, gateways, the
+    /// dashboard).
+    pub fn attended(parallel: usize) -> Self {
+        Self {
+            parallel,
+            unattended: false,
+        }
+    }
+
     /// The settings for a run nobody watches: fewer requests at once, so
-    /// an unattended run does not burst through a rate limit.
+    /// an unattended run does not burst through a rate limit, at most
+    /// three levels and no seam pass.
     pub fn unattended(parallel: usize) -> Self {
         Self {
             parallel: parallel.min(super::UNATTENDED_PARALLEL),
+            unattended: true,
         }
     }
 }
@@ -55,10 +73,15 @@ impl DraftTool {
                  (audience, purpose, facts and constraints: the writers see only this). \
                  `levels`: 2 goes straight from the plan to the text, 4 adds a paragraph outline \
                  and writes every paragraph at once (default 3). `polish`: one more pass that \
-                 fixes repetition and transitions at the seams between sections.",
+                 fixes repetition and transitions at the seams between sections.{}",
                 super::MIN_SECTIONS,
                 super::MAX_SECTIONS,
-                settings.parallel
+                settings.parallel,
+                if settings.unattended {
+                    " In this run levels stop at 3 and polish is off."
+                } else {
+                    ""
+                }
             ),
         }
     }
@@ -122,6 +145,10 @@ pub fn parse_input(
         None | Some(Value::Null) => {}
         Some(value) => options.polish = value.as_bool().ok_or("`polish` must be true or false")?,
     }
+    if settings.unattended {
+        options.levels = options.levels.min(UNATTENDED_LEVELS);
+        options.polish = false;
+    }
     Ok((request, options))
 }
 
@@ -137,6 +164,10 @@ pub fn output(draft: &Draft) -> ToolOutput {
             draft.text()
         )),
         Stop::Failed(reason) => ToolOutput::error(format!("draft failed: {reason}\n{status}")),
+        Stop::Limit(reason) => ToolOutput::error(format!(
+            "draft stopped: {reason}; the levels finished before:\n\n{}\n---\n{status}",
+            draft.text()
+        )),
     }
 }
 

@@ -624,9 +624,9 @@ fn api_agent(
     if let Some(settings) = config.subagents {
         agent = agent.with_delegate(settings);
     }
-    agent = agent.with_draft(junees::write::tool::Settings {
-        parallel: config.write_parallel,
-    });
+    agent = agent.with_draft(junees::write::tool::Settings::attended(
+        config.write_parallel,
+    ));
     if let Some(gate) = gate {
         let gate = gate
             .with_external_tools(mcp.external_tools())

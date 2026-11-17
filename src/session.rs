@@ -36,9 +36,15 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// added `clear_images`, which a format 7 Junees would refuse as a corrupt
 /// line. Format 9 added `notes`, the lines Junees itself puts before an
 /// input (an undo's `[되돌림]` line), kept apart from what the person wrote.
-/// Format 10 added `draft_usage`, which a format 9 Junees would refuse as
-/// an unknown entry.
-pub const FORMAT: u32 = 10;
+/// The tokens of `draft` calls need no new format: they are
+/// `subagent_usage` entries with a `source` field ([`DRAFT_SOURCE`]) that
+/// older versions ignore.
+pub const FORMAT: u32 = 9;
+
+/// The `source` of a `subagent_usage` line that counts the calls of a
+/// `draft` call ([`crate::write`]) rather than subagents
+/// ([`Journal::record_draft_usage`]).
+pub const DRAFT_SOURCE: &str = "draft";
 
 /// How the model sees the lines of an [`Entry::Notes`]: a text block of
 /// their own, before the person's input, between these tags. What the
@@ -193,7 +199,7 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 15] = [
+const ENTRY_TYPES: [&str; 14] = [
     "meta",
     "message",
     "append_text",
@@ -208,7 +214,6 @@ const ENTRY_TYPES: [&str; 15] = [
     "subagent_usage",
     "clear_images",
     "notes",
-    "draft_usage",
 ];
 
 /// One line of a journal.
@@ -279,11 +284,9 @@ pub enum Entry {
     /// ([`crate::subagent`]). They count toward the session's usage (and
     /// a task's budget) but say nothing about this conversation's context
     /// size; their own histories are in journals of their own.
+    /// Lines with `"source": "draft"` ([`DRAFT_SOURCE`]) count the calls of
+    /// a `draft` call instead, by the model that answered them.
     SubagentUsage(Usage),
-    /// Tokens the calls of a `draft` call used together
-    /// ([`crate::write`]). Like [`Entry::SubagentUsage`], they count toward
-    /// the session's usage but not its context size.
-    DraftUsage(Usage),
     /// The images of the trailing user message were replaced by `note`:
     /// the API rejected the request that carried them (a file whose header
     /// looks right but whose data is broken, for one), so sending them
@@ -334,6 +337,11 @@ struct LineOut<'a> {
     /// as the meta line's model.
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a str>,
+    /// What a `subagent_usage` entry counts when it is not subagents:
+    /// [`DRAFT_SOURCE`]. Optional like `model`, so older versions read the
+    /// line as subagents' tokens instead of refusing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
     /// Unix seconds.
     ts: u64,
 }
@@ -358,6 +366,13 @@ pub trait Journal: Send {
     fn record_usage(&mut self, entry: &Entry, model: &str) -> io::Result<()> {
         let _ = model;
         self.record(entry)
+    }
+
+    /// Records the tokens of a `draft` call's calls answered by `model`: a
+    /// `subagent_usage` entry with `"source": "draft"` ([`DRAFT_SOURCE`]).
+    /// Journals that keep neither record the entry alone.
+    fn record_draft_usage(&mut self, usage: Usage, model: &str) -> io::Result<()> {
+        self.record_usage(&Entry::SubagentUsage(usage), model)
     }
 
     /// The journal's file, if it is one: subagents keep theirs next to it
@@ -483,9 +498,7 @@ impl Transcript {
                     self.drop_thinking();
                 }
             }
-            Entry::SummaryUsage(usage) | Entry::SubagentUsage(usage) | Entry::DraftUsage(usage) => {
-                self.usage.add(usage)
-            }
+            Entry::SummaryUsage(usage) | Entry::SubagentUsage(usage) => self.usage.add(usage),
             Entry::Compact {
                 summary,
                 keep_from,
@@ -1134,13 +1147,18 @@ impl SessionWriter {
             .mode(0o600)
             .open(&self.path)?;
         lock(&file, &self.path)?;
-        write_line(&mut file, &Entry::Meta(self.meta.clone()), None)?;
+        write_line(&mut file, &Entry::Meta(self.meta.clone()), None, None)?;
         Ok(file)
     }
 }
 
 impl SessionWriter {
-    fn write(&mut self, entry: &Entry, model: Option<&str>) -> io::Result<()> {
+    fn write(
+        &mut self,
+        entry: &Entry,
+        model: Option<&str>,
+        source: Option<&str>,
+    ) -> io::Result<()> {
         let mut file = match self.file.take() {
             Some(file) => file,
             None => self.start()?,
@@ -1149,7 +1167,7 @@ impl SessionWriter {
         // A journal from an older version is continued in this one's
         // format; say so before the first line that may use it.
         if self.meta.format < FORMAT {
-            result = write_line(&mut file, &Entry::Format { format: FORMAT }, None);
+            result = write_line(&mut file, &Entry::Format { format: FORMAT }, None, None);
             if result.is_ok() {
                 self.meta.format = FORMAT;
             }
@@ -1157,7 +1175,9 @@ impl SessionWriter {
         // Images go to files of the session's folder; the line names them.
         let result = result
             .and_then(|()| crate::images::store::stored_entry(entry, &self.images_dir()))
-            .and_then(|stored| write_line(&mut file, stored.as_ref().unwrap_or(entry), model));
+            .and_then(|stored| {
+                write_line(&mut file, stored.as_ref().unwrap_or(entry), model, source)
+            });
         self.file = Some(file);
         result
     }
@@ -1170,11 +1190,19 @@ impl SessionWriter {
 
 impl Journal for SessionWriter {
     fn record(&mut self, entry: &Entry) -> io::Result<()> {
-        self.write(entry, None)
+        self.write(entry, None, None)
     }
 
     fn record_usage(&mut self, entry: &Entry, model: &str) -> io::Result<()> {
-        self.write(entry, Some(model))
+        self.write(entry, Some(model), None)
+    }
+
+    fn record_draft_usage(&mut self, usage: Usage, model: &str) -> io::Result<()> {
+        self.write(
+            &Entry::SubagentUsage(usage),
+            Some(model),
+            Some(DRAFT_SOURCE),
+        )
     }
 
     fn file(&self) -> Option<&Path> {
@@ -1198,10 +1226,16 @@ fn lock(file: &File, path: &Path) -> io::Result<()> {
     ))
 }
 
-fn write_line(file: &mut File, entry: &Entry, model: Option<&str>) -> io::Result<()> {
+fn write_line(
+    file: &mut File,
+    entry: &Entry,
+    model: Option<&str>,
+    source: Option<&str>,
+) -> io::Result<()> {
     let mut line = serde_json::to_vec(&LineOut {
         entry,
         model,
+        source,
         ts: unix_now(),
     })?;
     line.push(b'\n');
@@ -2150,7 +2184,6 @@ mod tests {
             Entry::Notes {
                 notes: vec!["n".into()],
             },
-            Entry::DraftUsage(Usage::default()),
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -2166,7 +2199,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 10);
+        assert_eq!(value["format"], 9);
         // An API conversation has no backend field.
         assert!(value.get("backend").is_none(), "{value}");
         // Journals written before the field existed are format 1.

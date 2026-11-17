@@ -275,8 +275,9 @@ impl Agent {
 
     /// Offers the model the `draft` tool, which writes a long text level by
     /// level with this agent's model ([`crate::write`]). The tokens its
-    /// calls use count toward this agent's usage (a `draft_usage` journal
-    /// entry), and this agent's cancel stops it.
+    /// calls use count toward this agent's usage (`subagent_usage` journal
+    /// entries marked `"source": "draft"`, one per answering model), its
+    /// limit is asked before each of them, and its cancel stops it.
     pub fn with_draft(mut self, settings: crate::write::tool::Settings) -> Self {
         self.tools
             .register(crate::write::tool::DraftTool::new(settings));
@@ -706,8 +707,26 @@ impl Agent {
     ) -> crate::write::Draft {
         let provider = self.provider.clone();
         let cancel = self.cancel.clone();
+        // The run's limit, asked with the tokens used before the draft and
+        // by its calls so far, before each of its calls.
+        let limit = self.limit.clone();
+        let before = self.transcript.usage;
+        let budget = move |used: Usage| {
+            let limit = limit.as_ref()?;
+            let mut limit = limit.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut total = before;
+            total.add(used);
+            (*limit)(total)
+        };
         let (sender, mut levels) = tokio::sync::mpsc::unbounded_channel();
-        let work = crate::write::run(&*provider, request, options, &cancel, Some(&sender));
+        let work = crate::write::run(
+            &*provider,
+            request,
+            options,
+            &cancel,
+            Some(&sender),
+            Some(&budget),
+        );
         tokio::pin!(work);
         let draft = loop {
             tokio::select! {
@@ -719,12 +738,40 @@ impl Agent {
         while let Ok(level) = levels.try_recv() {
             on_event(Event::DraftLevel(&level));
         }
+        // Said once, at the end: the calls ran at the same time.
+        if let Some(switch) = &draft.switch {
+            on_event(Event::ModelSwitch(switch));
+        }
         on_event(Event::DraftDone(&draft));
-        let usage = draft.usage();
-        if usage != Usage::default() {
-            self.record(Entry::DraftUsage(usage), on_event);
+        for (model, usage) in draft.usage_by_model() {
+            self.record_draft_usage(usage, model.as_deref(), on_event);
         }
         draft
+    }
+
+    /// Records the tokens of a `draft` call's calls that `model` answered:
+    /// a `subagent_usage` entry marked as a draft's
+    /// ([`Journal::record_draft_usage`]), which counts toward the
+    /// session's usage like a `delegate` call's.
+    fn record_draft_usage(
+        &mut self,
+        usage: Usage,
+        model: Option<&str>,
+        on_event: &mut impl FnMut(Event<'_>),
+    ) {
+        if let Some(journal) = &mut self.journal
+            && let Err(err) = match model {
+                Some(model) => journal.record_draft_usage(usage, model),
+                None => journal.record(&Entry::SubagentUsage(usage)),
+            }
+        {
+            self.journal = None;
+            on_event(Event::Warning(&format!(
+                "could not write the session journal ({err}); \
+                 the rest of this session will not be saved"
+            )));
+        }
+        self.transcript.apply(Entry::SubagentUsage(usage));
     }
 
     /// `/write`: one turn that Junees runs itself, not the model. The
@@ -778,6 +825,9 @@ impl Agent {
         match &draft.stop {
             Stop::Failed(reason) => anyhow::bail!("draft failed: {reason}"),
             Stop::Cancelled if draft.levels_done == 0 => return Err(Cancelled.into()),
+            Stop::Limit(reason) if draft.levels_done == 0 => {
+                return Err(LimitReached(reason.clone()).into());
+            }
             _ => {}
         }
         let text = draft.text();
@@ -1040,10 +1090,9 @@ impl Agent {
     /// conversation instead of one with holes.
     fn record(&mut self, entry: Entry, on_event: &mut impl FnMut(Event<'_>)) {
         let model = match entry {
-            Entry::Usage(_)
-            | Entry::SummaryUsage(_)
-            | Entry::SubagentUsage(_)
-            | Entry::DraftUsage(_) => self.provider.model(),
+            Entry::Usage(_) | Entry::SummaryUsage(_) | Entry::SubagentUsage(_) => {
+                self.provider.model()
+            }
             _ => None,
         };
         if let Some(journal) = &mut self.journal
@@ -1064,6 +1113,8 @@ impl Agent {
 
 fn forward(event: StreamEvent, on_event: &mut impl FnMut(Event<'_>)) {
     on_event(match &event {
+        // The usage entry names the model the provider reports.
+        StreamEvent::AnsweredBy(_) => return,
         StreamEvent::TextDelta(text) => Event::TextDelta(text),
         StreamEvent::TextEnd => Event::TextEnd,
         StreamEvent::Thinking => Event::Thinking,

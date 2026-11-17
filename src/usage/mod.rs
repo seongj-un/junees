@@ -34,7 +34,8 @@ pub enum Kind {
     /// The calls of a `delegate` call's subagents: together
     /// (`subagent_usage`), or one by one from their own journals.
     Subagents,
-    /// The calls of a `draft` call together (`draft_usage`).
+    /// The calls of a `draft` call answered by one model, together
+    /// (`subagent_usage` with `"source": "draft"`).
     Drafts,
     /// One Claude Code turn (`claude_turn`), on the subscription.
     ClaudeCode,

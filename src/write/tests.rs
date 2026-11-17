@@ -7,6 +7,7 @@ use serde_json::json;
 
 use super::*;
 use crate::provider::{CompletionResponse, ProviderError};
+use crate::tools::Tool;
 
 /// What the fake saw of one request.
 #[derive(Debug, Clone)]
@@ -22,6 +23,7 @@ type Reply = dyn Fn(&Seen, usize) -> Result<String, ProviderError> + Send + Sync
 /// A provider that answers from `reply` (the request and how many requests
 /// came before it) after `delay`, counting the requests in flight.
 struct Fake {
+    name: &'static str,
     reply: Box<Reply>,
     delay: Duration,
     active: AtomicUsize,
@@ -34,6 +36,7 @@ impl Fake {
         reply: impl Fn(&Seen, usize) -> Result<String, ProviderError> + Send + Sync + 'static,
     ) -> Self {
         Self {
+            name: "claude-sonnet-4-5",
             reply: Box::new(reply),
             delay: Duration::from_millis(50),
             active: AtomicUsize::new(0),
@@ -85,7 +88,7 @@ impl Provider for Fake {
     }
 
     fn model(&self) -> Option<&str> {
-        Some("claude-sonnet-4-5")
+        Some(self.name)
     }
 }
 
@@ -141,7 +144,15 @@ fn options(levels: u8, parallel: usize) -> Options {
 }
 
 async fn draft(fake: &Fake, options: &Options) -> Draft {
-    run(fake, "write about caching", options, &Cancel::new(), None).await
+    run(
+        fake,
+        "write about caching",
+        options,
+        &Cancel::new(),
+        None,
+        None,
+    )
+    .await
 }
 
 #[test]
@@ -366,7 +377,15 @@ async fn two_levels_go_from_the_plan_to_the_text() {
 async fn four_levels_write_every_paragraph_from_the_outlines() {
     let fake = Fake::new(standard(3));
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let result = run(&fake, "x", &options(4, 8), &Cancel::new(), Some(&sender)).await;
+    let result = run(
+        &fake,
+        "x",
+        &options(4, 8),
+        &Cancel::new(),
+        Some(&sender),
+        None,
+    )
+    .await;
     assert_eq!(result.levels_done, 4);
     // 1 plan, 3 gists, 3 outlines, 6 paragraphs.
     assert_eq!(result.calls.len(), 13);
@@ -498,7 +517,7 @@ async fn a_cancel_keeps_the_finished_levels() {
         }
         seen
     });
-    let result = run(&fake, "x", &options(3, 4), &cancel, Some(&sender)).await;
+    let result = run(&fake, "x", &options(3, 4), &cancel, Some(&sender), None).await;
     assert_eq!(canceller.await.unwrap(), 2);
     assert_eq!(result.stop, Stop::Cancelled);
     assert_eq!(result.levels_done, 2);
@@ -513,13 +532,13 @@ async fn a_cancel_keeps_the_finished_levels() {
 #[tokio::test]
 async fn empty_and_huge_requests_make_no_call() {
     let fake = Fake::new(standard(3));
-    let result = run(&fake, "  \n", &options(3, 4), &Cancel::new(), None).await;
+    let result = run(&fake, "  \n", &options(3, 4), &Cancel::new(), None, None).await;
     assert_eq!(
         result.stop,
         Stop::Failed("the request is empty".to_string())
     );
     let huge = "가".repeat(MAX_REQUEST_CHARS + 1);
-    let result = run(&fake, &huge, &options(3, 4), &Cancel::new(), None).await;
+    let result = run(&fake, &huge, &options(3, 4), &Cancel::new(), None, None).await;
     assert!(matches!(result.stop, Stop::Failed(_)));
     assert!(fake.seen().is_empty());
 }
@@ -577,7 +596,7 @@ fn prompt_blocks_cannot_be_closed_by_the_request() {
 
 #[test]
 fn draft_input_is_checked_and_unattended_runs_get_two_at_once() {
-    let settings = tool::Settings { parallel: 6 };
+    let settings = tool::Settings::attended(6);
     let (request, options) = tool::parse_input(
         &json!({"request": "a README", "levels": 4, "polish": true, "x": 1}),
         settings,
@@ -607,12 +626,37 @@ fn draft_input_is_checked_and_unattended_runs_get_two_at_once() {
     }
     assert_eq!(tool::Settings::unattended(8).parallel, UNATTENDED_PARALLEL);
     assert_eq!(tool::Settings::unattended(1).parallel, 1);
+    // Nobody watches: at most three levels and no seam pass.
+    let (_, options) = tool::parse_input(
+        &json!({"request": "r", "levels": 4, "polish": true}),
+        tool::Settings::unattended(8),
+        900,
+    )
+    .unwrap();
+    assert_eq!((options.levels, options.polish), (3, false));
+    let (_, options) = tool::parse_input(
+        &json!({"request": "r", "levels": 2}),
+        tool::Settings::unattended(8),
+        900,
+    )
+    .unwrap();
+    assert_eq!(options.levels, 2);
+    assert!(
+        tool::DraftTool::new(tool::Settings::unattended(8))
+            .description()
+            .contains("levels stop at 3 and polish is off")
+    );
+    assert!(
+        !tool::DraftTool::new(tool::Settings::attended(8))
+            .description()
+            .contains("levels stop at 3")
+    );
 }
 
 /// The agent's model calls `draft`, then answers; the draft's own calls
 /// (no tools offered) get the standard replies.
 struct AgentFake {
-    draft: Fake,
+    draft: Box<dyn Provider>,
     turns: AtomicUsize,
 }
 
@@ -625,6 +669,29 @@ impl Provider for AgentFake {
         if request.tools.is_empty() {
             return self.draft.complete(request).await;
         }
+        self.agent_turn()
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest<'_>,
+        events: &crate::provider::StreamSender,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if request.tools.is_empty() {
+            return self.draft.complete_streaming(request, events).await;
+        }
+        let response = self.agent_turn()?;
+        crate::provider::report_blocks(&response.content, events);
+        Ok(response)
+    }
+
+    fn model(&self) -> Option<&str> {
+        Some("claude-sonnet-4-5")
+    }
+}
+
+impl AgentFake {
+    fn agent_turn(&self) -> Result<CompletionResponse, ProviderError> {
         let usage = Usage {
             input_tokens: 100,
             output_tokens: 1,
@@ -648,16 +715,12 @@ impl Provider for AgentFake {
             })
         }
     }
-
-    fn model(&self) -> Option<&str> {
-        Some("claude-sonnet-4-5")
-    }
 }
 
 #[tokio::test]
 async fn the_agent_runs_draft_calls_reports_levels_and_counts_their_tokens() {
     let provider = AgentFake {
-        draft: Fake::new(standard(3)),
+        draft: Box::new(Fake::new(standard(3))),
         turns: AtomicUsize::new(0),
     };
     let mut agent = crate::agent::Agent::new(
@@ -671,7 +734,7 @@ async fn the_agent_runs_draft_calls_reports_levels_and_counts_their_tokens() {
             compact_threshold: 0.8,
         },
     )
-    .with_draft(tool::Settings { parallel: 2 });
+    .with_draft(tool::Settings::attended(2));
     let mut levels = Vec::new();
     let mut done = None;
     let mut result = None;
@@ -709,7 +772,7 @@ async fn slash_write_puts_the_draft_into_the_conversation_and_saves_it_like_writ
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("draft.md");
     let provider = AgentFake {
-        draft: Fake::new(standard(3)),
+        draft: Box::new(Fake::new(standard(3))),
         turns: AtomicUsize::new(0),
     };
     let mut agent = crate::agent::Agent::new(
@@ -753,7 +816,7 @@ async fn slash_write_puts_the_draft_into_the_conversation_and_saves_it_like_writ
 
     // A failed draft records the input only.
     let provider = AgentFake {
-        draft: Fake::new(|_, _| Ok("no plan".to_string())),
+        draft: Box::new(Fake::new(|_, _| Ok("no plan".to_string()))),
         turns: AtomicUsize::new(0),
     };
     let mut agent = crate::agent::Agent::new(
@@ -784,4 +847,146 @@ fn slash_write_needs_a_request() {
     );
     assert!(matches!(parse("/write"), Some(Slash::Bad(_))));
     assert!(crate::slash::is_command("write"));
+}
+
+#[tokio::test]
+async fn the_budget_stops_the_draft_before_its_next_call_and_keeps_the_finished_levels() {
+    let fake = Fake::new(standard(3));
+    let budget = |used: Usage| {
+        (used.input_tokens >= 30)
+            .then(|| format!("token limit reached: {} of 30", used.input_tokens))
+    };
+    let result = run(
+        &fake,
+        "x",
+        &options(3, 1),
+        &Cancel::new(),
+        None,
+        Some(&budget),
+    )
+    .await;
+    assert_eq!(
+        result.stop,
+        Stop::Limit("token limit reached: 30 of 30".to_string())
+    );
+    // The plan and two gists; the third gist and every body never went out.
+    assert_eq!(fake.seen().len(), 3);
+    assert_eq!(result.calls.len(), 3);
+    assert_eq!(result.levels_done, 1);
+    assert!(result.sections.iter().all(|s| s.gist.is_none()));
+    let output = tool::output(&result);
+    assert!(output.is_error);
+    assert!(
+        output
+            .content
+            .starts_with("draft stopped: token limit reached"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("## concept 1"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
+async fn a_switch_to_the_fallback_is_reported_once_and_each_call_keeps_its_model() {
+    use crate::provider::fallback::Switching;
+    // The main model is blocked for section texts; the fallback answers.
+    let mut main = Fake::new(|seen, count| {
+        if seen.user.contains("the full text of") {
+            Err(ProviderError::Api {
+                status: 429,
+                kind: Some("rate_limit_error".to_string()),
+                message: "slow down".to_string(),
+                retry_after: Some(900),
+            })
+        } else {
+            standard(3)(seen, count)
+        }
+    });
+    main.name = "big-model";
+    let mut fallback = Fake::new(standard(3));
+    fallback.name = "small-model";
+    let provider = Switching::new(
+        Box::new(main),
+        Some(Box::new(fallback)),
+        Duration::from_secs(120),
+        None,
+    );
+    let result = run(&provider, "x", &options(3, 4), &Cancel::new(), None, None).await;
+    assert_eq!(result.stop, Stop::Done);
+    let switch = result.switch.as_ref().expect("the switch is reported");
+    assert_eq!(
+        (switch.from.as_str(), switch.to.as_str()),
+        ("big-model", "small-model")
+    );
+    for call in &result.calls {
+        let expected = if call.kind == Kind::Body {
+            "small-model"
+        } else {
+            "big-model"
+        };
+        assert_eq!(call.model.as_deref(), Some(expected), "{call:?}");
+    }
+    let by_model = result.usage_by_model();
+    let models: Vec<_> = by_model
+        .iter()
+        .map(|(m, u)| (m.as_deref(), u.input_tokens))
+        .collect();
+    assert_eq!(models, [(Some("big-model"), 40), (Some("small-model"), 30)]);
+}
+
+#[tokio::test]
+async fn the_agent_reports_a_draft_switch_once() {
+    use crate::provider::fallback::Switching;
+    let mut main = Fake::new(|seen, count| {
+        if seen.user.contains("the full text of") {
+            Err(ProviderError::Api {
+                status: 529,
+                kind: Some("overloaded_error".to_string()),
+                message: "busy".to_string(),
+                retry_after: None,
+            })
+        } else {
+            standard(3)(seen, count)
+        }
+    });
+    main.name = "big-model";
+    let mut fallback = Fake::new(standard(3));
+    fallback.name = "small-model";
+    let provider = AgentFake {
+        draft: Box::new(Switching::new(
+            Box::new(main),
+            Some(Box::new(fallback)),
+            Duration::from_secs(120),
+            None,
+        )),
+        turns: AtomicUsize::new(0),
+    };
+    let mut agent = crate::agent::Agent::new(
+        Box::new(provider),
+        crate::tools::ToolRegistry::new(),
+        crate::agent::AgentOptions {
+            system: "sys".to_string(),
+            max_tokens: 1000,
+            max_turns: 5,
+            context_window: 200_000,
+            compact_threshold: 0.8,
+        },
+    )
+    .with_draft(tool::Settings::attended(4));
+    let mut switches = Vec::new();
+    agent
+        .run("write it", |event| {
+            if let crate::agent::Event::ModelSwitch(switch) = event {
+                switches.push(switch.to.clone());
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(switches, ["small-model"]);
+    // 2 agent calls of 100 + 7 draft calls of 10, on either model.
+    assert_eq!(agent.usage().input_tokens, 270);
 }

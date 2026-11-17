@@ -22,12 +22,11 @@ const READ_BUFFER: usize = 64 * 1024;
 const MAX_LINE_BYTES: usize = crate::search::MAX_LINE_BYTES;
 
 /// The entry types that hold usage.
-const USAGE_TYPES: [&[u8]; 5] = [
+const USAGE_TYPES: [&[u8]; 4] = [
     b"usage",
     b"summary_usage",
     b"subagent_usage",
     b"claude_turn",
-    b"draft_usage",
 ];
 
 /// How much of the journals was read.
@@ -52,6 +51,10 @@ struct LineIn {
     /// See [`session::Journal::record_usage`].
     #[serde(default)]
     model: Option<String>,
+    /// `draft` on a `subagent_usage` line that counts a `draft` call
+    /// ([`session::DRAFT_SOURCE`]).
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// The `type` of a line as Junees writes it (`{"type":"usage",...`).
@@ -114,8 +117,12 @@ fn read_journal(
         let (kind, usage) = match parsed.entry {
             Entry::Usage(usage) => (Kind::Call, usage),
             Entry::SummaryUsage(usage) => (Kind::Summary, usage),
+            Entry::SubagentUsage(usage)
+                if parsed.source.as_deref() == Some(session::DRAFT_SOURCE) =>
+            {
+                (Kind::Drafts, usage)
+            }
             Entry::SubagentUsage(usage) => (Kind::Subagents, usage),
-            Entry::DraftUsage(usage) => (Kind::Drafts, usage),
             Entry::ClaudeTurn(turn) => (Kind::ClaudeCode, turn.usage),
             _ => continue,
         };

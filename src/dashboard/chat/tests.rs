@@ -398,6 +398,7 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
         stop: Stop::Done,
         calls: vec![call(1, Kind::Concept, true), call(3, Kind::Body, false)],
         elapsed: Duration::from_millis(150),
+        switch: None,
     };
     super::runner::on_event(
         &shared,
