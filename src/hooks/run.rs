@@ -289,7 +289,7 @@ impl Hooks {
                     let what = failure(&outcome);
                     if failure_blocked && pin_failure.is_some() {
                         fired.blocked = Some(format!(
-                            "the {} hook `{}` did not run ({what}); a hook whose file fails its \
+                            "the {} hook `{}` did not run: {what}; a hook whose file fails its \
                              check blocks whatever its on_error says, since the file may have \
                              been tampered with",
                             event.name(),
