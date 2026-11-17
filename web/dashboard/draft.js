@@ -189,8 +189,9 @@ export function formatSeconds(ms) {
 const number = new Intl.NumberFormat("ko-KR");
 
 /**
- * The one line under a finished card: calls, tokens, cache reads, time and
- * what one call at a time would have taken.
+ * The one line under a finished card: calls, tokens, cache reads, time and,
+ * for a draft that ended normally and gained from running at once, what one
+ * call at a time would have taken.
  */
 export function summaryLine(done) {
   const input = `입력 ${number.format(done.inputTokens)}${done.cacheReadTokens > 0 ? ` (캐시 읽기 ${number.format(done.cacheReadTokens)})` : ""}`;
@@ -199,7 +200,10 @@ export function summaryLine(done) {
     `${input} · 출력 ${number.format(done.outputTokens)} 토큰`,
     `걸린 시간 ${formatSeconds(done.elapsedMs)}`,
   ];
-  if (done.sequentialMs > 0) parts.push(`순차였다면 약 ${formatSeconds(done.sequentialMs)}`);
+  // The estimate adds only the calls that finished, while the time spent includes the
+  // level a cancel or a token limit threw away: after such a stop, or when the estimate is
+  // not longer than the time spent, the comparison would read backwards.
+  if (done.stop === "done" && done.sequentialMs > done.elapsedMs) parts.push(`순차였다면 약 ${formatSeconds(done.sequentialMs)}`);
   return parts.join(", ");
 }
 
@@ -331,9 +335,11 @@ export function parseArticle(article) {
 // ---- the model switch line (stage 22) ----
 
 const SWITCH_REASON = {
+  // The words of `src/provider/fallback/switch.rs`, which the terminal and the gateway use.
+  // `unavailable` is a 5xx answer or no answer at all.
   rate_limit: "사용 한도로 막혀",
-  overloaded: "서버가 붐벼",
-  unavailable: "응답이 없어",
+  overloaded: "과부하로 막혀",
+  unavailable: "서버 오류나 연결 실패로 막혀",
 };
 
 /** Why the model changed, as the start of the notice; a raw reason for a code this page does not know. */

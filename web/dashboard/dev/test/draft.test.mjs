@@ -289,8 +289,8 @@ test("the retry time is relative to now and never a negative number", () => {
 
 test("the switch headline names why and keeps an unknown reason", () => {
   assert.equal(switchHeadline({ reason: "rate_limit" }), "사용 한도로 막혀 예비 모델로 이어 갑니다");
-  assert.equal(switchHeadline({ reason: "overloaded" }), "서버가 붐벼 예비 모델로 이어 갑니다");
-  assert.equal(switchHeadline({ reason: "unavailable" }), "응답이 없어 예비 모델로 이어 갑니다");
+  assert.equal(switchHeadline({ reason: "overloaded" }), "과부하로 막혀 예비 모델로 이어 갑니다");
+  assert.equal(switchHeadline({ reason: "unavailable" }), "서버 오류나 연결 실패로 막혀 예비 모델로 이어 갑니다");
   assert.equal(switchHeadline({ reason: "quota" }), "사유(quota)로 예비 모델로 이어 갑니다");
 });
 
@@ -324,4 +324,19 @@ test("the request is shown as the model wrote it, not as JSON", () => {
   assert.equal(requestText('{"request":"배포 가이드를 써 줘\\n표 포함","levels":3}'), "배포 가이드를 써 줘\n표 포함");
   assert.equal(requestText('{"request":"cut'), '{"request":"cut');
   assert.equal(requestText(undefined), "");
+});
+
+test("the sequential estimate is left out when it would read backwards", () => {
+  const state = newDraft("{}");
+  // A cancel after level 1: the time spent includes the level that was thrown away.
+  applyDone(state, done({ stop: "cancelled", levels_done: 1, elapsed_ms: 2200, sequential_ms: 1100 }));
+  assert.ok(!summaryLine(state.done).includes("순차였다면"));
+  // Cancelled or stopped by a limit, even when the estimate happens to be longer.
+  applyDone(state, done({ stop: "limit", elapsed_ms: 2200, sequential_ms: 9000 }));
+  assert.ok(!summaryLine(state.done).includes("순차였다면"));
+  // A finished draft that was not faster than one call at a time.
+  applyDone(state, done({ elapsed_ms: 7000, sequential_ms: 7000 }));
+  assert.ok(!summaryLine(state.done).includes("순차였다면"));
+  applyDone(state, done());
+  assert.ok(summaryLine(state.done).endsWith("순차였다면 약 25.2초"));
 });
