@@ -2150,6 +2150,7 @@ mod tests {
             Entry::Notes {
                 notes: vec!["n".into()],
             },
+            Entry::DraftUsage(Usage::default()),
         ];
         let kinds: Vec<String> = samples
             .iter()
@@ -2165,7 +2166,7 @@ mod tests {
     #[test]
     fn meta_lines_carry_the_format_version() {
         let value = serde_json::to_value(meta()).unwrap();
-        assert_eq!(value["format"], 9);
+        assert_eq!(value["format"], 10);
         // An API conversation has no backend field.
         assert!(value.get("backend").is_none(), "{value}");
         // Journals written before the field existed are format 1.
