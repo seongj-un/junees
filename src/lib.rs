@@ -45,3 +45,4 @@ pub mod update;
 pub mod usage;
 pub mod web_search;
 pub mod webhook;
+pub mod write;
