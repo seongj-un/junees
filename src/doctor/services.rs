@@ -611,9 +611,9 @@ fn hook_check(
             area,
             &name,
             format!("{detail}: {why}"),
-            "the model may change those files without asking; run a script by its path \
-             (`command`'s first word or an interpreter's script argument) or keep it in \
-             $JUNEES_HOME/hooks/ (docs/hooks.md, 보안)",
+            "files of the working folder may be changed by the model without asking; run a \
+             script by its path (`command`'s first word or an interpreter's script argument) \
+             or keep it in $JUNEES_HOME/hooks/ (docs/hooks.md, 보안)",
         );
     } else {
         report.ok(area, &name, detail);

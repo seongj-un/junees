@@ -279,7 +279,6 @@ const BUILD_TOOLS: &[(&str, &str)] = &[
     ("npx", "the project's packages"),
     ("yarn", "package.json"),
     ("pnpm", "package.json"),
-    ("cargo", "build.rs and the project's settings"),
 ];
 
 /// Programs that run another command given as their arguments, which
@@ -319,6 +318,23 @@ pub fn indirect(hook: &Hook) -> Option<String> {
             crate::prompt_text::escape_hidden(name)
         ));
     }
+    if name == "cargo" {
+        // `cargo fmt` only calls rustfmt; the others may build the
+        // project.
+        let sub = command[1..]
+            .iter()
+            .find(|word| !word.starts_with('+') && !word.starts_with('-'))
+            .map(String::as_str)
+            .unwrap_or_default();
+        if sub == "fmt" {
+            return None;
+        }
+        return Some(format!(
+            "`cargo {}` may build the project, which runs its build.rs and proc macros; \
+             Junees cannot pin them",
+            crate::prompt_text::escape_hidden(sub)
+        ));
+    }
     if let Some((tool, files)) = BUILD_TOOLS.iter().find(|(tool, _)| *tool == name) {
         return Some(format!(
             "`{tool}` runs what {files} of the working folder say, which Junees cannot pin"
@@ -326,8 +342,8 @@ pub fn indirect(hook: &Hook) -> Option<String> {
     }
     match script_arg(command) {
         Script::Code(option) => Some(format!(
-            "`{name} {}` runs code or a module given on the command line, and what it loads \
-             from the working folder is not pinned",
+            "`{name} {}` runs code or a module given on the command line: if that calls or \
+             loads files of the working folder, they are not pinned",
             crate::prompt_text::escape_hidden(&option)
         )),
         Script::File(arg)

@@ -1081,8 +1081,16 @@ mod pinning {
         for (words, project, part) in [
             (r#"["make", "lint"]"#, false, "the Makefile"),
             (r#"["/usr/bin/npm", "run", "fmt"]"#, true, "package.json"),
-            (r#"["cargo", "fmt"]"#, true, "build.rs"),
-            (r#"["sh", "-c", "./x.sh"]"#, true, "`sh -c` runs code"),
+            (
+                r#"["cargo", "+nightly", "clippy"]"#,
+                true,
+                "`cargo clippy` may build",
+            ),
+            (
+                r#"["sh", "-c", "./x.sh"]"#,
+                true,
+                "if that calls or loads files",
+            ),
             (r#"["node", "--require=./a.js", "b.js"]"#, true, "--require"),
             (
                 r#"["python3", "x.py"]"#,
@@ -1126,6 +1134,7 @@ mod pinning {
             (r#"["python3", "/opt/hooks/x.py"]"#, false),
             (r#"["./check.sh"]"#, true),
             (r#"["notify-send", "x"]"#, false),
+            (r#"["cargo", "fmt", "--all"]"#, false),
         ] {
             assert_eq!(indirect(&hook(words, project)), None, "{words}");
         }
