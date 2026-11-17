@@ -16,13 +16,15 @@
 [[hooks]]
 event = "pre_tool"          # pre_tool | post_tool | turn_end | session_start | user_prompt
 match = "bash|write_file"   # 도구 이름 정규식 (pre_tool, post_tool만). 없으면 모든 도구
-command = ["./scripts/check.sh"]   # 프로그램과 인자 배열. 셸 문자열은 받지 않음
+command = ["/home/you/.junees/hooks/check.sh"]   # 프로그램과 인자 배열. 셸 문자열은 받지 않음
 timeout = "10s"             # 기본 10s, 최대 60s (ms, s, m 단위)
 on_error = "allow"          # allow | block (pre_tool, user_prompt만)
 ```
 
 - `match`는 도구 이름 전체와 맞춰 봅니다. `bash`는 `bash`에만 맞고 `plugin__x__bash_helper`에는 맞지 않습니다.
-- `command`의 첫 낱말이 `/`를 담은 상대 경로(`./scripts/check.sh`)이면 세션의 작업 폴더에서 찾고, `/`가 없으면 PATH에서 찾습니다.
+- `command`의 첫 낱말은 절대 경로이거나 PATH에서 찾을 이름(`/`가 없는 낱말)이어야 합니다. 사용자 훅에서 `/`를 담은 상대 경로(`./scripts/check.sh`, `~/...`)는 설정 오류입니다. 사용자 훅은 어느 프로젝트에서나 묻지 않고 도는데, 상대 경로면 그때 연 저장소의 파일이 실행되기 때문입니다. `~`는 풀리지 않으므로 `/home/you/.junees/hooks/...`처럼 적습니다. 사용자 훅 스크립트는 `$JUNEES_HOME/hooks/`에 두기를 권합니다. 모델의 도구가 쓰지 못하는 폴더입니다.
+- 프로젝트 훅은 상대 경로를 쓸 수 있고, 세션의 작업 폴더에서 찾습니다.
+- 훅이 실행하는 파일(`command`의 첫 낱말)이 세션의 작업 폴더 안에 있으면, 훅을 읽을 때 그 파일의 SHA-256을 고정합니다([보안](#보안)). 프로젝트 훅이면 이 값이 승인에 들어가므로 스크립트가 바뀌면 다시 묻고, 세션 중에 바뀌면 실행하지 않습니다.
 - 사용자 훅(설정 파일과 `hooks.toml`)에 잘못된 값이 있으면(모르는 이벤트, 깨진 정규식, 문자열로 쓴 `command`, 60초를 넘는 `timeout`, 막을 수 없는 이벤트의 `on_error = "block"` 등) Junees가 시작하지 않고 파일과 줄을 알립니다. 정책 훅이 조용히 빠지면 막아야 할 호출이 통과하기 때문입니다.
 
 ## 이벤트
@@ -36,6 +38,16 @@ on_error = "allow"          # allow | block (pre_tool, user_prompt만)
 | `turn_end` | 턴이 끝난 뒤(답, 오류, 취소 모두) | 아니요 |
 
 서브에이전트(`delegate`)의 도구 호출에도 위임한 세션의 `pre_tool`, `post_tool` 훅이 돕니다. `user_prompt` 훅에 막힌 입력에는 `turn_end` 훅이 돌지 않습니다.
+
+### 도구 호출 하나의 순서
+
+1. 사용자 훅과 프로젝트 훅의 `pre_tool`(설정 순서대로). 하나가 막으면 2~4는 없고 5로 갑니다.
+2. 승인 질문과 정책(명령 정책, 파일 도구의 경로 검사, 무인 실행의 거절).
+3. 플러그인의 `pre_tool` 훅([플러그인](plugins.md)).
+4. 도구 실행.
+5. `post_tool` 훅(막히거나 거절된 호출에도 돎).
+
+`delegate`와 `draft` 호출에는 1, 4, 5만 있습니다. 승인 질문과 플러그인 훅은 이 둘에 돌지 않습니다(서브에이전트가 부르는 도구는 각자 이 순서를 다시 거칩니다).
 
 ## 실행 계약
 
@@ -90,7 +102,7 @@ on_error = "allow"          # allow | block (pre_tool, user_prompt만)
 [훅 post_tool `cargo fmt`] formatted 2 files
 ```
 
-- 결과는 `통과`, `막음`, `실패`, `시간 초과(N초)`이고, `on_error = "block"`으로 막았으면 `실패 시 막는 설정이라 막음`이 붙습니다.
+- 결과는 `통과`, `막음`, `실패`, `시간 초과(N초)`이고, `on_error = "block"`으로 막았으면 `실패 시 막는 설정이라 막음`이 붙습니다. 고정한 파일이 바뀌어 실행하지 않았으면 `실패, 훅이 부르는 파일이 바뀌어 실행하지 않았습니다`입니다.
 - `message`는 두 번째 줄처럼 따로 남습니다. 제어 문자와 방향 바꾸기 문자는 이스케이프하고, 알려진 비밀 값은 가리고, `<junees_notice>` 태그는 깨뜨려서(#117/#125 규칙) 훅 출력이 Junees의 안내 블록을 열거나 닫지 못하게 합니다.
 - 도구 훅의 줄은 그 도구 라운드의 결과 뒤에, `session_start`와 `user_prompt` 훅의 줄은 입력 앞에, `turn_end` 훅의 줄은 턴이 끝난 뒤(다음 입력과 같은 메시지)에 들어갑니다.
 - 터미널과 게이트웨이는 같은 줄을 진행 표시로 보여 줍니다. 대시보드 대화에는 `hook` 이벤트를 보냅니다.
@@ -110,13 +122,13 @@ on_error = "allow"          # allow | block (pre_tool, user_prompt만)
 [[hooks]]
 event = "post_tool"
 match = "write_file|edit_file"
-command = ["./scripts/fmt-hook.sh"]
+command = ["/home/you/.junees/hooks/fmt-hook.sh"]
 timeout = "30s"
 ```
 
 ```sh
 #!/bin/sh
-# scripts/fmt-hook.sh: 고친 파일이 .rs이면 rustfmt를 돌리고 모델에게 알린다.
+# ~/.junees/hooks/fmt-hook.sh: 고친 파일이 .rs이면 rustfmt를 돌리고 모델에게 알린다.
 path=$(jq -r '.tool.input.path // empty')
 case "$path" in
   *.rs) rustfmt --edition 2024 "$path" && echo '{"message": "rustfmt로 정리했습니다. 다시 읽고 이어 가세요."}' ;;
@@ -129,13 +141,13 @@ esac
 [[hooks]]
 event = "pre_tool"
 match = "bash"
-command = ["./scripts/no-force-push.sh"]
+command = ["/home/you/.junees/hooks/no-force-push.sh"]
 on_error = "block"   # 훅이 실패해도 막는다
 ```
 
 ```sh
 #!/bin/sh
-# scripts/no-force-push.sh: force push를 막는다.
+# ~/.junees/hooks/no-force-push.sh: force push를 막는다.
 if jq -r '.tool.input.command' | grep -Eq 'git push.*(--force|-f)'; then
   echo "force push는 사람이 직접 합니다" >&2
   exit 2
@@ -160,10 +172,13 @@ command = ["notify-send", "Junees", "턴이 끝났습니다"]
 
 ## 보안
 
-- 사용자 훅(`$JUNEES_HOME`)은 사용자가 쓴 것이므로 묻지 않고 실행합니다. 모델의 도구는 `$JUNEES_HOME/hooks.toml`과 승인 기록 `$JUNEES_HOME/trusted-hooks`를 읽지도 쓰지도 못합니다(설정 파일과 같은 보호, [명령 정책](safety.md#명령-정책)). 쓸 수 있다면 모델이 묻지 않고 실행될 명령을 심거나 프로젝트 훅을 스스로 승인할 수 있기 때문입니다.
+- 사용자 훅(`$JUNEES_HOME`)은 사용자가 쓴 것이므로 묻지 않고 실행합니다. 모델의 도구는 `$JUNEES_HOME/hooks.toml`과 승인 기록 `$JUNEES_HOME/trusted-hooks`를 읽지도 쓰지도 못합니다. 파일 도구, 명령 정책, bash 샌드박스(작업 폴더가 상태 폴더를 품을 때도) 모두에서 설정 파일과 같은 보호를 받습니다([명령 정책](safety.md#명령-정책)). `$JUNEES_HOME/hooks/` 폴더는 모델이 읽을 수만 있습니다. 쓸 수 있다면 모델이 묻지 않고 실행될 명령을 심거나 프로젝트 훅을 스스로 승인할 수 있기 때문입니다.
 - 프로젝트 훅(`.junees/hooks.toml`)은 저장소에 들어 있는 남의 코드이므로 사람이 승인해야 실행합니다. 승인은 파일 경로와 내용의 SHA-256으로 기록하므로(`$JUNEES_HOME/trusted-hooks`, 0600) 한 글자라도 바뀌면 다시 묻습니다. 링크인 파일, 일반 파일이 아닌 것, 256KB가 넘는 파일은 읽지 않습니다.
 - 터미널 대화(표준 입력과 표준 오류가 모두 터미널)는 시작할 때 파일 내용 전체를 보여 주고 실행할지 묻습니다. 답이 `y`가 아니면 이번 세션에서는 실행하지 않습니다.
 - 물을 사람이 없는 실행(`-p`, 게이트웨이, 대시보드 대화, 예약 작업, 웹훅, `junees mcp serve`, `task`)은 승인되지 않은 프로젝트 훅을 실행하지 않고 경고만 냅니다. 웹훅 실행은 지침 파일처럼 경로 폴더의 프로젝트 파일을 봅니다.
 - 모델이 bash로 `junees hooks trust`/`untrust`를 실행하려 하면 Junees 자신의 상태를 바꾸는 명령으로 보고 승인을 묻거나(대화) 막습니다(무인 실행).
-- 훅 명령은 bash 도구와 같은 비밀 변수 제거와 샌드박스 아래에서 돕니다. 다만 샌드박스가 꺼져 있으면 훅은 사용자 권한 그대로 돕니다. 승인한 프로젝트 훅은 그 저장소의 다른 스크립트(`./scripts/check.sh`)를 부를 수 있고, 승인은 그 스크립트의 내용까지 고정하지는 않습니다. 승인하기 전에 훅이 부르는 스크립트도 읽어 보세요.
+- 훅 명령은 bash 도구와 같은 비밀 변수 제거와 샌드박스 아래에서 돕니다. 다만 샌드박스가 꺼져 있으면 훅은 사용자 권한 그대로 돕니다.
+- 훅 실행은 명령 정책과 승인 질문을 거치지 않습니다. 그래서 훅이 실행하는 파일이 세션의 작업 폴더 안에 있으면(모델이 `write_file`로 묻지 않고 고칠 수 있는 곳) 훅을 읽을 때 그 파일의 SHA-256을 고정합니다. 프로젝트 훅이면 이 값이 승인 digest에 들어가 스크립트가 바뀌면 다음 세션에서 다시 묻고, 승인 질문에도 고정한 파일이 보입니다. 실행 직전에 다시 계산해 다르면 실행하지 않고 훅 실패로 처리합니다(`on_error`를 따름). 파일이 없거나, 링크이거나, 16MB가 넘으면 고정할 수 없으므로 실행하지 않습니다. 작업 폴더 밖의 절대 경로와 PATH의 프로그램은 고정하지 않습니다.
+- 모델이 고칠 수 있는 파일을 실행하는 훅은 모델에게 정책 밖 실행을 줍니다. 고정은 `command`의 첫 낱말이 가리키는 파일만 합니다. `make`, `npm run`, 인터프리터에 넘긴 인자(`["python3", "scripts/x.py"]`, `["sh", "x.sh"]`)처럼 저장소 내용을 간접으로 실행하는 훅은 막을 수 없습니다. 훅 스크립트는 작업 폴더 밖(`$JUNEES_HOME/hooks/`)에 두거나 `command`의 첫 낱말로 직접 부릅니다. 확인과 실행 사이에 이미 돌고 있던 프로세스가 파일을 바꿔치기하는 틈도 남습니다.
+- 승인 질문은 파일 원문 다음, `[y/N]` 바로 위에 파싱한 결과(훅 N개, 훅마다 이벤트, match, 명령, 고정한 파일)를 보여 줍니다. 긴 파일에서 빈 줄로 훅 하나를 화면 밖에 밀어내도 실제로 돌 것이 보입니다.
 - 훅에 넘기는 입력은 알려진 비밀 값을 가리지만, 파일 내용이나 명령 출력에 든 모르는 비밀까지 가리지는 못합니다. 훅이 입력을 밖으로 보낸다면 그 점을 생각하고 씁니다.
