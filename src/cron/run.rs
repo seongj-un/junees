@@ -473,7 +473,7 @@ impl ApiEngine {
             Trigger::Webhook { context_dir, .. } => context_dir,
             _ => dir,
         };
-        let mut hooks = crate::hooks::find(home, project)?;
+        let mut hooks = crate::hooks::find(home, project, dir)?;
         hooks.skip_untrusted();
         for warning in &hooks.warnings {
             eprintln!("  !! {warning}");

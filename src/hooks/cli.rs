@@ -121,18 +121,34 @@ pub fn quoted(text: &str) -> String {
         .collect()
 }
 
-fn hook_line(hook: &Hook) -> String {
+/// One hook on one line: its event, `match`, command and the file it
+/// pins, if any.
+pub fn summary(hook: &Hook) -> String {
     let spec = &hook.spec;
     let matched = spec
         .matcher
         .as_ref()
         .map(|matcher| format!(" match `{}`", escape_hidden(&matcher.source)))
         .unwrap_or_default();
+    let pinned = match &hook.pin {
+        Some(pin) => match &pin.digest {
+            Ok(digest) => format!(" (pinned {} sha256 {})", pin.path.display(), &digest[..16]),
+            Err(err) => format!(
+                " (cannot pin {}: {err}; it does not run)",
+                pin.path.display()
+            ),
+        },
+        None => String::new(),
+    };
+    format!("{}{matched} -> {}{pinned}", spec.event.name(), spec.shown())
+}
+
+fn hook_line(hook: &Hook) -> String {
+    let spec = &hook.spec;
     format!(
-        "  line {}: {}{matched} -> {} (timeout {}, on_error {})\n",
+        "  line {}: {} (timeout {}, on_error {})\n",
         spec.line,
-        spec.event.name(),
-        spec.shown(),
+        summary(hook),
         crate::mcp::server::seconds(spec.timeout),
         spec.on_error.name()
     )
@@ -186,7 +202,7 @@ fn list(place: &Place<'_>) -> Result<String> {
 }
 
 async fn test(event: Event, tool: &str, place: &Place<'_>) -> Result<String> {
-    let mut found = super::find(place.home, place.cwd)?;
+    let mut found = super::find(place.home, place.cwd, place.cwd)?;
     found.skip_untrusted();
     let mut out: String = found
         .warnings

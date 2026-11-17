@@ -101,6 +101,9 @@ impl Record {
             Outcome::Passed => "통과".to_string(),
             Outcome::Blocked(_) => "막음".to_string(),
             Outcome::TimedOut(limit) => format!("시간 초과({}초)", limit.as_secs_f64()),
+            Outcome::Failed(what) if what.starts_with(super::CHANGED) => {
+                format!("실패, {}", super::CHANGED)
+            }
             Outcome::Failed(_) => "실패".to_string(),
         };
         let result = if self.failure_blocked {
@@ -220,9 +223,7 @@ impl Hooks {
         }
         let payload = self.payload(event, &input);
         for hook in selected {
-            let (outcome, message, took) = self
-                .run(&hook.spec, event, input.session_id, &payload)
-                .await;
+            let (outcome, message, took) = self.run(hook, event, input.session_id, &payload).await;
             let failed = matches!(outcome, Outcome::TimedOut(_) | Outcome::Failed(_));
             let failure_blocked =
                 failed && event.can_block() && hook.spec.on_error == OnError::Block;
@@ -310,13 +311,17 @@ impl Hooks {
     /// Runs one hook: how it ended, its message, how long it took.
     async fn run(
         &self,
-        spec: &Spec,
+        hook: &Hook,
         event: Event,
         session_id: Option<&str>,
         payload: &Value,
     ) -> (Outcome, Option<String>, Duration) {
+        let spec = &hook.spec;
         let started = tokio::time::Instant::now();
-        let result = self.spawn(spec, event, session_id, payload).await;
+        let result = match check_pin(hook) {
+            Err(why) => Err(why),
+            Ok(()) => self.spawn(spec, event, session_id, payload).await,
+        };
         let took = started.elapsed();
         let (outcome, message) = match result {
             Err(why) => (Outcome::Failed(why), None),
@@ -479,6 +484,30 @@ fn secret_names(hidden: &[String]) -> Vec<String> {
         }
     }
     names
+}
+
+/// Refuses to run a hook whose pinned file ([`super::Pin`]) could not be
+/// read when the hook was, or is no longer what it was then: the model may
+/// have rewritten it during the session. (A swap between this check and
+/// the start remains possible for a process already running there.)
+fn check_pin(hook: &Hook) -> Result<(), String> {
+    let Some(pin) = &hook.pin else {
+        return Ok(());
+    };
+    let path = pin.path.display();
+    match &pin.digest {
+        Err(err) => Err(format!(
+            "the file it runs ({path}) could not be pinned when the hook was read ({err}), so \
+             it was not run"
+        )),
+        Ok(expected) => match super::pinned_digest(&pin.path) {
+            Ok(now) if now == *expected => Ok(()),
+            _ => Err(format!(
+                "{} ({path} changed since the hook was read)",
+                super::CHANGED
+            )),
+        },
+    }
 }
 
 /// Why a hook failed, in one line.

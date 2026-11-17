@@ -3633,6 +3633,7 @@ mod tests {
             .map(|spec| crate::hooks::Hook {
                 spec,
                 origin: crate::hooks::Origin::User(dir.join("hooks.toml")),
+                pin: None,
             })
             .collect();
         let mut hooks =

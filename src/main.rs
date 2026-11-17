@@ -673,7 +673,7 @@ async fn load_hooks(
     ask: Option<&SharedLines>,
 ) -> Result<Option<Arc<junees::hooks::Hooks>>> {
     use std::io::IsTerminal;
-    let mut found = junees::hooks::find(config.home.as_deref(), cwd)?;
+    let mut found = junees::hooks::find(config.home.as_deref(), cwd, cwd)?;
     if let (Some(file), Some(input), Some(home)) = (&found.untrusted, ask, config.home.as_deref())
         && std::io::stdin().is_terminal()
         && std::io::stderr().is_terminal()

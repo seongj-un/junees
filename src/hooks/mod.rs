@@ -70,6 +70,71 @@ impl Origin {
 pub struct Hook {
     pub spec: Spec,
     pub origin: Origin,
+    /// The file it runs, when that is in the session's working folder
+    /// (which the model may change): pinned when the hook was read, and
+    /// checked again before each run ([`pin_for`]).
+    pub pin: Option<Pin>,
+}
+
+/// The file a hook runs, pinned by its content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pin {
+    /// Its path, the folders resolved, the last part as written.
+    pub path: PathBuf,
+    /// The SHA-256 of its content when the hook was read, or why it
+    /// could not be read (the hook then does not run).
+    pub digest: Result<String, String>,
+}
+
+/// A larger file a hook runs cannot be pinned (the hook does not run).
+const MAX_PINNED_BYTES: u64 = 16 * 1024 * 1024;
+
+/// What a hook whose file changed after it was read says instead of
+/// running.
+pub const CHANGED: &str = "훅이 부르는 파일이 바뀌어 실행하지 않았습니다";
+
+/// The pin of the file `spec` runs (`command[0]` with a `/`), when it is
+/// in `workdir`: the model may change files there, so the hook must run
+/// only what was read (and, for a project's hooks, trusted). A program
+/// found on PATH and files outside `workdir` are not pinned.
+pub fn pin_for(spec: &Spec, workdir: &Path) -> Option<Pin> {
+    let program = &spec.command[0];
+    if !program.contains('/') {
+        return None;
+    }
+    let path = Path::new(program);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workdir.join(path)
+    };
+    let workdir = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
+    // The folders resolved (a linked folder cannot point it elsewhere),
+    // the file itself never followed.
+    let resolved = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or(path.clone()),
+        _ => path.clone(),
+    };
+    if !resolved.starts_with(&workdir) {
+        return None;
+    }
+    let digest = pinned_digest(&resolved);
+    Some(Pin {
+        path: resolved,
+        digest,
+    })
+}
+
+/// The SHA-256 of the regular file `path` (no link, at most
+/// [`MAX_PINNED_BYTES`]), or why it cannot be had.
+pub fn pinned_digest(path: &Path) -> Result<String, String> {
+    match read_capped(path, MAX_PINNED_BYTES) {
+        Ok(Some(bytes)) => Ok(digest(&bytes)),
+        Ok(None) => Err("it does not exist".into()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 /// The user's hooks of the state folder `home`: the settings file's, then
@@ -82,9 +147,11 @@ pub fn user_hooks(home: &Path) -> Result<Vec<Hook>> {
         for spec in config::parse(text, first_line)
             .with_context(|| format!("the hooks in {}", settings.display()))?
         {
+            check_user_program(&spec, &settings)?;
             hooks.push(Hook {
                 spec,
                 origin: Origin::User(settings.clone()),
+                pin: None,
             });
         }
     }
@@ -98,13 +165,34 @@ pub fn user_hooks(home: &Path) -> Result<Vec<Hook>> {
         for spec in
             config::parse(&text, 1).with_context(|| format!("the hooks in {}", path.display()))?
         {
+            check_user_program(&spec, &path)?;
             hooks.push(Hook {
                 spec,
                 origin: Origin::User(path.clone()),
+                pin: None,
             });
         }
     }
     Ok(hooks)
+}
+
+/// A user hook runs in every project without a question, so its program
+/// must not be a path relative to the project (`./scripts/x.sh` would run
+/// whatever file the project opened at the time has there): an absolute
+/// path or a name on PATH.
+fn check_user_program(spec: &Spec, file: &Path) -> Result<()> {
+    let program = &spec.command[0];
+    if program.contains('/') && !Path::new(program).is_absolute() {
+        anyhow::bail!(
+            "the hooks in {}: hook at line {}: `command` starts with the relative path `{}`; \
+             a user hook runs in every project, so it would run that project's file. Give an \
+             absolute path (`~` is not expanded) or a program name on PATH",
+            file.display(),
+            spec.line,
+            crate::prompt_text::escape_hidden(program)
+        );
+    }
+    Ok(())
 }
 
 /// A project's hooks file as read now.
@@ -118,6 +206,9 @@ pub struct ProjectFile {
     pub text: String,
     /// Its hooks, or why they cannot be read.
     pub hooks: Result<Vec<Spec>, String>,
+    /// The pins of its hooks ([`pin_for`]), in order; their digests are
+    /// part of [`ProjectFile::digest`].
+    pub pins: Vec<Option<Pin>>,
 }
 
 impl ProjectFile {
@@ -129,9 +220,11 @@ impl ProjectFile {
                 specs
                     .iter()
                     .cloned()
-                    .map(|spec| Hook {
+                    .zip(self.pins.iter().cloned().chain(std::iter::repeat(None)))
+                    .map(|(spec, pin)| Hook {
                         spec,
                         origin: Origin::Project(self.path.clone()),
+                        pin,
                     })
                     .collect()
             })
@@ -159,7 +252,20 @@ pub fn project_file(
     user_home: Option<&Path>,
     junees_home: Option<&Path>,
 ) -> Result<Option<ProjectFile>, String> {
-    let path = project_path(cwd, user_home);
+    project_file_in(cwd, cwd, user_home, junees_home)
+}
+
+/// [`project_file`] of the project in `project_dir` for a session working
+/// in `workdir`: the files its hooks run are pinned there, and their
+/// digests are part of what a person trusts, so a changed script asks
+/// again.
+pub fn project_file_in(
+    project_dir: &Path,
+    workdir: &Path,
+    user_home: Option<&Path>,
+    junees_home: Option<&Path>,
+) -> Result<Option<ProjectFile>, String> {
+    let path = project_path(project_dir, user_home);
     if let Some(home) = junees_home {
         let own =
             std::fs::canonicalize(home.join(FILE_NAME)).unwrap_or_else(|_| home.join(FILE_NAME));
@@ -173,7 +279,7 @@ pub fn project_file(
         Ok(None) => return Ok(None),
         Err(err) => return Err(format!("cannot read {}: {err}", path.display())),
     };
-    let digest = digest(&bytes);
+    let mut digest = digest(&bytes);
     let (text, hooks) = match String::from_utf8(bytes) {
         Ok(text) => {
             let hooks = config::parse(&text, 1).map_err(|err| format!("{err:#}"));
@@ -181,11 +287,24 @@ pub fn project_file(
         }
         Err(_) => (String::new(), Err("it is not UTF-8 text".to_string())),
     };
+    let pins: Vec<Option<Pin>> = hooks
+        .as_ref()
+        .map(|specs| specs.iter().map(|spec| pin_for(spec, workdir)).collect())
+        .unwrap_or_default();
+    if pins.iter().any(Option::is_some) {
+        let mut all = format!("{digest}\n");
+        for pin in pins.iter().flatten() {
+            let state = pin.digest.as_deref().unwrap_or("unreadable");
+            all.push_str(&format!("{}\t{state}\n", pin.path.display()));
+        }
+        digest = self::digest(all.as_bytes());
+    }
     Ok(Some(ProjectFile {
         path,
         digest,
         text,
         hooks,
+        pins,
     }))
 }
 
@@ -204,13 +323,13 @@ pub struct Found {
 /// The hooks of a run of the state folder `home` on the project in
 /// `project_dir`. Fails when a user hook is broken: a policy hook that
 /// silently dropped out would let calls through.
-pub fn find(home: Option<&Path>, project_dir: &Path) -> Result<Found> {
+pub fn find(home: Option<&Path>, project_dir: &Path, workdir: &Path) -> Result<Found> {
     let mut found = Found::default();
     if let Some(home) = home {
         found.hooks = user_hooks(home)?;
     }
     let user_home = std::env::var_os("HOME").map(PathBuf::from);
-    match project_file(project_dir, user_home.as_deref(), home) {
+    match project_file_in(project_dir, workdir, user_home.as_deref(), home) {
         Ok(None) => {}
         Ok(Some(file)) => match &file.hooks {
             Err(err) => found.warnings.push(format!(
@@ -265,8 +384,15 @@ impl Found {
         if self.hooks.is_empty() {
             return None;
         }
+        let mut hooks = self.hooks;
+        // A project's hooks were pinned when the file was read and trusted.
+        for hook in &mut hooks {
+            if matches!(hook.origin, Origin::User(_)) {
+                hook.pin = pin_for(&hook.spec, workdir);
+            }
+        }
         Some(std::sync::Arc::new(Hooks::new(
-            self.hooks,
+            hooks,
             workdir,
             &tools.hidden_env,
             crate::sandbox::Sandbox::for_tools(tools),
@@ -279,8 +405,8 @@ impl Found {
 /// runs, whole: they approve what they read.
 pub fn trust_question(file: &ProjectFile) -> String {
     format!(
-        "  이 프로젝트의 훅 파일을 처음 보거나, 승인한 뒤 내용이 바뀌었습니다: {}\n  \
-         승인하면 이 내용의 훅이 이 세션부터 실행됩니다(내용이 바뀌면 다시 묻습니다).\n{}",
+        "  이 프로젝트의 훅 파일을 처음 보거나, 승인한 뒤 내용이나 훅이 부르는 파일이 바뀌었습니다: {}\n  \
+         승인하면 이 내용의 훅이 이 세션부터 실행됩니다(바뀌면 다시 묻습니다).\n{}",
         file.path.display(),
         cli::quoted(&file.text)
     )
@@ -308,6 +434,11 @@ pub fn digest(bytes: &[u8]) -> String {
 /// A link (as the last part), a FIFO or a file over [`MAX_FILE_BYTES`] is
 /// an error, never followed or waited on.
 fn read_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    read_capped(path, MAX_FILE_BYTES)
+}
+
+/// [`read_file`] with the size limit `max`.
+fn read_capped(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -318,7 +449,7 @@ fn read_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
             return Err(std::io::Error::other(
-                "it is a link; hooks files must be regular files",
+                "it is a link; it must be a regular file",
             ));
         }
         Err(err) => return Err(err),
@@ -327,15 +458,15 @@ fn read_file(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     if !meta.is_file() {
         return Err(std::io::Error::other("it is not a regular file"));
     }
-    if meta.len() > MAX_FILE_BYTES {
+    if meta.len() > max {
         return Err(std::io::Error::other(format!(
             "it is larger than {} KiB",
-            MAX_FILE_BYTES / 1024
+            max / 1024
         )));
     }
     let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
+    file.take(max + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
         return Err(std::io::Error::other("it grew while being read"));
     }
     Ok(Some(bytes))

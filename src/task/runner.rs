@@ -259,7 +259,7 @@ impl TaskEnv<'_> {
         ));
         // Nobody can be asked: the user's hooks, and the project's only
         // when a person trusted them before.
-        let mut hooks = crate::hooks::find(self.home.as_deref(), &self.root)?;
+        let mut hooks = crate::hooks::find(self.home.as_deref(), &self.root, &self.root)?;
         hooks.skip_untrusted();
         for warning in &hooks.warnings {
             report(Report::Event(Event::Warning(warning)));

