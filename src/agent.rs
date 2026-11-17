@@ -3843,4 +3843,87 @@ mod tests {
         );
         assert_valid(agent.messages());
     }
+
+    #[tokio::test]
+    async fn hook_runs_are_notes_in_a_format_9_session_that_resumes_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        script(
+            dir.path(),
+            "id.sh",
+            "cat > \"input-$JUNEES_HOOK_EVENT.json\"\n",
+        );
+        let home = tempfile::tempdir().unwrap();
+        let (meta, writer) =
+            SessionWriter::create(home.path(), std::path::Path::new("/work"), "m").unwrap();
+        let provider = Scripted::new(vec![
+            tool_use("t", "upper", json!({"text": "a"})),
+            text("ok"),
+        ]);
+        let mut agent = agent(provider, 5)
+            .with_journal(Box::new(writer))
+            .with_hooks(test_hooks(
+                dir.path(),
+                "[[hooks]]\nevent = \"session_start\"\ncommand = [\"sh\", \"id.sh\"]\n\
+                 [[hooks]]\nevent = \"pre_tool\"\ncommand = [\"sh\", \"id.sh\"]\n\
+                 [[hooks]]\nevent = \"turn_end\"\ncommand = [\"sh\", \"id.sh\"]\n",
+            ));
+        let mut dashboard = Vec::new();
+        agent
+            .run("go", |event| {
+                if let Event::Hook(record) = event {
+                    dashboard.push(record.json());
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(dashboard.len(), 3);
+        assert_eq!(dashboard[1]["type"], "hook");
+        assert_eq!(dashboard[1]["event"], "pre_tool");
+        assert_eq!(dashboard[1]["origin"], "user");
+        assert_eq!(dashboard[1]["result"], "passed");
+        assert!(dashboard[1]["took_ms"].is_u64());
+        for event in ["session_start", "pre_tool", "turn_end"] {
+            let input: Value = serde_json::from_str(
+                &std::fs::read_to_string(dir.path().join(format!("input-{event}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(input["session_id"], meta.id.as_str(), "{event}");
+        }
+        let path = crate::session::sessions_dir(home.path()).join(format!("{}.jsonl", meta.id));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["format"], session::FORMAT);
+        assert_eq!(session::FORMAT, 9);
+        let notes: Vec<&Value> = lines
+            .iter()
+            .filter(|line| line["type"] == "notes")
+            .collect();
+        assert_eq!(notes.len(), 3, "{text}");
+        assert!(
+            notes[0]["notes"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("[훅] session_start")
+        );
+        assert!(
+            notes[1]["notes"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("[훅] pre_tool")
+        );
+        assert!(
+            notes[2]["notes"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("[훅] turn_end")
+        );
+        let messages = agent.messages().to_vec();
+        agent.reset(None);
+        let (session, _writer) = Session::resume(&path).unwrap();
+        assert_eq!(session.transcript.messages, messages);
+        assert_valid(&messages);
+    }
 }
