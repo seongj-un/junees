@@ -112,6 +112,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees doctor`: 설치와 설정 점검([점검](docs/doctor.md))
 - `junees dashboard [--listen 127.0.0.1:7878] [--no-open] [--chat [--dir <폴더>]]`: 브라우저로 상태와 세션 대화를 보고 예약 작업과 웹훅을 멈추거나 켜는 대시보드. `--chat`이면 페이지에서 대화하고 승인 질문에 답한다([대시보드](docs/dashboard.md))
 - `junees plugin list|install|enable|disable|remove`: 플러그인([플러그인](docs/plugins.md))
+- `junees hooks list|trust|untrust|test <event>`: 훅과 프로젝트 훅 승인([훅](docs/hooks.md))
 - `junees mcp login|logout <서버>`: MCP 서버 OAuth 로그인([OAuth 로그인](docs/mcp.md#oauth-로그인))
 - `junees mcp serve [--dir <폴더>]`: Junees를 stdio MCP 서버로 띄워 다른 에이전트가 일을 맡기게 한다([Junees를 MCP 서버로](docs/mcp.md#junees를-mcp-서버로))
 - `junees update [--check] [--version vX.Y.Z]`: 최신 릴리스로 바꾸기([업데이트](docs/install.md#업데이트))
@@ -145,6 +146,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [GitHub](docs/automation.md#github): 모델의 `github` 도구로 PR 읽기, 코멘트, 리뷰, PR 열기, merge.
 - [브라우저](docs/browser.md): 모델의 `browser` 도구로 헤드리스 Chromium을 열고 읽고 클릭하고 입력한다(기본 꺼짐, http/https만, 사설 주소와 위험한 입력은 설정과 승인으로만).
 - [플러그인](docs/plugins.md): 명령 도구, 훅, 프롬프트 조각을 폴더 하나로 더한다.
+- [훅](docs/hooks.md): 사용자가 정한 명령을 `pre_tool`, `post_tool`, `turn_end`, `session_start`, `user_prompt` 시점에 실행해 도구 호출이나 입력을 막거나 모델에게 안내를 더한다(입력은 바꾸지 못하고 승인은 그대로, 프로젝트 훅은 승인 뒤에만).
 - [컨텍스트 관리](docs/context.md): 프롬프트 캐싱, 오래된 도구 결과 비우기, 압축.
 - [기본 도구](docs/tools.md): `bash`, `read_file`, `write_file`, `edit_file`, 그리고 bash 없이 코드를 찾는 [`grep`, `glob`, `list_dir`](docs/tools.md#코드-탐색-grep-glob-list_dir)(읽기 규칙을 파일마다 적용, `.gitignore` 존중).
 - [파일 체크포인트](docs/checkpoints.md): `write_file`과 `edit_file`이 바꾼 파일을 턴마다 기록해 `/undo`, `junees rewind`, 대시보드로 되돌린다(bash가 바꾼 파일은 기록하지 않음).
@@ -167,6 +169,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [docs/mcp.md](docs/mcp.md): MCP 서버(stdio, Streamable HTTP, OAuth)
 - [docs/automation.md](docs/automation.md): 예약 작업, 웹훅(GitHub PR 흐름 포함), GitHub 도구
 - [docs/plugins.md](docs/plugins.md): 플러그인
+- [docs/hooks.md](docs/hooks.md): 훅
 - [docs/context.md](docs/context.md): 컨텍스트 관리
 - [docs/tools.md](docs/tools.md): 기본 도구와 `edit_file`, `draft`
 - [docs/write.md](docs/write.md): NCM식 글 쓰기(`junees write`, `/write`, `draft`), 단계, 비용, 속도 측정, 한계
@@ -203,6 +206,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 21. 코드 탐색 도구: Junees 안에서 도는 읽기 전용 `grep`, `glob`, `list_dir`(ripgrep의 무시 규칙, 만나는 파일마다 읽기 규칙, 상한과 시간 제한) ([docs/tools.md](docs/tools.md#코드-탐색-grep-glob-list_dir)) (완료)
 22. 예비 모델과 사용 한도 대응: 주 모델이 오래 막히면 `fallback_model`로 넘어가고, 무인 실행은 `wait_limit` 안에서 한도가 풀리기를 기다린다 ([docs/configuration.md](docs/configuration.md#예비-모델)) (완료)
 23. NCM식 글 쓰기: `junees write`, `/write`, `draft` 도구가 거친 개념에서 세부로 내려가며 긴 글을 쓰고, 같은 단계의 섹션은 앞 단계에만 조건을 걸어 동시에 요청한다(NCM의 생성 방식을 하네스에 적용, [docs/write.md](docs/write.md), 대시보드의 단계별 카드) (완료)
+24. 훅: 사용자가 정한 명령을 `pre_tool`(승인 질문 전), `post_tool`, `turn_end`, `session_start`, `user_prompt`에 실행해 막거나 안내를 더하기, 프로젝트 훅(`.junees/hooks.toml`)은 내용 해시로 승인, `junees hooks` ([docs/hooks.md](docs/hooks.md))
 
 ## 개발
 
