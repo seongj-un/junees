@@ -302,3 +302,42 @@ async fn a_cancelled_run_stops_waiting() {
     tokio::time::advance(Duration::from_secs(900)).await;
     assert_eq!(*calls.lock().unwrap(), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn every_session_of_a_run_gets_the_deadline_fixed_at_its_start() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let start = Instant::now();
+    let factory =
+        crate::provider::unattended_factory(Some(Duration::from_secs(3600)), move |deadline| {
+            record.lock().unwrap().push(deadline);
+            Ok(Scripted::boxed("big", vec![]).0)
+        });
+    factory().unwrap();
+    // A session made 55 minutes in still ends its waits at 60 minutes.
+    tokio::time::advance(Duration::from_secs(55 * 60)).await;
+    factory().unwrap();
+    let deadline = Some(start + Duration::from_secs(3600));
+    assert_eq!(*seen.lock().unwrap(), [deadline, deadline]);
+    // No time limit, no deadline.
+    let none = crate::provider::unattended_factory(None, |deadline| {
+        assert_eq!(deadline, None);
+        Ok(Scripted::boxed("big", vec![]).0)
+    });
+    none().unwrap();
+}
+
+#[test]
+fn an_unavailable_api_is_named_for_both_of_its_causes() {
+    let switch = Switch {
+        from: "big".into(),
+        to: "small".into(),
+        reason: Reason::Unavailable,
+        retry_at: SystemTime::now(),
+        retry_in: Duration::from_secs(120),
+    };
+    assert_eq!(
+        switch.line(),
+        "big 모델이 서버 오류나 연결 실패로 막혀 small 모델로 이어 갑니다 (다시 시도: 2분 뒤)"
+    );
+}

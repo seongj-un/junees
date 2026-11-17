@@ -1168,13 +1168,10 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
     };
     // A task runs unattended: a usage limit with no fallback left is
     // waited out, within its time budget.
-    let max_time = budget.max_time;
-    let provider = || {
-        junees::provider::unattended_from_config(
-            &config,
-            max_time.map(|max_time| tokio::time::Instant::now() + max_time),
-        )
-    };
+    // One deadline for every session of this run, fixed now.
+    let provider = junees::provider::unattended_factory(budget.max_time, |deadline| {
+        junees::provider::unattended_from_config(&config, deadline)
+    });
     let env = TaskEnv {
         root,
         home: config.home.clone(),

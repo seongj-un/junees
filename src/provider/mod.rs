@@ -78,6 +78,22 @@ pub fn unattended_from_config(
     build(config, Some(deadline))
 }
 
+/// A provider factory for a run of several sessions (a task) that share one
+/// time limit: the deadline is fixed once, when the factory is made, and
+/// every provider `build` makes gets that same deadline. A deadline taken
+/// per session would move on with each one, and a late session could wait
+/// past the run's limit.
+pub fn unattended_factory<F>(
+    max_time: Option<std::time::Duration>,
+    build: F,
+) -> impl Fn() -> anyhow::Result<Box<dyn Provider>>
+where
+    F: Fn(Option<tokio::time::Instant>) -> anyhow::Result<Box<dyn Provider>>,
+{
+    let deadline = max_time.map(|max_time| tokio::time::Instant::now() + max_time);
+    move || build(deadline)
+}
+
 fn build(
     config: &crate::config::Config,
     unattended: Option<Option<tokio::time::Instant>>,
