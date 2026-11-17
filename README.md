@@ -206,7 +206,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 21. 코드 탐색 도구: Junees 안에서 도는 읽기 전용 `grep`, `glob`, `list_dir`(ripgrep의 무시 규칙, 만나는 파일마다 읽기 규칙, 상한과 시간 제한) ([docs/tools.md](docs/tools.md#코드-탐색-grep-glob-list_dir)) (완료)
 22. 예비 모델과 사용 한도 대응: 주 모델이 오래 막히면 `fallback_model`로 넘어가고, 무인 실행은 `wait_limit` 안에서 한도가 풀리기를 기다린다 ([docs/configuration.md](docs/configuration.md#예비-모델)) (완료)
 23. NCM식 글 쓰기: `junees write`, `/write`, `draft` 도구가 거친 개념에서 세부로 내려가며 긴 글을 쓰고, 같은 단계의 섹션은 앞 단계에만 조건을 걸어 동시에 요청한다(NCM의 생성 방식을 하네스에 적용, [docs/write.md](docs/write.md), 대시보드의 단계별 카드) (완료)
-24. 훅: 사용자가 정한 명령을 `pre_tool`(승인 질문 전), `post_tool`, `turn_end`, `session_start`, `user_prompt`에 실행해 막거나 안내를 더하기, 프로젝트 훅(`.junees/hooks.toml`)은 내용 해시로 승인, `junees hooks` ([docs/hooks.md](docs/hooks.md))
+24. 훅: 사용자가 정한 명령을 `pre_tool`(승인 질문 전), `post_tool`, `turn_end`, `session_start`, `user_prompt`에 실행해 막거나 안내를 더하기, 프로젝트 훅(`.junees/hooks.toml`)은 내용 해시로 승인, `junees hooks` ([docs/hooks.md](docs/hooks.md)) (완료)
 
 ## 개발
 
