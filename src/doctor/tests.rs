@@ -2342,3 +2342,37 @@ async fn the_fallback_model_is_checked_when_set_and_asked_online() {
         "{request}"
     );
 }
+
+#[tokio::test]
+async fn hooks_are_listed_and_a_broken_user_hook_fails() {
+    let fixture = Fixture::new();
+    let report = fixture.run(false).await;
+    expect(&report, "hooks", "hooks", Status::Skip, "no hook is set");
+    std::fs::create_dir_all(&fixture.home).unwrap();
+    std::fs::write(
+        fixture.home.join(crate::hooks::FILE_NAME),
+        "[[hooks]]\nevent = \"pre_tool\"\nmatch = \"bash\"\ncommand = [\"sh\", \"x.sh\"]\n",
+    )
+    .unwrap();
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "hooks",
+        "user pre_tool (line 1)",
+        Status::Warn,
+        "match `bash`: the program `sh` is not found",
+    );
+    std::fs::write(
+        fixture.home.join(crate::hooks::FILE_NAME),
+        "[[hooks]]\nevent = \"pre_tool\"\ncommand = \"sh x.sh\"\n",
+    )
+    .unwrap();
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "hooks",
+        "user",
+        Status::Fail,
+        "shell strings are not accepted",
+    );
+}
