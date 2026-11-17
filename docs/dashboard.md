@@ -121,8 +121,12 @@ junees dashboard --chat --dir ~/work/x # 페이지에서 ~/work/x의 Junees와 �
  "messages":[{"index":0,"role":"user","at":"2026-11-13T01:02:03Z","blocks":[
     {"type":"text","text":"...","truncated":true},
     {"type":"text","text":"[되돌림] 변경 기록 2의 파일 변경을 되돌렸습니다: ...","notice":true},
-    {"type":"tool_use","name":"bash","input_preview":"ls -la"},
-    {"type":"tool_result","is_error":false,"text_preview":"..."},
+    {"type":"tool_use","tool_use_id":"toolu_01","name":"bash","input_preview":"ls -la"},
+    {"type":"tool_result","tool_use_id":"toolu_01","is_error":false,"text_preview":"..."},
+    {"type":"tool_result","tool_use_id":"toolu_02","is_error":false,"text_preview":"...","truncated":true,
+     "text_tail":"...","omitted_chars":1820,"draft":{"stop":"done","error":null,"levels":3,"levels_done":3,
+     "polished":false,"sections":8,"failed_sections":[],"calls":17,"input_tokens":11207,"output_tokens":3936,
+     "cache_read_tokens":0,"elapsed_ms":7000,"sequential_ms":25200,"by_level":null}},
     {"type":"image","media_type":"image/png"},
     {"type":"thinking"},
     {"type":"other","kind":"server_tool_use"}]}]}
@@ -131,6 +135,17 @@ junees dashboard --chat --dir ~/work/x # 페이지에서 ~/work/x의 Junees와 �
 - `index`는 대화 전체에서의 순서(0부터)이고, `at`은 그 줄이 기록된 시각입니다. 시각을 남기기 전의 기록은 `null`입니다.
 - `text`는 8,000자, `input_preview`와 `text_preview`는 2,000자까지이고, 잘렸으면 `"truncated": true`가 붙습니다(안 잘렸으면 이 필드가 없습니다). 비밀 값을 먼저 가린 뒤에 자릅니다.
 - `input_preview`는 `bash`처럼 `command`가 있으면 그 명령, 문자열 필드 하나뿐이면 그 값, 그 밖에는 입력 JSON입니다.
+- `tool_use_id`: `tool_use`와 그 결과(`tool_result`)가 같은 값을 가집니다. 호출과 결과는 이 값으로 짝짓습니다(같은 메시지 안의 순서가 아니라). 모델 API가 준 id를 비밀 값을 가린 뒤 200자까지 보냅니다.
+- `text_tail`, `omitted_chars`: 잘린 `tool_result`(`"truncated": true`)에만 붙습니다. `text_tail`은 결과의 끝 500자(넘친 부분이 그보다 짧으면 넘친 부분 전체)이고, `text_preview`와 겹치지 않습니다. `omitted_chars`는 둘 사이에 빠진 글자 수입니다(0이면 이어집니다). 도구가 상태를 맨 끝에 붙이므로(`draft`의 상태 줄 등) 잘린 결과에서도 끝은 보입니다. 비밀 값은 끝 앞 512자까지 함께 놓고 가린 뒤에 자릅니다.
+- `draft`: `draft` 도구 호출(같은 `tool_use_id`의 `tool_use` 이름이 `draft`)의 결과에만 붙습니다. 그 밖의 결과에는 이 필드가 없습니다. 값은 그 호출이 어떻게 끝났는지이고, 필드는 대화 이벤트 `draft_done`([NCM식 글 쓰기](write.md#대시보드-이벤트))과 같습니다.
+  - 값은 Junees가 쓴 것에서만 읽습니다. 결과의 첫머리(`draft failed: `, `draft stopped: `, 취소 문구), 글과 상태 줄 사이의 `---`, Junees가 결과 맨 끝에 붙인 상태 줄(`[draft] levels ...`), 그리고 세션 기록의 `draft` 토큰 줄(`subagent_usage`, `"source": "draft"`)입니다. 모델이 쓴 글은 읽지 않으므로, 글 안에 상태 줄과 같은 모양의 줄이 있어도 값이 바뀌지 않습니다. 상태 줄은 잘리지 않은 결과 전체에서 읽습니다.
+  - `null`: 결과가 `draft` 결과 모양이 아닐 때입니다. 잘못된 입력, 시작 전에 이미 넘은 토큰 상한, 실행되기 전에 끝난 호출(답이 잘림, 취소), `draft`가 없는 대화에서 부른 호출이 여기에 듭니다.
+  - `stop`: `done`, `cancelled`, `failed`, `limit`. `error`: `failed`, `limit`의 이유(비밀 값을 가리고 2,000자까지), 그 밖에는 `null`.
+  - `levels`, `levels_done`, `polished`, `sections`(절 수, `draft_done`에는 없는 필드), `failed_sections`, `calls`, `input_tokens`(캐시 쓰기와 읽기 포함), `output_tokens`: 상태 줄의 값 그대로입니다.
+  - `elapsed_ms`, `sequential_ms`: 상태 줄이 0.1초 단위로 적으므로 100밀리초 단위입니다(실시간 `draft_done`은 밀리초). `sequential_ms`는 `stop`이 `done`이고 걸린 시간보다 길 때만 값이 있고, 그 밖에는 `null`입니다. 이 규칙 전의 상태 줄(늘 추정을 적음)도 같은 규칙으로 읽습니다.
+  - `cache_read_tokens`: 토큰 줄에서 더합니다. 한 답에 `draft` 호출이 여럿이면, 호출 순서대로 상태 줄의 입력과 출력 토큰에 정확히 맞을 때까지 줄을 나눠 가집니다. 맞지 않거나 줄이 남으면(답한 모델 이름이 없는 provider는 표시 없는 줄을 남깁니다) 그 답의 모든 호출에서 `null`입니다. 다른 호출의 토큰을 붙이지 않기 위해서입니다.
+  - `by_level`: 세션 기록에 단계별 값이 없어 늘 `null`입니다.
+  - 기록에 없는 것: 예비 모델 전환(`model_switch`)은 세션 기록에 이벤트로 남지 않아 다시 그릴 수 없습니다. 세션 기록 형식은 9 그대로이고, 새 항목을 쓰지 않습니다.
 - `tool_result`에 이미지(브라우저 스크린샷 등)가 붙어 있으면 `"images":["image/png"]`처럼 형식만 보냅니다. 없으면 이 필드가 없습니다.
 - `thinking`은 내용 없이 종류만 보냅니다. 서버 도구 호출과 결과(웹 검색 등)는 `"type":"other"`와 그 종류(`kind`)만 보냅니다.
 - `"notice": true`는 사람이 쓴 글이 아니라 Junees가 입력 앞에 붙인 안내라는 표시입니다(되돌리기의 `[되돌림]` 줄, [파일 체크포인트](checkpoints.md)). 그 user 메시지의 `text` 블록으로 사람이 쓴 입력보다 앞에 오고, 여러 줄이면 줄바꿈으로 이어집니다. 표시가 없는 블록은 사람이 쓴 글입니다. 사람이 `[되돌림] `으로 시작하는 글을 써도 표시가 붙지 않습니다. 기록 형식 9 전의 세션(안내 줄이 입력 글 앞부분에 들어 있음)에는 표시가 없습니다. 제목(`title`)은 표시가 없는 글에서 정합니다. MCP의 `junees_session`도 같은 모양입니다.
