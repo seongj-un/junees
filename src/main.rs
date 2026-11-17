@@ -2317,6 +2317,7 @@ fn print_event(event: Event<'_>) {
             );
         }
         Event::Subagent { index, line } => eprintln!("  [{index}] {line}"),
+        Event::ModelSwitch(switch) => eprintln!("  !! {}", switch.line()),
         // Part of the answer, after its text.
         Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),
         Event::Compacted {

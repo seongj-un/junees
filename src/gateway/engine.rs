@@ -56,6 +56,9 @@ pub enum Progress {
 pub struct Collector<'a> {
     out: &'a UnboundedSender<Progress>,
     text: String,
+    /// The line about the switch to the fallback model, sent after the
+    /// reply ([`Collector::finish`]).
+    switched: Option<String>,
 }
 
 impl<'a> Collector<'a> {
@@ -63,6 +66,7 @@ impl<'a> Collector<'a> {
         Self {
             out,
             text: String::new(),
+            switched: None,
         }
     }
 
@@ -79,6 +83,10 @@ impl<'a> Collector<'a> {
             }
             Event::Thinking | Event::ToolResult { .. } => return,
             Event::Warning(warning) => Progress::Note(warning.to_string()),
+            Event::ModelSwitch(switch) => {
+                self.switched = Some(switch.line());
+                return;
+            }
             Event::ToolCall { name, input } => Progress::Tool(format!(
                 "-> {name} {}",
                 crate::cli::preview(&tool_target(input), PREVIEW_CHARS)
@@ -101,12 +109,16 @@ impl<'a> Collector<'a> {
     }
 
     /// Sends the text of a reply that was cut off (by a cancel or an
-    /// error) as far as it got.
+    /// error) as far as it got, then the line about a switch to the
+    /// fallback model, so it ends the reply.
     pub fn finish(&mut self) {
         if !self.text.trim().is_empty() {
             let _ = self
                 .out
                 .send(Progress::Text(std::mem::take(&mut self.text)));
+        }
+        if let Some(line) = self.switched.take() {
+            let _ = self.out.send(Progress::Note(line));
         }
     }
 }
