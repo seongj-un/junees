@@ -208,6 +208,50 @@ const INTERPRETERS: &[Interpreter] = &[
     },
 ];
 
+/// Programs that run what the project's files say, and which files.
+const BUILD_TOOLS: &[(&str, &str)] = &[
+    ("make", "the Makefile"),
+    ("npm", "package.json"),
+    ("npx", "the project's packages"),
+    ("yarn", "package.json"),
+    ("pnpm", "package.json"),
+    ("cargo", "build.rs and the project's settings"),
+];
+
+/// Why `hook` runs files Junees cannot pin, if it does (`junees doctor`
+/// warns): a build tool, an interpreter given code or a module, or a user
+/// hook whose script is relative to whichever project the session is in.
+pub fn indirect(hook: &Hook) -> Option<String> {
+    let command = &hook.spec.command;
+    let name = Path::new(&command[0])
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if let Some((tool, files)) = BUILD_TOOLS.iter().find(|(tool, _)| *tool == name) {
+        return Some(format!(
+            "`{tool}` runs what {files} of the working folder say, which Junees cannot pin"
+        ));
+    }
+    match script_arg(command) {
+        Script::Code(option) => Some(format!(
+            "`{name} {}` runs code or a module given on the command line, and what it loads \
+             from the working folder is not pinned",
+            crate::prompt_text::escape_hidden(&option)
+        )),
+        Script::File(arg)
+            if matches!(hook.origin, Origin::User(_))
+                && !Path::new(&command[arg]).is_absolute() =>
+        {
+            Some(format!(
+                "a user hook runs `{}` relative to the session's folder, so it runs that file \
+                 of whichever project is open (pinned when the session starts)",
+                crate::prompt_text::escape_hidden(&command[arg])
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// The names of the interpreters whose script is pinned.
 pub fn interpreter_names() -> impl Iterator<Item = &'static str> {
     INTERPRETERS

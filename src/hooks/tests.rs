@@ -783,8 +783,8 @@ mod pinning {
 
     use super::super::run::{Hooks, Input, Outcome};
     use super::super::{
-        CHANGED, Hook, NOT_PINNED, Origin, Script, config, find, pins_for, script_arg, trust,
-        user_hooks,
+        CHANGED, Hook, NOT_PINNED, Origin, Script, config, find, indirect, pins_for, script_arg,
+        trust, user_hooks,
     };
     use super::{repository, write};
     use crate::hooks::Event;
@@ -1054,6 +1054,51 @@ mod pinning {
         write(&work.join("bin/python3"), "#!/bin/sh\n");
         let both = pins(&["./bin/python3", "lib/x.py"]);
         assert_eq!(both.iter().map(|pin| pin.arg).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn hooks_that_run_files_indirectly_are_named() {
+        let hook = |words: &str, project: bool| {
+            let spec = config::parse(
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {words}\n"),
+                1,
+            )
+            .unwrap()
+            .remove(0);
+            let file = std::path::PathBuf::from("/x/hooks.toml");
+            Hook {
+                spec,
+                origin: if project {
+                    Origin::Project(file)
+                } else {
+                    Origin::User(file)
+                },
+                pins: Vec::new(),
+            }
+        };
+        for (words, project, part) in [
+            (r#"["make", "lint"]"#, false, "the Makefile"),
+            (r#"["/usr/bin/npm", "run", "fmt"]"#, true, "package.json"),
+            (r#"["cargo", "fmt"]"#, true, "build.rs"),
+            (r#"["sh", "-c", "./x.sh"]"#, true, "`sh -c` runs code"),
+            (r#"["node", "--require=./a.js", "b.js"]"#, true, "--require"),
+            (
+                r#"["python3", "x.py"]"#,
+                false,
+                "relative to the session's folder",
+            ),
+        ] {
+            let why = indirect(&hook(words, project)).unwrap_or_default();
+            assert!(why.contains(part), "{words}: {why}");
+        }
+        for (words, project) in [
+            (r#"["python3", "x.py"]"#, true),
+            (r#"["python3", "/opt/hooks/x.py"]"#, false),
+            (r#"["./check.sh"]"#, true),
+            (r#"["notify-send", "x"]"#, false),
+        ] {
+            assert_eq!(indirect(&hook(words, project)), None, "{words}");
+        }
     }
 
     #[tokio::test]
