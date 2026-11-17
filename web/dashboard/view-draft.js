@@ -193,7 +193,8 @@ export class DraftCard {
     if (parsed.status) {
       this.state.levels = parsed.status.levels;
       this.state.polish = parsed.status.polished;
-      this.state.level = Math.max(this.state.level, parsed.status.levelsDone);
+      // The status line counts the levels, not the seam level after them.
+      this.state.level = Math.max(this.state.level, parsed.status.levelsDone + (parsed.status.polished ? 1 : 0));
       this.state.done = { ...parsed.status, stop: parsed.stop, error: parsed.error, byLevel: [] };
     } else if (history) {
       // A history result the server cut: the text is a beginning only.
@@ -261,11 +262,11 @@ export class DraftCard {
     const text = this.cut
       ? "서버가 긴 결과를 잘라서 보내 호출 수와 걸린 시간은 알 수 없습니다. 보내온 앞부분만 보여 줍니다."
       : progressText(state);
-    this.status.replaceChildren(
-      note ? el("span", { class: `draft-stop draft-stop-${done.stop}` }, note) : null,
-      note ? " " : null,
-      el("span", null, text),
-    );
+    // replaceChildren prints a null as the text "null": push only real nodes.
+    const line = [];
+    if (note) line.push(el("span", { class: `draft-stop draft-stop-${done.stop}` }, note), " ");
+    line.push(el("span", null, text));
+    this.status.replaceChildren(...line);
     const reason = done?.error ? `서버가 보낸 이유: ${done.error}` : "";
     this.error.textContent = reason;
     this.error.hidden = reason === "";
