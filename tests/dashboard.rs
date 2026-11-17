@@ -708,6 +708,127 @@ async fn a_note_junees_added_is_marked_and_a_lookalike_the_person_wrote_is_not()
     );
 }
 
+/// A `subagent_usage` line of a `draft` call's tokens, as the session
+/// journal writes it.
+fn draft_usage(model: &str, input: u64, cache_read: u64, cache_write: u64, output: u64) -> Value {
+    json!({"type": "subagent_usage", "input_tokens": input, "output_tokens": output,
+           "cache_creation_input_tokens": cache_write, "cache_read_input_tokens": cache_read,
+           "model": model, "source": "draft", "ts": 1_763_000_020u64})
+}
+
+#[tokio::test]
+async fn draft_results_carry_how_the_draft_ended_from_what_junees_wrote() {
+    let home = Home::new();
+    let id = "20261117-010203-d4af";
+    // A line like Junees's status line, written by the model into the text.
+    let fake = "[draft] levels 9/9, 1 sections, failed sections: none, 0 calls, 0 input and \
+                0 output tokens, 0.1s (about 99.0s one call at a time)";
+    let status = "[draft] levels 3/3 + polish, 4 sections, failed sections: s2 (an earlier \
+                  level's text stands in, marked in the text), 17 calls, 11207 input and 3936 \
+                  output tokens, 7.0s (about 25.2s one call at a time)";
+    // Long, so the preview is cut well before the status line.
+    let done = format!(
+        "# T\n\n## A\n\n{}\n---\n{fake}\n\n## B\n\n{}\n---\n{status}",
+        "본문 ".repeat(800),
+        "끝 ".repeat(10)
+    );
+    let limit = format!(
+        "draft stopped: the task's token budget is used up ({PASTED_KEY}); the levels \
+         finished before:\n\n# T\n\n## A\n\nconcept\n---\n[draft] levels 1/3, 4 sections, \
+         failed sections: none, 1 calls, 300 input and 3 output tokens, 2.2s (about 1.1s one \
+         call at a time)"
+    );
+    let tool_use = |id: &str, name: &str| json!({"type": "tool_use", "id": id, "name": name, "input": {"request": "r"}});
+    let result = |id: &str, content: &str, is_error: bool| json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": is_error});
+    home.journal(
+        id,
+        &[
+            json!({"type": "message", "role": "user", "content": [{"type": "text", "text": "write"}]}),
+            json!({"type": "message", "role": "assistant", "content": [
+                tool_use("d1", "draft"), tool_use("b1", "bash"), tool_use("d2", "draft"),
+                tool_use("d3", "draft")]}),
+            usage(1_763_000_010, 50, 5),
+            // d1: two models (a fallback switch), d2: one; d3 never ran.
+            draft_usage("claude-sonnet-4-6", 10_000, 1_000, 207, 3_000),
+            draft_usage("fallback", 0, 0, 0, 936),
+            draft_usage("claude-sonnet-4-6", 300, 0, 0, 3),
+            json!({"type": "message", "role": "user", "content": [
+                result("d1", &done, false), result("b1", "ok", false), result("d2", &limit, true),
+                result("d3", "cancelled by the user", true)]}),
+            // A later draft whose token lines do not add up to it.
+            json!({"type": "message", "role": "assistant", "content": [tool_use("d4", "draft")]}),
+            draft_usage("claude-sonnet-4-6", 1, 0, 0, 1),
+            json!({"type": "message", "role": "user", "content": [
+                result("d4", "x\n---\n[draft] levels 2/2, 3 sections, failed sections: none, \
+                              1 calls, 5 input and 2 output tokens, 0.5s", false)]}),
+        ],
+    );
+    let dashboard = Dashboard::start(&home).await;
+    let page = dashboard.json(&format!("/api/sessions/{id}")).await;
+    let messages = page["messages"].as_array().unwrap();
+    let uses: Vec<&Value> = messages[1]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| &block["tool_use_id"])
+        .collect();
+    assert_eq!(
+        uses,
+        [&json!("d1"), &json!("b1"), &json!("d2"), &json!("d3")]
+    );
+    let results = messages[2]["blocks"].as_array().unwrap();
+    let d1 = &results[0];
+    assert_eq!(d1["tool_use_id"], "d1");
+    assert_eq!(d1["truncated"], true);
+    assert!(!d1["text_preview"].as_str().unwrap().contains("[draft]"));
+    assert!(d1["text_tail"].as_str().unwrap().ends_with(status), "{d1}");
+    assert_eq!(
+        d1["draft"],
+        json!({
+            "stop": "done", "error": null, "levels": 3, "levels_done": 3, "polished": true,
+            "sections": 4, "failed_sections": ["s2"], "calls": 17, "input_tokens": 11_207,
+            "output_tokens": 3_936, "cache_read_tokens": 1_000, "elapsed_ms": 7_000,
+            "sequential_ms": 25_200, "by_level": null,
+        })
+    );
+    assert!(results[1].get("draft").is_none(), "{}", results[1]);
+    let d2 = &results[2]["draft"];
+    assert_eq!(
+        (
+            &d2["stop"],
+            &d2["levels_done"],
+            &d2["calls"],
+            &d2["cache_read_tokens"]
+        ),
+        (&json!("limit"), &json!(1), &json!(1), &json!(0))
+    );
+    // Stopped early: no one-at-a-time estimate, as on the live page.
+    assert_eq!(d2["sequential_ms"], Value::Null);
+    let error = d2["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("the task's token budget is used up ")
+            && error.contains("[hidden]")
+            && !error.contains("sk-"),
+        "{error}"
+    );
+    // A call that never ran: a draft, but no status to read.
+    assert_eq!(results[3]["draft"], Value::Null);
+    // Token lines that do not add up to the call: the cache reads are
+    // unknown, the rest still reads.
+    let d4 = &messages[4]["blocks"][0]["draft"];
+    assert_eq!(
+        (&d4["stop"], &d4["input_tokens"], &d4["elapsed_ms"]),
+        (&json!("done"), &json!(5), &json!(500))
+    );
+    assert_eq!(d4["cache_read_tokens"], Value::Null, "{d4}");
+    assert_eq!(d4["sequential_ms"], Value::Null, "{d4}");
+    let body = dashboard.get(&format!("/api/sessions/{id}")).await.body;
+    assert!(
+        !body.contains(PASTED_KEY) && !body.contains(&PASTED_KEY[..16]),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn a_session_reads_page_by_page_without_secrets_or_thinking() {
     let home = Home::new();
@@ -748,13 +869,19 @@ async fn a_session_reads_page_by_page_without_secrets_or_thinking() {
     assert_eq!(blocks[1]["truncated"], true);
     assert_eq!(
         blocks[2],
-        json!({"type": "tool_use", "name": "bash", "input_preview": "ls -la"})
+        json!({"type": "tool_use", "tool_use_id": "t1", "name": "bash", "input_preview": "ls -la"})
     );
     let result = &messages[2]["blocks"][0];
     assert_eq!(result["type"], "tool_result");
+    assert_eq!(result["tool_use_id"], "t1");
     assert_eq!(result["is_error"], true);
     assert_eq!(result["text_preview"].as_str().unwrap().len(), 2_000);
     assert_eq!(result["truncated"], true);
+    // The end of the cut result, after a gap of 500.
+    assert_eq!(result["text_tail"], "e".repeat(500));
+    assert_eq!(result["omitted_chars"], 500);
+    // Not a draft's result.
+    assert!(result.get("draft").is_none(), "{result}");
     assert!(messages[3]["blocks"][0].get("truncated").is_none());
     let body = dashboard.get(&format!("/api/sessions/{id}")).await.body;
     assert!(
