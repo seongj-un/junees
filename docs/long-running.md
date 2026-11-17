@@ -457,7 +457,7 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 알림: 터미널 stderr 한 줄, 게이트웨이 답 끝 한 줄, 대시보드 `model_switch` 이벤트. 사용량 기록의 모델 이름은 실제로 답한 모델이다
 - 무인 실행의 기다리기: 예약 작업, 웹훅, `mcp serve`, `task`는 `provider::unattended_from_config`로 모델을 부른다. 넘어갈 모델이 없으면(예비 없음, 예비도 막힘) 다시 시도까지 남은 시간이 `wait_limit`(기본 30분, 호출 하나에서 기다린 시간의 합) 안이고 실행 시간 상한 전에 끝나면 기다렸다가 같은 요청을 다시 보낸다. 아니면 기다리지 않고 실패로 기록하며 그 이유를 경고로 남긴다. 취소(실행 시간 상한 포함)되면 기다리기는 drop되어 바로 멈춘다. 작업 잠금은 실행이 잡고 있으므로 기다리는 동안에도 유지된다
 - 대화, `-p`, 게이트웨이, 대시보드 대화는 사람이 보므로 기다리지 않는다
-- 남은 것: claude-code 백엔드의 예비 모델, 대시보드 화면의 `model_switch` 표시(Daedalus), 넘어간 상태를 프로세스 사이에 나누기
+- 남은 것: claude-code 백엔드의 예비 모델, 넘어간 상태를 프로세스 사이에 나누기
 
 ### NCM식 글 쓰기 (로드맵 23단계)
 - NCM(Next-Concept Modeling, arXiv 2610.14162)의 생성 방식만 하네스 수준에서 적용했다. 각 단계의 생성기는 설정한 모델이고, 같은 단계의 섹션은 API 요청을 동시에 보낸다. NCM 모델은 넣지 않았다(대화·도구 호출을 못 하는 연구 모델이고 GPU가 필요하다)
@@ -465,6 +465,6 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 실패한 단위는 한 번 다시 요청하고, 그래도 실패하면 앞 단계의 글을 넣고 표시한다. 취소는 끝난 단계까지를 남긴다(`--out`이면 `.partial`)
 - `draft`는 `delegate`처럼 에이전트 루프가 직접 돌린다(`Agent::with_draft`). 무인 실행(예약 작업, 웹훅, `task`)은 동시 요청 2개로 줄이고, 서브에이전트에는 주지 않는다. 무인 실행에서는 `levels` 최대 3, `polish` 끔, 실행의 토큰 상한을 호출마다 확인한다(Argus 리뷰 권장). 사용량은 답한 모델별 `subagent_usage`에 `"source": "draft"`를 붙여 남긴다. 처음에는 새 항목 `draft_usage`로 형식을 10으로 올렸지만, 리뷰에서 두 릴리스 연속 호환이 끊기는 것을 피하기로 하고 형식 9로 되돌렸다(릴리스된 0.5.0 바이너리로 열기와 이어 쓰기를 확인). 예비 모델로 넘어가면 호출마다 답한 모델(`StreamEvent::AnsweredBy`)을 기록하고 끝날 때 한 번 알린다
 - `/write`는 Junees가 직접 도는 한 턴이다(`Agent::write`): 입력한 줄이 사람의 입력, 글이 답이고, `--out`은 `write_file`을 승인과 체크포인트를 거쳐 부른다
-- 대시보드 대화는 `draft_level`, `draft_done` 이벤트를 보낸다. 화면은 Daedalus 배정
+- 대시보드 대화는 `draft_level`, `draft_done` 이벤트를 보낸다. 화면(`web/dashboard/draft.js`, `view-draft.js`)은 `draft` 도구 블록 안의 카드로, 단계마다 칸의 글이 바뀌고 끝나면 접는다. 같은 화면 작업에서 22단계의 `model_switch` 줄도 그렸다. 새로 고침한 대화는 도구 결과로 카드를 그린다(세션 API가 결과를 2,000자에서 자르는 한계가 있다)
 - 속도: 루프백 가짜 API(출력 토큰당 5ms)에서 3,200토큰 글이 한 번에 쓰기 16.4초, parallel 4에서 7.0초, parallel 8에서 3.9초 (`scripts/write_bench.sh`, [docs/write.md](write.md#속도-측정))
-- 남은 것: 실제 API로 품질 비교(`scripts/write_eval.sh`, 키가 생기면), 대시보드 화면, `junees write`의 사용량을 `junees usage`에 넣기
+- 남은 것: 실제 API로 품질 비교(`scripts/write_eval.sh`, 키가 생기면), `junees write`의 사용량을 `junees usage`에 넣기
