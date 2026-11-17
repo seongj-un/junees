@@ -305,14 +305,10 @@ fn draft_level(shared: &Shared, level: &crate::write::LevelDone) -> serde_json::
 /// `draft_done`: how a `draft` call ended and what its calls used.
 fn draft_done(shared: &Shared, draft: &crate::write::Draft) -> serde_json::Value {
     let usage = draft.usage();
-    let (stop, error) = match &draft.stop {
-        crate::write::Stop::Done => ("done", None),
-        crate::write::Stop::Cancelled => ("cancelled", None),
-        crate::write::Stop::Limit(reason) => {
-            ("limit", Some(preview(shared, reason, PREVIEW_CHARS)))
-        }
-        crate::write::Stop::Failed(reason) => {
-            ("failed", Some(preview(shared, reason, PREVIEW_CHARS)))
+    let error = match &draft.stop {
+        crate::write::Stop::Done | crate::write::Stop::Cancelled => None,
+        crate::write::Stop::Limit(reason) | crate::write::Stop::Failed(reason) => {
+            Some(preview(shared, reason, PREVIEW_CHARS))
         }
     };
     let levels: Vec<_> = draft
@@ -333,7 +329,7 @@ fn draft_done(shared: &Shared, draft: &crate::write::Draft) -> serde_json::Value
         .collect();
     json!({
         "type": "draft_done",
-        "stop": stop,
+        "stop": draft.stop.code(),
         "error": error,
         "levels": draft.levels,
         "levels_done": draft.levels_done,

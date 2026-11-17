@@ -116,7 +116,9 @@ pub fn parse(reply: &str) -> Result<Plan, String> {
     })
 }
 
-fn plain_id(id: &str) -> bool {
+/// Whether `id` is a section id as plans keep them: 1 to [`ID_CHARS`] of
+/// `A-Z`, `a-z`, `0-9`, `_` and `-`.
+pub(super) fn plain_id(id: &str) -> bool {
     !id.is_empty()
         && id.chars().count() <= ID_CHARS
         && id

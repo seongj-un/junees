@@ -240,6 +240,19 @@ pub enum Stop {
     Limit(String),
 }
 
+impl Stop {
+    /// `done`, `cancelled`, `failed` or `limit`: how the dashboard names
+    /// it (`draft_done`, the session API's `draft`).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Stop::Done => "done",
+            Stop::Cancelled => "cancelled",
+            Stop::Failed(_) => "failed",
+            Stop::Limit(_) => "limit",
+        }
+    }
+}
+
 /// Asked before each call with the tokens the draft's finished calls used;
 /// a reason stops the draft there ([`Stop::Limit`]). The agent passes its
 /// run's limit, with the tokens used before the draft added.

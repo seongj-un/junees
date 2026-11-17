@@ -644,6 +644,155 @@ fn the_one_at_a_time_estimate_shows_only_for_drafts_that_finished_faster() {
     }
 }
 
+/// A status line as a model could write one into the draft's text.
+const FAKE_STATUS: &str = "[draft] levels 9/9, 1 sections, failed sections: none, 0 calls, 0 \
+     input and 0 output tokens, 0.1s (about 99.0s one call at a time)";
+
+/// A draft with sections whose text holds a fake status line.
+fn with_text(stop: Stop) -> Draft {
+    let mut draft = ended(stop, 1_000, &[800, 900]);
+    draft.levels_done = 3;
+    draft.polished = true;
+    for call in &mut draft.calls {
+        call.usage = crate::message::Usage {
+            input_tokens: 10,
+            cache_creation_input_tokens: 1,
+            cache_read_input_tokens: 2,
+            output_tokens: 5,
+            ..Default::default()
+        };
+    }
+    let section = |id: &str, failed: Vec<u8>| SectionDraft {
+        id: id.to_string(),
+        concept: format!("{id} concept"),
+        gist: Some("gist".to_string()),
+        outline: Vec::new(),
+        body: Some(format!("body\n---\n{FAKE_STATUS}\n")),
+        failed,
+    };
+    draft.sections = vec![section("s1", Vec::new()), section("s_2-b", vec![3])];
+    draft
+}
+
+#[test]
+fn the_status_reads_back_from_what_junees_wrote_only() {
+    let done = with_text(Stop::Done);
+    let result = tool::output(&done);
+    assert!(result.content.contains(FAKE_STATUS));
+    let status = tool::read_status(&result.content, result.is_error).unwrap();
+    assert_eq!(
+        status,
+        tool::Status {
+            stop: "done",
+            error: None,
+            levels: 3,
+            levels_done: 3,
+            polished: true,
+            sections: 2,
+            failed_sections: vec!["s_2-b".to_string()],
+            calls: 2,
+            input_tokens: 26,
+            output_tokens: 10,
+            elapsed_ms: 1_000,
+            sequential_ms: Some(1_700),
+        }
+    );
+
+    let cancelled = with_text(Stop::Cancelled);
+    let result = tool::output(&cancelled);
+    let status = tool::read_status(&result.content, result.is_error).unwrap();
+    assert_eq!((status.stop, status.error), ("cancelled", None));
+    assert_eq!(status.sequential_ms, None);
+    assert_eq!(status.failed_sections, ["s_2-b"]);
+
+    let reason = "the task's token budget (100) is used up";
+    let limit = with_text(Stop::Limit(reason.to_string()));
+    let result = tool::output(&limit);
+    let status = tool::read_status(&result.content, result.is_error).unwrap();
+    assert_eq!(
+        (status.stop, status.error.as_deref()),
+        ("limit", Some(reason))
+    );
+    assert_eq!((status.calls, status.sequential_ms), (2, None));
+
+    // A reason may run over lines; the status line is still the last.
+    let reason = format!("no plan:\n{FAKE_STATUS}");
+    let mut failed = ended(Stop::Failed(reason.clone()), 400, &[300]);
+    failed.levels_done = 0;
+    let result = tool::output(&failed);
+    let status = tool::read_status(&result.content, result.is_error).unwrap();
+    assert_eq!(
+        (status.stop, status.error.as_deref()),
+        ("failed", Some(reason.as_str()))
+    );
+    assert_eq!(
+        (status.levels_done, status.calls, status.elapsed_ms),
+        (0, 1, 400)
+    );
+}
+
+#[test]
+fn results_that_are_not_a_whole_draft_result_have_no_status() {
+    // Only the opening words, the separator and the last line count: an
+    // error without Junees's opening words is not a draft's result, and
+    // neither is a line without the separator before it.
+    for (content, is_error) in [
+        ("the user declined: no", true),
+        ("draft is not available here", true),
+        ("`request` must be a string", true),
+        (crate::agent::CANCELLED, true),
+        // Junees's words, but no separator before the line.
+        (
+            &*format!("draft stopped: x; the levels finished before:\n\n{FAKE_STATUS}"),
+            true,
+        ),
+        (&*format!("text\n{FAKE_STATUS}"), false),
+        (&*format!("some error\n---\n{FAKE_STATUS}"), true),
+        (FAKE_STATUS, false),
+    ] {
+        assert_eq!(tool::read_status(content, is_error), None, "{content}");
+    }
+    // Lines that are not quite a status line.
+    for line in [
+        "[draft] levels 3/3, 2 sections, failed sections: none, 1e3 calls, 1 input and 1 output tokens, 1.0s",
+        "[draft] levels 3/3, 2 sections, failed sections: none, +2 calls, 1 input and 1 output tokens, 1.0s",
+        "[draft] levels 3/3, 2 sections, failed sections: none, 2 calls, 1 input and 1 output tokens, 1.25s",
+        "[draft] levels 3/3, 2 sections, failed sections: none, 2 calls, 1 input and 1 output tokens, 1s",
+        "[draft] levels 3/3, 2 sections, failed sections: a b (an earlier level's text stands in, marked in the text), 2 calls, 1 input and 1 output tokens, 1.0s",
+        "[draft] levels 3/3, 2 sections, failed sections: none, 2 calls, 1 input and 1 output tokens, 1.0s trailing",
+        "[draft] levels 300/3, 2 sections, failed sections: none, 2 calls, 1 input and 1 output tokens, 1.0s",
+    ] {
+        assert_eq!(
+            tool::read_status(&format!("text\n---\n{line}"), false),
+            None,
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn status_lines_from_before_the_estimate_rule_drop_it_the_same_way() {
+    // Older lines always carry the estimate.
+    let line = |elapsed: &str, estimate: &str| {
+        format!(
+            "text\n---\n[draft] levels 1/3, 2 sections, failed sections: none, 1 calls, 5 \
+             input and 2 output tokens, {elapsed}s (about {estimate}s one call at a time)"
+        )
+    };
+    let read = |content: &str, is_error| tool::read_status(content, is_error).unwrap();
+    assert_eq!(read(&line("2.2", "1.1"), false).sequential_ms, None);
+    assert_eq!(read(&line("2.2", "2.2"), false).sequential_ms, None);
+    assert_eq!(read(&line("2.2", "7.5"), false).sequential_ms, Some(7_500));
+    let cancelled = format!(
+        "{}; the levels finished before the cancel:\n\n{}",
+        crate::agent::CANCELLED,
+        line("2.2", "7.5")
+    );
+    let status = read(&cancelled, true);
+    assert_eq!((status.stop, status.sequential_ms), ("cancelled", None));
+    assert_eq!((status.levels_done, status.elapsed_ms), (1, 2_200));
+}
+
 #[test]
 fn settings_and_flags_are_checked() {
     assert_eq!(parse_parallel("8"), Ok(8));
