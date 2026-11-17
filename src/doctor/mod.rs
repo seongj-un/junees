@@ -403,6 +403,12 @@ pub async fn run_with(
         files::sessions(&mut report, home);
         services::mcp(&mut report, home, path, &|key| settings.env(key));
         services::plugins(&mut report, home);
+        services::hooks(
+            &mut report,
+            home,
+            settings.env("HOME").as_deref().map(Path::new),
+            path,
+        );
     }
     if online {
         online::api_key(&mut report, settings).await;

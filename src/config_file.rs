@@ -194,6 +194,10 @@ pub fn path(lookup: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
 pub struct ConfigFile {
     /// (key, value) for the keys that are set.
     values: Vec<(&'static str, String)>,
+    /// The `[[hooks]]` tables ([`crate::hooks`]) after the flat settings,
+    /// as written, and the line they start on. Kept unread here: the
+    /// hooks module parses them, and saving writes them back unchanged.
+    hooks: Option<(usize, String)>,
 }
 
 impl ConfigFile {
@@ -222,8 +226,16 @@ impl ConfigFile {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
+            if crate::hooks::config::is_header(line) {
+                let rest: Vec<&str> = text.lines().skip(index).collect();
+                file.hooks = Some((number, rest.join("\n") + "\n"));
+                break;
+            }
             if line.starts_with('[') {
-                bail!("line {number}: sections are not supported; put every setting at the top");
+                bail!(
+                    "line {number}: sections are not supported; put every setting at the top \
+                     (only `[[hooks]]` tables may follow them)"
+                );
             }
             let Some((key, rest)) = line.split_once('=') else {
                 bail!("line {number}: expected `key = value`");
@@ -257,6 +269,14 @@ impl ConfigFile {
         }
         file.sort();
         Ok(file)
+    }
+
+    /// The `[[hooks]]` tables after the flat settings, and the line of the
+    /// file they start on.
+    pub fn hooks(&self) -> Option<(usize, &str)> {
+        self.hooks
+            .as_ref()
+            .map(|(line, text)| (*line, text.as_str()))
     }
 
     /// The value of a file key.
@@ -304,6 +324,10 @@ impl ConfigFile {
                 quote(value)
             };
             text.push_str(&format!("{key} = {shown}\n"));
+        }
+        if let Some((_, hooks)) = &self.hooks {
+            text.push('\n');
+            text.push_str(hooks);
         }
         text
     }
@@ -370,7 +394,7 @@ fn parse_value(text: &str) -> Result<String> {
 }
 
 /// The rest of a `"` string: its value and what follows the closing quote.
-fn basic_string(body: &str) -> Result<(String, &str)> {
+pub(crate) fn basic_string(body: &str) -> Result<(String, &str)> {
     let mut value = String::new();
     let mut chars = body.char_indices();
     while let Some((at, c)) = chars.next() {
