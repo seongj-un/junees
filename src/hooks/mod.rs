@@ -17,6 +17,7 @@
 //!   skip it with a warning.
 
 pub mod config;
+pub mod run;
 pub mod trust;
 
 #[cfg(test)]
@@ -28,6 +29,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 pub use config::{Event, OnError, Spec};
+pub use run::Hooks;
 
 /// The user's hooks file in the state folder.
 pub const FILE_NAME: &str = "hooks.toml";
