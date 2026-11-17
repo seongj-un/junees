@@ -4,15 +4,15 @@
 
 ### 업그레이드할 때 확인할 것
 
-- 파일 체크포인트가 기본으로 켜집니다. 모델이 `write_file`, `edit_file`로 바꾼 파일의 원래 내용이 `$JUNEES_HOME/checkpoints`(폴더 0700, 파일 0600)에 최대 30일 남습니다. `.env` 같은 파일의 원래 내용도 남으므로, 원하지 않으면 `checkpoints = false`(`JUNEES_CHECKPOINTS=0`)로 끕니다. bash로 바뀐 파일은 기록되지 않습니다 ([파일 체크포인트](docs/checkpoints.md)).
-- 세션 기록 형식이 9로 올랐습니다. 0.5.0이 되돌리기 안내를 붙여 쓴 세션은 0.4.0 이하로 이어 갈 수 없습니다(이전 버전은 "continued by a newer Junees"로 멈추고, 파일은 그대로 남습니다). 0.4.0 세션은 0.5.0에서 그대로 이어 갑니다.
+- 파일 체크포인트가 기본으로 켜집니다. 모델이 `write_file`, `edit_file`로 바꾼 파일의 원래 내용이 `$JUNEES_HOME/checkpoints`(폴더 0700, 파일 0600)에 최대 30일 남습니다. `.env` 같은 파일의 원래 내용도 남으므로, 원하지 않으면 `checkpoints = false`(`JUNEES_CHECKPOINTS=0`)로 끕니다. bash로 바뀐 파일은 기록되지 않습니다. 이미 남은 체크포인트를 지우려면 그 세션 폴더(`$JUNEES_HOME/checkpoints/<세션 id>`)를 지웁니다 ([파일 체크포인트](docs/checkpoints.md)).
+- 세션 기록 형식이 9로 올랐습니다. 0.5.0이 새로 만들거나 한 줄이라도 이어 쓴 세션은 0.4.0 이하에서 열 수 없습니다. 되돌리기를 쓰지 않았어도 같습니다(이전 버전은 "written by a newer Junees (session format 9, ...)"로 멈추고, 파일은 그대로 남습니다). 0.4.0 세션은 0.5.0에서 그대로 이어 갑니다. 0.5.0으로 올린 뒤 이전 버전으로 되돌릴 계획이라면 이 점을 확인합니다.
 - `junees dashboard --chat`을 켜면 브라우저가 터미널 대화와 같은 권한(명령 실행과 승인)을 가집니다. 기본은 꺼져 있고, `--chat`이면 브라우저를 자동으로 열지 않고 `#token=` 주소를 터미널에만 출력합니다. 웹훅이나 예약 작업이 도는 컴퓨터에서는 쓸 때만 켭니다 ([대시보드](docs/dashboard.md)).
 - 승인 질문과 게이트웨이 버튼의 문구가 한국어로 바뀌었습니다. 승인 규칙(무엇을 묻는지)과 종류 이름은 그대로지만, 출력 문구를 읽어 들이는 스크립트가 있다면 확인합니다.
 - 모델의 기본 도구에 `grep`, `glob`, `list_dir`이 더해졌습니다. `junees mcp serve`의 읽기 전용 기본 도구에도 들어갑니다.
 
 ### 새 기능
 
-- 코드 탐색 도구 `grep`, `glob`, `list_dir`: Junees 안에서 도는 읽기 전용 도구로, bash의 `rg`, `find`, `ls` 대신 쓴다. ripgrep의 무시 규칙(`.gitignore`, `.ignore`, `.git/info/exclude`)을 따르고 `.git/`, `target/`, `node_modules/`, 점 파일(`hidden`이 아니면), 심볼릭 링크를 건너뛴다. 탐색 중에 만나는 파일과 폴더마다 `read_file`과 같은 읽기 규칙을 적용해 숨긴 경로는 보이지도, 내려가지도 않는다. 상한(파일 200, 줄 400, 출력 30,000자, glob 500, list_dir 400)과 10초 제한이 있고, `grep`의 `content` 출력은 비밀 값을 가린다. 작업 폴더 밖을 탐색하면 대화에서는 묻고, 무인 실행에서는 거절한다. 새 의존성: `ignore`, `globset`, `regex` ([코드 탐색](docs/tools.md#코드-탐색-grep-glob-list_dir)) (#126)
+- 코드 탐색 도구 `grep`, `glob`, `list_dir`: Junees 안에서 도는 읽기 전용 도구로, bash의 `rg`, `find`, `ls` 대신 쓴다. ripgrep의 무시 규칙(`.gitignore`, `.ignore`, `.git/info/exclude`)을 따르고 `.git/`, `target/`, `node_modules/`, 점 파일(`hidden`이 아니면), 심볼릭 링크를 건너뛴다. 탐색 중에 만나는 파일과 폴더마다 `read_file`과 같은 읽기 규칙을 적용해 숨긴 경로는 보이지도, 내려가지도 않는다. 상한(파일 200, 줄 400, 출력 30,000자, glob 500, list_dir 400)과 10초 제한이 있고, `grep`의 `content` 출력은 비밀 값을 가린다(우연히 섞이는 것을 줄일 뿐이고, 무엇을 읽을 수 있는지는 경로 규칙이 정한다). 작업 폴더 밖을 탐색하면 대화에서는 묻고, 무인 실행에서는 거절한다. 새 의존성: `ignore`, `globset`, `regex` ([코드 탐색](docs/tools.md#코드-탐색-grep-glob-list_dir)) (#126)
 - 파일 체크포인트와 되돌리기: `write_file`, `edit_file`이 파일을 바꾸기 직전의 내용과 권한(없던 파일은 "없었음")을 턴마다 `$JUNEES_HOME/checkpoints/<session>/<turn>/`(0700/0600)에 남긴다. `/checkpoints`, `/undo [N]`, `junees rewind --session <id> [--list] [--turn <n>] [--force] [--yes]`, 대시보드 `GET /api/chat/<id>/checkpoints`(되돌리기 기록이면 `undid`), `POST /api/chat/<id>/undo`(남긴 체크포인트 번호 `checkpoint`)로 최근 턴부터 되돌린다. 그 뒤 바뀐 파일은 `--force` 없이는 건너뛰고, 링크는 따라가지 않으며, 파일 도구의 쓰기 규칙을 그대로 거친다. 되돌린 내용은 세션의 다음 메시지 앞에 한 줄로 알리고, 되돌리기도 체크포인트로 남아 되돌릴 수 있다. 2MB가 넘는 파일은 기록하지 않고, 세션 200MB·전체 1GB·30일 상한이 있다. bash가 바꾼 파일은 기록하지 않는다. 체크포인트에는 원래 내용이 남으므로 `checkpoints = false`(`JUNEES_CHECKPOINTS=0`)로 끌 수 있다 ([파일 체크포인트](docs/checkpoints.md)) (#112, #118, #115, #123, #130)
 - 대시보드 대화(`junees dashboard --chat [--dir <폴더>]`): 페이지에서 Junees와 대화하고, 승인 질문을 페이지 버튼으로 답한다. 응답은 이벤트 스트림(`GET /api/chat/<id>/events`, `after`로 다시 연결)으로 오고, 세션은 일반 세션으로 저장된다. 기본은 꺼져 있고, 켜면 페이지가 터미널 대화와 같은 권한을 가진다. `--chat`이면 브라우저를 열지 않고 `#token=` 주소만 출력한다(`--open`으로 열 수 있고, 그때는 일회용 코드 경합을 경고한다). 일회용 코드 교환은 `dashboard.log`에 남는다. api 백엔드만 지원한다. `/api/status`에 `chat`이 더해졌다 ([대화](docs/dashboard.md#대화---chat)) (#109, #108, #114)
 
