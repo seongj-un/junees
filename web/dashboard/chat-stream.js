@@ -125,6 +125,7 @@ export function closedText(answer, by) {
 const TOOL_LABEL = {
   bash: "명령 실행",
   write_file: "파일 쓰기",
+  draft: "글 생성",
   edit_file: "파일 고치기",
   read_file: "파일 읽기",
 };

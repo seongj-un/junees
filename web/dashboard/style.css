@@ -2029,3 +2029,332 @@ a.button {
   margin-left: 4px;
   vertical-align: baseline;
 }
+
+/* 글 생성 card (stage 23): a draft tool call that fills in level by level. */
+
+.chat-draft > .chat-draft-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.draft {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.draft:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.draft-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.draft-title {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.draft-badge {
+  flex: none;
+}
+
+.draft-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Done is filled, the one being made has a pulsing dot, the rest are dashed. */
+.draft-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.draft-step.is-done {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-weight: 600;
+}
+
+.draft-step.is-current {
+  border-style: solid;
+  border-color: var(--primary);
+  color: var(--primary-text);
+  font-weight: 600;
+}
+
+.draft-step.is-current::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: chat-pulse 1.2s ease-in-out infinite;
+}
+
+.draft-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.draft-stop {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.draft-stop-limit {
+  color: var(--warn);
+}
+
+.draft-stop-failed {
+  color: var(--fail);
+}
+
+.draft-error {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.draft-failed {
+  margin: 0;
+  color: var(--fail);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.draft-fold,
+.draft-request {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.draft-fold > summary,
+.draft-request > summary {
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.draft-fold[open] > summary,
+.draft-request[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+
+.draft-request .tool-body {
+  border-top: 0;
+}
+
+.draft-cells {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 19rem), 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 10px;
+  list-style: none;
+}
+
+.draft-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.draft-cell.is-failed {
+  border-color: color-mix(in srgb, var(--fail) 35%, var(--border));
+  background: color-mix(in srgb, var(--fail) 4%, var(--surface));
+}
+
+.draft-cell-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.draft-cell-name {
+  flex: 1 1 8rem;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.draft-cell-id {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.draft-cell-flags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.draft-cell-flags:empty {
+  display: none;
+}
+
+/* A closed cell shows about five lines; opened, it scrolls inside a height limit of its own. */
+.draft-cell-text {
+  max-height: 7.8em;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.draft-cell-text.is-open {
+  max-height: min(60vh, 28rem);
+  overflow: auto;
+}
+
+.draft-cell-text:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.draft-cell-text.is-fresh {
+  animation: draft-refine 0.4s ease-out;
+}
+
+@keyframes draft-refine {
+  from {
+    background-color: var(--primary-soft);
+    opacity: 0.35;
+  }
+
+  to {
+    background-color: transparent;
+    opacity: 1;
+  }
+}
+
+.draft-more {
+  align-self: flex-start;
+}
+
+.draft-cell-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.draft-cell.is-failed .draft-cell-note {
+  color: var(--fail);
+}
+
+.draft-table-slot:not(:empty) {
+  padding: 0 10px 10px;
+}
+
+.draft-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.draft-table-caption {
+  padding: 2px 0 6px;
+  color: var(--muted);
+  font-weight: 600;
+  text-align: left;
+}
+
+.draft-table th,
+.draft-table td {
+  padding: 6px 6px;
+  border-top: 1px solid var(--border);
+  text-align: right;
+  font-weight: 400;
+}
+
+.draft-table thead th {
+  border-top: 0;
+  color: var(--muted);
+  font-weight: 600;
+  vertical-align: bottom;
+}
+
+.draft-table th:first-child {
+  padding-left: 0;
+  text-align: left;
+}
+
+.draft-table tbody th {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.draft-table td:last-child,
+.draft-table thead th:last-child {
+  padding-right: 0;
+}
+
+/* The chat line for a switch to the fallback model (stage 22). */
+.chat-switch {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border));
+  border-radius: 8px;
+  background: var(--warn-soft);
+  font-size: 14px;
+}
+
+.chat-switch-head {
+  margin: 0;
+  font-weight: 700;
+}
+
+.chat-switch-detail {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-switch-hint {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}

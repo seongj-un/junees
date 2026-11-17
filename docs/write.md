@@ -77,7 +77,7 @@ echo "요청" | junees write [옵션]
 
 ### 대시보드 이벤트
 
-대시보드 대화에서 모델이 `draft`를 부르면, 채팅 이벤트 스트림(`GET /api/chat/<id>/events`)에 두 종류가 더해진다. 화면은 아직 그리지 않는다.
+대시보드 대화에서 모델이 `draft`를 부르면, 채팅 이벤트 스트림(`GET /api/chat/<id>/events`)에 두 종류가 더해진다. 대시보드는 이 이벤트로 도구 블록 안에 "글 생성" 카드를 그린다([대시보드](dashboard.md#대화---chat)의 "화면: 글 생성").
 
 - `draft_level`: 한 단계가 끝날 때마다.
   - `level`(정수, 1부터. 이음은 `levels + 1`), `kind`(`concept`, `gist`, `outline`, `body`, `paragraph`, `polish`), `title`(문자열)
