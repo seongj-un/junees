@@ -130,7 +130,12 @@ class Chats:
         return 200, {"session_id": session_id}
 
     def record(self, chat, role, blocks):
-        """Appends a message to the chat's session, as the session file gets it."""
+        """Appends a message to the chat's session, as the session file gets it
+        and the session API sends it: text past 8,000 characters cut and marked."""
+        for block in blocks:
+            if block.get("type") == "text" and len(block["text"]) > 8000:
+                block["text"] = block["text"][:8000]
+                block["truncated"] = True
         with self.lock:
             detail = self.journal[chat.id]
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
