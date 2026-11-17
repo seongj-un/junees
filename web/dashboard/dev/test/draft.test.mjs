@@ -265,6 +265,28 @@ test("draft results are paired with their calls by tool_use_id and nothing else"
   assert.deepEqual([...draftResultKeys(null)], []);
 });
 
+test("a result whose call is outside the list is a card when the server sent a draft field", () => {
+  const out = (id, extra) => ({ type: "tool_result", tool_use_id: id, is_error: false, text_preview: "# T\n\n## a\n\ntext", ...extra });
+  const messages = [
+    // The window starts here: the draft calls are in the message before it.
+    { index: 40, role: "user", blocks: [out("toolu_x", { draft: { ...STATUS } }), out("toolu_y", { draft: null }), out("toolu_z", {})] },
+    { index: 41, role: "assistant", blocks: [{ type: "text", text: "끝났습니다" }] },
+  ];
+  // toolu_x: a draft status, the card. toolu_y: draft null, the card that says the status is unknown.
+  // toolu_z: no draft field (a result of another tool), a plain block.
+  assert.deepEqual([...draftResultKeys(messages)], ["40:0", "40:1"]);
+  const card = resultStatus(messages[0].blocks[0]);
+  assert.equal(card.calls, 9);
+  assert.equal(resultStatus(messages[0].blocks[1]), null);
+});
+
+test("a draft field on a result without an id is a card but a text block never is", () => {
+  const messages = [
+    { index: 0, role: "user", blocks: [{ type: "tool_result", is_error: false, text_preview: "x", draft: null }, { type: "text", text: "x", draft: null }] },
+  ];
+  assert.deepEqual([...draftResultKeys(messages)], ["0:0"]);
+});
+
 test("a session answer from before the ids pairs nothing", () => {
   const messages = [
     { index: 0, role: "assistant", blocks: [{ type: "tool_use", name: "draft", input_preview: "{}" }] },

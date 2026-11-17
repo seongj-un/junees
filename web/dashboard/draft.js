@@ -354,11 +354,16 @@ export function retryText(retryAt, now) {
 }
 
 /**
- * Which tool results of a session's messages answer a `draft` call, as
+ * Which tool results of a session's messages are a `draft` call's, as
  * `"<message index>:<block number>"`: the results whose `tool_use_id` is the
- * id of a `draft` `tool_use` in the list. A call or result without an id (a
- * session answer from before the ids) is left out, and so is a result whose
- * call is not in the list; its block stays a plain tool block.
+ * id of a `draft` `tool_use` in the list, and the results that carry the
+ * server's `draft` field (it is there only on the result of a `draft` call,
+ * `null` when no status could be read). The second rule is for a call that
+ * is not in the list: the chat screen gets only the last 20 messages, so the
+ * first one can be a result whose call lies before the window. A call or
+ * result without an id (a session answer from before the ids) is left out, and
+ * so is a result whose call is not in the list and that has no `draft` field;
+ * its block stays a plain tool block.
  */
 export function draftResultKeys(messages) {
   const keys = new Set();
@@ -373,9 +378,9 @@ export function draftResultKeys(messages) {
   }
   for (const message of list) {
     (Array.isArray(message?.blocks) ? message.blocks : []).forEach((block, n) => {
-      if (block?.type === "tool_result" && typeof block.tool_use_id === "string" && ids.has(block.tool_use_id)) {
-        keys.add(`${message.index}:${n}`);
-      }
+      if (block?.type !== "tool_result") return;
+      const paired = typeof block.tool_use_id === "string" && ids.has(block.tool_use_id);
+      if (paired || "draft" in block) keys.add(`${message.index}:${n}`);
     });
   }
   return keys;

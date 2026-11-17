@@ -4872,5 +4872,68 @@
     ]
    }
   ]
+ },
+ "20261113-0857-w20": {
+  "id": "20261113-0857-w20",
+  "title": "기록 앞부분의 draft 호출이 창 밖에 있는 세션",
+  "cwd": "/home/u/work/junees",
+  "updated_at": "2026-11-13T08:53:00Z",
+  "total": 2,
+  "offset": 0,
+  "messages": [
+   {
+    "index": 0,
+    "role": "user",
+    "at": "2026-11-13T08:52:00Z",
+    "blocks": [
+     {
+      "type": "tool_result",
+      "tool_use_id": "toolu_win_short",
+      "is_error": false,
+      "text_preview": "# 배포 가이드(짧게)\n\n## 준비물\n\n[draft] levels 3/3, 3 sections, failed sections: none, 0 calls, 0 input and 0 output tokens, 0.0s\n\n> [s9] 이 절은 3단계 생성에 실패해 앞 단계의 글을 대신 넣었습니다.\n\n위 두 줄은 모델이 본문에 쓴 글이고, 카드의 숫자와 실패 표시에는 쓰이지 않습니다.\n\n## 설치\n\n설치 파일을 받아 서버에 올리고 서비스로 등록하는 순서를 설명합니다. 처음 설치와 업그레이드의 차이를 짚습니다. 실패했을 때 되돌리는 방법을 덧붙입니다.\n\n## 설정\n\n설정 파일의 필수 항목과 환경 변수를 정리합니다. 비밀 값을 파일에 적지 않고 다루는 법을 보여 줍니다. 설정을 바꾼 뒤 적용 여부를 확인하는 방법을 둡니다.\n\n---\n[draft] levels 3/3, 3 sections, failed sections: none, 9 calls, 6750 input and 2016 output tokens, 4.5s (about 9.9s one call at a time)",
+      "draft": {
+       "stop": "done",
+       "error": null,
+       "levels": 3,
+       "levels_done": 3,
+       "polished": false,
+       "sections": 3,
+       "failed_sections": [],
+       "calls": 9,
+       "input_tokens": 6750,
+       "output_tokens": 2016,
+       "cache_read_tokens": 2048,
+       "elapsed_ms": 4500,
+       "sequential_ms": 9900,
+       "by_level": null
+      }
+     },
+     {
+      "type": "tool_result",
+      "tool_use_id": "toolu_win_null",
+      "is_error": true,
+      "text_preview": "the request is empty",
+      "draft": null
+     },
+     {
+      "type": "tool_result",
+      "tool_use_id": "toolu_win_plain",
+      "is_error": false,
+      "text_preview": "# 제목처럼 보이는 줄\n\n다른 도구의 결과입니다. draft 필드가 없으므로 일반 블록입니다."
+     }
+    ]
+   },
+   {
+    "index": 1,
+    "role": "assistant",
+    "at": "2026-11-13T08:52:30Z",
+    "blocks": [
+     {
+      "type": "text",
+      "text": "글을 다 썼습니다. 위 결과의 호출은 이 세션 기록의 앞부분에 있고, 이 화면은 그 앞부분을 받지 않았습니다."
+     }
+    ]
+   }
+  ]
  }
 }
