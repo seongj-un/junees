@@ -135,6 +135,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
         tool: None,
     },
     DataFolder {
+        name: "hooks",
+        holds: "the user's hook scripts",
+        tool: None,
+    },
+    DataFolder {
         name: "webhooks",
         holds: "the webhook routes and their output",
         tool: None,
@@ -285,11 +290,17 @@ impl SettingsFile {
         Some(resolve(&dir).unwrap_or(dir))
     }
 
-    /// The settings file, the MCP server list, the secrets folder and the
+    /// The settings file, the MCP server list, the user's hooks file and
+    /// the hook trust list ([`crate::hooks`]), the secrets folder and the
     /// browser profiles ([`crate::browser::PROFILES_FOLDER`]): the paths
     /// the bash sandbox ([`crate::sandbox`]) keeps commands from reading.
     pub fn protected_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.path.clone(), self.mcp_path()];
+        let mut paths = vec![
+            self.path.clone(),
+            self.mcp_path(),
+            self.path.with_file_name(crate::hooks::FILE_NAME),
+            self.path.with_file_name(crate::hooks::trust::FILE_NAME),
+        ];
         paths.extend(self.path.parent().map(secrets_dir));
         paths.extend(
             self.path

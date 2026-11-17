@@ -230,6 +230,56 @@ async fn the_browser_profiles_are_out_of_reach() {
 }
 
 #[tokio::test]
+async fn a_working_folder_holding_the_state_folder_keeps_the_hook_files_protected() {
+    // A command the policy does not read (a script the model wrote) must
+    // not plant a user hook, trust a project's hooks or change the user's
+    // hook scripts.
+    if !landlock() {
+        return;
+    }
+    let layout = Layout::new();
+    let home = layout.path("home");
+    let junees = layout.path("home/.junees");
+    std::fs::create_dir_all(junees.join("hooks")).unwrap();
+    std::fs::write(junees.join("hooks.toml"), "# hooks\n").unwrap();
+    std::fs::write(junees.join("trusted-hooks"), "").unwrap();
+    std::fs::write(junees.join("hooks/fmt.sh"), "exit 0\n").unwrap();
+    std::fs::write(home.join("sub/x.sh"), "").unwrap();
+    let command = format!(
+        "echo x >> {j}/hooks.toml || echo hooks-refused; \
+         cat {j}/trusted-hooks || echo trust-read-refused; \
+         echo x >> {j}/trusted-hooks || echo trust-refused; \
+         echo x >> {j}/hooks/fmt.sh || echo script-refused; \
+         echo ok > {h}/sub/x.sh && echo sub-ok",
+        h = home.display(),
+        j = junees.display(),
+    );
+    let output = run(&home, layout.sandbox(settings()), &command).await;
+    let text = &output.content;
+    for line in [
+        "hooks-refused",
+        "trust-read-refused",
+        "trust-refused",
+        "script-refused",
+        "sub-ok",
+    ] {
+        assert!(text.contains(line), "missing {line}: {text}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(junees.join("hooks.toml")).unwrap(),
+        "# hooks\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(junees.join("trusted-hooks")).unwrap(),
+        ""
+    );
+    assert_eq!(
+        std::fs::read_to_string(junees.join("hooks/fmt.sh")).unwrap(),
+        "exit 0\n"
+    );
+}
+
+#[tokio::test]
 async fn a_working_folder_holding_the_state_folder_keeps_it_protected() {
     // Junees started in the home folder: everything there is writable
     // except the state folder's protected and data parts.
@@ -1330,6 +1380,8 @@ fn the_tools_sandbox_follows_the_settings() {
         [
             junees.join("config.toml"),
             junees.join("mcp.json"),
+            junees.join("hooks.toml"),
+            junees.join("trusted-hooks"),
             junees.join("secrets"),
             junees.join(crate::browser::PROFILES_FOLDER)
         ]

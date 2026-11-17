@@ -678,6 +678,15 @@ mod tests {
     async fn the_model_cannot_write_user_hooks_or_trust_project_hooks() {
         let (_dir, root, file) = settings_file::testing::home();
         let home = root.join(".junees");
+        // The bash sandbox hides them too (see the sandbox tests for a
+        // command writing them).
+        let protected = file.protected_paths();
+        for name in [crate::hooks::FILE_NAME, crate::hooks::trust::FILE_NAME] {
+            assert!(
+                protected.iter().any(|path| path.ends_with(name)),
+                "{name}: {protected:?}"
+            );
+        }
         let settings = ToolSettings {
             settings_file: Some(file),
             ..ToolSettings::default()
