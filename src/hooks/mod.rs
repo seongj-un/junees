@@ -282,6 +282,12 @@ const BUILD_TOOLS: &[(&str, &str)] = &[
     ("cargo", "build.rs and the project's settings"),
 ];
 
+/// Programs that run another command given as their arguments, which
+/// Junees does not look into.
+const WRAPPERS: &[&str] = &[
+    "env", "timeout", "nice", "nohup", "xargs", "exec", "sudo", "time",
+];
+
 /// Interpreters Junees does not read the options of, so the script they
 /// run is not pinned.
 const UNKNOWN_INTERPRETERS: &[&str] = &[
@@ -290,7 +296,8 @@ const UNKNOWN_INTERPRETERS: &[&str] = &[
 ];
 
 /// Why `hook` runs files Junees cannot pin, if it does (`junees doctor`
-/// warns): a build tool, an interpreter Junees does not know or one given
+/// warns): a build tool, a command that runs another one (`env`,
+/// `timeout`), an interpreter Junees does not know or one given
 /// code or a module, or a user hook whose script is relative to whichever
 /// project the session is in.
 pub fn indirect(hook: &Hook) -> Option<String> {
@@ -299,6 +306,12 @@ pub fn indirect(hook: &Hook) -> Option<String> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
+    if WRAPPERS.contains(&name) {
+        return Some(format!(
+            "`{name}` runs another command, which Junees does not look into: if that runs a \
+             file of the working folder, the file is not pinned"
+        ));
+    }
     if UNKNOWN_INTERPRETERS.contains(&name) || UNKNOWN_INTERPRETERS.contains(&without_version(name))
     {
         return Some(format!(

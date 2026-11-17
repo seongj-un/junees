@@ -1102,6 +1102,21 @@ mod pinning {
                 "`php8.2` is an interpreter",
             ),
             (r#"["dash", "x.sh"]"#, false, "`dash` is an interpreter"),
+            (
+                r#"["env", "A=1", "./x.sh"]"#,
+                false,
+                "`env` runs another command",
+            ),
+            (
+                r#"["timeout", "5", "sh", "x.sh"]"#,
+                true,
+                "`timeout` runs another command",
+            ),
+            (
+                r#"["/usr/bin/nice", "./x.sh"]"#,
+                true,
+                "`nice` runs another command",
+            ),
         ] {
             let why = indirect(&hook(words, project)).unwrap_or_default();
             assert!(why.contains(part), "{words}: {why}");
