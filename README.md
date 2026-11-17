@@ -148,6 +148,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [명령 정책](docs/safety.md#명령-정책): 치명적인 명령과 비밀 파일을 다루는 명령을 실행 전에 막는다.
 - [실행 격리](docs/safety.md#실행-격리-landlock): `bash` 명령을 Linux Landlock으로 묶어 작업 폴더 밖 쓰기, 설정과 비밀 파일 읽기, (설정하면) TCP를 커널이 막는다.
 - [실행 전 승인](docs/safety.md#실행-전-승인): 대화 모드에서 위험할 수 있는 도구 호출을 먼저 묻는다.
+- [예비 모델](docs/configuration.md#예비-모델): 주 모델이 사용 한도나 과부하로 막히면 설정한 예비 모델(OpenAI 호환 API도 가능)로 넘어가고, 무인 실행은 한도가 풀리기를 기다린다.
 - [점검](docs/doctor.md): `junees doctor`로 설치와 설정을 점검한다(기본은 네트워크 없이).
 - [대시보드](docs/dashboard.md): `junees dashboard`가 이 컴퓨터의 브라우저에 상태, 세션, 사용량, 예약 작업, 웹훅, 점검 결과와 세션 대화를 보여 주고, 예약 작업과 웹훅을 멈추거나 다시 켜게 한다(루프백 주소와 실행마다 새 토큰만). `--chat`이면 페이지에서 Junees와 대화한다.
 - [설치와 업데이트](docs/install.md): `install.sh`, `junees update`(체크섬 확인, 한 번의 rename으로 교체), 태그로 만드는 릴리스.
@@ -196,6 +197,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 19. 대시보드 대화: `junees dashboard --chat`으로 페이지에서 Junees와 대화하고, 승인 질문을 버튼으로 답하기(이벤트 스트림, 터미널과 같은 신뢰 수준, [docs/dashboard.md](docs/dashboard.md#대화---chat)) (완료)
 20. 파일 체크포인트: `write_file`, `edit_file`이 바꾼 파일을 턴 단위로 기록하고 `/undo`, `junees rewind`, 대시보드 API로 되돌리기 ([docs/checkpoints.md](docs/checkpoints.md)) (완료)
 21. 코드 탐색 도구: Junees 안에서 도는 읽기 전용 `grep`, `glob`, `list_dir`(ripgrep의 무시 규칙, 만나는 파일마다 읽기 규칙, 상한과 시간 제한) ([docs/tools.md](docs/tools.md#코드-탐색-grep-glob-list_dir)) (완료)
+22. 예비 모델과 사용 한도 대응: 주 모델이 오래 막히면 `fallback_model`로 넘어가고, 무인 실행은 `wait_limit` 안에서 한도가 풀리기를 기다린다 ([docs/configuration.md](docs/configuration.md#예비-모델))
 
 ## 개발
 

@@ -64,6 +64,32 @@ model = "openai/gpt-4o-mini"                       # JUNEES_MODEL, 이 provider�
 - 사용량: `usage.prompt_tokens`에서 캐시된 토큰(`prompt_tokens_details.cached_tokens`, 서버가 주면 `cache_write_tokens`)을 빼 입력으로, 그 둘을 캐시 읽기/쓰기로 센다. 추론 토큰(`completion_tokens_details.reasoning_tokens`)은 `completion_tokens`에 들어 있고 출력 가격으로 청구되므로 출력에 그대로 두어 비용에 들어간다. 다만 Chat Completions는 추론 내용을 돌려주지 않아 다음 요청에 실리지 않으므로, 기록에는 `reasoning_tokens`로 따로 남기고 컨텍스트 크기(자동 압축 기준)에서는 뺀다. 스트리밍은 `stream_options.include_usage`로 마지막 조각의 사용량을 받는다. 사용량을 주지 않는 서버(또는 사용량 조각 전에 끊긴 스트림)면 비용은 0으로 남지만, 컨텍스트 크기는 0으로 두지 않고 마지막으로 잰 크기에 그 뒤 늘어난 대화의 추정치를 더해 자동 압축이 계속 동작한다. 가격표에는 Claude 모델만 있으므로 비용을 보려면 `prices`에 모델 가격을 적는다([사용량과 비용](usage.md#사용량과-비용)).
 - 오류: 401/403은 키 문제로, 429와 5xx는 재시도(`retry-after`를 따름)하되 크레딧 소진·지출 한도 429(`code`가 `insufficient_quota`, `credit_balance_exhausted`, `organization_spend_limit_exceeded`, `project_spend_limit_exceeded`, `organization_usage_limit_exceeded`이거나 `type`이 `insufficient_quota`)는 재시도하지 않는다. 오류 응답, 상태 200 본문의 오류, 스트림 중간의 오류 조각 모두 같은 기준이다. 400 `context_length_exceeded`(또는 "maximum context length" 문구)는 컨텍스트 초과로 보고 도구 결과 비우기와 압축을 한다. 다만 vLLM처럼 출력 상한(`max_tokens`)만으로 모델의 창 이상이라고 말하는 오류("8192 in the completion", "'max_tokens' ... is too large")는 압축해도 소용이 없으므로 초과로 보지 않고, 창이 작은 모델이면 `max_tokens`를 낮추라고 안내한다. OpenRouter처럼 상태 200 응답 본문에 든 `{"error": ...}`도 그 `code`(없으면 `type`)의 상태로 보고 같은 기준으로 재시도한다. JSON이 아닌 오류 본문(프록시의 HTML 페이지 등)은 앞 300자만 남긴다. 이미지를 가리키는 400은 Anthropic과 같이 다음 요청부터 그 이미지를 안내 한 줄로 바꾼다.
 
+## 예비 모델
+
+주 모델이 사용 한도(429)나 과부하(529)로, 또는 서버 오류나 응답 없음으로 막히면 설정한 예비 모델로 넘어가 그 턴을 이어 간다. 무인 실행은 넘어갈 모델이 없을 때 한도가 풀릴 때까지 기다릴 수 있다.
+
+```toml
+fallback_model = "claude-haiku-4-5"       # JUNEES_FALLBACK_MODEL, 없으면 넘어가지 않는다
+# fallback_provider = "openai"            # JUNEES_FALLBACK_PROVIDER, 기본은 주 provider와 같다
+# fallback_base_url = "http://localhost:11434/v1"  # JUNEES_FALLBACK_BASE_URL
+# fallback_api_key = "..."                # JUNEES_FALLBACK_API_KEY, fallback_base_url과 같은 곳에서만 읽는다
+# fallback_after = "2m"                   # JUNEES_FALLBACK_AFTER
+# wait_limit = "30m"                      # JUNEES_WAIT_LIMIT, 0이면 무인 실행도 기다리지 않는다
+```
+
+- **주소와 키**
+  - `fallback_base_url`을 적으면 그 주소로 보내고, 키는 `fallback_api_key`에서만 읽는다. 주 설정의 키와 같은 규칙이라, 주소를 설정 파일에 적었으면 키도 설정 파일에서, 환경 변수에 적었으면 환경 변수에서만 읽는다. 셸에 있는 `OPENAI_API_KEY`나 `ANTHROPIC_API_KEY`는 이 주소로 가지 않는다. OpenAI 호환 서버가 이 컴퓨터에 있으면(루프백 주소) 키 없이 부를 수 있다. 주소 검사(https, 평문 http는 루프백만, 사용자 이름과 비밀번호 거절)는 주 주소와 같다.
+  - `fallback_base_url`이 없으면, 예비 provider가 주 provider와 같을 때 주 provider의 주소와 키를 그대로 쓴다(같은 API의 다른 모델). 다르면 그 provider의 평소 설정(`base_url`/`api_key` 또는 `openai_base_url`/`openai_api_key`)을 평소 규칙대로 읽는다.
+  - `fallback_api_key`만 있고 `fallback_base_url`이 없으면 시작할 때 오류다. 그 키가 어느 주소로 갈지 정해지지 않기 때문이다.
+- **넘어가는 조건**: 429, 529, 5xx와 연결 실패는 지금처럼 몇 번 다시 시도하고, 그래도 막히면 넘어간다. `retry-after`가 `fallback_after`(기본 2분)보다 길면 다시 시도하지 않고 바로 넘어간다. 400, 401, 403, 404, 413(요청이나 키 문제)은 예비 모델로 가도 같은 결과라서 넘어가지 않고 오류로 끝난다.
+- **넘어간 뒤**: 그 턴의 남은 호출은 예비 모델로 한다. 다음 턴의 첫 호출에서 주 모델을 다시 시도하는데, 막힌 시각에 `retry-after`(없으면 `fallback_after`)를 더한 시각 전이면 바로 예비 모델을 쓴다. 이 상태는 프로세스 메모리에만 있다.
+  - 대화 기록은 provider가 달라도 이어진다. 기록은 Anthropic 블록으로 남고, OpenAI 호환 예비에는 요청할 때 변환하며 thinking 블록과 서명은 보내지 않는다. 같은 Anthropic의 다른 모델이면 `/model`로 바꿀 때와 같은 규칙을 따른다.
+  - 예비 모델은 주 모델과 같은 `stream`, `thinking_budget`, `web_search` 설정으로 부른다(Anthropic 예비일 때). OpenAI 호환 주 provider의 `openai_reasoning_effort`와 `openai_max_tokens_field`는 같은 OpenAI 호환 예비에 그대로 쓴다.
+- **알림**: 터미널은 stderr에 `<주> 모델이 사용 한도로 막혀 <예비> 모델로 이어 갑니다 (다시 시도: 15분 뒤)` 한 줄을 쓰고, 게이트웨이는 답 끝에 같은 줄을 붙이고, 대시보드 대화는 `model_switch` 이벤트를 보낸다([대시보드](dashboard.md#이벤트)). 사용량 기록(`usage`)에는 실제로 답한 모델 이름이 남아 비용이 그 모델 가격으로 계산된다.
+- **무인 실행의 기다리기**: 예약 작업, 웹훅, `junees mcp serve`의 실행, `task`는 예비 모델이 없거나 예비도 막히면, 다시 시도까지 남은 시간(`retry-after`, 없으면 `fallback_after`)이 `wait_limit`(기본 30분) 안일 때 그만큼 기다렸다가 같은 요청을 다시 보낸다. 한 번의 호출에서 기다린 시간을 모두 더해 `wait_limit`을 넘거나, 기다리면 실행 시간 상한(`webhook_max_time`, 예약 작업의 상한, `task_max_time`)을 넘게 되면 기다리지 않고 실패로 기록한다. 취소되면 기다리기도 바로 멈춘다. 대화, `-p`, 게이트웨이처럼 사람이 보는 실행은 기다리지 않는다. 이때 다시 시도는 `retry-after`가 60초 넘게 남으면 하지 않고 바로 이 기다리기로 넘어간다.
+- **claude-code 백엔드**: 이 단계의 예비 모델은 api 백엔드만 쓴다. claude-code 백엔드에서는 설정이 있어도 무시하고 `junees doctor`가 알린다.
+- **점검**: `junees doctor`가 예비 모델, provider, 주소, `fallback_after`, `wait_limit`을 보여 주고 설정 오류를 알린다(키 값은 보여 주지 않는다). `--online`이면 예비 모델에 출력 1토큰짜리 요청을 보내 키와 모델 이름을 확인한다.
+
 ## 환경 변수
 
 `JUNEES_HOME` 말고는 모두 설정 파일 키로도 줄 수 있고([설정 파일](#설정-파일과-처음-설정) 절), 둘 다 있으면 환경 변수가 이긴다.
@@ -79,6 +105,12 @@ model = "openai/gpt-4o-mini"                       # JUNEES_MODEL, 이 provider�
 | `JUNEES_OPENAI_MAX_TOKENS_FIELD` | `auto` | 출력 상한을 보낼 필드: `auto`(OpenAI와 Azure OpenAI는 `max_completion_tokens`, 그 밖은 `max_tokens`), `max_tokens`, `max_completion_tokens` |
 | `JUNEES_BACKEND` | `api` | 대화와 작업을 돌릴 것: `api`(Junees의 에이전트) 또는 `claude-code`([구독 모드](subscription.md#구독-모드-claude-code-백엔드)) |
 | `JUNEES_MODEL` | `claude-sonnet-4-6` | 모델 |
+| `JUNEES_FALLBACK_MODEL` | (없음: 넘어가지 않음) | 주 모델이 막혔을 때 넘어갈 예비 모델 ([예비 모델](#예비-모델)) |
+| `JUNEES_FALLBACK_PROVIDER` | (주 provider) | 예비 모델의 API: `anthropic` 또는 `openai` |
+| `JUNEES_FALLBACK_BASE_URL` | (없음: 주 provider나 그 provider의 평소 주소) | 예비 모델의 주소. https만, 평문 http는 루프백 주소에만 |
+| `JUNEES_FALLBACK_API_KEY` | (없음) | `fallback_base_url`의 키. 그 주소와 같은 곳(둘 다 환경 변수 또는 둘 다 설정 파일)에서만 읽는다 |
+| `JUNEES_FALLBACK_AFTER` | `2m` | 주 모델이 이보다 오래 막히면(`retry-after`가 이보다 길면) 바로 예비로 넘어간다. 0은 받지 않는다 |
+| `JUNEES_WAIT_LIMIT` | `30m` | 무인 실행이 사용 한도가 풀리기를 기다릴 수 있는 시간(호출 하나에서 모두 더해). `0`이면 기다리지 않는다 |
 | `JUNEES_PRICES` | (없음) | 비용 추정에 쓸 모델 가격, `<모델>=<입력>/<출력>` 쉼표 목록 ([사용량과 비용](usage.md#사용량과-비용)) |
 | `JUNEES_MAX_TOKENS` | `8192` | 모델 호출 1회의 최대 출력 토큰 |
 | `JUNEES_MAX_TURNS` | `50` | 입력 하나당 최대 모델 호출 횟수 |
