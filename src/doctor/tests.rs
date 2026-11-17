@@ -2278,3 +2278,67 @@ async fn transcription_is_shown_without_its_key_and_asked_online() {
         heads[0]
     );
 }
+
+#[tokio::test]
+async fn the_fallback_model_is_checked_when_set_and_asked_online() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut fixture = Fixture::new();
+    let report = fixture.run(false).await;
+    assert!(!has(&report, "settings", "fallback model"));
+
+    fixture.set("JUNEES_FALLBACK_MODEL", "small");
+    fixture.set("JUNEES_FALLBACK_BASE_URL", "https://proxy.example/v1");
+    let report = fixture.run(false).await;
+    expect(
+        &report,
+        "settings",
+        "fallback model",
+        Status::Fail,
+        "no key for the fallback model at https://proxy.example/v1",
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0u8; 16384];
+        let n = socket.read(&mut request).await.unwrap();
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"O"},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        String::from_utf8_lossy(&request[..n]).to_string()
+    });
+    fixture.set("JUNEES_FALLBACK_PROVIDER", "openai");
+    fixture.set("JUNEES_FALLBACK_BASE_URL", &base);
+    fixture.set("JUNEES_WAIT_LIMIT", "0");
+    let report = fixture.run(true).await;
+    expect(
+        &report,
+        "settings",
+        "fallback model",
+        Status::Ok,
+        &format!("small (openai at {base}), after the main model is blocked for"),
+    );
+    expect(
+        &report,
+        "settings",
+        "fallback model",
+        Status::Ok,
+        "unattended runs do not wait",
+    );
+    expect(
+        &report,
+        "online",
+        "fallback model",
+        Status::Ok,
+        "small answers at",
+    );
+    let request = server.await.unwrap();
+    assert!(
+        request.starts_with("POST /v1/chat/completions"),
+        "{request}"
+    );
+}
