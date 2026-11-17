@@ -213,6 +213,10 @@ pub trait Engine {
 pub(crate) struct Answer {
     blocks: Vec<String>,
     current: String,
+    /// The line about a switch to the fallback model, for the run's note.
+    switched: Option<String>,
+    /// The last warning, which says why a failed call was not waited out.
+    warning: Option<String>,
 }
 
 impl Answer {
@@ -225,8 +229,27 @@ impl Answer {
                 self.blocks.clear();
                 self.current.clear();
             }
+            Event::ModelSwitch(switch) => self.switched = Some(switch.line()),
+            Event::Warning(warning) => self.warning = Some(warning.to_string()),
             _ => {}
         }
+    }
+
+    /// `note` with what the model calls went through: the switch to the
+    /// fallback model, and for a failed run the last warning (such as why
+    /// a usage limit was not waited out).
+    pub(crate) fn note(&self, note: String, failed: bool) -> String {
+        let extra = [
+            self.switched.as_deref(),
+            self.warning.as_deref().filter(|_| failed),
+        ];
+        extra.into_iter().flatten().fold(note, |note, line| {
+            if note.is_empty() {
+                line.to_string()
+            } else {
+                format!("{note}; {line}")
+            }
+        })
     }
 
     pub(crate) fn text(mut self) -> String {
@@ -484,12 +507,15 @@ impl Engine for ApiEngine {
         mcp.shutdown().await;
         let used = tokens(agent.usage());
         let (status, answer, note) = match result {
-            Ok(text) => (RunStatus::Ok, text.trim().to_string(), String::new()),
-            Err(err) => (
-                RunStatus::Failed,
-                answer.text(),
-                failure_note(&err, &deadline, limits),
+            Ok(text) => (
+                RunStatus::Ok,
+                text.trim().to_string(),
+                answer.note(String::new(), false),
             ),
+            Err(err) => {
+                let note = answer.note(failure_note(&err, &deadline, limits), true);
+                (RunStatus::Failed, answer.text(), note)
+            }
         };
         Outcome {
             status,

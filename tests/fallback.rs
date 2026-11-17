@@ -279,3 +279,55 @@ async fn an_unattended_run_does_not_start_a_wait_it_may_not_finish() {
         .unwrap();
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn a_cron_run_does_not_wait_past_wait_limit() {
+    let home = tempfile::tempdir().unwrap();
+    let work = home.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let (main, seen) = serve(vec![(429, Some(3600), limited())]).await;
+    let cron = |args: &[&str]| {
+        let mut command = junees_binary(&work, home.path());
+        command
+            .args(args)
+            .env("JUNEES_HOME", home.path().join("state"))
+            .env("ANTHROPIC_API_KEY", "sk-fake-main")
+            .env("ANTHROPIC_BASE_URL", &main)
+            .env("JUNEES_STREAM", "0")
+            .env("JUNEES_WAIT_LIMIT", "30m")
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null());
+        async move {
+            tokio::time::timeout(WAIT, command.output())
+                .await
+                .expect("junees did not exit")
+                .unwrap()
+        }
+    };
+    let added = cron(&["cron", "add", "every 2h", "hi", "--name", "limited"]).await;
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let started = std::time::Instant::now();
+    let run = cron(&["cron", "run", "limited"]).await;
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    // The provider of an unattended run: one request, no retries (a plain
+    // one would retry for minutes), and the reason it did not wait.
+    assert!(started.elapsed() < Duration::from_secs(10), "{all}");
+    assert_eq!(seen.lock().unwrap().len(), 1, "{all}");
+    assert!(all.contains("failed (API error 429"), "{all}");
+    // The run's output file says why it did not wait.
+    let outputs = home.path().join("state/cron/output");
+    let written: String = std::fs::read_dir(&outputs)
+        .unwrap()
+        .flat_map(|job| std::fs::read_dir(job.unwrap().path()).unwrap())
+        .map(|file| std::fs::read_to_string(file.unwrap().path()).unwrap())
+        .collect();
+    assert!(written.contains("wait_limit 30분"), "{written}");
+}
