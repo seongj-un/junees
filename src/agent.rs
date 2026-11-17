@@ -692,10 +692,22 @@ impl Agent {
         if let Err(err) = self.check_limit() {
             return ToolOutput::error(err.to_string());
         }
+        let draft = self.run_draft(&request, &options, on_event).await;
+        crate::write::tool::output(&draft)
+    }
+
+    /// Makes a draft with this agent's model and cancel, reports its
+    /// levels and records the tokens its calls used.
+    async fn run_draft(
+        &mut self,
+        request: &str,
+        options: &crate::write::Options,
+        on_event: &mut impl FnMut(Event<'_>),
+    ) -> crate::write::Draft {
         let provider = self.provider.clone();
         let cancel = self.cancel.clone();
         let (sender, mut levels) = tokio::sync::mpsc::unbounded_channel();
-        let work = crate::write::run(&*provider, &request, &options, &cancel, Some(&sender));
+        let work = crate::write::run(&*provider, request, options, &cancel, Some(&sender));
         tokio::pin!(work);
         let draft = loop {
             tokio::select! {
@@ -712,7 +724,94 @@ impl Agent {
         if usage != Usage::default() {
             self.record(Entry::DraftUsage(usage), on_event);
         }
-        crate::write::tool::output(&draft)
+        draft
+    }
+
+    /// `/write`: one turn that Junees runs itself, not the model. The
+    /// person's `line` goes in as their input; the draft of `request`
+    /// (the finished levels, after a cancel) comes back as the reply, its
+    /// status line in a text block of its own. With `out`, the text is
+    /// saved through `write_file`, under its rules: the approval gate and
+    /// this turn's file checkpoint; a line says how that went. A draft
+    /// that failed, or was cancelled before its plan, records no reply.
+    pub async fn write(
+        &mut self,
+        line: &str,
+        request: &str,
+        options: &crate::write::Options,
+        out: Option<&str>,
+        mut on_event: impl FnMut(Event<'_>),
+    ) -> Result<crate::write::Draft> {
+        let journal = self
+            .journal
+            .as_ref()
+            .and_then(|journal| journal.file())
+            .map(std::path::Path::to_path_buf);
+        let turn = crate::checkpoints::begin(journal.as_deref());
+        let result = crate::checkpoints::scope(
+            turn.clone(),
+            self.write_turn(line, request, options, out, &mut on_event),
+        )
+        .await;
+        self.last_checkpoint = turn.as_ref().and_then(|turn| turn.number());
+        if let Some(turn) = turn {
+            turn.finish();
+        }
+        result
+    }
+
+    async fn write_turn(
+        &mut self,
+        line: &str,
+        request: &str,
+        options: &crate::write::Options,
+        out: Option<&str>,
+        on_event: &mut impl FnMut(Event<'_>),
+    ) -> Result<crate::write::Draft> {
+        use crate::write::Stop;
+        self.provider.begin_turn();
+        self.drop_open_server_calls(on_event);
+        let entry = self.transcript.user_input_entry(line, Vec::new());
+        self.record(entry, on_event);
+        self.check_limit()?;
+        let draft = self.run_draft(request, options, on_event).await;
+        match &draft.stop {
+            Stop::Failed(reason) => anyhow::bail!("draft failed: {reason}"),
+            Stop::Cancelled if draft.levels_done == 0 => return Err(Cancelled.into()),
+            _ => {}
+        }
+        let text = draft.text();
+        let mut reply = vec![
+            ContentBlock::text(text.clone()),
+            ContentBlock::text(crate::write::tool::status_line(&draft)),
+        ];
+        // A cancelled draft is not saved: the cancel also stands for the
+        // write it would have asked about.
+        if let Some(path) = out.filter(|_| draft.stop == Stop::Done) {
+            let input = serde_json::json!({ "path": path, "content": text });
+            on_event(Event::ToolCall {
+                name: "write_file",
+                input: &input,
+            });
+            let output = self.call_tool("write_file", input).await;
+            on_event(Event::ToolResult {
+                name: "write_file",
+                output: &output,
+            });
+            reply.push(ContentBlock::text(format!(
+                "[write_file {path}] {}{}",
+                if output.is_error { "error: " } else { "" },
+                output.content
+            )));
+        }
+        self.record(
+            Entry::Message(Message {
+                role: Role::Assistant,
+                content: reply,
+            }),
+            on_event,
+        );
+        Ok(draft)
     }
 
     /// Fails with [`LimitReached`] if the limit says to stop.

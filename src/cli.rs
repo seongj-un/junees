@@ -189,6 +189,11 @@ pub const REPL_HELP: &str = "\
                    for this session (a switch starts a new conversation)
 /doctor            check the installation and the settings (`junees doctor`)
 /update            say whether a newer release is out (`junees update` installs it)
+/write [options] <request>
+                   write a long text coarse to fine, sections in parallel, as
+                   a reply in the conversation (--levels 2|3|4, --parallel N,
+                   --polish, --lang ko|en; --out FILE saves it the way
+                   write_file does, asking first; api backend)
 /compact           replace the earlier conversation with a summary (api backend;
                    Claude Code compacts its own)
 /context           show the context size and its limit (api backend) and the

@@ -560,3 +560,76 @@ async fn the_agent_runs_draft_calls_reports_levels_and_counts_their_tokens() {
     // 2 agent calls of 100 + 7 draft calls of 10.
     assert_eq!(agent.usage().input_tokens, 270);
 }
+
+#[tokio::test]
+async fn slash_write_puts_the_draft_into_the_conversation_and_saves_it_like_write_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("draft.md");
+    let provider = AgentFake {
+        draft: Fake::new(standard(3)),
+        turns: AtomicUsize::new(0),
+    };
+    let mut agent = crate::agent::Agent::new(
+        Box::new(provider),
+        crate::tools::ToolRegistry::with_defaults(&crate::tools::ToolSettings::default()),
+        crate::agent::AgentOptions {
+            system: "sys".to_string(),
+            max_tokens: 1000,
+            max_turns: 5,
+            context_window: 200_000,
+            compact_threshold: 0.8,
+        },
+    );
+    let out = path.to_str().unwrap();
+    let draft = agent
+        .write("/write --out x a doc", "a doc", &options(2, 4), Some(out), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(draft.stop, Stop::Done);
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(saved, draft.text());
+    let messages = agent.messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, Role::User);
+    assert_eq!(messages[0].text(), "/write --out x a doc");
+    assert_eq!(messages[1].role, Role::Assistant);
+    assert_eq!(messages[1].content.len(), 3, "text, status, save line");
+    let reply = messages[1].text();
+    assert!(reply.starts_with("# A title\n"), "{reply}");
+    assert!(reply.contains("[draft] levels 2/2"), "{reply}");
+    assert!(reply.contains(&format!("[write_file {out}] ")), "{reply}");
+    assert!(!reply.contains("error:"), "{reply}");
+    // No agent model call: only the draft's 4 calls are counted.
+    assert_eq!(agent.usage().input_tokens, 40);
+
+    // A failed draft records the input only.
+    let provider = AgentFake {
+        draft: Fake::new(|_, _| Ok("no plan".to_string())),
+        turns: AtomicUsize::new(0),
+    };
+    let mut agent = crate::agent::Agent::new(
+        Box::new(provider),
+        crate::tools::ToolRegistry::new(),
+        crate::agent::AgentOptions {
+            system: "sys".to_string(),
+            max_tokens: 1000,
+            max_turns: 5,
+            context_window: 200_000,
+            compact_threshold: 0.8,
+        },
+    );
+    let err = agent
+        .write("/write a doc", "a doc", &options(3, 4), None, |_| {})
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("draft failed"), "{err}");
+    assert_eq!(agent.messages().len(), 1);
+}
+
+#[test]
+fn slash_write_needs_a_request() {
+    use crate::slash::{Slash, parse};
+    assert_eq!(parse("/write --levels 2 a b"), Some(Slash::Write("--levels 2 a b".into())));
+    assert!(matches!(parse("/write"), Some(Slash::Bad(_))));
+    assert!(crate::slash::is_command("write"));
+}

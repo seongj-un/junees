@@ -57,6 +57,9 @@ pub enum Slash {
     /// `/undo` undoes the last turn that changed files (an undo too);
     /// `/undo N` the last N turns that are not undos.
     Undo(Option<usize>),
+    /// `/write [options] <request>` makes a draft level by level
+    /// ([`crate::write`]); the text after the command, options included.
+    Write(String),
     /// `/update` says whether a newer release is out (it installs
     /// nothing: `junees update` does).
     Update,
@@ -98,6 +101,13 @@ pub fn parse(line: &str) -> Option<Slash> {
             Some(arg) => Slash::Search(arg),
         },
         "new" | "reset" => plain(Slash::New),
+        "write" => match arg {
+            None => Slash::Bad(
+                "/write takes the request, for example /write --levels 2 a README for this repo"
+                    .into(),
+            ),
+            Some(arg) => Slash::Write(arg),
+        },
         "checkpoints" => plain(Slash::Checkpoints),
         "undo" => match arg.as_deref().map(str::parse::<usize>) {
             None => Slash::Undo(None),
