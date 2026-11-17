@@ -597,9 +597,7 @@ async fn errors_name_the_problem_but_never_the_token() {
     );
 
     // Nothing listens there: the error names the host, not the URL.
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = closed.local_addr().unwrap();
-    drop(closed);
+    let (_closed, address) = crate::tools::testing::closed_port();
     let client = Client::new(
         &Url::parse(&format!("http://{address}")).unwrap(),
         Token::new(TOKEN).unwrap(),

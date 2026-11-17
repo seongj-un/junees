@@ -552,9 +552,8 @@ async fn refuses_other_schemes_and_private_addresses() {
         output.content
     );
     // A later failure is not given that reason.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+    let (_closed, address) = crate::tools::testing::closed_port();
+    let port = address.port();
     let output = run(
         &tool,
         json!({"action": "open", "url": format!("http://127.0.0.1:{port}/")}),

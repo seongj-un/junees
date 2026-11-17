@@ -774,11 +774,9 @@ async fn redirects_are_not_followed() {
 
 #[tokio::test]
 async fn failures_name_neither_the_url_nor_header_values() {
-    // Nothing listens on a port that was just freed.
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
+    // Nothing listens on a port held bound without listening.
+    let (_closed, address) = crate::tools::testing::closed_port();
+    let port = address.port();
     let url = format!("http://127.0.0.1:{port}/mcp/s3cret-path?key=q-s3cret");
     let mcp = start_with(config(&url, json!({})), env()).await;
     let reason = failure(&mcp);
