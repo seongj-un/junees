@@ -440,4 +440,30 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
             ]
         })
     );
+    // A draft that stopped early has no one-at-a-time estimate: the
+    // calls it dropped ran for part of `elapsed` but are not in the sum.
+    let mut stopped = draft.clone();
+    stopped.stop = Stop::Cancelled;
+    stopped.elapsed = Duration::from_millis(300);
+    super::runner::on_event(
+        &shared,
+        &room,
+        &mut out,
+        crate::agent::Event::DraftDone(&stopped),
+    );
+    let mut even = draft;
+    even.elapsed = Duration::from_millis(200);
+    super::runner::on_event(
+        &shared,
+        &room,
+        &mut out,
+        crate::agent::Event::DraftDone(&even),
+    );
+    let events = types(&room);
+    assert_eq!(events[2]["stop"], "cancelled");
+    assert_eq!(events[2]["elapsed_ms"], 300);
+    assert_eq!(events[2]["sequential_ms"], Value::Null);
+    // Finished, but no faster than one call at a time.
+    assert_eq!(events[3]["stop"], "done");
+    assert_eq!(events[3]["sequential_ms"], Value::Null);
 }

@@ -1018,6 +1018,16 @@ impl Draft {
         self.calls.iter().map(|call| call.elapsed).sum()
     }
 
+    /// [`Self::sequential_estimate`] where the comparison means something:
+    /// the draft finished ([`Stop::Done`]) and one call at a time would have
+    /// taken longer than it did. A draft that stopped early leaves out the
+    /// calls it dropped while `elapsed` counts the time they ran, so the
+    /// sum would read shorter than the draft took.
+    pub fn sequential_comparison(&self) -> Option<Duration> {
+        let estimate = self.sequential_estimate();
+        (self.stop == Stop::Done && estimate > self.elapsed).then_some(estimate)
+    }
+
     /// Usage per level, in level order.
     pub fn by_level(&self) -> Vec<LevelUsage> {
         let mut levels: Vec<LevelUsage> = Vec::new();
@@ -1057,7 +1067,8 @@ impl Draft {
     }
 
     /// One line: calls, tokens, cost (when `prices` are given), time taken
-    /// and the one-at-a-time estimate.
+    /// and the one-at-a-time estimate when it compares
+    /// ([`Self::sequential_comparison`]).
     pub fn summary(&self, prices: Option<&crate::usage::Prices>) -> String {
         let usage = self.usage();
         let input =
@@ -1068,12 +1079,14 @@ impl Draft {
             Some(None) => ", 비용 알 수 없음".to_string(),
         };
         format!(
-            "호출 {}번, 입력 {} / 출력 {} 토큰{cost}, 걸린 시간 {}, 순차였다면 약 {}",
+            "호출 {}번, 입력 {} / 출력 {} 토큰{cost}, 걸린 시간 {}{}",
             self.calls.len(),
             crate::usage::report::thousands(input),
             crate::usage::report::thousands(usage.output_tokens),
             seconds(self.elapsed),
-            seconds(self.sequential_estimate()),
+            self.sequential_comparison()
+                .map(|estimate| format!(", 순차였다면 약 {}", seconds(estimate)))
+                .unwrap_or_default(),
         )
     }
 }

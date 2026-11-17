@@ -44,7 +44,7 @@ echo "요청" | junees write [옵션]
     2단계 요지: 호출 8번, 입력 2,850 / 출력 640 토큰
     3단계 본문: 호출 8번, 입력 8,083 / 출력 3,200 토큰
   ```
-  "순차였다면"은 모든 호출의 걸린 시간을 더한 값으로, 같은 호출을 하나씩 보냈다면 걸렸을 시간의 추정이다. 비용은 `prices` 설정(없으면 내장 가격)으로 계산하고, 가격을 모르는 모델이면 "알 수 없음"이다.
+  "순차였다면"은 모든 호출의 걸린 시간을 더한 값으로, 같은 호출을 하나씩 보냈다면 걸렸을 시간의 추정이다. 글이 끝까지 만들어졌고(취소, 토큰 상한, 실패가 아님) 이 추정이 걸린 시간보다 길 때만 쓴다. 중간에 멈춘 글은 버린 호출의 시간이 걸린 시간에만 들어가 추정이 거꾸로 짧게 나오기 때문이다. 모델이 받는 상태 줄의 `(about ...s one call at a time)`과 대시보드 `draft_done`의 `sequential_ms`도 같은 규칙을 따른다. 비용은 `prices` 설정(없으면 내장 가격)으로 계산하고, 가격을 모르는 모델이면 "알 수 없음"이다.
 - `--lang`을 주지 않으면 요청에 한글이 있으면 한국어, 없으면 영어로 쓴다.
 - 요청은 비어 있으면 안 되고 20,000자까지다. 표준 입력은 그만큼만 읽는다.
 - `--out 파일`이면 최종 글을 그 파일에 쓰고 표준 출력에는 쓰지 않는다.
@@ -86,7 +86,7 @@ echo "요청" | junees write [옵션]
 - `draft_done`: 끝날 때 한 번.
   - `stop`: `done`, `cancelled`, `failed`, `limit`(실행의 토큰 상한으로 멈춤). `error`: 실패나 멈춘 이유 문자열 또는 `null`.
   - `levels`, `levels_done`, `polished`, `failed_sections`(id 배열), `calls`
-  - `input_tokens`(캐시 쓰기와 읽기 포함), `output_tokens`, `cache_read_tokens`, `elapsed_ms`, `sequential_ms`
+  - `input_tokens`(캐시 쓰기와 읽기 포함), `output_tokens`, `cache_read_tokens`, `elapsed_ms`, `sequential_ms`(밀리초 또는 `null`. `stop`이 `done`이고 호출 시간의 합이 `elapsed_ms`보다 길 때만 값이 있다)
   - `by_level`: `[{level, kind, calls, failed_calls, input_tokens, output_tokens}]`
 
 ## 병렬과 비용

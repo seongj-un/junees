@@ -346,7 +346,10 @@ fn draft_done(shared: &Shared, draft: &crate::write::Draft) -> serde_json::Value
         "output_tokens": usage.output_tokens,
         "cache_read_tokens": usage.cache_read_input_tokens,
         "elapsed_ms": draft.elapsed.as_millis() as u64,
-        "sequential_ms": draft.sequential_estimate().as_millis() as u64,
+        // `null` unless the draft finished faster than one call at a time.
+        "sequential_ms": draft
+            .sequential_comparison()
+            .map(|estimate| estimate.as_millis() as u64),
         "by_level": levels,
     })
 }

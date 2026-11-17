@@ -574,6 +574,76 @@ async fn usage_is_kept_per_call_and_summed_per_level() {
     assert!(line.contains("순차였다면 약 "), "{line}");
 }
 
+/// A draft that ended as `stop` after `elapsed_ms`, with calls that took
+/// `call_ms` each.
+fn ended(stop: Stop, elapsed_ms: u64, call_ms: &[u64]) -> Draft {
+    Draft {
+        title: "T".to_string(),
+        sections: Vec::new(),
+        levels: 3,
+        levels_done: 1,
+        polished: false,
+        lang: Lang::En,
+        stop,
+        calls: call_ms
+            .iter()
+            .map(|ms| Call {
+                level: 1,
+                kind: Kind::Concept,
+                unit: None,
+                model: None,
+                usage: crate::message::Usage::default(),
+                elapsed: Duration::from_millis(*ms),
+                ok: true,
+            })
+            .collect(),
+        elapsed: Duration::from_millis(elapsed_ms),
+        switch: None,
+    }
+}
+
+#[test]
+fn the_one_at_a_time_estimate_shows_only_for_drafts_that_finished_faster() {
+    let done = ended(Stop::Done, 1_000, &[800, 900]);
+    assert_eq!(
+        done.sequential_comparison(),
+        Some(Duration::from_millis(1_700))
+    );
+    let summary = done.summary(None);
+    assert!(
+        summary.ends_with("걸린 시간 1.0초, 순차였다면 약 1.7초"),
+        "{summary}"
+    );
+    let status = tool::status_line(&done);
+    assert!(
+        status.ends_with(", 1.0s (about 1.7s one call at a time)"),
+        "{status}"
+    );
+    for draft in [
+        // Stopped early: the dropped calls' time is in `elapsed` only.
+        ended(Stop::Cancelled, 2_200, &[1_100]),
+        ended(Stop::Limit("budget".to_string()), 2_200, &[1_100]),
+        // Not finished, even though the sum is longer.
+        ended(Stop::Failed("no plan".to_string()), 500, &[600]),
+        // Finished, but no faster than one call at a time.
+        ended(Stop::Done, 1_000, &[400, 600]),
+        ended(Stop::Done, 1_000, &[300]),
+    ] {
+        assert_eq!(draft.sequential_comparison(), None, "{:?}", draft.stop);
+        let summary = draft.summary(None);
+        assert!(
+            summary.ends_with(&format!("걸린 시간 {}", seconds(draft.elapsed))),
+            "{summary}"
+        );
+        assert!(!summary.contains("순차"), "{summary}");
+        let status = tool::status_line(&draft);
+        assert!(
+            status.ends_with(&format!("{:.1}s", draft.elapsed.as_secs_f64())),
+            "{status}"
+        );
+    }
+}
+
 #[test]
 fn settings_and_flags_are_checked() {
     assert_eq!(parse_parallel("8"), Ok(8));
