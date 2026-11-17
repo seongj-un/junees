@@ -83,7 +83,10 @@ fn api(status: u16, retry_after: Option<u64>) -> Result<CompletionResponse, Prov
 
 const AFTER: Duration = Duration::from_secs(120);
 
-/// One streamed call; its reply text and the events other than text.
+/// One streamed call; its reply text and the events other than text and
+/// the closing `AnsweredBy`. That one comes only with a fallback model
+/// set, and must name the model that answered (the fakes answer with
+/// their model's name).
 async fn ask(provider: &Switching) -> (Result<String, ProviderError>, Vec<StreamEvent>) {
     let messages = [Message::user_text("hi")];
     let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
@@ -106,10 +109,22 @@ async fn ask(provider: &Switching) -> (Result<String, ProviderError>, Vec<Stream
             other => panic!("{other:?}"),
         });
     let mut events = Vec::new();
+    let mut answered = None;
     while let Ok(event) = received.try_recv() {
-        if !matches!(event, StreamEvent::TextDelta(_) | StreamEvent::TextEnd) {
-            events.push(event);
+        match event {
+            StreamEvent::TextDelta(_) | StreamEvent::TextEnd => {}
+            StreamEvent::AnsweredBy(model) => {
+                assert!(answered.is_none(), "one AnsweredBy per call");
+                answered = Some(model);
+            }
+            event => events.push(event),
         }
+    }
+    match &result {
+        Ok(text) if provider.fallback.is_some() => {
+            assert_eq!(answered.as_deref(), Some(text.as_str()), "answered by")
+        }
+        _ => assert_eq!(answered, None),
     }
     (result, events)
 }

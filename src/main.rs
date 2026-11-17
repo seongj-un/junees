@@ -139,6 +139,10 @@ async fn run() -> Result<ExitCode> {
             print!("{}", junees::usage::args::HELP);
             return Ok(ExitCode::SUCCESS);
         }
+        Command::WriteHelp => {
+            println!("{}", junees::write::cli::HELP);
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::DashboardHelp => {
             print!("{}", junees::dashboard::HELP);
             return Ok(ExitCode::SUCCESS);
@@ -234,6 +238,10 @@ async fn run() -> Result<ExitCode> {
     match command {
         Command::Run(args) => conversation(args, settings, input).await,
         Command::Task(command) => run_task(command, &settings).await,
+        Command::Write(args) => {
+            let code = junees::write::cli::main(args, |key| settings.get(key)).await?;
+            Ok(ExitCode::from(code))
+        }
         Command::Gateway => discord_gateway(&settings).await,
         Command::Telegram => telegram_gateway(&settings).await,
         Command::Slack => slack_gateway(&settings).await,
@@ -250,6 +258,7 @@ async fn run() -> Result<ExitCode> {
         | Command::DoctorHelp
         | Command::Usage(_)
         | Command::UsageHelp
+        | Command::WriteHelp
         | Command::Dashboard(_)
         | Command::DashboardHelp
         | Command::Update(_)
@@ -615,6 +624,9 @@ fn api_agent(
     if let Some(settings) = config.subagents {
         agent = agent.with_delegate(settings);
     }
+    agent = agent.with_draft(junees::write::tool::Settings::attended(
+        config.write_parallel,
+    ));
     if let Some(gate) = gate {
         let gate = gate
             .with_external_tools(mcp.external_tools())
@@ -667,6 +679,7 @@ fn api_system(
 ) -> String {
     prompt::system_prompt(cwd)
         + subagent::prompt_note(config.subagents)
+        + junees::write::tool::PROMPT_NOTE
         + &context.section()
         + &prompt::data_sections(
             memory,
@@ -1186,6 +1199,7 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         cancel,
         notify: Notifier::from_lookup(lookup)?,
         subagents: config.subagents,
+        write_parallel: config.write_parallel,
         claude,
         skill_manage: config.task_skill_manage,
         memory,
@@ -1456,6 +1470,7 @@ impl Repl {
                 }
             }
             Slash::Undo(count) => return self.undo(count).await,
+            Slash::Write(arg) => return self.write(&arg).await,
             // Nothing is recorded until the summary is back, so the
             // compaction can simply be dropped.
             Slash::Compact => match &mut self.engine {
@@ -1661,6 +1676,83 @@ impl Repl {
         printer.end_line();
         match result {
             Ok(()) => {}
+            Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
+                eprintln!("(turn cancelled)");
+            }
+            Err(err) => report(&err),
+        }
+        terminated
+    }
+
+    /// `/write [options] <request>`: a draft made level by level, put into
+    /// the conversation as a reply ([`Agent::write`]); api backend only.
+    /// A signal cancels it and keeps the finished levels; returns whether
+    /// it was SIGTERM.
+    async fn write(&mut self, arg: &str) -> bool {
+        let args = match junees::write::cli::parse(arg.split_whitespace().map(str::to_string)) {
+            Ok(Some(args)) => args,
+            Ok(None) => {
+                println!("{}", junees::write::cli::HELP);
+                return false;
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                return false;
+            }
+        };
+        let Some(request) = args.request.clone() else {
+            eprintln!("/write takes the request after its options");
+            return false;
+        };
+        let parallel = args.parallel.unwrap_or_else(|| {
+            junees::write::read_parallel(|key| self.settings.get(key))
+                .unwrap_or(junees::write::DEFAULT_PARALLEL)
+        });
+        let Engine::Api(agent) = &mut self.engine else {
+            eprintln!(
+                "/write is not available on the claude-code backend: it makes many model \
+                 calls at once through the API (/backend api switches)"
+            );
+            return false;
+        };
+        let options = junees::write::Options {
+            levels: args.levels,
+            parallel,
+            polish: args.polish,
+            lang: args.lang,
+            max_tokens: agent.options().max_tokens,
+        };
+        let out = args
+            .out
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let line = format!("/write {arg}");
+        self.cancel.reset();
+        let mut terminated = false;
+        let result = {
+            let run = agent.write(&line, &request, &options, out.as_deref(), print_event);
+            tokio::pin!(run);
+            loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    signal = self.signals.next() => {
+                        terminated |= signal == libc::SIGTERM;
+                        self.cancel.cancel();
+                    }
+                }
+            }
+        };
+        match result {
+            Ok(draft) => {
+                print!("{}", draft.text());
+                let _ = std::io::stdout().flush();
+                if draft.stop == junees::write::Stop::Cancelled {
+                    eprintln!(
+                        "(cancelled; the {} finished level(s) are in the conversation)",
+                        draft.levels_done
+                    );
+                }
+            }
             Err(err) if err.downcast_ref::<Cancelled>().is_some() => {
                 eprintln!("(turn cancelled)");
             }
@@ -2322,6 +2414,8 @@ fn print_event(event: Event<'_>) {
             );
         }
         Event::Subagent { index, line } => eprintln!("  [{index}] {line}"),
+        Event::DraftLevel(level) => eprintln!("  [draft] {}", junees::write::level_line(level)),
+        Event::DraftDone(draft) => eprintln!("  [draft] {}", draft.summary(None)),
         Event::ModelSwitch(switch) => eprintln!("  !! {}", switch.line()),
         // Part of the answer, after its text.
         Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),

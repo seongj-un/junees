@@ -421,6 +421,7 @@ impl ApiEngine {
         let system = prompt::system_prompt(dir)
             + spec.note
             + crate::subagent::prompt_note(config.subagents)
+            + crate::write::tool::PROMPT_NOTE
             + &spec.trigger.context_files(config, dir).section()
             + &prompt::data_sections(
                 memory.as_ref(),
@@ -465,6 +466,10 @@ impl ApiEngine {
         if let Some(settings) = config.subagents {
             agent = agent.with_delegate(settings);
         }
+        // Nobody watches: fewer requests at once.
+        agent = agent.with_draft(crate::write::tool::Settings::unattended(
+            config.write_parallel,
+        ));
         Ok((agent, left_out))
     }
 }
@@ -803,6 +808,55 @@ mod tests {
              true in mcp.json to allow them)"
         );
         assert_eq!(with_left_out("interrupted".into(), &[]), "interrupted");
+    }
+
+    #[tokio::test]
+    async fn the_token_limit_stops_a_draft_before_its_calls_go_past_it() {
+        let home = tempfile::tempdir().unwrap();
+        let mut job = job("0123abcd", Schedule::Once { at: 1 }, None);
+        job.dir = home.path().to_path_buf();
+        let call = ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: crate::write::tool::NAME.into(),
+            input: serde_json::json!({"request": "a long report", "levels": 4, "polish": true}),
+        };
+        let plan = serde_json::json!({"title": "T", "sections": [
+            {"id": "s1", "concept": "a"}, {"id": "s2", "concept": "b"}, {"id": "s3", "concept": "c"}
+        ]});
+        let text = |text: &str| reply(vec![ContentBlock::text(text)], StopReason::EndTurn);
+        // Only these replies exist: a call past them would panic the run.
+        let (engine, seen) = engine(
+            home.path(),
+            vec![
+                reply(vec![call], StopReason::ToolUse),
+                text(&plan.to_string()),
+                text("gist"),
+                text("gist"),
+            ],
+            Duration::ZERO,
+        );
+        let outcome = engine
+            .run(
+                &job.spec(),
+                &Cancel::new(),
+                Limits {
+                    max_tokens: 300,
+                    ..limits()
+                },
+            )
+            .await;
+        assert_eq!(outcome.status, RunStatus::Failed, "{outcome:?}");
+        assert!(
+            outcome.note.starts_with("token limit reached"),
+            "{}",
+            outcome.note
+        );
+        // The agent's call, the plan and at most the two gists that started
+        // together under the limit; no body, outline or seam call.
+        let seen = seen.lock().unwrap();
+        assert!((3..=4).contains(&seen.len()), "{}", seen.len());
+        assert!(seen[0].1.contains(&crate::write::tool::NAME.to_string()));
+        assert!(outcome.tokens < 300 + 2 * 110, "{}", outcome.tokens);
     }
 
     #[tokio::test]

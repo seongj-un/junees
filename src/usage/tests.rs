@@ -1038,3 +1038,45 @@ fn totals_name_what_their_cost_leaves_out() {
     assert_eq!(report::thousands(1000), "1,000");
     assert_eq!(report::thousands(1_234_567), "1,234,567");
 }
+
+#[test]
+fn draft_lines_count_as_drafts_by_their_model_and_take_no_subagent_journal() {
+    let home = tempfile::tempdir().unwrap();
+    let (_, mut parent) =
+        SessionWriter::create(home.path(), Path::new("/w"), "claude-sonnet-4-6").unwrap();
+    parent
+        .record(&Entry::Message(crate::message::Message::user_text("go")))
+        .unwrap();
+    // A subagent journal whose sum equals the draft line: it belongs to
+    // the `delegate` entry after it, not to the draft.
+    let mut sub = SessionWriter::create_sub(parent.path(), "sub-1").unwrap();
+    sub.record_usage(&Entry::Usage(usage(300, 0, 0, 3, 0)), "claude-haiku-5-5")
+        .unwrap();
+    parent
+        .record_draft_usage(usage(300, 0, 0, 3, 0), "claude-haiku-5-5")
+        .unwrap();
+    parent
+        .record_usage(
+            &Entry::SubagentUsage(usage(300, 0, 0, 3, 0)),
+            "claude-haiku-5-5",
+        )
+        .unwrap();
+    let line = std::fs::read_to_string(parent.path()).unwrap();
+    assert!(
+        line.contains(r#"{"type":"subagent_usage","input_tokens":300,"output_tokens":3,"model":"claude-haiku-5-5","source":"draft","#),
+        "{line}"
+    );
+    let (records, stats) = read_session(parent.path(), &Prices::default()).unwrap();
+    assert_eq!(stats.broken_lines, 0);
+    let got: Vec<(Kind, &str, bool)> = records
+        .iter()
+        .map(|r| (r.kind, r.model.as_str(), r.one_call))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Kind::Drafts, "claude-haiku-5-5", false),
+            (Kind::Subagents, "claude-haiku-5-5", true),
+        ]
+    );
+}

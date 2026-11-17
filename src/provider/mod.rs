@@ -211,6 +211,11 @@ pub enum StreamEvent {
     ServerToolUse { name: String, input: Value },
     /// The calls went over to the fallback model ([`fallback::Switching`]).
     ModelSwitch(fallback::Switch),
+    /// This model answered the call: sent last, by a provider with a
+    /// fallback model ([`fallback::Switching`]), which alone knows which
+    /// of its models it was. [`Provider::model`] says the same only while
+    /// no other call runs on the same provider at once.
+    AnsweredBy(String),
     /// Something the person should know about the calls, such as a wait
     /// for a usage limit to lift.
     Notice(String),

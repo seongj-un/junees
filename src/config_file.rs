@@ -89,6 +89,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("subagents", "JUNEES_SUBAGENTS"),
     ("subagent_max_turns", "JUNEES_SUBAGENT_MAX_TURNS"),
     ("subagent_max_tokens", "JUNEES_SUBAGENT_MAX_TOKENS"),
+    ("write_parallel", "JUNEES_WRITE_PARALLEL"),
     ("context_window", "JUNEES_CONTEXT_WINDOW"),
     ("compact_threshold", "JUNEES_COMPACT_THRESHOLD"),
     ("thinking_budget", "JUNEES_THINKING_BUDGET"),

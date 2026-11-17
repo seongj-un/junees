@@ -106,6 +106,13 @@ src/
     mod.rs             설정(JUNEES_SUBAGENTS 등), 도구 정의와 입력 검사, 시스템 프롬프트 안내, 서브에이전트 이름을 붙여 부모 게이트로 묻는 ChildGate
     run.rs             과제 실행(동시 실행 상한, 과제 순서 보존), 자기 한도와 부모 예산, 진행 한 줄, 서브에이전트 기록, 결과 크기 제한
     tests.rs           Scripted provider로 병렬 상한과 순서, 재귀 금지, 예산 차감, 취소, 자식 기록, 승인 공유(한 자식이 답을 기다리는 동안 다른 자식의 묻지 않는 호출은 실행), 결과 크기 검증
+  write/             NCM식 글 쓰기 (junees write, /write, draft 도구, docs/write.md)
+    mod.rs             단계 실행(L1 계획, 단계 안 병렬, 세마포어, 실패한 단위 재요청과 앞 단계 글로 대체, 취소), 이음, 호출별 사용량과 단계별 합, 요약 줄
+    plan.rs            L1 JSON 읽기(코드 펜스, 섹션 3~12개, id 정리, 한 줄 개념)
+    prompts.rs         단계별 프롬프트(같은 단계는 시스템 프롬프트 공유, 요청문과 앞 단계 글은 데이터 태그)
+    tool.rs            draft 도구 정의, 입력 검사, 결과와 상태 줄, 무인 실행의 동시 요청 상한
+    cli.rs             junees write 인자, 표준 입력, 터미널 보조 화면 그리기, .partial, 요약 줄
+    tests.rs           가짜 provider로 동시 접속 수와 parallel 상한, 다른 섹션 본문을 보지 않는지, 캐시 표시, 실패 대체, 취소, levels 2/4, 이음, draft 도구와 /write
   prompt.rs          시스템 프롬프트, 메모리와 스킬 절(data_sections), Claude Code에 넘기는 인자(claude_append, 지침 파일을 더한 claude_append_with_context, 128 KiB 한도)
   secrets.rs         비밀처럼 보이는 내용 찾기, 메모리와 스킬이 함께 씀 (키 접두사, 개인 키, AWS 키 id, 디스코드/텔레그램 봇 토큰, 긴 hex/토큰, 몇째 줄인지)
   prompt_text.rs     저장된 텍스트(메모리, 스킬)의 제어/방향 문자 판단: 쓸 때 거절(check_plain), 읽을 때 이스케이프(escape_hidden)

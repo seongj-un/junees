@@ -167,7 +167,13 @@ impl Switching {
             let (result, reported) = one_call(provider, request, events).await;
             self.used_fallback.store(on_fallback, Ordering::Relaxed);
             let error = match result {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    if let (Some(events), Some(_)) = (events, &self.fallback) {
+                        let model = provider.model().unwrap_or_default().to_string();
+                        let _ = events.send(StreamEvent::AnsweredBy(model));
+                    }
+                    return Ok(response);
+                }
                 Err(error) => error,
             };
             let Some(reason) = Reason::of(&error) else {
@@ -261,7 +267,7 @@ async fn one_call(
     let mut pass = |event: StreamEvent| {
         match event {
             StreamEvent::Retrying => reported = false,
-            StreamEvent::ModelSwitch(_) | StreamEvent::Notice(_) => {}
+            StreamEvent::ModelSwitch(_) | StreamEvent::Notice(_) | StreamEvent::AnsweredBy(_) => {}
             _ => reported = true,
         }
         let _ = events.send(event);

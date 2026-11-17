@@ -87,6 +87,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `/context`: 컨텍스트 크기와 이 세션이 읽은 지침 파일
 - `/doctor`: 설치와 설정 점검
 - `/update`: 새 릴리스가 있는지(설치는 `junees update`)
+- `/write [옵션] <요청>`: 긴 글을 거친 개념에서 세부로, 섹션을 동시에 써서 대화에 넣기(`--out`이면 `write_file` 규칙으로 저장, api 백엔드, [NCM식 글 쓰기](docs/write.md))
 - `/compact`: 앞 대화를 요약으로 바꾸기(api 백엔드)
 - `/usage`: 이 세션의 토큰과 추정 비용
 - `/checkpoints`, `/undo [N]`: 이 세션에서 파일 도구가 바꾼 파일 목록, 마지막 N개 턴 되돌리기([파일 체크포인트](docs/checkpoints.md))
@@ -105,6 +106,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees cron add|list|remove|pause|resume|run|daemon`: 예약 작업([예약 작업](docs/automation.md#예약-작업))
 - `junees webhook serve|add|add-github|list|remove|pause|resume|test`: 웹훅과 GitHub PR 흐름([웹훅](docs/automation.md#웹훅))
 - `junees sessions search <낱말>`: 세션 검색([세션 검색](docs/usage.md#세션-검색))
+- `junees write [--levels 2|3|4] [--parallel N] [--polish] [--out <파일>] [--lang ko|en] "<요청>"`: 긴 글을 단계별로, 섹션을 동시에 쓰기. 터미널에서는 단계마다 글을 덮어 그린다([NCM식 글 쓰기](docs/write.md))
 - `junees usage`: 지난 며칠의 토큰과 비용([사용량과 비용](docs/usage.md#사용량과-비용))
 - `junees rewind --session <id> [--list] [--turn <n>] [--force] [--yes]`: 세션의 파일 변경을 턴 단위로 되돌리기([파일 체크포인트](docs/checkpoints.md))
 - `junees doctor`: 설치와 설정 점검([점검](docs/doctor.md))
@@ -131,6 +133,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [프로젝트 지침 파일](docs/memory-and-skills.md#프로젝트-지침-파일): 저장소의 `AGENTS.md`, `JUNEES.md`, `CLAUDE.md`를 시스템 프롬프트에 넣는다.
 - [스킬](docs/memory-and-skills.md#스킬): 반복 작업의 절차를 적은 문서를 모델이 읽고 고친다.
 - [서브에이전트](docs/memory-and-skills.md#서브에이전트-delegate): `delegate`로 독립적인 하위 작업을 동시에 맡긴다.
+- [NCM식 글 쓰기](docs/write.md): `junees write`, `/write`, 모델 도구 `draft`가 긴 글을 계획, 요지, 본문 단계로 내려가며 쓰고, 같은 단계의 섹션은 앞 단계만 보고 동시에 요청한다(NCM의 생성 방식을 하네스에서 적용, NCM 모델은 넣지 않음).
 - [구독 모드](docs/subscription.md): 대화와 장기 작업을 Claude 구독으로 로그인한 Claude Code가 실행한다.
 - [디스코드 게이트웨이](docs/gateways.md#디스코드-게이트웨이): 채널(스레드, DM)마다 대화 하나를 두는 디스코드 봇. 승인 질문은 버튼이나 글 답장으로 답한다.
 - [텔레그램 게이트웨이](docs/gateways.md#텔레그램-게이트웨이): 같은 엔진으로 도는 텔레그램 봇(승인 버튼은 인라인 키보드).
@@ -165,7 +168,8 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - [docs/automation.md](docs/automation.md): 예약 작업, 웹훅(GitHub PR 흐름 포함), GitHub 도구
 - [docs/plugins.md](docs/plugins.md): 플러그인
 - [docs/context.md](docs/context.md): 컨텍스트 관리
-- [docs/tools.md](docs/tools.md): 기본 도구와 `edit_file`
+- [docs/tools.md](docs/tools.md): 기본 도구와 `edit_file`, `draft`
+- [docs/write.md](docs/write.md): NCM식 글 쓰기(`junees write`, `/write`, `draft`), 단계, 비용, 속도 측정, 한계
 - [docs/checkpoints.md](docs/checkpoints.md): 파일 체크포인트와 되돌리기(`/undo`, `junees rewind`)
 - [docs/browser.md](docs/browser.md): 브라우저 도구
 - [docs/safety.md](docs/safety.md): 명령 정책, 실행 격리(Landlock), 실행 전 승인
@@ -198,6 +202,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 20. 파일 체크포인트: `write_file`, `edit_file`이 바꾼 파일을 턴 단위로 기록하고 `/undo`, `junees rewind`, 대시보드 API로 되돌리기 ([docs/checkpoints.md](docs/checkpoints.md)) (완료)
 21. 코드 탐색 도구: Junees 안에서 도는 읽기 전용 `grep`, `glob`, `list_dir`(ripgrep의 무시 규칙, 만나는 파일마다 읽기 규칙, 상한과 시간 제한) ([docs/tools.md](docs/tools.md#코드-탐색-grep-glob-list_dir)) (완료)
 22. 예비 모델과 사용 한도 대응: 주 모델이 오래 막히면 `fallback_model`로 넘어가고, 무인 실행은 `wait_limit` 안에서 한도가 풀리기를 기다린다 ([docs/configuration.md](docs/configuration.md#예비-모델))
+23. NCM식 글 쓰기: `junees write`, `/write`, `draft` 도구가 거친 개념에서 세부로 내려가며 긴 글을 쓰고, 같은 단계의 섹션은 앞 단계에만 조건을 걸어 동시에 요청한다(NCM의 생성 방식을 하네스에 적용, [docs/write.md](docs/write.md))
 
 ## 개발
 

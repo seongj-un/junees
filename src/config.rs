@@ -96,6 +96,9 @@ pub struct Config {
     /// The `delegate` tool's settings (`JUNEES_SUBAGENTS` and
     /// `JUNEES_SUBAGENT_*`); `None` turns it off.
     pub subagents: Option<subagent::Settings>,
+    /// Requests a draft (`junees write`, `/write`, `draft`) sends at once
+    /// (`JUNEES_WRITE_PARALLEL`, [`crate::write`]).
+    pub write_parallel: usize,
     /// The `github` tool's settings (`JUNEES_GITHUB_*`).
     pub github: crate::github::Settings,
     /// The `browser` tool's settings (`JUNEES_BROWSER*`).
@@ -310,6 +313,7 @@ impl Config {
         let web_search = WebSearch::read(get)?;
         let memory = Limits::read(get)?;
         let subagents = subagent::Settings::read(get)?;
+        let write_parallel = crate::write::read_parallel(get)?;
         let github = crate::github::Settings::read(get)?;
         let browser = crate::browser::Settings::read(get)?;
 
@@ -337,6 +341,7 @@ impl Config {
             web_search,
             memory,
             subagents,
+            write_parallel,
             github,
             browser,
             context_files,

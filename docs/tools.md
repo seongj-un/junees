@@ -1,6 +1,6 @@
 # 기본 도구
 
-기본 도구는 `bash`, `read_file`, `write_file`, `edit_file`과 코드 탐색 도구 `grep`, `glob`, `list_dir`([코드 탐색](#코드-탐색-grep-glob-list_dir))이다(`task` 작업 세션도 같은 도구에 `mark_feature_passing`을 더해 쓴다). api 백엔드의 대화와 작업 세션에는 서브에이전트를 띄우는 `delegate`도 있다([서브에이전트](memory-and-skills.md#서브에이전트-delegate)). 대화 모드는 위험할 수 있는 호출을 실행하기 전에 묻는다([실행 전 승인](safety.md#실행-전-승인)). `-p`와 `task` 모드는 묻지 않고 명령 정책만 적용하므로 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`, `JUNEES_DISCORD_TOKEN`, Claude Code의 자격 증명(`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE`, `ANTHROPIC_AWS_API_KEY`, `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_AUTH_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`, `MCP_CLIENT_SECRET`. [Claude Code 환경 변수 문서](https://code.claude.com/docs/en/env-vars) 기준이고, claude-code 백엔드의 `claude`에는 그대로 넘긴다)과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다. 리눅스에서는 junees가 시작할 때 자기 프로세스를 dump 불가(`PR_SET_DUMPABLE` 0)로 만들어, 같은 사용자의 프로세스도 `/proc/<junees pid>/environ`과 `mem`을 읽지 못한다. 그래서 `bash`가 `/proc/$PPID/environ`처럼 부모를 거슬러 올라가도 이 변수들을 읽을 수 없다. 자식 프로세스는 exec할 때 다시 보통 프로세스가 되므로 도구 동작은 그대로이고, junees 자신의 코어 덤프만 남지 않는다.
+기본 도구는 `bash`, `read_file`, `write_file`, `edit_file`과 코드 탐색 도구 `grep`, `glob`, `list_dir`([코드 탐색](#코드-탐색-grep-glob-list_dir))이다(`task` 작업 세션도 같은 도구에 `mark_feature_passing`을 더해 쓴다). api 백엔드의 대화와 작업 세션에는 서브에이전트를 띄우는 `delegate`도 있다([서브에이전트](memory-and-skills.md#서브에이전트-delegate)). 긴 문서를 단계별로 쓰는 `draft`도 있다([draft](#draft)). 대화 모드는 위험할 수 있는 호출을 실행하기 전에 묻는다([실행 전 승인](safety.md#실행-전-승인)). `-p`와 `task` 모드는 묻지 않고 명령 정책만 적용하므로 믿을 수 있는 폴더에서만 쓴다. `bash`에는 `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `JUNEES_NOTIFY_WEBHOOK`, `JUNEES_DISCORD_TOKEN`, Claude Code의 자격 증명(`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE`, `ANTHROPIC_AWS_API_KEY`, `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_AUTH_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`, `MCP_CLIENT_SECRET`. [Claude Code 환경 변수 문서](https://code.claude.com/docs/en/env-vars) 기준이고, claude-code 백엔드의 `claude`에는 그대로 넘긴다)과 `JUNEES_HIDDEN_ENV`에 적은 변수가 보이지 않는다. 리눅스에서는 junees가 시작할 때 자기 프로세스를 dump 불가(`PR_SET_DUMPABLE` 0)로 만들어, 같은 사용자의 프로세스도 `/proc/<junees pid>/environ`과 `mem`을 읽지 못한다. 그래서 `bash`가 `/proc/$PPID/environ`처럼 부모를 거슬러 올라가도 이 변수들을 읽을 수 없다. 자식 프로세스는 exec할 때 다시 보통 프로세스가 되므로 도구 동작은 그대로이고, junees 자신의 코어 덤프만 남지 않는다.
 
 ## 파일 도구의 경로 검사
 
@@ -49,3 +49,13 @@
 - 대상이 NUL 바이트를 담고 있으면 바이너리 파일로 보고 거절한다(힌트도 보여 주지 않는다).
 - 같은 폴더의 임시 파일(`.<이름>.junees-edit-<pid>-<번호>.tmp`, `write_file`도 같은 이름을 쓴다)에 원래 권한으로 쓰고 `fsync`한 뒤 `rename`으로 바꿔 넣으므로 중간에 죽어도 반쯤 쓴 파일이 남지 않는다. 쓰기, 권한 설정, `fsync`, `rename` 중 하나라도 실패하면(디스크가 가득 찬 경우 등) 임시 파일을 지우고 오류를 돌려주며 원본은 그대로다. 이 과정은 한 blocking 스레드에서 끝까지 실행되므로, 편집 중에 턴이 취소돼도 임시 파일이 작업 트리에 남지 않는다. 소유자, 하드 링크, 확장 속성(xattr)과 ACL은 유지되지 않는다(새 inode). 임시 파일 이름이 255바이트를 넘지 않도록 긴 파일 이름은 임시 이름에서 줄인다. 그래서 파일에 쓸 수 있어도 폴더에 쓸 수 없으면 고칠 수 없고, 이때 오류에 폴더를 밝히고 `write_file`(제자리 쓰기)을 안내한다.
 - 성공하면 바꾼 부분과 위아래 3줄을 `read_file`과 같은 줄 번호 형식으로 보여 준다(`replace_all`이면 처음 3곳까지, 나머지는 개수만).
+
+## draft
+
+긴 문서(보고서, 설계 문서, README)를 거친 개념에서 세부로 내려가며 쓰는 모델 도구다. 단계, 비용, 한계는 [NCM식 글 쓰기](write.md)에 있다.
+
+- 입력: `{"request": string, "levels"?: 2 | 3 | 4, "polish"?: bool}`. `request`만 필수이고 20,000자까지다. 다른 키는 무시하고, `levels`와 `polish`가 이 형식이 아니면 도구 오류다.
+- 결과: 글 전체(Markdown), `---`, 상태 줄 `[draft] levels 3/3, 8 sections, failed sections: none, 17 calls, ... tokens, 7.0s (about 25.2s one call at a time)`. 실패한 섹션은 상태 줄과 글 안의 표시로 알린다. 계획을 못 만들면 오류 결과, 취소되면 끝난 단계까지를 담은 오류 결과다.
+- 파일은 저장하지 않는다. 모델이 결과를 확인한 뒤 `write_file`로 저장한다.
+- 에이전트 루프가 직접 돌린다(`delegate`처럼). 같은 모델로 호출하고, 그 턴의 취소로 멈추며, 호출의 토큰은 답한 모델별로 세션 사용량(`subagent_usage`에 `"source": "draft"`)과 작업 예산에 들어간다. 실행의 토큰 상한은 호출마다 확인해, 넘으면 남은 호출을 내지 않고 멈춘다. 승인은 묻지 않는다(파일을 바꾸지 않는다).
+- 동시 요청: `write_parallel`(기본 4). 예약 작업, 웹훅, `task`에서는 동시 요청 최대 2, `levels` 최대 3, `polish` 끔. 서브에이전트에는 없다.

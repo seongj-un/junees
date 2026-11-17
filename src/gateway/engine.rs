@@ -96,6 +96,10 @@ impl<'a> Collector<'a> {
                 crate::cli::preview(&tool_target(input), PREVIEW_CHARS)
             )),
             Event::Subagent { index, line } => Progress::Tool(format!("[{index}] {line}")),
+            Event::DraftLevel(level) => {
+                Progress::Tool(format!("[draft] {}", crate::write::level_line(level)))
+            }
+            Event::DraftDone(draft) => Progress::Tool(format!("[draft] {}", draft.summary(None))),
             Event::Sources(urls) => Progress::Text(crate::web_search::sources_text(urls)),
             Event::Compacted {
                 before_messages,
@@ -320,6 +324,9 @@ impl ApiEngines {
         if let Some(settings) = config.subagents {
             agent = agent.with_delegate(settings);
         }
+        agent = agent.with_draft(crate::write::tool::Settings::attended(
+            config.write_parallel,
+        ));
         if config.approval != ApprovalMode::Off {
             let gate = Approval::new(
                 config.approval,
@@ -357,6 +364,7 @@ fn api_system(
     prompt::system_prompt(cwd)
         + note
         + crate::subagent::prompt_note(config.subagents)
+        + crate::write::tool::PROMPT_NOTE
         + &config.context_files.load(cwd).section()
         + &prompt::data_sections(
             memory,

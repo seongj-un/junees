@@ -51,6 +51,10 @@ struct LineIn {
     /// See [`session::Journal::record_usage`].
     #[serde(default)]
     model: Option<String>,
+    /// `draft` on a `subagent_usage` line that counts a `draft` call
+    /// ([`session::DRAFT_SOURCE`]).
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// The `type` of a line as Junees writes it (`{"type":"usage",...`).
@@ -113,6 +117,11 @@ fn read_journal(
         let (kind, usage) = match parsed.entry {
             Entry::Usage(usage) => (Kind::Call, usage),
             Entry::SummaryUsage(usage) => (Kind::Summary, usage),
+            Entry::SubagentUsage(usage)
+                if parsed.source.as_deref() == Some(session::DRAFT_SOURCE) =>
+            {
+                (Kind::Drafts, usage)
+            }
             Entry::SubagentUsage(usage) => (Kind::Subagents, usage),
             Entry::ClaudeTurn(turn) => (Kind::ClaudeCode, turn.usage),
             _ => continue,

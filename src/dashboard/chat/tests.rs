@@ -351,3 +351,93 @@ async fn only_the_known_secret_is_hidden_not_what_is_glued_to_it() {
     );
     assert!(!event.to_string().contains(&key[..20]), "{event}");
 }
+
+#[test]
+fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
+    use crate::write::{Call, Draft, Kind, LevelDone, Stop};
+    let shared = shared();
+    let room = Room::new("r".into());
+    let mut out = TextOut::default();
+    let key = format!("sk-ant-api03-{}", "a".repeat(40));
+    let level = LevelDone {
+        level: 2,
+        kind: Kind::Gist,
+        title: "T".to_string(),
+        sections: vec![
+            ("s1".to_string(), format!("uses {key} here")),
+            ("s2".to_string(), "가".repeat(40 * 1024)),
+        ],
+    };
+    super::runner::on_event(
+        &shared,
+        &room,
+        &mut out,
+        crate::agent::Event::DraftLevel(&level),
+    );
+    let call = |level, kind, ok| Call {
+        level,
+        kind,
+        unit: None,
+        model: Some("m".to_string()),
+        usage: crate::message::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_input_tokens: 2,
+            ..Default::default()
+        },
+        elapsed: Duration::from_millis(100),
+        ok,
+    };
+    let draft = Draft {
+        title: "T".to_string(),
+        sections: Vec::new(),
+        levels: 3,
+        levels_done: 3,
+        polished: false,
+        lang: crate::write::Lang::En,
+        stop: Stop::Done,
+        calls: vec![call(1, Kind::Concept, true), call(3, Kind::Body, false)],
+        elapsed: Duration::from_millis(150),
+        switch: None,
+    };
+    super::runner::on_event(
+        &shared,
+        &room,
+        &mut out,
+        crate::agent::Event::DraftDone(&draft),
+    );
+    let events = types(&room);
+    assert_eq!(events[0]["type"], "draft_level");
+    assert_eq!(events[0]["level"], 2);
+    assert_eq!(events[0]["kind"], "gist");
+    assert_eq!(events[0]["sections"][0]["id"], "s1");
+    let text = events[0]["sections"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("uses ") && !text.contains("aaaaaaaaaa"),
+        "{text}"
+    );
+    assert_eq!(events[0]["sections"][0]["truncated"], false);
+    assert_eq!(
+        events[0]["sections"][1]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        32 * 1024
+    );
+    assert_eq!(events[0]["sections"][1]["truncated"], true);
+    assert_eq!(
+        events[1],
+        json!({
+            "type": "draft_done", "stop": "done", "error": null, "levels": 3, "levels_done": 3,
+            "polished": false, "failed_sections": [], "calls": 2, "input_tokens": 24,
+            "output_tokens": 10, "cache_read_tokens": 4, "elapsed_ms": 150, "sequential_ms": 200,
+            "by_level": [
+                {"level": 1, "kind": "concept", "calls": 1, "failed_calls": 0,
+                 "input_tokens": 12, "output_tokens": 5},
+                {"level": 3, "kind": "body", "calls": 1, "failed_calls": 1,
+                 "input_tokens": 12, "output_tokens": 5}
+            ]
+        })
+    );
+}
