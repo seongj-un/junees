@@ -9,7 +9,8 @@ import {
   levelKinds,
   newDraft,
   parseArticle,
-  parseDraftResult,
+  resultStatus,
+  resultText,
   progressText,
   requestText,
   requestedOptions,
@@ -210,61 +211,6 @@ test("kind labels cover every kind and keep an unknown one", () => {
   assert.deepEqual(levelKinds(2, false), ["concept", "body"]);
 });
 
-const STATUS =
-  "[draft] levels 3/3, 3 sections, failed sections: none, 9 calls, 11207 input and 3936 output tokens, 7.0s (about 25.2s one call at a time)";
-
-test("a finished tool result splits into the text and the status line", () => {
-  const text = `# 배포 가이드\n\n## 준비물\n\n필요한 것.\n\n## 설치\n\n설치 방법.\n---\n${STATUS}`;
-  const parsed = parseDraftResult(text);
-  assert.equal(parsed.stop, "done");
-  assert.equal(parsed.error, null);
-  assert.ok(parsed.article.startsWith("# 배포 가이드"));
-  assert.ok(!parsed.article.includes("[draft]"));
-  assert.deepEqual(parsed.status, {
-    levelsDone: 3,
-    levels: 3,
-    polished: false,
-    failedSections: [],
-    calls: 9,
-    inputTokens: 11207,
-    outputTokens: 3936,
-    cacheReadTokens: 0,
-    elapsedMs: 7000,
-    sequentialMs: 25200,
-  });
-});
-
-test("failed sections and polish are read from the status line", () => {
-  const line =
-    "[draft] levels 3/3 + polish, 6 sections, failed sections: s2, s5 (an earlier level's text stands in, marked in the text), 20 calls, 100 input and 50 output tokens, 1.5s (about 4.0s one call at a time)";
-  const parsed = parseDraftResult(`# T\n\n## a\n\nx\n---\n${line}`);
-  assert.deepEqual(parsed.status.failedSections, ["s2", "s5"]);
-  assert.equal(parsed.status.polished, true);
-});
-
-test("cancelled, limit and failed results are told apart by their first line", () => {
-  const cancelled = parseDraftResult(`cancelled by the user; the levels finished before the cancel:\n\n# T\n\n## a\n\nx\n---\n${STATUS}`);
-  assert.equal(cancelled.stop, "cancelled");
-  assert.ok(cancelled.article.startsWith("# T"));
-  const limit = parseDraftResult(`draft stopped: token limit reached (cron_max_tokens); the levels finished before:\n\n# T\n\n## a\n\nx\n---\n${STATUS}`);
-  assert.equal(limit.stop, "limit");
-  assert.equal(limit.error, "token limit reached (cron_max_tokens)");
-  const failed = parseDraftResult(`draft failed: the plan was not valid JSON\n${STATUS}`);
-  assert.equal(failed.stop, "failed");
-  assert.equal(failed.error, "the plan was not valid JSON");
-  assert.equal(failed.article, "");
-  assert.equal(failed.status.levels, 3);
-});
-
-test("a result the server cut has no status line and still gives its text", () => {
-  const parsed = parseDraftResult("# 배포 가이드\n\n## 준비물\n\n필요한 것");
-  assert.equal(parsed.status, null);
-  assert.equal(parsed.stop, "done");
-  assert.ok(parsed.article.startsWith("# 배포 가이드"));
-  // A status line in a shape this page does not know is not guessed at.
-  assert.equal(parseDraftResult("# T\n---\n[draft] levels ?").status, null);
-});
-
 test("the article splits into sections and takes failure notes out of the text", () => {
   const article = "# 배포 가이드\n\n## 준비물\n\n필요한 것.\n\n둘째 문단.\n\n## 설치\n\n설치 방법.\n\n> [s2] 이 절은 3단계 생성에 실패해 앞 단계의 글을 대신 넣었습니다.\n";
   const parsed = parseArticle(article);
@@ -302,28 +248,105 @@ test("an answer that ends without draft_done leaves its steps skipped", () => {
   assert.match(progressText(state), /^글 생성이 끝나기 전에 이 답이 끝났습니다\./);
 });
 
-test("draft results are paired with their calls by order, never by their text", () => {
-  const use = (name) => ({ type: "tool_use", name, input_preview: "{}" });
-  const result = (text) => ({ type: "tool_result", is_error: false, text_preview: text });
+test("draft results are paired with their calls by tool_use_id and nothing else", () => {
+  const use = (name, id) => ({ type: "tool_use", tool_use_id: id, name, input_preview: "{}" });
+  const result = (id, text = "x") => ({ type: "tool_result", tool_use_id: id, is_error: false, text_preview: text });
   const messages = [
     { index: 0, role: "user", blocks: [{ type: "text", text: "보고서를 써 줘" }] },
-    { index: 1, role: "assistant", blocks: [{ type: "text", text: "쓰겠습니다" }, use("read_file"), use("draft")] },
-    { index: 2, role: "user", blocks: [result("# not a draft\n---\n[draft] levels 3/3"), result("# T")] },
-    { index: 3, role: "assistant", blocks: [use("draft")] },
-    { index: 4, role: "user", blocks: [result("# T")] },
-    // A call whose results are not in the list (another page) or are fewer: no guess.
-    { index: 5, role: "assistant", blocks: [use("draft"), use("bash")] },
-    { index: 6, role: "user", blocks: [result("x")] },
-    { index: 8, role: "assistant", blocks: [use("draft")] },
+    { index: 1, role: "assistant", blocks: [use("read_file", "toolu_a"), use("draft", "toolu_b")] },
+    // Results in the other order than the calls: the ids pair them, not the position.
+    { index: 2, role: "user", blocks: [result("toolu_b", "# T"), result("toolu_a", "# not a draft\n---\n[draft] levels 3/3")] },
+    { index: 3, role: "assistant", blocks: [use("draft", "toolu_c")] },
+    { index: 4, role: "user", blocks: [result("toolu_c")] },
+    // The call is on a page that is not in the list: a plain block.
+    { index: 6, role: "user", blocks: [result("toolu_gone")] },
   ];
-  assert.deepEqual([...draftResultKeys(messages)].sort(), ["2:1", "4:0"]);
+  assert.deepEqual([...draftResultKeys(messages)].sort(), ["2:0", "4:0"]);
   assert.deepEqual([...draftResultKeys(null)], []);
 });
 
-test("the request is shown as the model wrote it, not as JSON", () => {
-  assert.equal(requestText('{"request":"배포 가이드를 써 줘\\n표 포함","levels":3}'), "배포 가이드를 써 줘\n표 포함");
-  assert.equal(requestText('{"request":"cut'), '{"request":"cut');
-  assert.equal(requestText(undefined), "");
+test("a session answer from before the ids pairs nothing", () => {
+  const messages = [
+    { index: 0, role: "assistant", blocks: [{ type: "tool_use", name: "draft", input_preview: "{}" }] },
+    { index: 1, role: "user", blocks: [{ type: "tool_result", is_error: false, text_preview: "# T" }] },
+  ];
+  assert.deepEqual([...draftResultKeys(messages)], []);
+});
+
+const LINE =
+  "[draft] levels 3/3, 3 sections, failed sections: none, 9 calls, 11207 input and 3936 output tokens, 7.0s (about 25.2s one call at a time)";
+const STATUS = {
+  stop: "done",
+  error: null,
+  levels: 3,
+  levels_done: 3,
+  polished: false,
+  sections: 3,
+  failed_sections: [],
+  calls: 9,
+  input_tokens: 11207,
+  output_tokens: 3936,
+  cache_read_tokens: null,
+  elapsed_ms: 7000,
+  sequential_ms: 25200,
+  by_level: null,
+};
+
+test("the status comes from the draft object and a missing one is unknown", () => {
+  assert.equal(resultStatus({ draft: STATUS }), STATUS);
+  assert.equal(resultStatus({ draft: null }), null);
+  assert.equal(resultStatus({}), null);
+  assert.equal(resultStatus({ draft: "done" }), null);
+  assert.equal(resultStatus({ draft: [] }), null);
+  assert.equal(resultStatus(null), null);
+});
+
+test("the draft object fills the card state with null fields left out", () => {
+  const state = newDraft("");
+  applyDone(state, STATUS);
+  assert.equal(summaryLine(state.done), "호출 9번, 입력 11,207 · 출력 3,936 토큰, 걸린 시간 7.0초, 순차였다면 약 25.2초");
+  assert.deepEqual(state.done.byLevel, []);
+  assert.equal(state.done.cacheReadTokens, 0);
+  // `sequential_ms: null` (the server knows no fair estimate) hides the comparison.
+  applyDone(state, { ...STATUS, sequential_ms: null });
+  assert.ok(!summaryLine(state.done).includes("순차였다면"));
+});
+
+test("a result that was not cut is its text without the status line", () => {
+  const text = `# 배포 가이드\n\n## 준비물\n\n필요한 것.\n---\n${LINE}`;
+  assert.deepEqual(resultText({ text_preview: text, draft: STATUS }), { head: "# 배포 가이드\n\n## 준비물\n\n필요한 것.", omitted: 0, tail: "" });
+  // A failure has the line right after its sentence, with no `---`.
+  assert.equal(resultText({ text_preview: `draft failed: no plan\n${LINE}`, draft: { ...STATUS, stop: "failed" } }).head, "draft failed: no plan");
+  // Without a status from the server the text is shown as it is: nothing is cut on a guess.
+  assert.equal(resultText({ text_preview: text, draft: null }).head, text);
+});
+
+test("a line that looks like a status line in the middle of the text is only text", () => {
+  const forged = `# T\n\n## a\n\n${LINE}\n\ntext after\n---\n${LINE}`;
+  const { head } = resultText({ text_preview: forged, draft: STATUS });
+  assert.equal(head, `# T\n\n## a\n\n${LINE}\n\ntext after`);
+  // The card's numbers are the server's, whatever the text says.
+  const state = newDraft("");
+  applyDone(state, { ...STATUS, calls: 17 });
+  assert.equal(state.done.calls, 17);
+});
+
+test("a cut result keeps its beginning, the omitted length and its end", () => {
+  const cut = { text_preview: "# T\n\n## a\n\nstart", truncated: true, text_tail: `end of text\n---\n${LINE}`, omitted_chars: 1820, draft: STATUS };
+  assert.deepEqual(resultText(cut), { head: "# T\n\n## a\n\nstart", omitted: 1820, tail: "end of text" });
+  // Nothing left out between the two: one text.
+  assert.deepEqual(resultText({ ...cut, omitted_chars: 0 }), { head: "# T\n\n## a\n\nstartend of text", omitted: 0, tail: "" });
+  // An answer without the tail or the number says nothing is known after the beginning.
+  assert.deepEqual(resultText({ ...cut, text_tail: undefined }), { head: "# T\n\n## a\n\nstart", omitted: null, tail: "" });
+  assert.deepEqual(resultText({ ...cut, omitted_chars: "many" }), { head: "# T\n\n## a\n\nstart", omitted: null, tail: "" });
+});
+
+test("a card that lost its events says so", () => {
+  const state = newDraft("{}");
+  applyLevel(state, level(1, "concept", ["a"]));
+  state.ended = true;
+  state.lost = true;
+  assert.match(progressText(state), /^단계 이벤트를 받지 못해/);
 });
 
 test("the sequential estimate is left out when it would read backwards", () => {

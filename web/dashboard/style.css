@@ -2358,3 +2358,46 @@ a.button {
   color: var(--muted);
   font-size: 13px;
 }
+
+/* A tool result the server cut: how much is left out, then the end it kept. */
+.draft-gap-slot:not(:empty) {
+  padding: 0 10px 10px;
+}
+
+.draft-gap {
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.draft-gap-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.draft-tail {
+  max-height: 12em;
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.draft-tail:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}

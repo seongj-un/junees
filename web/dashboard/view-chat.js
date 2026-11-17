@@ -637,9 +637,9 @@ class ChatView {
     const tool = entry.tools.find((t) => !t.done && t.name === event.name) ?? null;
     if (tool?.draft) {
       // The card shows the text and the summary already; the tool result
-      // only settles a card whose draft_done never came.
+      // only tells a card whose draft_done never came.
       tool.done = true;
-      tool.draft.settle(event.text_preview);
+      tool.draft.lose();
       this.follow();
       return;
     }

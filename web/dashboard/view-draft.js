@@ -12,8 +12,9 @@ import {
   levelRowLabel,
   newDraft,
   parseArticle,
-  parseDraftResult,
   progressText,
+  resultStatus,
+  resultText,
   sectionFailed,
   stepText,
   steps,
@@ -29,7 +30,7 @@ const BADGE = {
   limit: ["상한에서 멈춤", "warn"],
   failed: ["실패", "fail"],
   ended: ["중단됨", "neutral"],
-  cut: ["일부만 보임", "neutral"],
+  unknown: ["상태 모름", "neutral"],
 };
 
 const STEP_NOTE = { done: "완료", current: "만드는 중", skipped: "하지 않음", todo: "" };
@@ -133,8 +134,10 @@ export class DraftCard {
     this.id = idBase;
     this.state = newDraft(inputPreview);
     this.cells = new Map();
-    /** Set for a card drawn from a tool result that the server cut: no numbers to show. */
-    this.cut = false;
+    /** Set for a card drawn from a tool result the server sent no `draft` status for: no numbers to show. */
+    this.unknown = false;
+    /** What a cut tool result leaves out: `{ omitted, tail }` (see resultText), or null. */
+    this.gap = null;
     const titleId = `${idBase}-title`;
     this.title = el("p", { class: "draft-title", id: titleId }, "글 생성");
     this.badge = el("span", { class: "badge badge-info draft-badge" });
@@ -144,9 +147,10 @@ export class DraftCard {
     this.error = el("p", { class: "draft-error", hidden: true });
     this.failedLine = el("p", { class: "draft-failed", hidden: true });
     this.list = el("ol", { class: "draft-cells", "aria-label": "절별 글" });
+    this.gapSlot = el("div", { class: "draft-gap-slot" });
     this.tableSlot = el("div", { class: "draft-table-slot" });
     this.foldSummary = el("summary", null, "");
-    this.fold = el("details", { class: "draft-fold", id: `${idBase}-fold`, open: true }, this.foldSummary, this.list, this.tableSlot);
+    this.fold = el("details", { class: "draft-fold", id: `${idBase}-fold`, open: true }, this.foldSummary, this.list, this.gapSlot, this.tableSlot);
     // Whether a cell's text needs its 펼치기 button depends on the width and on
     // being shown at all, so measure again whenever the list changes size.
     if (typeof ResizeObserver === "function") new ResizeObserver(() => this.fit()).observe(this.list);
@@ -165,7 +169,7 @@ export class DraftCard {
 
   /** Whether the card has stopped changing: `draft_done` came, or the answer ended. */
   get finished() {
-    return this.state.done !== null || this.state.ended || this.cut;
+    return this.state.done !== null || this.state.ended || this.unknown;
   }
 
   /** `draft_level`: the cells' text becomes this level's text. `live` is false for a replayed event. */
@@ -184,26 +188,14 @@ export class DraftCard {
   }
 
   /**
-   * The answer ended, or the tool result came, without `draft_done`
-   * (the event was older than the 1,000 the server keeps): show what is
-   * known, from the result's own status line when it has one.
+   * The tool result came without `draft_done` (the event was older than the
+   * 1,000 the server keeps, or this tab missed it): say so; a reload draws
+   * the card from the session record.
    */
-  settle(resultText, { history = false } = {}) {
+  lose() {
     if (this.finished) return;
-    const parsed = parseDraftResult(resultText);
-    if (parsed.status) {
-      this.state.levels = parsed.status.levels;
-      this.state.polish = parsed.status.polished;
-      // The status line counts the levels, not the seam level after them.
-      this.state.level = Math.max(this.state.level, parsed.status.levelsDone + (parsed.status.polished ? 1 : 0));
-      this.state.done = { ...parsed.status, stop: parsed.stop, error: parsed.error, byLevel: [] };
-    } else if (history) {
-      // A history result the server cut: the text is a beginning only.
-      this.cut = true;
-    } else {
-      this.state.ended = true;
-    }
-    if (this.state.sections.length === 0) this.fromArticle(parsed.article);
+    this.state.ended = true;
+    this.state.lost = true;
     this.draw(false);
     this.fold.open = false;
   }
@@ -215,19 +207,37 @@ export class DraftCard {
     this.draw(false);
   }
 
-  fromArticle(article) {
-    const parsed = parseArticle(article);
-    if (parsed.title) this.state.title = parsed.title;
-    this.state.sections = parsed.sections.map((s, i) => ({
+  /**
+   * Draws the card from a session's `tool_result` block: the numbers and the
+   * failed sections from its `draft` object only, the sections from the text
+   * the server did not cut, and what it cut as a gap before the end.
+   */
+  fromHistory(block) {
+    const status = resultStatus(block);
+    if (status && applyDone(this.state, status)) {
+      // The status counts the levels, not the seam level after them.
+      this.state.level = this.state.done.levelsDone + (this.state.done.polished ? 1 : 0);
+    } else {
+      this.unknown = true;
+    }
+    const parts = resultText(block);
+    const article = parseArticle(parts.head);
+    if (article.title) this.state.title = article.title;
+    const failedIds = this.state.done?.failedSections ?? [];
+    this.state.sections = article.sections.map((s, i) => ({
       id: s.failedId ?? "",
       concept: s.concept,
       text: s.text,
       kind: null,
       level: 0,
       truncated: false,
-      failed: s.failedId !== null,
+      // A note in the text only places a failure the server's list names.
+      failed: s.failedId !== null && failedIds.includes(s.failedId),
       key: i + 1,
     }));
+    if (parts.omitted !== 0) this.gap = { omitted: parts.omitted, tail: parts.tail };
+    this.draw(false);
+    this.fold.open = false;
   }
 
   /** Measures the closed cells again. */
@@ -237,14 +247,14 @@ export class DraftCard {
 
   draw(live) {
     const state = this.state;
-    const stop = state.done ? state.done.stop : state.ended ? "ended" : this.cut ? "cut" : "running";
+    const stop = state.done ? state.done.stop : state.ended ? "ended" : this.unknown ? "unknown" : "running";
     const [badgeText, tone] = BADGE[stop] ?? [stop, "neutral"];
     this.node.dataset.state = stop;
     this.badge.textContent = badgeText;
     this.badge.className = `badge badge-${tone} draft-badge`;
     this.title.textContent = state.title || "글 생성";
 
-    const hideSteps = this.cut || (state.level === 0 && state.done === null && state.ended);
+    const hideSteps = this.unknown || (state.level === 0 && state.done === null && state.ended);
     this.steps.hidden = hideSteps;
     this.steps.replaceChildren(
       ...steps(state).map((step) => {
@@ -260,9 +270,7 @@ export class DraftCard {
 
     const done = state.done;
     const note = done ? stopNote(done) : null;
-    const text = this.cut
-      ? "서버가 긴 결과를 잘라서 보내 호출 수와 걸린 시간은 알 수 없습니다. 보내온 앞부분만 보여 줍니다."
-      : progressText(state);
+    const text = this.unknown ? "서버가 이 결과의 상태를 보내지 않아 몇 단계까지 만들었는지, 호출 수와 걸린 시간은 알 수 없습니다." : progressText(state);
     // replaceChildren prints a null as the text "null": push only real nodes.
     const line = [];
     if (note) line.push(el("span", { class: `draft-stop draft-stop-${done.stop}` }, note), " ");
@@ -272,9 +280,7 @@ export class DraftCard {
     this.error.textContent = reason;
     this.error.hidden = reason === "";
 
-    const failed = state.sections.filter((s) => s.failed === true || sectionFailed(state, s.id));
-    const failedIds = done ? done.failedSections : [];
-    const names = failedIds.length ? failedIds : failed.map((s) => s.id || s.concept);
+    const names = done ? done.failedSections : [];
     this.failedLine.textContent = names.length ? `실패한 절: ${names.join(", ")}. 앞 단계의 글로 대신했습니다.` : "";
     this.failedLine.hidden = names.length === 0;
 
@@ -289,16 +295,41 @@ export class DraftCard {
       fillCell(cell, section, { failed: section.failed === true || sectionFailed(state, section.id), fresh: live });
     }
 
+    this.gapSlot.replaceChildren(...this.gapView());
+
     const count = state.sections.length;
     const rows = done?.byLevel ?? [];
     this.tableSlot.replaceChildren(...(rows.length ? [this.table(rows)] : []));
-    this.fold.hidden = count === 0 && rows.length === 0;
+    this.fold.hidden = count === 0 && rows.length === 0 && !this.gap;
     this.foldSummary.textContent = this.finished
       ? rows.length
         ? `절 ${formatInt(count)}개의 글과 단계별 호출 보기`
-        : `절 ${formatInt(count)}개의 글 보기`
+        : count === 0
+          ? "글 보기"
+          : `절 ${formatInt(count)}개의 글 보기`
       : `진행 중인 글, 절 ${formatInt(count)}개`;
     this.fit();
+  }
+
+  /** What follows the cells when the server cut the result: the omitted length, then the end it kept. */
+  gapView() {
+    if (!this.gap) return [];
+    const { omitted, tail } = this.gap;
+    const parts = [
+      el(
+        "p",
+        { class: "draft-gap" },
+        omitted === null ? "서버가 이 뒤의 글을 보내지 않았습니다." : `가운데 ${formatInt(omitted)}자 생략`,
+      ),
+    ];
+    if (tail) {
+      const id = `${this.id}-tail`;
+      parts.push(
+        el("p", { class: "draft-gap-label", id }, "글의 끝부분"),
+        el("pre", { class: "draft-tail", tabindex: "0", "aria-labelledby": id }, tail),
+      );
+    }
+    return parts;
   }
 
   table(rows) {
@@ -332,12 +363,11 @@ export class DraftCard {
 
 /**
  * The card for a `draft` tool result found in a session's history, where
- * the events do not come again. `block` is the `tool_result` block; its
- * text (the result, cut at 2,000 characters by the server) may lack the
- * status line.
+ * the events do not come again. `block` is the `tool_result` block, with the
+ * `draft` status and the `text_tail` the session API adds.
  */
 export function draftResultCard(idBase, block) {
   const card = new DraftCard(idBase, "");
-  card.settle(block?.text_preview, { history: true });
+  card.fromHistory(block);
   return card;
 }
