@@ -2417,6 +2417,7 @@ fn print_event(event: Event<'_>) {
         Event::DraftLevel(level) => eprintln!("  [draft] {}", junees::write::level_line(level)),
         Event::DraftDone(draft) => eprintln!("  [draft] {}", draft.summary(None)),
         Event::ModelSwitch(switch) => eprintln!("  !! {}", switch.line()),
+        Event::Hook(record) => eprintln!("  {}", cli::preview(&record.line(), PREVIEW_CHARS)),
         // Part of the answer, after its text.
         Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),
         Event::Compacted {

@@ -96,6 +96,9 @@ impl<'a> Collector<'a> {
                 crate::cli::preview(&tool_target(input), PREVIEW_CHARS)
             )),
             Event::Subagent { index, line } => Progress::Tool(format!("[{index}] {line}")),
+            Event::Hook(record) => {
+                Progress::Tool(crate::cli::preview(&record.line(), PREVIEW_CHARS))
+            }
             Event::DraftLevel(level) => {
                 Progress::Tool(format!("[draft] {}", crate::write::level_line(level)))
             }

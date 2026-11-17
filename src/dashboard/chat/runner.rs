@@ -406,6 +406,17 @@ pub(super) fn on_event(shared: &Shared, room: &Room, out: &mut TextOut, event: E
                 "input_preview": preview(shared, &input_text(input), PREVIEW_CHARS),
             }));
         }
+        Event::Hook(record) => {
+            out.flush(shared, room);
+            let mut value = record.json();
+            for key in ["command", "message", "reason", "error"] {
+                if let Some(text) = value.get(key).and_then(|text| text.as_str()) {
+                    let shown = preview(shared, text, PREVIEW_CHARS);
+                    value[key] = json!(shown);
+                }
+            }
+            room.push(value);
+        }
         Event::Subagent { index, line } => {
             out.flush(shared, room);
             room.push(json!({

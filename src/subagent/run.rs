@@ -28,6 +28,9 @@ pub(crate) struct Parent<'a> {
     pub options: &'a AgentOptions,
     pub cancel: &'a Cancel,
     pub gate: Option<&'a SharedGate>,
+    /// The delegating session's hooks: their `pre_tool` and `post_tool`
+    /// hooks check the subagents' calls too.
+    pub hooks: Option<&'a Arc<crate::hooks::Hooks>>,
     pub limit: Option<&'a SharedLimit>,
     /// The tokens the delegating session used before the call.
     pub usage: Usage,
@@ -136,6 +139,9 @@ async fn child(
             shared: Arc::clone(gate),
             label: format!("[{index}] {goal}"),
         }));
+    }
+    if let Some(hooks) = parent.hooks {
+        agent = agent.with_tool_hooks(Arc::clone(hooks));
     }
     if let (Some(path), Some(n)) = (parent.journal, journal) {
         match SessionWriter::create_sub(path, &format!("sub-{n}")) {
