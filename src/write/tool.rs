@@ -274,10 +274,9 @@ pub fn read_status(content: &str, is_error: bool) -> Option<Status> {
         // model's, so the first match is the end of the reason.
         let (reason, _) = rest.split_once(LIMIT_AFTER)?;
         (Stop::Limit(reason.to_string()), Some(reason.to_string()))
-    } else if let Some(reason) = before.strip_prefix(FAILED_BEFORE) {
-        (Stop::Failed(reason.to_string()), Some(reason.to_string()))
     } else {
-        return None;
+        let reason = before.strip_prefix(FAILED_BEFORE)?;
+        (Stop::Failed(reason.to_string()), Some(reason.to_string()))
     };
     status.stop = stop.code();
     status.error = error;
