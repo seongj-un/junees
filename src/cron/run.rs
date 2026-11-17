@@ -213,6 +213,10 @@ pub trait Engine {
 pub(crate) struct Answer {
     blocks: Vec<String>,
     current: String,
+    /// The line about a switch to the fallback model, for the run's note.
+    switched: Option<String>,
+    /// The last warning, which says why a failed call was not waited out.
+    warning: Option<String>,
 }
 
 impl Answer {
@@ -225,8 +229,27 @@ impl Answer {
                 self.blocks.clear();
                 self.current.clear();
             }
+            Event::ModelSwitch(switch) => self.switched = Some(switch.line()),
+            Event::Warning(warning) => self.warning = Some(warning.to_string()),
             _ => {}
         }
+    }
+
+    /// `note` with what the model calls went through: the switch to the
+    /// fallback model, and for a failed run the last warning (such as why
+    /// a usage limit was not waited out).
+    pub(crate) fn note(&self, note: String, failed: bool) -> String {
+        let extra = [
+            self.switched.as_deref(),
+            self.warning.as_deref().filter(|_| failed),
+        ];
+        extra.into_iter().flatten().fold(note, |note, line| {
+            if note.is_empty() {
+                line.to_string()
+            } else {
+                format!("{note}; {line}")
+            }
+        })
     }
 
     pub(crate) fn text(mut self) -> String {
@@ -286,7 +309,9 @@ fn failure_note(err: &anyhow::Error, deadline: &Deadline, limits: Limits) -> Str
 /// Junees's own agent on the API.
 pub struct ApiEngine {
     config: Arc<Config>,
-    provider: ProviderFactory,
+    /// The model calls' provider when a test sets one; otherwise one that
+    /// waits out usage limits within the run's time ([`ApiEngine::agent`]).
+    provider: Option<ProviderFactory>,
     /// Tests only: bash runs in the run's folder, in a sandbox there
     /// ([`crate::tools::Bash::sandboxed`]). A real run's process is
     /// already in that folder; a test's is in the crate.
@@ -297,11 +322,9 @@ pub struct ApiEngine {
 impl ApiEngine {
     pub fn new(config: Config) -> Self {
         let config = Arc::new(config);
-        let settings = Arc::clone(&config);
-        let provider: ProviderFactory = Arc::new(move || crate::provider::from_config(&settings));
         Self {
             config,
-            provider,
+            provider: None,
             #[cfg(test)]
             sandbox: false,
         }
@@ -316,7 +339,7 @@ impl ApiEngine {
 
     /// Uses `provider` for the model calls (tests).
     pub fn with_provider(mut self, provider: ProviderFactory) -> Self {
-        self.provider = provider;
+        self.provider = Some(provider);
         self
     }
 
@@ -406,8 +429,18 @@ impl ApiEngine {
                 skills::Mode::ReadOnly,
             );
         let started = Instant::now();
+        let provider = match &self.provider {
+            Some(factory) => factory()?,
+            // Nobody watches these runs (cron, webhooks, `mcp serve`): a
+            // usage limit with no fallback left is waited out, within the
+            // run's time limit.
+            None => crate::provider::unattended_from_config(
+                config,
+                Some(tokio::time::Instant::now() + limits.max_time),
+            )?,
+        };
         let mut agent = Agent::new(
-            (self.provider)()?,
+            provider,
             tools,
             AgentOptions {
                 system,
@@ -474,12 +507,15 @@ impl Engine for ApiEngine {
         mcp.shutdown().await;
         let used = tokens(agent.usage());
         let (status, answer, note) = match result {
-            Ok(text) => (RunStatus::Ok, text.trim().to_string(), String::new()),
-            Err(err) => (
-                RunStatus::Failed,
-                answer.text(),
-                failure_note(&err, &deadline, limits),
+            Ok(text) => (
+                RunStatus::Ok,
+                text.trim().to_string(),
+                answer.note(String::new(), false),
             ),
+            Err(err) => {
+                let note = answer.note(failure_note(&err, &deadline, limits), true);
+                (RunStatus::Failed, answer.text(), note)
+            }
         };
         Outcome {
             status,

@@ -10,6 +10,9 @@ pub enum ProviderError {
         /// The API's error type, e.g. `invalid_request_error`.
         kind: Option<String>,
         message: String,
+        /// Seconds the API asked to wait before the next try (its
+        /// `retry-after` header), when it said.
+        retry_after: Option<u64>,
     },
     /// The request did not complete: connection, timeout, or a body cut off.
     Transport(Box<dyn std::error::Error + Send + Sync>),
@@ -103,6 +106,7 @@ impl ProviderError {
                 status: 400,
                 kind,
                 message,
+                ..
             } => {
                 kind.as_deref()
                     .is_none_or(|kind| kind == "invalid_request_error")
@@ -110,6 +114,17 @@ impl ProviderError {
                     && !self.is_context_overflow()
             }
             _ => false,
+        }
+    }
+
+    /// How long the API asked to wait before the next try, if it said.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Api {
+                retry_after: Some(secs),
+                ..
+            } => Some(std::time::Duration::from_secs(*secs)),
+            _ => None,
         }
     }
 
@@ -132,6 +147,7 @@ impl fmt::Display for ProviderError {
                 status,
                 kind,
                 message,
+                ..
             } => {
                 write!(f, "API error {status}")?;
                 if let Some(kind) = kind {
@@ -222,6 +238,7 @@ mod tests {
             status,
             kind: kind.map(Into::into),
             message: message.into(),
+            retry_after: None,
         }
     }
 

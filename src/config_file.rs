@@ -31,6 +31,13 @@ pub const PAIRED_KEYS: &[(&str, &str, &str)] = &[
         openai::BASE_URL_ENV,
         openai::DEFAULT_BASE_URL,
     ),
+    // No default address: without one, the fallback uses the main
+    // provider's (or its kind's usual) address and key.
+    (
+        crate::provider::fallback::API_KEY_ENV,
+        crate::provider::fallback::BASE_URL_ENV,
+        "",
+    ),
     // No default address: without one, transcription is off.
     (
         crate::transcribe::API_KEY_ENV,
@@ -67,6 +74,12 @@ pub const KEYS: &[(&str, &str)] = &[
     ("openai_max_tokens_field", "JUNEES_OPENAI_MAX_TOKENS_FIELD"),
     ("openai_reasoning_effort", "JUNEES_OPENAI_REASONING_EFFORT"),
     ("model", "JUNEES_MODEL"),
+    ("fallback_model", "JUNEES_FALLBACK_MODEL"),
+    ("fallback_provider", "JUNEES_FALLBACK_PROVIDER"),
+    ("fallback_base_url", "JUNEES_FALLBACK_BASE_URL"),
+    ("fallback_api_key", "JUNEES_FALLBACK_API_KEY"),
+    ("fallback_after", "JUNEES_FALLBACK_AFTER"),
+    ("wait_limit", "JUNEES_WAIT_LIMIT"),
     ("prices", "JUNEES_PRICES"),
     ("task_max_time", "JUNEES_TASK_MAX_TIME"),
     ("task_max_tokens", "JUNEES_TASK_MAX_TOKENS"),

@@ -291,6 +291,21 @@ fn on_event(shared: &Shared, room: &Room, out: &mut TextOut, event: Event<'_>) {
             out.note(shared, room, "(the reply broke off; asking for it again)");
         }
         Event::Warning(warning) => out.note(shared, room, &format!("({warning})")),
+        Event::ModelSwitch(switch) => {
+            out.flush(shared, room);
+            let retry_at = switch
+                .retry_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| crate::session::format_utc_seconds(since.as_secs()))
+                .ok();
+            room.push(json!({
+                "type": "model_switch",
+                "from": preview(shared, &switch.from, NAME_CHARS),
+                "to": preview(shared, &switch.to, NAME_CHARS),
+                "reason": switch.reason.code(),
+                "retry_at": retry_at,
+            }));
+        }
         Event::Compacted {
             before_messages,
             after_messages,

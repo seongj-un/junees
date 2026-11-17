@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 mod error;
+pub mod fallback;
 mod http;
 pub mod openai;
 mod stream;
@@ -58,22 +59,107 @@ impl Kind {
 /// The model client the settings ask for: the provider, its address and
 /// key, the model, streaming, and the Anthropic-only extras (thinking
 /// budget, web search) where they apply.
+///
+/// With a fallback model, the calls go to it while the main one is blocked
+/// ([`fallback::Switching`]). A person sees what happens, so nothing waits
+/// for a usage limit to lift here; see [`unattended_from_config`].
 pub fn from_config(config: &crate::config::Config) -> anyhow::Result<Box<dyn Provider>> {
+    build(config, None)
+}
+
+/// [`from_config`] for runs nobody watches (cron, webhooks, `mcp serve`,
+/// tasks): when no model is left to switch to, a call waits for a usage
+/// limit to lift, up to `wait_limit` and never past `deadline` (the run's
+/// time limit).
+pub fn unattended_from_config(
+    config: &crate::config::Config,
+    deadline: Option<tokio::time::Instant>,
+) -> anyhow::Result<Box<dyn Provider>> {
+    build(config, Some(deadline))
+}
+
+/// A provider factory for a run of several sessions (a task) that share one
+/// time limit: the deadline is fixed once, when the factory is made, and
+/// every provider `build` makes gets that same deadline. A deadline taken
+/// per session would move on with each one, and a late session could wait
+/// past the run's limit.
+pub fn unattended_factory<F>(
+    max_time: Option<std::time::Duration>,
+    build: F,
+) -> impl Fn() -> anyhow::Result<Box<dyn Provider>>
+where
+    F: Fn(Option<tokio::time::Instant>) -> anyhow::Result<Box<dyn Provider>>,
+{
+    let deadline = max_time.map(|max_time| tokio::time::Instant::now() + max_time);
+    move || build(deadline)
+}
+
+fn build(
+    config: &crate::config::Config,
+    unattended: Option<Option<tokio::time::Instant>>,
+) -> anyhow::Result<Box<dyn Provider>> {
+    let wait = unattended
+        .filter(|_| !config.wait_limit.is_zero())
+        .map(|deadline| fallback::Wait {
+            limit: config.wait_limit,
+            deadline,
+        });
+    if config.fallback.is_none() && wait.is_none() {
+        return main_client(config, None);
+    }
+    // A long `retry-after` is not sat out in the retries: the switch or
+    // the planned wait takes over.
+    let give_up = if config.fallback.is_some() {
+        config.fallback_after
+    } else {
+        std::time::Duration::from_secs(http::MAX_RETRY_AFTER_SECS)
+    };
+    let fallback = config
+        .fallback
+        .as_ref()
+        .map(|settings| {
+            fallback::client_giving_up(
+                settings,
+                config,
+                wait.map(|_| std::time::Duration::from_secs(http::MAX_RETRY_AFTER_SECS)),
+            )
+        })
+        .transpose()?;
+    Ok(Box::new(fallback::Switching::new(
+        main_client(config, Some(give_up))?,
+        fallback,
+        config.fallback_after,
+        wait,
+    )))
+}
+
+fn main_client(
+    config: &crate::config::Config,
+    give_up: Option<std::time::Duration>,
+) -> anyhow::Result<Box<dyn Provider>> {
     Ok(match &config.openai {
-        None => Box::new(
-            anthropic::AnthropicProvider::new(
+        None => {
+            let client = anthropic::AnthropicProvider::new(
                 config.api_key.clone(),
                 config.base_url.clone(),
                 config.model.clone(),
             )?
             .with_thinking(config.thinking_budget)
             .with_streaming(config.stream)
-            .with_web_search(config.web_search.clone()),
-        ),
-        Some(settings) => Box::new(
-            openai::OpenAiProvider::new(settings.clone(), config.model.clone())?
-                .with_streaming(config.stream),
-        ),
+            .with_web_search(config.web_search.clone());
+            match give_up {
+                Some(give_up) => Box::new(client.with_give_up(give_up)),
+                None => Box::new(client),
+            }
+        }
+        Some(settings) => {
+            let client = openai::OpenAiProvider::new(settings.clone(), config.model.clone())?
+                .with_streaming(config.stream);
+            match give_up {
+                Some(give_up) => Box::new(client.with_give_up(give_up)),
+                None => Box::new(client),
+            }
+        }
     })
 }
 
@@ -123,6 +209,11 @@ pub enum StreamEvent {
     /// The API ran one of its own tools (a `server_tool_use` block, such as
     /// a web search) with this input. Junees does not run it.
     ServerToolUse { name: String, input: Value },
+    /// The calls went over to the fallback model ([`fallback::Switching`]).
+    ModelSwitch(fallback::Switch),
+    /// Something the person should know about the calls, such as a wait
+    /// for a usage limit to lift.
+    Notice(String),
     /// The response broke off after part of it was reported. It is asked
     /// for again from the start, and what was reported since the last
     /// `Retrying` (or the start) is not part of the response.
@@ -164,6 +255,11 @@ pub trait Provider: Send + Sync {
     fn manual_thinking(&self) -> bool {
         false
     }
+
+    /// A new turn (the person's or the run's next input) starts. A provider
+    /// that switched to a fallback model goes back to the main one here
+    /// once it may ([`fallback::Switching`]).
+    fn begin_turn(&self) {}
 
     /// The model the calls go to, if the provider names one. Journals
     /// stamp it on usage entries, so costs follow a `/model` switch.

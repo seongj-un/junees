@@ -1158,7 +1158,6 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
     // The tools resolve relative paths from the process's folder.
     std::env::set_current_dir(&root)
         .with_context(|| format!("cannot change to {}", root.display()))?;
-    let provider = || make_provider(&config);
     let budget = match command {
         TaskCommand::Run(run) | TaskCommand::Start { run, .. } => Budget {
             max_tokens: run.max_tokens.or(config.task_max_tokens),
@@ -1167,6 +1166,12 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         },
         TaskCommand::Init { .. } | TaskCommand::Status { .. } => Budget::default(),
     };
+    // A task runs unattended: a usage limit with no fallback left is
+    // waited out, within its time budget.
+    // One deadline for every session of this run, fixed now.
+    let provider = junees::provider::unattended_factory(budget.max_time, |deadline| {
+        junees::provider::unattended_from_config(&config, deadline)
+    });
     let env = TaskEnv {
         root,
         home: config.home.clone(),
@@ -2317,6 +2322,7 @@ fn print_event(event: Event<'_>) {
             );
         }
         Event::Subagent { index, line } => eprintln!("  [{index}] {line}"),
+        Event::ModelSwitch(switch) => eprintln!("  !! {}", switch.line()),
         // Part of the answer, after its text.
         Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),
         Event::Compacted {

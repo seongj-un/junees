@@ -56,6 +56,9 @@ pub enum Progress {
 pub struct Collector<'a> {
     out: &'a UnboundedSender<Progress>,
     text: String,
+    /// The line about the switch to the fallback model, sent after the
+    /// reply ([`Collector::finish`]).
+    switched: Option<String>,
 }
 
 impl<'a> Collector<'a> {
@@ -63,6 +66,7 @@ impl<'a> Collector<'a> {
         Self {
             out,
             text: String::new(),
+            switched: None,
         }
     }
 
@@ -79,6 +83,10 @@ impl<'a> Collector<'a> {
             }
             Event::Thinking | Event::ToolResult { .. } => return,
             Event::Warning(warning) => Progress::Note(warning.to_string()),
+            Event::ModelSwitch(switch) => {
+                self.switched = Some(switch.line());
+                return;
+            }
             Event::ToolCall { name, input } => Progress::Tool(format!(
                 "-> {name} {}",
                 crate::cli::preview(&tool_target(input), PREVIEW_CHARS)
@@ -101,12 +109,16 @@ impl<'a> Collector<'a> {
     }
 
     /// Sends the text of a reply that was cut off (by a cancel or an
-    /// error) as far as it got.
+    /// error) as far as it got, then the line about a switch to the
+    /// fallback model, so it ends the reply.
     pub fn finish(&mut self) {
         if !self.text.trim().is_empty() {
             let _ = self
                 .out
                 .send(Progress::Text(std::mem::take(&mut self.text)));
+        }
+        if let Some(line) = self.switched.take() {
+            let _ = self.out.send(Progress::Note(line));
         }
     }
 }
@@ -573,6 +585,40 @@ mod tests {
                 Progress::Tool("-> bash ls -la /tmp".into()),
                 Progress::Note("cut off".into()),
                 Progress::Text("half".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_switch_to_the_fallback_model_ends_the_reply() {
+        use crate::provider::fallback::{Reason, Switch};
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let switch = Switch {
+            from: "big".into(),
+            to: "small".into(),
+            reason: Reason::Overloaded,
+            retry_at: std::time::SystemTime::now(),
+            retry_in: std::time::Duration::from_secs(120),
+        };
+        let mut collector = Collector::new(&tx);
+        collector.event(Event::ModelSwitch(&switch));
+        collector.event(Event::TextDelta("answer"));
+        collector.event(Event::TextEnd);
+        collector.finish();
+        drop(tx);
+        let mut seen = Vec::new();
+        while let Ok(progress) = rx.try_recv() {
+            seen.push(match progress {
+                Progress::Text(text) => format!("text {text}"),
+                Progress::Note(note) => format!("note {note}"),
+                _ => "other".into(),
+            });
+        }
+        assert_eq!(
+            seen,
+            [
+                "text answer",
+                "note big 모델이 과부하로 막혀 small 모델로 이어 갑니다 (다시 시도: 2분 뒤)"
             ]
         );
     }

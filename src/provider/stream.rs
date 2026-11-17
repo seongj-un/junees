@@ -335,6 +335,7 @@ fn stream_error(error: &Value) -> ProviderError {
         status,
         kind: Some(kind),
         message: error["message"].as_str().unwrap_or("").to_string(),
+        retry_after: None,
     }
 }
 

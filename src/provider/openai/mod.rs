@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use reqwest::StatusCode;
 
 use super::http::{
-    Failure, MAX_ATTEMPTS, REQUEST_TIMEOUT, STREAM_IDLE_TIMEOUT, backoff, body_failure,
-    idle_failure, is_retryable, retry_after, send_failure,
+    Failure, REQUEST_TIMEOUT, STREAM_IDLE_TIMEOUT, backoff, body_failure, idle_failure,
+    is_retryable, retry_after, send_failure,
 };
 use super::stream::SseParser;
 use super::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamSender};
@@ -196,9 +196,19 @@ pub struct OpenAiProvider {
     stream: bool,
     /// See [`STREAM_IDLE_TIMEOUT`].
     idle_timeout: Duration,
+    /// See [`OpenAiProvider::with_give_up`].
+    give_up: Option<Duration>,
 }
 
 impl OpenAiProvider {
+    /// Returns the error at once, instead of trying again, when the API
+    /// asks to wait longer than `give_up` (see
+    /// `AnthropicProvider::with_give_up`).
+    pub fn with_give_up(mut self, give_up: Duration) -> Self {
+        self.give_up = Some(give_up);
+        self
+    }
+
     pub fn new(settings: Settings, model: String) -> Result<Self> {
         // Timeouts are set per request: a stream has no overall one. No
         // redirects: one could lead the key to plain http.
@@ -212,6 +222,7 @@ impl OpenAiProvider {
             model,
             stream: false,
             idle_timeout: STREAM_IDLE_TIMEOUT,
+            give_up: None,
         })
     }
 
@@ -355,11 +366,11 @@ impl OpenAiProvider {
         loop {
             match self.send_once(&url, body).await {
                 Ok(response) => return Ok(response),
-                Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
+                Err(failure) if failure.try_again(attempt, self.give_up) => {
                     tokio::time::sleep(backoff(attempt, failure.retry_after)).await;
                     attempt += 1;
                 }
-                Err(failure) => return Err(failure.error),
+                Err(failure) => return Err(failure.into_error()),
             }
         }
     }
@@ -438,14 +449,14 @@ impl Provider for OpenAiProvider {
             let mut reported = false;
             match self.stream_once(&url, &body, events, &mut reported).await {
                 Ok(response) => return Ok(response),
-                Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
+                Err(failure) if failure.try_again(attempt, self.give_up) => {
                     if reported {
                         let _ = events.send(super::StreamEvent::Retrying);
                     }
                     tokio::time::sleep(backoff(attempt, failure.retry_after)).await;
                     attempt += 1;
                 }
-                Err(failure) => return Err(failure.error),
+                Err(failure) => return Err(failure.into_error()),
             }
         }
     }

@@ -47,6 +47,16 @@ pub struct Config {
     /// `provider = openai` (and then always there).
     pub openai: Option<crate::provider::openai::Settings>,
     pub model: String,
+    /// The model that takes over when this one stays blocked
+    /// (`fallback_model` and its settings); `None` when it is not set, and
+    /// always with the claude-code backend.
+    pub fallback: Option<crate::provider::fallback::Settings>,
+    /// How long the model may stay blocked before the fallback takes over
+    /// (`JUNEES_FALLBACK_AFTER`, default 2m).
+    pub fallback_after: Duration,
+    /// How long unattended runs wait for a usage limit to lift
+    /// (`JUNEES_WAIT_LIMIT`, default 30m); zero turns waiting off.
+    pub wait_limit: Duration,
     pub max_tokens: u32,
     pub max_turns: usize,
     /// The model's context window in tokens.
@@ -185,6 +195,22 @@ impl Config {
                 &ANTHROPIC_ADDRESS,
             )?;
         }
+        let base_url = get("ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        // The claude-code backend calls no model API itself: no fallback.
+        let fallback = if need_key {
+            crate::provider::fallback::read(
+                &get,
+                &crate::provider::fallback::Main {
+                    kind: provider,
+                    anthropic_key: &api_key,
+                    anthropic_url: &base_url,
+                    openai: openai.as_ref(),
+                },
+            )?
+        } else {
+            None
+        };
+        let (fallback_after, wait_limit) = crate::provider::fallback::read_times(&get)?;
         let max_tokens = parse_or(
             get("JUNEES_MAX_TOKENS"),
             "JUNEES_MAX_TOKENS",
@@ -291,7 +317,10 @@ impl Config {
             provider,
             api_key,
             openai,
-            base_url: get("ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            base_url,
+            fallback,
+            fallback_after,
+            wait_limit,
             model: get("JUNEES_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens,
             max_turns,

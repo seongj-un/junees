@@ -82,6 +82,9 @@ pub enum Event<'a> {
         name: &'a str,
         output: &'a ToolOutput,
     },
+    /// The calls went over to the fallback model, because the main one is
+    /// blocked (`Switch::line` says so in one line).
+    ModelSwitch(&'a crate::provider::fallback::Switch),
     /// The earlier part of the conversation was replaced by a summary.
     Compacted {
         before_messages: usize,
@@ -401,6 +404,7 @@ impl Agent {
         images: Vec<crate::images::Image>,
         mut on_event: impl FnMut(Event<'_>),
     ) -> Result<String> {
+        self.provider.begin_turn();
         self.drop_open_server_calls(&mut on_event);
         if !notes.is_empty() {
             self.record(Entry::Notes { notes }, &mut on_event);
@@ -901,6 +905,8 @@ fn forward(event: StreamEvent, on_event: &mut impl FnMut(Event<'_>)) {
         StreamEvent::Thinking => Event::Thinking,
         StreamEvent::Retrying => Event::Retrying,
         StreamEvent::ServerToolUse { name, input } => Event::ServerToolUse { name, input },
+        StreamEvent::ModelSwitch(switch) => Event::ModelSwitch(switch),
+        StreamEvent::Notice(text) => Event::Warning(text),
     });
 }
 
@@ -1080,6 +1086,7 @@ mod tests {
             status: 400,
             kind: Some("invalid_request_error".into()),
             message: message.into(),
+            retry_after: None,
         })
     }
 
@@ -1633,6 +1640,7 @@ mod tests {
             status: 400,
             kind: Some("invalid_request_error".into()),
             message: "prompt is too long: 300000 tokens > 200000 maximum".into(),
+            retry_after: None,
         })]);
         let mut agent = agent(provider, 5);
         let err = agent.run("hi", |_| {}).await.unwrap_err();
@@ -2724,6 +2732,7 @@ mod tests {
             status: 400,
             kind: Some("invalid_request_error".into()),
             message: "prompt is too long: 215000 tokens > 200000 maximum".into(),
+            retry_after: None,
         })
     }
 

@@ -1,5 +1,12 @@
 # 변경 기록
 
+## 다음 버전
+
+### 새 기능
+
+- 예비 모델(`fallback_model`, `fallback_provider`, `fallback_base_url`, `fallback_api_key`, `fallback_after`): 주 모델이 사용 한도(429), 과부하(529), 서버 오류나 응답 없음으로 막히면 예비 모델로 넘어가 그 턴을 잇는다. `retry-after`가 `fallback_after`(기본 2분)보다 길면 다시 시도하지 않고 바로 넘어가고, 400/401/403/404/413은 넘어가지 않는다. 막힌 시간 동안은 다음 턴도 예비로 시작한다. 예비는 OpenAI 호환 API여도 되고, 키는 `fallback_base_url`과 같은 곳에서만 읽는다. 터미널과 게이트웨이는 한 줄로 알리고, 대시보드 대화는 `model_switch` 이벤트를 보낸다. 사용량 기록에는 실제로 답한 모델이 남는다. `junees doctor`가 설정을 점검하고, `--online`이면 예비 모델에 1토큰 요청을 보낸다 ([예비 모델](docs/configuration.md#예비-모델))
+- 무인 실행의 사용 한도 기다리기(`wait_limit`, 기본 30분, `0`이면 끔): 예약 작업, 웹훅, `junees mcp serve`, `task`는 넘어갈 모델이 없으면 `retry-after`만큼 기다렸다가 같은 요청을 다시 보낸다. 기다린 시간의 합이 `wait_limit`을 넘거나 실행 시간 상한을 넘게 되면 기다리지 않고 실패로 기록한다 ([예비 모델](docs/configuration.md#예비-모델))
+
 ## 0.5.0 (2026-11-17)
 
 ### 업그레이드할 때 확인할 것

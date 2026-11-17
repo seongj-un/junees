@@ -30,3 +30,5 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 
 [dev-dependencies]
 tempfile = "3"
+# Paused time in tests of waits (`start_paused`).
+tokio = { version = "1", features = ["test-util"] }
