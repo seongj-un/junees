@@ -595,9 +595,7 @@ fn hook_check(
     } else {
         find_on_path(program, path).is_some()
     };
-    if found {
-        report.ok(area, &name, detail);
-    } else {
+    if !found {
         report.warn(
             area,
             &name,
@@ -607,5 +605,17 @@ fn hook_check(
             ),
             "install it or fix `command`; a hook that cannot start follows its on_error",
         );
+    } else if let Some(why) = crate::hooks::indirect(hook) {
+        // It runs files of the project nobody pinned.
+        report.warn(
+            area,
+            &name,
+            format!("{detail}: {why}"),
+            "files of the working folder may be changed by the model without asking; run a \
+             script by its path (`command`'s first word or an interpreter's script argument) \
+             or keep it in $JUNEES_HOME/hooks/ (docs/hooks.md, 보안)",
+        );
+    } else {
+        report.ok(area, &name, detail);
     }
 }
