@@ -121,7 +121,7 @@ pub fn quoted(text: &str) -> String {
         .collect()
 }
 
-/// One hook on one line: its event, `match`, command and the file it
+/// One hook on one line: its event, `match`, command and the files it
 /// pins, if any.
 pub fn summary(hook: &Hook) -> String {
     let spec = &hook.spec;
@@ -130,16 +130,17 @@ pub fn summary(hook: &Hook) -> String {
         .as_ref()
         .map(|matcher| format!(" match `{}`", escape_hidden(&matcher.source)))
         .unwrap_or_default();
-    let pinned = match &hook.pin {
-        Some(pin) => match &pin.digest {
+    let pinned: String = hook
+        .pins
+        .iter()
+        .map(|pin| match &pin.digest {
             Ok(digest) => format!(" (pinned {} sha256 {})", pin.path.display(), &digest[..16]),
             Err(err) => format!(
                 " (cannot pin {}: {err}; it does not run)",
                 pin.path.display()
             ),
-        },
-        None => String::new(),
-    };
+        })
+        .collect();
     format!("{}{matched} -> {}{pinned}", spec.event.name(), spec.shown())
 }
 

@@ -531,27 +531,33 @@ struct PinFailure {
 /// have rewritten it during the session. (A swap between this check and
 /// the start remains possible for a process already running there.)
 fn check_pin(hook: &Hook) -> Result<(), PinFailure> {
-    let Some(pin) = &hook.pin else {
-        return Ok(());
-    };
-    let path = pin.path.display();
-    match &pin.digest {
-        Err(err) => Err(PinFailure {
-            what: super::NOT_PINNED,
-            detail: format!("{path} could not be pinned when the hook was read: {err}"),
-        }),
-        Ok(expected) => match super::pinned_digest(&pin.path) {
-            Ok(now) if now == *expected => Ok(()),
-            Ok(_) => Err(PinFailure {
-                what: super::CHANGED,
-                detail: format!("{path} changed since the hook was read"),
-            }),
-            Err(err) => Err(PinFailure {
-                what: super::CHANGED,
-                detail: format!("{path} cannot be read as it was pinned: {err}"),
-            }),
-        },
+    for pin in &hook.pins {
+        let path = pin.path.display();
+        match &pin.digest {
+            Err(err) => {
+                return Err(PinFailure {
+                    what: super::NOT_PINNED,
+                    detail: format!("{path} could not be pinned when the hook was read: {err}"),
+                });
+            }
+            Ok(expected) => match super::pinned_digest(&pin.path) {
+                Ok(now) if now == *expected => {}
+                Ok(_) => {
+                    return Err(PinFailure {
+                        what: super::CHANGED,
+                        detail: format!("{path} changed since the hook was read"),
+                    });
+                }
+                Err(err) => {
+                    return Err(PinFailure {
+                        what: super::CHANGED,
+                        detail: format!("{path} cannot be read as it was pinned: {err}"),
+                    });
+                }
+            },
+        }
     }
+    Ok(())
 }
 
 /// Why a hook failed, in one line.

@@ -70,10 +70,10 @@ impl Origin {
 pub struct Hook {
     pub spec: Spec,
     pub origin: Origin,
-    /// The file it runs, when that is in the session's working folder
+    /// The files it runs, when they are in the session's working folder
     /// (which the model may change): pinned when the hook was read, and
-    /// checked again before each run ([`pin_for`]).
-    pub pin: Option<Pin>,
+    /// checked again before each run ([`pins_for`]).
+    pub pins: Vec<Pin>,
 }
 
 /// The file a hook runs, pinned by its content.
@@ -81,6 +81,9 @@ pub struct Hook {
 pub struct Pin {
     /// Its path, the folders resolved, the last part as written.
     pub path: PathBuf,
+    /// The word of `command` that names it: 0 for the program, else an
+    /// interpreter's script argument.
+    pub arg: usize,
     /// The SHA-256 of its content when the hook was read, or why it
     /// could not be read (the hook then does not run).
     pub digest: Result<String, String>,
@@ -96,25 +99,174 @@ pub const CHANGED: &str = "훅이 부르는 파일이 바뀌어 실행하지 않
 /// a link, too large) says instead of running.
 pub const NOT_PINNED: &str = "훅이 부르는 파일을 고정하지 못해 실행하지 않았습니다";
 
-/// The pin of the file `spec` runs (`command[0]` with a `/`), when it is
-/// in `workdir` or, for a project's hook, in the project's folder
-/// `project`: the model may change files there, so the hook must run only
-/// what was read (and, for a project's hooks, trusted). A program found on
-/// PATH and files outside those folders are not pinned.
-pub fn pin_for(spec: &Spec, workdir: &Path, project: Option<&Path>) -> Option<Pin> {
-    let program = &spec.command[0];
-    if !program.contains('/') {
-        return None;
+/// The pins of the files `spec` runs, when they are in `workdir` or, for
+/// a project's hook, in the project's folder `project`: the model may
+/// change files there, so the hook must run only what was read (and, for
+/// a project's hooks, trusted). The files are `command[0]` when it has a
+/// `/`, and the script a known interpreter runs ([`script_arg`]). A
+/// program found on PATH and files outside those folders are not pinned.
+pub fn pins_for(spec: &Spec, workdir: &Path, project: Option<&Path>) -> Vec<Pin> {
+    let mut words = Vec::new();
+    if spec.command[0].contains('/') {
+        words.push(0);
     }
-    let resolved = resolve(program, workdir)?;
-    if !inside(&resolved, workdir, project) {
-        return None;
+    if let Script::File(arg) = script_arg(&spec.command) {
+        words.push(arg);
     }
-    let digest = pinned_digest(&resolved);
-    Some(Pin {
-        path: resolved,
-        digest,
-    })
+    words
+        .into_iter()
+        .filter_map(|arg| {
+            let resolved = resolve(&spec.command[arg], workdir)?;
+            inside(&resolved, workdir, project).then(|| Pin {
+                digest: pinned_digest(&resolved),
+                path: resolved,
+                arg,
+            })
+        })
+        .collect()
+}
+
+/// What a known interpreter in `command[0]` runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Script {
+    /// `command[0]` is not one of [`INTERPRETERS`].
+    NotInterpreter,
+    /// The file named by this word of `command`.
+    File(usize),
+    /// Code or a module named by this option (`-c`, `-e`, `-m`): nothing
+    /// to pin.
+    Code(String),
+    /// No file: it reads its program from stdin.
+    None,
+}
+
+/// An interpreter whose first file argument is pinned, and its options
+/// that matter for finding it.
+struct Interpreter {
+    names: &'static [&'static str],
+    /// Short options that give code or a module instead of a file (also
+    /// inside a cluster such as `-ec`).
+    code: &'static str,
+    /// Short options that take a value (the rest of the word, or the next
+    /// word).
+    value: &'static str,
+    /// Long options that give code or load a module.
+    long_code: &'static [&'static str],
+    /// Long options that take the next word as their value.
+    long_value: &'static [&'static str],
+}
+
+/// The interpreters whose script argument is pinned like `command[0]`.
+const INTERPRETERS: &[Interpreter] = &[
+    Interpreter {
+        names: &["sh", "bash", "zsh"],
+        code: "c",
+        value: "oO",
+        long_code: &[],
+        long_value: &["--rcfile", "--init-file"],
+    },
+    Interpreter {
+        names: &["python3", "python"],
+        code: "cm",
+        value: "WX",
+        long_code: &[],
+        long_value: &["--check-hash-based-pycs"],
+    },
+    Interpreter {
+        names: &["node"],
+        code: "epr",
+        value: "",
+        long_code: &[
+            "--eval",
+            "--print",
+            "--require",
+            "--import",
+            "--loader",
+            "--experimental-loader",
+        ],
+        long_value: &[],
+    },
+    Interpreter {
+        names: &["ruby"],
+        // `-C dir` runs the script from another folder.
+        code: "erC",
+        value: "IEF",
+        long_code: &[],
+        long_value: &[],
+    },
+    Interpreter {
+        names: &["perl"],
+        code: "eEMmx",
+        value: "",
+        long_code: &[],
+        long_value: &[],
+    },
+];
+
+/// The names of the interpreters whose script is pinned.
+pub fn interpreter_names() -> impl Iterator<Item = &'static str> {
+    INTERPRETERS
+        .iter()
+        .flat_map(|known| known.names.iter().copied())
+}
+
+/// What the interpreter `command[0]` (by its file name) runs: the first
+/// word after its options, unless an option gives code or a module first.
+/// `--` ends the options.
+pub fn script_arg(command: &[String]) -> Script {
+    let name = Path::new(&command[0])
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let Some(known) = INTERPRETERS
+        .iter()
+        .find(|known| known.names.contains(&name))
+    else {
+        return Script::NotInterpreter;
+    };
+    let mut at = 1;
+    while let Some(word) = command.get(at) {
+        if word == "--" {
+            return match command.get(at + 1) {
+                Some(next) if next != "-" => Script::File(at + 1),
+                _ => Script::None,
+            };
+        }
+        if word == "-" {
+            return Script::None;
+        }
+        if !word.starts_with('-') {
+            return Script::File(at);
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, has_value) = match long.split_once('=') {
+                Some((name, _)) => (name, true),
+                None => (long, false),
+            };
+            let name = format!("--{name}");
+            if known.long_code.contains(&name.as_str()) {
+                return Script::Code(word.clone());
+            }
+            if known.long_value.contains(&name.as_str()) && !has_value {
+                at += 1;
+            }
+        } else {
+            let letters = &word[1..];
+            for (index, letter) in letters.char_indices() {
+                if known.code.contains(letter) {
+                    return Script::Code(word.clone());
+                }
+                if known.value.contains(letter) {
+                    if index + letter.len_utf8() == letters.len() {
+                        at += 1;
+                    }
+                    break;
+                }
+            }
+        }
+        at += 1;
+    }
+    Script::None
 }
 
 /// `path` as a process working in `workdir` finds it: absolute, its
@@ -212,7 +364,7 @@ pub fn user_hooks(home: &Path) -> Result<Vec<Hook>> {
             hooks.push(Hook {
                 spec,
                 origin: Origin::User(settings.clone()),
-                pin: None,
+                pins: Vec::new(),
             });
         }
     }
@@ -230,7 +382,7 @@ pub fn user_hooks(home: &Path) -> Result<Vec<Hook>> {
             hooks.push(Hook {
                 spec,
                 origin: Origin::User(path.clone()),
-                pin: None,
+                pins: Vec::new(),
             });
         }
     }
@@ -267,9 +419,9 @@ pub struct ProjectFile {
     pub text: String,
     /// Its hooks, or why they cannot be read.
     pub hooks: Result<Vec<Spec>, String>,
-    /// The pins of its hooks ([`pin_for`]), in order; their digests are
+    /// The pins of its hooks ([`pins_for`]), in order; their digests are
     /// part of [`ProjectFile::digest`].
-    pub pins: Vec<Option<Pin>>,
+    pub pins: Vec<Vec<Pin>>,
 }
 
 impl ProjectFile {
@@ -281,11 +433,16 @@ impl ProjectFile {
                 specs
                     .iter()
                     .cloned()
-                    .zip(self.pins.iter().cloned().chain(std::iter::repeat(None)))
-                    .map(|(spec, pin)| Hook {
+                    .zip(
+                        self.pins
+                            .iter()
+                            .cloned()
+                            .chain(std::iter::repeat(Vec::new())),
+                    )
+                    .map(|(spec, pins)| Hook {
                         spec,
                         origin: Origin::Project(self.path.clone()),
-                        pin,
+                        pins,
                     })
                     .collect()
             })
@@ -361,16 +518,18 @@ pub fn project_file_in(
         }
         Err(_) => (String::new(), Err("it is not UTF-8 text".to_string())),
     };
-    let pins: Vec<Option<Pin>> = hooks
+    let pins: Vec<Vec<Pin>> = hooks
         .as_ref()
         .map(|specs| {
             specs
                 .iter()
-                .map(|spec| pin_for(spec, workdir, Some(&project)))
+                .map(|spec| pins_for(spec, workdir, Some(&project)))
                 .collect()
         })
         .unwrap_or_default();
-    if pins.iter().any(Option::is_some) {
+    // Lines as before interpreter scripts were pinned, so a file trusted
+    // then stays trusted unless one of its hooks runs such a script.
+    if pins.iter().any(|pins| !pins.is_empty()) {
         let mut all = format!("{digest}\n");
         for pin in pins.iter().flatten() {
             let state = pin.digest.as_deref().unwrap_or("unreadable");
@@ -467,7 +626,7 @@ impl Found {
         // A project's hooks were pinned when the file was read and trusted.
         for hook in &mut hooks {
             if matches!(hook.origin, Origin::User(_)) {
-                hook.pin = pin_for(&hook.spec, workdir, None);
+                hook.pins = pins_for(&hook.spec, workdir, None);
             }
         }
         Some(std::sync::Arc::new(Hooks::new(
