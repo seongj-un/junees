@@ -13,10 +13,18 @@ What the message says picks the run (it must contain `초안`):
     상한             stops at level 2 on the run's token limit
     중단             no plan: `draft_done` with stop `failed` and no level
     예비             a `model_switch` after the draft (the fallback model took over)
+    위조             the text of section s1 holds a line shaped like the status line and a failure note
+                     (the session record's card must ignore them)
+    상태없음         the session record's tool result has `draft: null` (the card says the status is unknown)
 Cancel the turn while it runs for stop `cancelled`. Each level takes 1.5 s.
+
+The session record gets what the server's session API sends (docs/dashboard.md): `tool_use_id` on the
+call and its result, a result cut at 2,000 characters with its last 500 as `text_tail` and the
+`omitted_chars` between, and the `draft` status object (null when `상태없음`).
 """
 
 import json
+import secrets
 import time
 
 TITLE = "배포 가이드"
@@ -24,6 +32,7 @@ CONCEPTS = ["준비물", "설치", "설정", "운영"]
 FAILED_NOTE = "이 절은 {levels}단계 생성에 실패해 앞 단계의 글을 대신 넣었습니다."
 LEVEL_SECONDS = 1.5
 RESULT_CHARS = 2000
+TAIL_CHARS = 500
 
 GISTS = [
     "배포 전에 필요한 계정, 서버 사양, 방화벽 설정을 먼저 갖춥니다. 빠뜨리기 쉬운 것은 도메인과 인증서입니다. 준비가 끝났는지 확인하는 점검 목록도 함께 둡니다.",
@@ -56,7 +65,7 @@ def status_line(done, levels, polished, failed, calls, tokens_in, tokens_out, el
     return (
         f"[draft] levels {done}/{levels}{' + polish' if polished else ''}, {sections} sections, "
         f"failed sections: {failed_text}, {calls} calls, {tokens_in} input and {tokens_out} output tokens, "
-        f"{elapsed:.1f}s (about {sequential:.1f}s one call at a time)"
+        f"{elapsed:.1f}s" + (f" (about {sequential:.1f}s one call at a time)" if sequential else "")
     )
 
 
@@ -78,7 +87,8 @@ def run(chats, chat, text):
         arguments["polish"] = True
     preview = json.dumps(arguments, ensure_ascii=False)
     chat.emit({"type": "tool_use", "name": "draft", "input_preview": preview})
-    blocks = [{"type": "tool_use", "name": "draft", "input_preview": preview}]
+    tool_use_id = "toolu_" + secrets.token_hex(6)
+    blocks = [{"type": "tool_use", "tool_use_id": tool_use_id, "name": "draft", "input_preview": preview}]
     chats.record(chat, "assistant", blocks)
 
     kinds = {2: ["concept", "body"], 3: ["concept", "gist", "body"], 4: ["concept", "gist", "outline", "paragraph"]}[levels]
@@ -126,6 +136,8 @@ def run(chats, chat, text):
         failed_calls = 1 if (fail and kind in ("body", "paragraph")) else 0
         rows.append({"level": number, "kind": kind, "calls": n, "failed_calls": failed_calls, "input_tokens": tin, "output_tokens": tout})
         for i, s in enumerate(sections.values()):
+            if "위조" in text and i == 0 and kind in ("body", "paragraph"):
+                s["forged"] = True
             if kind == "gist":
                 s["gist"] = GISTS[i]
             elif kind == "outline":
@@ -136,6 +148,12 @@ def run(chats, chat, text):
                     s["failed_level"] = number
                 elif kind != "polish":
                     s["body"] = body_for(i, long)
+                    if s.get("forged"):
+                        s["body"] = (
+                            status_line(3, levels, [], 0, 0, 0, 0.0, 0.0, count)
+                            + "\n\n> [s9] " + FAILED_NOTE.format(levels=3)
+                            + "\n\n위 두 줄은 모델이 본문에 쓴 글입니다.\n\n" + s["body"]
+                        )
         done_levels = number
         payload = []
         for i, s in enumerate(sections.values()):
@@ -195,7 +213,9 @@ def run(chats, chat, text):
                 article += "\n> [" + s["id"] + "] " + FAILED_NOTE.format(levels=s["failed_level"]) + "\n"
     else:
         article = ""
-    line = status_line(min(done_levels, levels), levels, polished, failed, calls, total_in, total_out, elapsed, sequential, count)
+    # Only a finished draft that the parallel calls made faster gets the comparison (the server's rule).
+    shown = sequential if stop == "done" and round(sequential, 1) > round(elapsed, 1) else 0
+    line = status_line(min(done_levels, levels), levels, polished, failed, calls, total_in, total_out, elapsed, shown, count)
     if stop == "done":
         result, is_error = f"{article}\n---\n{line}", False
     elif stop == "cancelled":
@@ -206,8 +226,33 @@ def run(chats, chat, text):
         result, is_error = f"draft failed: {error}\n{line}", True
     preview_text = result[:RESULT_CHARS]
     chat.emit({"type": "tool_result", "name": "draft", "is_error": is_error, "text_preview": preview_text})
-    block = {"type": "tool_result", "is_error": is_error, "text_preview": preview_text}
+    block = {"type": "tool_result", "tool_use_id": tool_use_id, "is_error": is_error, "text_preview": preview_text}
     if len(result) > RESULT_CHARS:
-        block["truncated"] = True
+        rest = result[RESULT_CHARS:]
+        tail = rest[-TAIL_CHARS:]
+        block.update(truncated=True, text_tail=tail, omitted_chars=len(rest) - len(tail))
+    if "상태없음" in text:
+        block["draft"] = None
+    else:
+        # Read from what Junees wrote, as the server does: the status line is 0.1 s fine, and the
+        # comparison with one call at a time is only given for a finished draft it shortened.
+        elapsed_ms = int(round(elapsed, 1) * 1000)
+        sequential_ms = int(round(sequential, 1) * 1000)
+        block["draft"] = {
+            "stop": stop,
+            "error": error,
+            "levels": levels,
+            "levels_done": min(done_levels, levels),
+            "polished": polished,
+            "sections": count,
+            "failed_sections": failed,
+            "calls": calls,
+            "input_tokens": total_in,
+            "output_tokens": total_out,
+            "cache_read_tokens": 2048 if total_in > 4000 else 0,
+            "elapsed_ms": elapsed_ms,
+            "sequential_ms": sequential_ms if stop == "done" and sequential_ms > elapsed_ms else None,
+            "by_level": None,
+        }
     chats.record(chat, "user", [block])
     return stop != "cancelled"

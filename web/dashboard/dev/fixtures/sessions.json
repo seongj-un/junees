@@ -1,6 +1,17 @@
 {
   "sessions": [
     {
+      "id": "20261113-0855-d138",
+      "title": "배포 가이드를 길게 써 줘",
+      "cwd": "/home/u/work/junees",
+      "updated_at": "2026-11-13T08:51:00Z",
+      "messages": 12,
+      "input_tokens": 21467,
+      "output_tokens": 6368,
+      "cost_usd": 0.2191,
+      "preview": "배포 가이드를 길게 써 줘"
+    },
+    {
       "id": "20261113-0841-3f2a",
       "title": "대시보드 사용량 화면 막대 그래프 정리",
       "cwd": "/home/u/work/junees",
