@@ -1,9 +1,11 @@
 // 세션 상세: one session's conversation, 100 messages at a time.
 
 import { noticeLines } from "./checkpoints.js";
+import { draftResultKeys } from "./draft.js";
 import { code, el, notice, pathCode, timeEl } from "./dom.js";
 import { formatDateTime, formatInt, parseTime } from "./format.js";
 import { chatHash } from "./routes.js";
+import { draftResultCard } from "./view-draft.js";
 
 export const PAGE = 100;
 
@@ -90,7 +92,7 @@ function cut(block) {
     : null;
 }
 
-function blockView(block, messageIndex, n) {
+function blockView(block, messageIndex, n, draftKeys) {
   // A stable id keeps a folded block open across a refresh.
   const id = `blk-${messageIndex}-${n}`;
   switch (block.type) {
@@ -133,6 +135,8 @@ function blockView(block, messageIndex, n) {
         toolBody(block.input_preview),
       );
     case "tool_result":
+      // The result of a `draft` call: the finished card, since its events are not sent again.
+      if (draftKeys.has(`${messageIndex}:${n}`)) return draftResultCard(`draft-${messageIndex}-${n}`, block).node;
       return el(
         "details",
         { class: `tool${block.is_error ? " tool-error" : ""}`, id },
@@ -171,7 +175,13 @@ function blockView(block, messageIndex, n) {
   }
 }
 
-export function messageView(message, now) {
+const NO_DRAFTS = new Set();
+
+/**
+ * One message. `draftKeys` is {@link draftResultKeys} of the list it is in,
+ * for the tool results that answer a `draft` call.
+ */
+export function messageView(message, now, draftKeys = NO_DRAFTS) {
   const at = parseTime(message.at);
   const role = roleLabel(message);
   const tone = role === "도구 결과" ? "tool" : message.role === "user" ? "user" : message.role === "assistant" ? "assistant" : "other";
@@ -188,7 +198,7 @@ export function messageView(message, now) {
       el("span", { class: "msg-index" }, `${formatInt(message.index + 1)}번째`),
     ),
     blocks.length
-      ? blocks.map((block, n) => blockView(block, message.index, n))
+      ? blocks.map((block, n) => blockView(block, message.index, n, draftKeys))
       : el("p", { class: "msg-note" }, "내용 없음"),
   );
 }
@@ -232,7 +242,8 @@ export function render(root, data, ctx) {
     return;
   }
 
-  const list = el("ol", { class: "msgs", "aria-label": "대화" }, messages.map((m) => messageView(m, now)));
+  const draftKeys = draftResultKeys(messages);
+  const list = el("ol", { class: "msgs", "aria-label": "대화" }, messages.map((m) => messageView(m, now, draftKeys)));
   const count = el("p", { class: "summary", "aria-live": "polite" });
   const error = el("div", { class: "more-error", role: "alert", hidden: true });
   const button = el("button", { type: "button", class: "button button-secondary" }, "더 보기");
@@ -265,7 +276,8 @@ export function render(root, data, ctx) {
       if (got.length === 0) more.done = true;
       more.messages = mergePages(more.messages, added);
       messages = mergePages(messages, added);
-      list.append(...added.map((m) => messageView(m, now)));
+      const pairs = draftResultKeys(messages);
+      list.append(...added.map((m) => messageView(m, now, pairs)));
       button.disabled = false;
       update();
       // Keyboard and screen reader users land on the first new message.
