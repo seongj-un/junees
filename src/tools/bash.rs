@@ -572,6 +572,18 @@ pub(crate) mod testing {
             .parse()
             .unwrap_or_else(|_| panic!("not a pid: {text:?}"))
     }
+
+    /// A loopback address that refuses connections for as long as the
+    /// returned socket lives: the socket holds the port bound but never
+    /// listens. A port that was freed instead could be taken by a listener of
+    /// another test running at the same time, and the connection would reach
+    /// that test's server.
+    pub fn closed_port() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let address = socket.local_addr().unwrap();
+        (socket, address)
+    }
 }
 
 #[cfg(test)]

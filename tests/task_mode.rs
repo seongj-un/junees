@@ -498,12 +498,8 @@ async fn a_failing_webhook_leaves_the_exit_code_alone() {
     assert_eq!(posts_of(webhook).await.len(), 1);
 
     // Nothing listens at the webhook: a failed run still exits with 1.
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let hook = format!(
-        "http://{}/api/webhooks/7/{HOOK_TOKEN}",
-        closed.local_addr().unwrap()
-    );
-    drop(closed);
+    let (_closed, address) = common::closed_port();
+    let hook = format!("http://{address}/api/webhooks/7/{HOOK_TOKEN}");
     let run = junees_env(
         root,
         home.path(),
