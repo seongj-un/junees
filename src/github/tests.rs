@@ -68,11 +68,14 @@ type Routes = Vec<(String, VecDeque<Reply>)>;
 
 impl Fake {
     async fn start(routes: Vec<(&str, Vec<Reply>)>) -> Self {
-        Self::start_at("127.0.0.1:0", routes).await
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Self::start_on(listener, routes)
     }
 
-    async fn start_at(address: &str, routes: Vec<(&str, Vec<Reply>)>) -> Self {
-        let listener = TcpListener::bind(address).await.unwrap();
+    /// Serves `routes` on a listener the caller bound, for routes that
+    /// must name the server's own address. The listener is never freed and
+    /// bound again: another test could take the port in between.
+    fn start_on(listener: TcpListener, routes: Vec<(&str, Vec<Reply>)>) -> Self {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut routes: Routes = routes
@@ -451,11 +454,10 @@ struct SelfLinked {
 
 impl SelfLinked {
     async fn start() -> Self {
-        // The port must be known before the routes, so bind, read it,
-        // free it and start the fake there.
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = probe.local_addr().unwrap();
-        drop(probe);
+        // The port must be known before the routes: bind first and hand
+        // the same listener to the fake.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
         let link =
             format!("<http://{address}/repos/o/n/pulls/7/files?per_page=100&page=2>; rel=\"next\"");
         let routes = vec![
@@ -479,7 +481,7 @@ impl SelfLinked {
                 )],
             ),
         ];
-        let fake = Fake::start_at(&address.to_string(), routes).await;
+        let fake = Fake::start_on(listener, routes);
         Self { fake }
     }
 }
