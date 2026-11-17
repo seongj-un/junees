@@ -286,7 +286,9 @@ fn failure_note(err: &anyhow::Error, deadline: &Deadline, limits: Limits) -> Str
 /// Junees's own agent on the API.
 pub struct ApiEngine {
     config: Arc<Config>,
-    provider: ProviderFactory,
+    /// The model calls' provider when a test sets one; otherwise one that
+    /// waits out usage limits within the run's time ([`ApiEngine::agent`]).
+    provider: Option<ProviderFactory>,
     /// Tests only: bash runs in the run's folder, in a sandbox there
     /// ([`crate::tools::Bash::sandboxed`]). A real run's process is
     /// already in that folder; a test's is in the crate.
@@ -297,11 +299,9 @@ pub struct ApiEngine {
 impl ApiEngine {
     pub fn new(config: Config) -> Self {
         let config = Arc::new(config);
-        let settings = Arc::clone(&config);
-        let provider: ProviderFactory = Arc::new(move || crate::provider::from_config(&settings));
         Self {
             config,
-            provider,
+            provider: None,
             #[cfg(test)]
             sandbox: false,
         }
@@ -316,7 +316,7 @@ impl ApiEngine {
 
     /// Uses `provider` for the model calls (tests).
     pub fn with_provider(mut self, provider: ProviderFactory) -> Self {
-        self.provider = provider;
+        self.provider = Some(provider);
         self
     }
 
@@ -406,8 +406,18 @@ impl ApiEngine {
                 skills::Mode::ReadOnly,
             );
         let started = Instant::now();
+        let provider = match &self.provider {
+            Some(factory) => factory()?,
+            // Nobody watches these runs (cron, webhooks, `mcp serve`): a
+            // usage limit with no fallback left is waited out, within the
+            // run's time limit.
+            None => crate::provider::unattended_from_config(
+                config,
+                Some(tokio::time::Instant::now() + limits.max_time),
+            )?,
+        };
         let mut agent = Agent::new(
-            (self.provider)()?,
+            provider,
             tools,
             AgentOptions {
                 system,
