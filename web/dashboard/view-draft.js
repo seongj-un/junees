@@ -55,6 +55,7 @@ function makeCell(idBase, key) {
   const note = el("p", { class: "draft-cell-note", hidden: true });
   const node = el("li", { class: "draft-cell" }, el("div", { class: "draft-cell-head" }, name, idCode, kind, flags), text, toggle, note);
   const cell = { node, name, idCode, kind, flags, text, toggle, note, open: false, label: "" };
+  text.addEventListener("animationend", () => text.classList.remove("is-fresh"));
   toggle.addEventListener("click", () => {
     setOpen(cell, !cell.open);
     fitCell(cell);
