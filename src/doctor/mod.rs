@@ -380,6 +380,7 @@ pub async fn run_with(
     files::state_folder(&mut report, home.as_deref());
     let read = settings::settings(&mut report, settings, broken);
     settings::provider(&mut report, settings, &read);
+    settings::fallback(&mut report, settings, &read);
     settings::keys(&mut report, settings, read.backend);
     claude::check(&mut report, settings, &read, path, probe, online).await;
     services::programs(&mut report, path);
@@ -406,6 +407,7 @@ pub async fn run_with(
     if online {
         online::api_key(&mut report, settings).await;
         online::openai_models(&mut report, settings).await;
+        online::fallback(&mut report, read.config.as_ref()).await;
         online::transcribe(&mut report, settings).await;
         online::release(&mut report, settings).await;
         if has_slack(settings) {

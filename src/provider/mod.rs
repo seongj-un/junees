@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 mod error;
+pub mod fallback;
 mod http;
 pub mod openai;
 mod stream;

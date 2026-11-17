@@ -104,6 +104,87 @@ pub(super) fn settings(
     }
 }
 
+/// The fallback model (`fallback_model`), when it is set: which one and
+/// where, or what is wrong with its settings.
+pub(super) fn fallback(report: &mut Report, settings: &Settings, read: &Read) {
+    use crate::provider::fallback;
+    const NAME: &str = "fallback model";
+    let Some(model) = settings.get(fallback::MODEL_ENV) else {
+        return;
+    };
+    if read.backend == Backend::ClaudeCode {
+        report.skip(
+            AREA,
+            NAME,
+            format!(
+                "{} (not used: the claude-code backend calls no model API itself)",
+                model.trim()
+            ),
+        );
+        return;
+    }
+    match &read.config {
+        Some(config) => {
+            let Some(fallback) = &config.fallback else {
+                return;
+            };
+            let wait = if config.wait_limit.is_zero() {
+                "unattended runs do not wait for usage limits".to_string()
+            } else {
+                format!(
+                    "unattended runs wait up to {} for usage limits",
+                    crate::korean::duration(config.wait_limit)
+                )
+            };
+            report.ok(
+                AREA,
+                NAME,
+                format!(
+                    "{} ({} at {}), after the main model is blocked for {}; {wait}",
+                    fallback.model,
+                    fallback.kind().as_str(),
+                    fallback.address(),
+                    crate::korean::duration(config.fallback_after),
+                ),
+            );
+        }
+        // The settings did not read: say whether the fallback's part is
+        // why (the main provider's own problems are reported above).
+        None => {
+            let get = |key: &str| {
+                settings
+                    .get(key)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            };
+            let kind = crate::provider::Kind::parse(get(crate::provider::PROVIDER_ENV).as_deref())
+                .unwrap_or_default();
+            let main_openai = (kind == crate::provider::Kind::OpenAi)
+                .then(|| crate::provider::openai::Settings::read(get).ok())
+                .flatten();
+            let checked = fallback::read(
+                &get,
+                &fallback::Main {
+                    kind,
+                    anthropic_key: "-",
+                    anthropic_url: crate::config::DEFAULT_BASE_URL,
+                    openai: main_openai.as_ref(),
+                },
+            )
+            .and_then(|_| fallback::read_times(&get));
+            if let Err(err) = checked {
+                report.fail(
+                    AREA,
+                    NAME,
+                    format!("{err:#}"),
+                    "check fallback_model, fallback_provider, fallback_base_url, \
+                     fallback_api_key, fallback_after and wait_limit (docs/configuration.md)",
+                );
+            }
+        }
+    }
+}
+
 /// The API the `api` backend talks to: which one and where, and the
 /// settings it ignores.
 pub(super) fn provider(report: &mut Report, settings: &Settings, read: &Read) {

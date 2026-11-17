@@ -177,6 +177,71 @@ pub(super) async fn api_key(report: &mut Report, settings: &Settings) {
     }
 }
 
+/// With a fallback model, one call with a one-token answer: whether its
+/// API takes the key and knows the model. Costs one input and one output
+/// token or so.
+pub(super) async fn fallback(report: &mut Report, config: Option<&crate::config::Config>) {
+    use crate::message::Message;
+    use crate::provider::{CompletionRequest, fallback};
+    const NAME: &str = "fallback model";
+    let Some((config, settings)) =
+        config.and_then(|config| Some((config, config.fallback.as_ref()?)))
+    else {
+        return;
+    };
+    let client = match fallback::client(settings, config) {
+        Ok(client) => client,
+        Err(err) => {
+            report.warn(
+                AREA,
+                NAME,
+                format!("cannot set up the client: {err:#}"),
+                "try again",
+            );
+            return;
+        }
+    };
+    let messages = [Message::user_text("Reply with OK.")];
+    let request = CompletionRequest {
+        system: "",
+        messages: &messages,
+        tools: &[],
+        max_tokens: 1,
+        cache: false,
+        thinking: false,
+        web_search: false,
+    };
+    match tokio::time::timeout(TIMEOUT, client.complete(request)).await {
+        Ok(Ok(_)) => report.ok(
+            AREA,
+            NAME,
+            format!("{} answers at {}", settings.model, settings.address()),
+        ),
+        Ok(Err(err)) if err.is_auth() => report.fail(
+            AREA,
+            NAME,
+            format!("{} refused the key: {err}", settings.address()),
+            "check fallback_api_key (or the main provider's key it reuses)",
+        ),
+        Ok(Err(err)) => report.warn(
+            AREA,
+            NAME,
+            format!("{} did not answer: {err}", settings.model),
+            "check fallback_model and fallback_base_url; try again later if the API is busy",
+        ),
+        Err(_) => report.warn(
+            AREA,
+            NAME,
+            format!(
+                "no answer from {} in {} s",
+                settings.address(),
+                TIMEOUT.as_secs()
+            ),
+            "check the network and fallback_base_url",
+        ),
+    }
+}
+
 /// With provider = openai, `GET <openai_base_url>/models` with the key
 /// (none for a server on this machine without one): whether the server
 /// takes it, and whether it lists the model. No tokens are used.
