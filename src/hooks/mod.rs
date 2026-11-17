@@ -403,10 +403,18 @@ impl Found {
 
 /// The question a person answers before a project's hooks file first
 /// runs, whole: they approve what they read.
+///
+/// After the text comes what will run, parsed, right above the question:
+/// a long file cannot push a hook out of sight with empty lines.
 pub fn trust_question(file: &ProjectFile) -> String {
+    let hooks = file.hooks();
+    let mut parsed = format!("  훅 {}개:\n", hooks.len());
+    for hook in &hooks {
+        parsed.push_str(&format!("  - {}\n", cli::summary(hook)));
+    }
     format!(
         "  이 프로젝트의 훅 파일을 처음 보거나, 승인한 뒤 내용이나 훅이 부르는 파일이 바뀌었습니다: {}\n  \
-         승인하면 이 내용의 훅이 이 세션부터 실행됩니다(바뀌면 다시 묻습니다).\n{}",
+         승인하면 이 내용의 훅이 이 세션부터 실행됩니다(바뀌면 다시 묻습니다).\n{}{parsed}",
         file.path.display(),
         cli::quoted(&file.text)
     )

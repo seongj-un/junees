@@ -838,6 +838,13 @@ mod pinning {
         let pin = file.pins[0].clone().unwrap();
         assert_eq!(pin.path, repo.canonicalize().unwrap().join("check.sh"));
         assert!(pin.digest.is_ok());
+        // The question lists what runs, with the pinned file.
+        let question = super::super::trust_question(&file);
+        assert!(question.contains("훅 1개:"), "{question}");
+        assert!(
+            question.contains("- pre_tool -> ./check.sh (pinned "),
+            "{question}"
+        );
         found.trust_untrusted(&home).unwrap();
         let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_none() && found.hooks.len() == 1);
