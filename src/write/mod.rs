@@ -28,6 +28,7 @@ mod plan;
 mod prompts;
 #[cfg(test)]
 mod tests;
+pub mod tool;
 
 pub use plan::{Plan, PlanSection};
 

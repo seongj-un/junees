@@ -615,6 +615,9 @@ fn api_agent(
     if let Some(settings) = config.subagents {
         agent = agent.with_delegate(settings);
     }
+    agent = agent.with_draft(junees::write::tool::Settings {
+        parallel: config.write_parallel,
+    });
     if let Some(gate) = gate {
         let gate = gate
             .with_external_tools(mcp.external_tools())
@@ -667,6 +670,7 @@ fn api_system(
 ) -> String {
     prompt::system_prompt(cwd)
         + subagent::prompt_note(config.subagents)
+        + junees::write::tool::PROMPT_NOTE
         + &context.section()
         + &prompt::data_sections(
             memory,
@@ -1186,6 +1190,7 @@ async fn task_work(command: &TaskCommand, settings: &Settings, cancel: Cancel) -
         cancel,
         notify: Notifier::from_lookup(lookup)?,
         subagents: config.subagents,
+        write_parallel: config.write_parallel,
         claude,
         skill_manage: config.task_skill_manage,
         memory,
@@ -2322,6 +2327,8 @@ fn print_event(event: Event<'_>) {
             );
         }
         Event::Subagent { index, line } => eprintln!("  [{index}] {line}"),
+        Event::DraftLevel(level) => eprintln!("  [draft] {}", junees::write::level_line(level)),
+        Event::DraftDone(draft) => eprintln!("  [draft] {}", draft.summary(None)),
         Event::ModelSwitch(switch) => eprintln!("  !! {}", switch.line()),
         // Part of the answer, after its text.
         Event::Sources(urls) => print!("{}", web_search::sources_text(urls)),

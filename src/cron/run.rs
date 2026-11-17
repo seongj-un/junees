@@ -421,6 +421,7 @@ impl ApiEngine {
         let system = prompt::system_prompt(dir)
             + spec.note
             + crate::subagent::prompt_note(config.subagents)
+            + crate::write::tool::PROMPT_NOTE
             + &spec.trigger.context_files(config, dir).section()
             + &prompt::data_sections(
                 memory.as_ref(),
@@ -465,6 +466,10 @@ impl ApiEngine {
         if let Some(settings) = config.subagents {
             agent = agent.with_delegate(settings);
         }
+        // Nobody watches: fewer requests at once.
+        agent = agent.with_draft(crate::write::tool::Settings::unattended(
+            config.write_parallel,
+        ));
         Ok((agent, left_out))
     }
 }

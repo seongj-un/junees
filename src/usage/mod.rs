@@ -34,6 +34,8 @@ pub enum Kind {
     /// The calls of a `delegate` call's subagents: together
     /// (`subagent_usage`), or one by one from their own journals.
     Subagents,
+    /// The calls of a `draft` call together (`draft_usage`).
+    Drafts,
     /// One Claude Code turn (`claude_turn`), on the subscription.
     ClaudeCode,
 }
@@ -44,6 +46,7 @@ impl Kind {
             Kind::Call => "model calls",
             Kind::Summary => "summaries",
             Kind::Subagents => "subagents",
+            Kind::Drafts => "drafts",
             Kind::ClaudeCode => "Claude Code turns",
         }
     }

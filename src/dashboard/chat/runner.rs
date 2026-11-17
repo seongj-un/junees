@@ -306,6 +306,8 @@ fn on_event(shared: &Shared, room: &Room, out: &mut TextOut, event: Event<'_>) {
                 "retry_at": retry_at,
             }));
         }
+        // Shown by the tool's call and result.
+        Event::DraftLevel(_) | Event::DraftDone(_) => {}
         Event::Compacted {
             before_messages,
             after_messages,

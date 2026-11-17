@@ -448,3 +448,115 @@ fn prompt_blocks_cannot_be_closed_by_the_request() {
     assert_eq!(system.matches("</request>").count(), 1, "{system}");
     let _ = Arc::new(0);
 }
+
+#[test]
+fn draft_input_is_checked_and_unattended_runs_get_two_at_once() {
+    let settings = tool::Settings { parallel: 6 };
+    let (request, options) =
+        tool::parse_input(&json!({"request": "a README", "levels": 4, "polish": true, "x": 1}), settings, 900)
+            .unwrap();
+    assert_eq!(request, "a README");
+    assert_eq!((options.levels, options.polish, options.parallel, options.max_tokens), (4, true, 6, 900));
+    let (_, options) = tool::parse_input(&json!({"request": "r"}), settings, 900).unwrap();
+    assert_eq!((options.levels, options.polish), (3, false));
+    for bad in [
+        json!({}),
+        json!({"request": ""}),
+        json!({"request": "r", "levels": 5}),
+        json!({"request": "r", "levels": "3"}),
+        json!({"request": "r", "polish": "yes"}),
+    ] {
+        assert!(tool::parse_input(&bad, settings, 900).is_err(), "{bad}");
+    }
+    assert_eq!(tool::Settings::unattended(8).parallel, UNATTENDED_PARALLEL);
+    assert_eq!(tool::Settings::unattended(1).parallel, 1);
+}
+
+/// The agent's model calls `draft`, then answers; the draft's own calls
+/// (no tools offered) get the standard replies.
+struct AgentFake {
+    draft: Fake,
+    turns: AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for AgentFake {
+    async fn complete(
+        &self,
+        request: CompletionRequest<'_>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        if request.tools.is_empty() {
+            return self.draft.complete(request).await;
+        }
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 1,
+            ..Usage::default()
+        };
+        if self.turns.fetch_add(1, Ordering::SeqCst) == 0 {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: tool::NAME.to_string(),
+                    input: json!({"request": "a design document"}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                usage,
+            })
+        } else {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::text("saved nothing, here it is")],
+                stop_reason: StopReason::EndTurn,
+                usage,
+            })
+        }
+    }
+
+    fn model(&self) -> Option<&str> {
+        Some("claude-sonnet-4-5")
+    }
+}
+
+#[tokio::test]
+async fn the_agent_runs_draft_calls_reports_levels_and_counts_their_tokens() {
+    let provider = AgentFake {
+        draft: Fake::new(standard(3)),
+        turns: AtomicUsize::new(0),
+    };
+    let mut agent = crate::agent::Agent::new(
+        Box::new(provider),
+        crate::tools::ToolRegistry::new(),
+        crate::agent::AgentOptions {
+            system: "sys".to_string(),
+            max_tokens: 1000,
+            max_turns: 5,
+            context_window: 200_000,
+            compact_threshold: 0.8,
+        },
+    )
+    .with_draft(tool::Settings { parallel: 2 });
+    let mut levels = Vec::new();
+    let mut done = None;
+    let mut result = None;
+    agent
+        .run("write it", |event| match event {
+            crate::agent::Event::DraftLevel(level) => levels.push(level.kind),
+            crate::agent::Event::DraftDone(draft) => done = Some(draft.calls.len()),
+            crate::agent::Event::ToolResult { output, .. } => result = Some(output.clone()),
+            _ => {}
+        })
+        .await
+        .unwrap();
+    assert_eq!(levels, [Kind::Concept, Kind::Gist, Kind::Body]);
+    assert_eq!(done, Some(7));
+    let result = result.unwrap();
+    assert!(!result.is_error);
+    assert!(result.content.starts_with("# A title\n"), "{}", result.content);
+    assert!(
+        result.content.contains("[draft] levels 3/3, 3 sections, failed sections: none, 7 calls"),
+        "{}",
+        result.content
+    );
+    // 2 agent calls of 100 + 7 draft calls of 10.
+    assert_eq!(agent.usage().input_tokens, 270);
+}

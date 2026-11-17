@@ -134,6 +134,9 @@ pub struct TaskEnv<'a> {
     /// Offers the API sessions `delegate` with these settings; their
     /// subagents' tokens count toward the budget.
     pub subagents: Option<crate::subagent::Settings>,
+    /// Requests at once of the `draft` tool's calls, before the unattended
+    /// cap ([`crate::write::tool::Settings::unattended`]).
+    pub write_parallel: usize,
     /// The project instruction files every session reads from the
     /// repository when it starts ([`crate::context_files`]).
     pub context_files: crate::context_files::Setting,
@@ -233,6 +236,7 @@ impl TaskEnv<'_> {
         // the skills as they were when it started.
         let system = system
             + crate::subagent::prompt_note(self.subagents)
+            + crate::write::tool::PROMPT_NOTE
             + &self.context_files.load(&self.root).section()
             + &crate::prompt::data_sections(self.memory.as_ref(), Mode::Task, home, mode);
         let mut agent = Agent::new(
@@ -250,6 +254,9 @@ impl TaskEnv<'_> {
         if let Some(settings) = self.subagents {
             agent = agent.with_delegate(settings);
         }
+        agent = agent.with_draft(crate::write::tool::Settings::unattended(
+            self.write_parallel,
+        ));
         let Some(home) = &self.home else {
             return Ok((agent, None));
         };
@@ -1558,6 +1565,7 @@ mod tests {
             claude: None,
             memory: None,
             subagents: None,
+            write_parallel: crate::write::DEFAULT_PARALLEL,
             context_files: crate::context_files::Setting::with_home(None),
         }
     }

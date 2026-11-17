@@ -85,6 +85,11 @@ pub enum Event<'a> {
     /// The calls went over to the fallback model, because the main one is
     /// blocked (`Switch::line` says so in one line).
     ModelSwitch(&'a crate::provider::fallback::Switch),
+    /// A `draft` call finished a level ([`crate::write`]): each section's
+    /// text at that level.
+    DraftLevel(&'a crate::write::LevelDone),
+    /// A `draft` call ended, as the draft says ([`crate::write::Draft`]).
+    DraftDone(&'a crate::write::Draft),
     /// The earlier part of the conversation was replaced by a summary.
     Compacted {
         before_messages: usize,
@@ -182,6 +187,8 @@ pub struct Agent {
     gate: Option<SharedGate>,
     /// Runs `delegate` calls; see [`Agent::with_delegate`].
     delegate: Option<subagent::Settings>,
+    /// Runs `draft` calls; see [`Agent::with_draft`].
+    draft: Option<crate::write::tool::Settings>,
     /// Told how each run ended; see [`Agent::with_after_turn`].
     after_turn: Option<Arc<dyn AfterTurn>>,
 }
@@ -222,6 +229,7 @@ impl Agent {
             limit: None,
             gate: None,
             delegate: None,
+            draft: None,
             after_turn: None,
         }
     }
@@ -262,6 +270,17 @@ impl Agent {
     pub fn with_delegate(mut self, settings: subagent::Settings) -> Self {
         self.tools.register(subagent::Delegate::new(settings));
         self.delegate = Some(settings);
+        self
+    }
+
+    /// Offers the model the `draft` tool, which writes a long text level by
+    /// level with this agent's model ([`crate::write`]). The tokens its
+    /// calls use count toward this agent's usage (a `draft_usage` journal
+    /// entry), and this agent's cancel stops it.
+    pub fn with_draft(mut self, settings: crate::write::tool::Settings) -> Self {
+        self.tools
+            .register(crate::write::tool::DraftTool::new(settings));
+        self.draft = Some(settings);
         self
     }
 
@@ -532,11 +551,16 @@ impl Agent {
                         name: &name,
                         input: &input,
                     });
-                    match self.delegate {
+                    match (self.delegate, self.draft) {
                         // The subagents stop on the cancel themselves, so
                         // their journals record how they ended.
-                        Some(settings) if name == subagent::NAME => {
+                        (Some(settings), _) if name == subagent::NAME => {
                             self.delegate(settings, &input, &mut on_event).await
+                        }
+                        // The draft stops on the cancel itself and keeps
+                        // the levels it finished.
+                        (_, Some(settings)) if name == crate::write::tool::NAME => {
+                            self.draft(settings, &input, &mut on_event).await
                         }
                         // Dropping the call stops the tool.
                         _ => tokio::select! {
@@ -649,6 +673,46 @@ impl Agent {
             self.record(Entry::SubagentUsage(usage), on_event);
         }
         output
+    }
+
+    /// Runs a `draft` call and records the tokens its calls used. The
+    /// levels are reported as they finish.
+    async fn draft(
+        &mut self,
+        settings: crate::write::tool::Settings,
+        input: &Value,
+        on_event: &mut impl FnMut(Event<'_>),
+    ) -> ToolOutput {
+        let (request, options) =
+            match crate::write::tool::parse_input(input, settings, self.options.max_tokens) {
+                Ok(parsed) => parsed,
+                Err(reason) => return ToolOutput::error(reason),
+            };
+        // A task budget that is used up stops the draft before its calls.
+        if let Err(err) = self.check_limit() {
+            return ToolOutput::error(err.to_string());
+        }
+        let provider = self.provider.clone();
+        let cancel = self.cancel.clone();
+        let (sender, mut levels) = tokio::sync::mpsc::unbounded_channel();
+        let work = crate::write::run(&*provider, &request, &options, &cancel, Some(&sender));
+        tokio::pin!(work);
+        let draft = loop {
+            tokio::select! {
+                draft = &mut work => break draft,
+                Some(level) = levels.recv() => on_event(Event::DraftLevel(&level)),
+            }
+        };
+        // Levels sent while the draft ended are still queued.
+        while let Ok(level) = levels.try_recv() {
+            on_event(Event::DraftLevel(&level));
+        }
+        on_event(Event::DraftDone(&draft));
+        let usage = draft.usage();
+        if usage != Usage::default() {
+            self.record(Entry::DraftUsage(usage), on_event);
+        }
+        crate::write::tool::output(&draft)
     }
 
     /// Fails with [`LimitReached`] if the limit says to stop.
@@ -877,7 +941,10 @@ impl Agent {
     /// conversation instead of one with holes.
     fn record(&mut self, entry: Entry, on_event: &mut impl FnMut(Event<'_>)) {
         let model = match entry {
-            Entry::Usage(_) | Entry::SummaryUsage(_) | Entry::SubagentUsage(_) => {
+            Entry::Usage(_)
+            | Entry::SummaryUsage(_)
+            | Entry::SubagentUsage(_)
+            | Entry::DraftUsage(_) => {
                 self.provider.model()
             }
             _ => None,

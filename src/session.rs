@@ -36,7 +36,9 @@ use crate::message::{ContentBlock, Message, Role, Usage};
 /// added `clear_images`, which a format 7 Junees would refuse as a corrupt
 /// line. Format 9 added `notes`, the lines Junees itself puts before an
 /// input (an undo's `[되돌림]` line), kept apart from what the person wrote.
-pub const FORMAT: u32 = 9;
+/// Format 10 added `draft_usage`, which a format 9 Junees would refuse as
+/// an unknown entry.
+pub const FORMAT: u32 = 10;
 
 /// How the model sees the lines of an [`Entry::Notes`]: a text block of
 /// their own, before the person's input, between these tags. What the
@@ -191,7 +193,7 @@ fn first_format() -> u32 {
 }
 
 /// The `type` tags of [`Entry`]; keep in step with its variants.
-const ENTRY_TYPES: [&str; 14] = [
+const ENTRY_TYPES: [&str; 15] = [
     "meta",
     "message",
     "append_text",
@@ -206,6 +208,7 @@ const ENTRY_TYPES: [&str; 14] = [
     "subagent_usage",
     "clear_images",
     "notes",
+    "draft_usage",
 ];
 
 /// One line of a journal.
@@ -277,6 +280,10 @@ pub enum Entry {
     /// a task's budget) but say nothing about this conversation's context
     /// size; their own histories are in journals of their own.
     SubagentUsage(Usage),
+    /// Tokens the calls of a `draft` call used together
+    /// ([`crate::write`]). Like [`Entry::SubagentUsage`], they count toward
+    /// the session's usage but not its context size.
+    DraftUsage(Usage),
     /// The images of the trailing user message were replaced by `note`:
     /// the API rejected the request that carried them (a file whose header
     /// looks right but whose data is broken, for one), so sending them
@@ -476,7 +483,9 @@ impl Transcript {
                     self.drop_thinking();
                 }
             }
-            Entry::SummaryUsage(usage) | Entry::SubagentUsage(usage) => self.usage.add(usage),
+            Entry::SummaryUsage(usage) | Entry::SubagentUsage(usage) | Entry::DraftUsage(usage) => {
+                self.usage.add(usage)
+            }
             Entry::Compact {
                 summary,
                 keep_from,

@@ -55,6 +55,7 @@ fn env<'a>(root: &Path, factory: &'a ProviderFactory<'a>, bin: &Path) -> TaskEnv
         }),
         memory: None,
         subagents: None,
+        write_parallel: crate::write::DEFAULT_PARALLEL,
         context_files: crate::context_files::Setting::with_home(None),
     }
 }
