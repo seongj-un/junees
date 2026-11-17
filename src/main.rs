@@ -1722,7 +1722,10 @@ impl Repl {
             lang: args.lang,
             max_tokens: agent.options().max_tokens,
         };
-        let out = args.out.as_ref().map(|path| path.to_string_lossy().into_owned());
+        let out = args
+            .out
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
         let line = format!("/write {arg}");
         self.cancel.reset();
         let mut terminated = false;

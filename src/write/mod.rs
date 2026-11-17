@@ -83,10 +83,9 @@ impl Lang {
 
     /// Korean when the request has Hangul in it, else English.
     pub fn of(request: &str) -> Self {
-        if request
-            .chars()
-            .any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c) || ('\u{3131}'..='\u{318E}').contains(&c))
-        {
+        if request.chars().any(|c| {
+            ('\u{AC00}'..='\u{D7A3}').contains(&c) || ('\u{3131}'..='\u{318E}').contains(&c)
+        }) {
             Lang::Ko
         } else {
             Lang::En
@@ -154,9 +153,8 @@ pub fn parse_parallel(raw: &str) -> Result<usize, String> {
 pub fn read_parallel(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<usize> {
     match get(PARALLEL_ENV) {
         None => Ok(DEFAULT_PARALLEL),
-        Some(raw) => {
-            parse_parallel(&raw).map_err(|err| anyhow::anyhow!("{PARALLEL_ENV} (`write_parallel`): {err}"))
-        }
+        Some(raw) => parse_parallel(&raw)
+            .map_err(|err| anyhow::anyhow!("{PARALLEL_ENV} (`write_parallel`): {err}")),
     }
 }
 
@@ -666,7 +664,10 @@ async fn levels(
         for (section, body) in draft.sections.iter_mut().zip(bodies) {
             section.body = Some(body.unwrap_or_else(|| {
                 section.failed.push(levels);
-                section.gist.clone().unwrap_or_else(|| section.concept.clone())
+                section
+                    .gist
+                    .clone()
+                    .unwrap_or_else(|| section.concept.clone())
             }));
         }
         draft.levels_done = levels;
@@ -827,7 +828,11 @@ impl Draft {
         }
         let mut out = format!("# {}\n", self.title);
         for section in &self.sections {
-            out.push_str(&format!("\n## {}\n\n{}\n", section.concept, section.best_text()));
+            out.push_str(&format!(
+                "\n## {}\n\n{}\n",
+                section.concept,
+                section.best_text()
+            ));
             if !section.failed.is_empty() {
                 out.push_str(&format!("\n> {}\n", self.failure_note(section)));
             }
@@ -921,9 +926,8 @@ impl Draft {
     /// and the one-at-a-time estimate.
     pub fn summary(&self, prices: Option<&crate::usage::Prices>) -> String {
         let usage = self.usage();
-        let input = usage.input_tokens
-            + usage.cache_creation_input_tokens
-            + usage.cache_read_input_tokens;
+        let input =
+            usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
         let cost = match prices.map(|prices| self.cost(prices)) {
             None => String::new(),
             Some(Some(nano)) => format!(", 비용 {}", crate::usage::prices::dollars(nano)),

@@ -76,12 +76,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
             "-h" | "--help" => return Ok(None),
             "--" => options_done = true,
             "--levels" => {
-                parsed.levels = super::parse_levels(&value("--levels")?).map_err(anyhow::Error::msg)?
+                parsed.levels =
+                    super::parse_levels(&value("--levels")?).map_err(anyhow::Error::msg)?
             }
             "--parallel" => {
-                parsed.parallel = Some(
-                    super::parse_parallel(&value("--parallel")?).map_err(anyhow::Error::msg)?,
-                )
+                parsed.parallel =
+                    Some(super::parse_parallel(&value("--parallel")?).map_err(anyhow::Error::msg)?)
             }
             "--polish" if inline.is_none() => parsed.polish = true,
             "--out" => {
@@ -91,7 +91,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
                 }
                 parsed.out = Some(PathBuf::from(out));
             }
-            "--lang" => parsed.lang = Some(Lang::parse(&value("--lang")?).map_err(anyhow::Error::msg)?),
+            "--lang" => {
+                parsed.lang = Some(Lang::parse(&value("--lang")?).map_err(anyhow::Error::msg)?)
+            }
             _ => bail!("unknown option `{arg}` (see junees write --help)"),
         }
     }
@@ -333,8 +335,17 @@ mod tests {
     #[test]
     fn options_and_the_request_are_read() {
         let parsed = args(&[
-            "--levels", "4", "--parallel=8", "--polish", "--out", "a.md", "--lang", "en", "write",
-            "a", "README",
+            "--levels",
+            "4",
+            "--parallel=8",
+            "--polish",
+            "--out",
+            "a.md",
+            "--lang",
+            "en",
+            "write",
+            "a",
+            "README",
         ])
         .unwrap()
         .unwrap();
@@ -373,10 +384,16 @@ mod tests {
             level: 1,
             kind: Kind::Concept,
             title: "T".to_string(),
-            sections: vec![("s1".into(), "first".into()), ("s2".into(), "second".into())],
+            sections: vec![
+                ("s1".into(), "first".into()),
+                ("s2".into(), "second".into()),
+            ],
         };
         view.update(&concepts);
-        assert_eq!(view.render(&concepts, 3), "[1/3단계 개념]\n\n# T\n\n- first\n- second\n");
+        assert_eq!(
+            view.render(&concepts, 3),
+            "[1/3단계 개념]\n\n# T\n\n- first\n- second\n"
+        );
         let gists = LevelDone {
             level: 2,
             kind: Kind::Gist,
@@ -388,6 +405,9 @@ mod tests {
             view.render(&gists, 3),
             "[2/3단계 요지]\n\n# T\n\n## first\n\ng1\n\n## second\n\ng2\n\n"
         );
-        assert_eq!(partial_path(Path::new("out/a.md")), PathBuf::from("out/a.md.partial"));
+        assert_eq!(
+            partial_path(Path::new("out/a.md")),
+            PathBuf::from("out/a.md.partial")
+        );
     }
 }

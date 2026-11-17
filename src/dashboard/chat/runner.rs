@@ -308,7 +308,9 @@ fn draft_done(shared: &Shared, draft: &crate::write::Draft) -> serde_json::Value
     let (stop, error) = match &draft.stop {
         crate::write::Stop::Done => ("done", None),
         crate::write::Stop::Cancelled => ("cancelled", None),
-        crate::write::Stop::Failed(reason) => ("failed", Some(preview(shared, reason, PREVIEW_CHARS))),
+        crate::write::Stop::Failed(reason) => {
+            ("failed", Some(preview(shared, reason, PREVIEW_CHARS)))
+        }
     };
     let levels: Vec<_> = draft
         .by_level()

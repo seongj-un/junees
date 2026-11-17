@@ -118,7 +118,10 @@ fn neighbours(plan: &Plan, index: usize) -> String {
     if lines.is_empty() {
         "It has no neighbours.".to_string()
     } else {
-        format!("Its neighbours, which other writers cover: {}.", lines.join("; "))
+        format!(
+            "Its neighbours, which other writers cover: {}.",
+            lines.join("; ")
+        )
     }
 }
 

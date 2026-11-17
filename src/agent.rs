@@ -1043,9 +1043,7 @@ impl Agent {
             Entry::Usage(_)
             | Entry::SummaryUsage(_)
             | Entry::SubagentUsage(_)
-            | Entry::DraftUsage(_) => {
-                self.provider.model()
-            }
+            | Entry::DraftUsage(_) => self.provider.model(),
             _ => None,
         };
         if let Some(journal) = &mut self.journal

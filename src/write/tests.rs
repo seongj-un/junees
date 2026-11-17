@@ -30,7 +30,9 @@ struct Fake {
 }
 
 impl Fake {
-    fn new(reply: impl Fn(&Seen, usize) -> Result<String, ProviderError> + Send + Sync + 'static) -> Self {
+    fn new(
+        reply: impl Fn(&Seen, usize) -> Result<String, ProviderError> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             reply: Box::new(reply),
             delay: Duration::from_millis(50),
@@ -53,7 +55,11 @@ impl Provider for Fake {
     ) -> Result<CompletionResponse, ProviderError> {
         let seen = Seen {
             system: request.system.to_string(),
-            user: request.messages.last().map(Message::text).unwrap_or_default(),
+            user: request
+                .messages
+                .last()
+                .map(Message::text)
+                .unwrap_or_default(),
             messages: request.messages.len(),
             cache: request.cache,
         };
@@ -174,7 +180,11 @@ async fn a_bad_plan_is_asked_for_once_more_then_fails() {
     assert_eq!(result.stop, Stop::Done);
     let seen = fake.seen();
     assert_eq!(seen[1].messages, 3, "the retry carries the bad reply");
-    assert!(seen[1].user.contains("not a valid plan"), "{}", seen[1].user);
+    assert!(
+        seen[1].user.contains("not a valid plan"),
+        "{}",
+        seen[1].user
+    );
 
     let fake = Fake::new(|_, _| Ok("still not json".to_string()));
     let result = draft(&fake, &options(3, 4)).await;
@@ -194,7 +204,10 @@ async fn three_levels_run_each_level_in_parallel_within_the_limit() {
     assert_eq!(result.calls.len(), 13);
     assert_eq!(fake.peak.load(Ordering::SeqCst), 4);
     let text = result.text();
-    assert!(text.starts_with("# A title\n\n## concept 1\n\nbody of s1"), "{text}");
+    assert!(
+        text.starts_with("# A title\n\n## concept 1\n\nbody of s1"),
+        "{text}"
+    );
     assert!(text.contains("## concept 6\n\nbody of s6"), "{text}");
 
     let fake = Fake::new(standard(6));
@@ -226,15 +239,29 @@ async fn a_body_request_sees_the_plan_and_gists_but_no_other_body() {
         // Same level, same system prompt, byte for byte.
         assert_eq!(body.system, bodies[0].system);
     }
-    let gists: Vec<_> = seen.iter().filter(|s| s.user.contains("the gist of")).collect();
+    let gists: Vec<_> = seen
+        .iter()
+        .filter(|s| s.user.contains("the gist of"))
+        .collect();
     for gist in &gists {
-        assert!(!gist.system.contains("gist of s"), "a gist sees no other gist");
+        assert!(
+            !gist.system.contains("gist of s"),
+            "a gist sees no other gist"
+        );
         assert_eq!(gist.system, gists[0].system);
     }
     // Neighbours are named in the user message.
     let second = gists.iter().find(|s| unit_of(s) == "s2").unwrap();
-    assert!(second.user.contains("before it: [s1] concept 1"), "{}", second.user);
-    assert!(second.user.contains("after it: [s3] concept 3"), "{}", second.user);
+    assert!(
+        second.user.contains("before it: [s1] concept 1"),
+        "{}",
+        second.user
+    );
+    assert!(
+        second.user.contains("after it: [s3] concept 3"),
+        "{}",
+        second.user
+    );
 }
 
 #[tokio::test]
@@ -243,11 +270,17 @@ async fn the_cache_mark_goes_on_levels_with_a_second_wave_only() {
     draft(&fake, &options(3, 4)).await;
     let seen = fake.seen();
     assert!(!seen[0].cache, "the plan is a one-off call");
-    assert!(seen[1..].iter().all(|seen| seen.cache), "6 units, 4 at once");
+    assert!(
+        seen[1..].iter().all(|seen| seen.cache),
+        "6 units, 4 at once"
+    );
 
     let fake = Fake::new(standard(4));
     draft(&fake, &options(3, 4)).await;
-    assert!(fake.seen().iter().all(|seen| !seen.cache), "one wave reads nothing");
+    assert!(
+        fake.seen().iter().all(|seen| !seen.cache),
+        "one wave reads nothing"
+    );
 }
 
 #[tokio::test]
@@ -263,18 +296,29 @@ async fn a_failing_section_is_asked_again_then_its_gist_stands_in() {
     assert_eq!(result.stop, Stop::Done);
     let failed_calls: Vec<_> = result.calls.iter().filter(|call| !call.ok).collect();
     assert_eq!(failed_calls.len(), 2, "asked once more");
-    assert!(failed_calls.iter().all(|call| call.unit.as_deref() == Some("s2")));
+    assert!(
+        failed_calls
+            .iter()
+            .all(|call| call.unit.as_deref() == Some("s2"))
+    );
     assert_eq!(result.sections[1].body.as_deref(), Some("gist of s2"));
     assert_eq!(result.sections[1].failed, [3]);
     assert_eq!(result.failed_sections(), ["s2"]);
     let text = result.text();
-    assert!(text.contains("gist of s2\n\n> [s2] Level 3 of this section failed"), "{text}");
-    assert!(text.contains("body of s1") && text.contains("body of s3"), "{text}");
+    assert!(
+        text.contains("gist of s2\n\n> [s2] Level 3 of this section failed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("body of s1") && text.contains("body of s3"),
+        "{text}"
+    );
 
     // The second try that works is used.
     let fake = Fake::new(|seen, count| {
         static FIRST: AtomicUsize = AtomicUsize::new(0);
-        if seen.user.contains("the full text of section [s1]") && FIRST.fetch_add(1, Ordering::SeqCst) == 0
+        if seen.user.contains("the full text of section [s1]")
+            && FIRST.fetch_add(1, Ordering::SeqCst) == 0
         {
             Err(ProviderError::Decode("once".to_string()))
         } else {
@@ -283,7 +327,13 @@ async fn a_failing_section_is_asked_again_then_its_gist_stands_in() {
     });
     let result = draft(&fake, &options(3, 4)).await;
     assert!(result.sections[0].failed.is_empty());
-    assert!(result.sections[0].body.as_deref().unwrap().starts_with("body of s1"));
+    assert!(
+        result.sections[0]
+            .body
+            .as_deref()
+            .unwrap()
+            .starts_with("body of s1")
+    );
 }
 
 #[tokio::test]
@@ -294,9 +344,22 @@ async fn two_levels_go_from_the_plan_to_the_text() {
     assert_eq!(result.calls.len(), 4);
     let seen = fake.seen();
     assert!(seen.iter().all(|seen| !seen.user.contains("the gist of")));
-    let body = seen.iter().find(|s| s.user.contains("the full text of")).unwrap();
-    assert!(body.user.contains("other sections' concepts"), "{}", body.user);
-    assert!(result.calls.iter().filter(|c| c.kind == Kind::Body).all(|c| c.level == 2));
+    let body = seen
+        .iter()
+        .find(|s| s.user.contains("the full text of"))
+        .unwrap();
+    assert!(
+        body.user.contains("other sections' concepts"),
+        "{}",
+        body.user
+    );
+    assert!(
+        result
+            .calls
+            .iter()
+            .filter(|c| c.kind == Kind::Body)
+            .all(|c| c.level == 2)
+    );
 }
 
 #[tokio::test]
@@ -318,7 +381,11 @@ async fn four_levels_write_every_paragraph_from_the_outlines() {
         .into_iter()
         .find(|s| s.user.contains("outline line"))
         .unwrap();
-    assert!(paragraph.system.contains("<outlines>"), "{}", paragraph.system);
+    assert!(
+        paragraph.system.contains("<outlines>"),
+        "{}",
+        paragraph.system
+    );
     assert!(!paragraph.system.contains("paragraph of"));
     let mut levels = Vec::new();
     while let Ok(level) = receiver.try_recv() {
@@ -342,17 +409,42 @@ async fn polish_edits_only_the_paragraphs_at_each_seam() {
     opts.polish = true;
     let result = draft(&fake, &opts).await;
     assert!(result.polished);
-    let polish: Vec<_> = result.calls.iter().filter(|c| c.kind == Kind::Polish).collect();
+    let polish: Vec<_> = result
+        .calls
+        .iter()
+        .filter(|c| c.kind == Kind::Polish)
+        .collect();
     assert_eq!(polish.len(), 2);
     assert_eq!(polish[0].unit.as_deref(), Some("s1|s2"));
     assert_eq!(polish[0].level, 4);
-    assert_eq!(result.sections[0].body.as_deref(), Some("body of s1\n\nfixed end"));
-    assert_eq!(result.sections[1].body.as_deref(), Some("fixed start\n\nfixed end"));
-    assert_eq!(result.sections[2].body.as_deref(), Some("fixed start\n\nsecond paragraph of s3"));
-    let seam = fake.seen().into_iter().find(|s| s.system.contains("edit the seam")).unwrap();
-    assert!(seam.user.contains("second paragraph of s1"), "{}", seam.user);
+    assert_eq!(
+        result.sections[0].body.as_deref(),
+        Some("body of s1\n\nfixed end")
+    );
+    assert_eq!(
+        result.sections[1].body.as_deref(),
+        Some("fixed start\n\nfixed end")
+    );
+    assert_eq!(
+        result.sections[2].body.as_deref(),
+        Some("fixed start\n\nsecond paragraph of s3")
+    );
+    let seam = fake
+        .seen()
+        .into_iter()
+        .find(|s| s.system.contains("edit the seam"))
+        .unwrap();
+    assert!(
+        seam.user.contains("second paragraph of s1"),
+        "{}",
+        seam.user
+    );
     assert!(seam.user.contains("body of s2"), "{}", seam.user);
-    assert!(!seam.user.contains("second paragraph of s2"), "only the seam: {}", seam.user);
+    assert!(
+        !seam.user.contains("second paragraph of s2"),
+        "only the seam: {}",
+        seam.user
+    );
 }
 
 #[tokio::test]
@@ -371,8 +463,20 @@ async fn polish_keeps_a_one_paragraph_section_to_the_first_seam_and_refuses_rewr
     let result = draft(&fake, &opts).await;
     // The starts are too long to be a fix: kept. The middle section's
     // end edit is applied since its start was not changed.
-    assert!(result.sections[0].body.as_deref().unwrap().starts_with("end "));
-    assert!(result.sections[1].body.as_deref().unwrap().starts_with("end "));
+    assert!(
+        result.sections[0]
+            .body
+            .as_deref()
+            .unwrap()
+            .starts_with("end ")
+    );
+    assert!(
+        result.sections[1]
+            .body
+            .as_deref()
+            .unwrap()
+            .starts_with("end ")
+    );
     assert_eq!(result.sections[2].body.as_deref(), Some("only s3"));
 }
 
@@ -399,14 +503,21 @@ async fn a_cancel_keeps_the_finished_levels() {
     assert_eq!(result.stop, Stop::Cancelled);
     assert_eq!(result.levels_done, 2);
     assert!(result.sections.iter().all(|s| s.body.is_none()));
-    assert!(result.text().contains("## concept 2\n\ngist of s2"), "{}", result.text());
+    assert!(
+        result.text().contains("## concept 2\n\ngist of s2"),
+        "{}",
+        result.text()
+    );
 }
 
 #[tokio::test]
 async fn empty_and_huge_requests_make_no_call() {
     let fake = Fake::new(standard(3));
     let result = run(&fake, "  \n", &options(3, 4), &Cancel::new(), None).await;
-    assert_eq!(result.stop, Stop::Failed("the request is empty".to_string()));
+    assert_eq!(
+        result.stop,
+        Stop::Failed("the request is empty".to_string())
+    );
     let huge = "가".repeat(MAX_REQUEST_CHARS + 1);
     let result = run(&fake, &huge, &options(3, 4), &Cancel::new(), None).await;
     assert!(matches!(result.stop, Stop::Failed(_)));
@@ -419,13 +530,28 @@ async fn usage_is_kept_per_call_and_summed_per_level() {
     let result = draft(&fake, &options(3, 4)).await;
     let levels = result.by_level();
     let shape: Vec<_> = levels.iter().map(|l| (l.level, l.kind, l.calls)).collect();
-    assert_eq!(shape, [(1, Kind::Concept, 1), (2, Kind::Gist, 3), (3, Kind::Body, 3)]);
+    assert_eq!(
+        shape,
+        [
+            (1, Kind::Concept, 1),
+            (2, Kind::Gist, 3),
+            (3, Kind::Body, 3)
+        ]
+    );
     assert_eq!(result.usage().input_tokens, 70);
     assert_eq!(result.usage().output_tokens, 35);
-    assert!(result.calls.iter().all(|c| c.model.as_deref() == Some("claude-sonnet-4-5")));
+    assert!(
+        result
+            .calls
+            .iter()
+            .all(|c| c.model.as_deref() == Some("claude-sonnet-4-5"))
+    );
     assert!(result.sequential_estimate() >= Duration::from_millis(350));
     let line = result.summary(Some(&crate::usage::Prices::default()));
-    assert!(line.starts_with("호출 7번, 입력 70 / 출력 35 토큰, 비용 $"), "{line}");
+    assert!(
+        line.starts_with("호출 7번, 입력 70 / 출력 35 토큰, 비용 $"),
+        "{line}"
+    );
     assert!(line.contains("순차였다면 약 "), "{line}");
 }
 
@@ -452,11 +578,22 @@ fn prompt_blocks_cannot_be_closed_by_the_request() {
 #[test]
 fn draft_input_is_checked_and_unattended_runs_get_two_at_once() {
     let settings = tool::Settings { parallel: 6 };
-    let (request, options) =
-        tool::parse_input(&json!({"request": "a README", "levels": 4, "polish": true, "x": 1}), settings, 900)
-            .unwrap();
+    let (request, options) = tool::parse_input(
+        &json!({"request": "a README", "levels": 4, "polish": true, "x": 1}),
+        settings,
+        900,
+    )
+    .unwrap();
     assert_eq!(request, "a README");
-    assert_eq!((options.levels, options.polish, options.parallel, options.max_tokens), (4, true, 6, 900));
+    assert_eq!(
+        (
+            options.levels,
+            options.polish,
+            options.parallel,
+            options.max_tokens
+        ),
+        (4, true, 6, 900)
+    );
     let (_, options) = tool::parse_input(&json!({"request": "r"}), settings, 900).unwrap();
     assert_eq!((options.levels, options.polish), (3, false));
     for bad in [
@@ -551,9 +688,15 @@ async fn the_agent_runs_draft_calls_reports_levels_and_counts_their_tokens() {
     assert_eq!(done, Some(7));
     let result = result.unwrap();
     assert!(!result.is_error);
-    assert!(result.content.starts_with("# A title\n"), "{}", result.content);
     assert!(
-        result.content.contains("[draft] levels 3/3, 3 sections, failed sections: none, 7 calls"),
+        result.content.starts_with("# A title\n"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("[draft] levels 3/3, 3 sections, failed sections: none, 7 calls"),
         "{}",
         result.content
     );
@@ -582,7 +725,13 @@ async fn slash_write_puts_the_draft_into_the_conversation_and_saves_it_like_writ
     );
     let out = path.to_str().unwrap();
     let draft = agent
-        .write("/write --out x a doc", "a doc", &options(2, 4), Some(out), |_| {})
+        .write(
+            "/write --out x a doc",
+            "a doc",
+            &options(2, 4),
+            Some(out),
+            |_| {},
+        )
         .await
         .unwrap();
     assert_eq!(draft.stop, Stop::Done);
@@ -629,7 +778,10 @@ async fn slash_write_puts_the_draft_into_the_conversation_and_saves_it_like_writ
 #[test]
 fn slash_write_needs_a_request() {
     use crate::slash::{Slash, parse};
-    assert_eq!(parse("/write --levels 2 a b"), Some(Slash::Write("--levels 2 a b".into())));
+    assert_eq!(
+        parse("/write --levels 2 a b"),
+        Some(Slash::Write("--levels 2 a b".into()))
+    );
     assert!(matches!(parse("/write"), Some(Slash::Bad(_))));
     assert!(crate::slash::is_command("write"));
 }

@@ -368,7 +368,12 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
             ("s2".to_string(), "가".repeat(40 * 1024)),
         ],
     };
-    super::runner::on_event(&shared, &room, &mut out, crate::agent::Event::DraftLevel(&level));
+    super::runner::on_event(
+        &shared,
+        &room,
+        &mut out,
+        crate::agent::Event::DraftLevel(&level),
+    );
     let call = |level, kind, ok| Call {
         level,
         kind,
@@ -394,16 +399,31 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
         calls: vec![call(1, Kind::Concept, true), call(3, Kind::Body, false)],
         elapsed: Duration::from_millis(150),
     };
-    super::runner::on_event(&shared, &room, &mut out, crate::agent::Event::DraftDone(&draft));
+    super::runner::on_event(
+        &shared,
+        &room,
+        &mut out,
+        crate::agent::Event::DraftDone(&draft),
+    );
     let events = types(&room);
     assert_eq!(events[0]["type"], "draft_level");
     assert_eq!(events[0]["level"], 2);
     assert_eq!(events[0]["kind"], "gist");
     assert_eq!(events[0]["sections"][0]["id"], "s1");
     let text = events[0]["sections"][0]["text"].as_str().unwrap();
-    assert!(text.starts_with("uses ") && !text.contains("aaaaaaaaaa"), "{text}");
+    assert!(
+        text.starts_with("uses ") && !text.contains("aaaaaaaaaa"),
+        "{text}"
+    );
     assert_eq!(events[0]["sections"][0]["truncated"], false);
-    assert_eq!(events[0]["sections"][1]["text"].as_str().unwrap().chars().count(), 32 * 1024);
+    assert_eq!(
+        events[0]["sections"][1]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        32 * 1024
+    );
     assert_eq!(events[0]["sections"][1]["truncated"], true);
     assert_eq!(
         events[1],
