@@ -1,6 +1,28 @@
 {
   "sessions": [
     {
+      "id": "20261113-0857-w20",
+      "title": "기록 앞부분의 draft 호출이 창 밖에 있는 세션",
+      "cwd": "/home/u/work/junees",
+      "updated_at": "2026-11-13T08:53:00Z",
+      "messages": 2,
+      "input_tokens": 6750,
+      "output_tokens": 2016,
+      "cost_usd": 0.05,
+      "preview": "글을 다 썼습니다. 위 결과의 호출은 이 세션 기록의 앞부분에 있고"
+    },
+    {
+      "id": "20261113-0855-d138",
+      "title": "배포 가이드를 길게 써 줘",
+      "cwd": "/home/u/work/junees",
+      "updated_at": "2026-11-13T08:51:00Z",
+      "messages": 12,
+      "input_tokens": 21467,
+      "output_tokens": 6368,
+      "cost_usd": 0.2191,
+      "preview": "배포 가이드를 길게 써 줘"
+    },
+    {
       "id": "20261113-0841-3f2a",
       "title": "대시보드 사용량 화면 막대 그래프 정리",
       "cwd": "/home/u/work/junees",

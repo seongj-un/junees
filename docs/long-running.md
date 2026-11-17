@@ -465,6 +465,6 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - 실패한 단위는 한 번 다시 요청하고, 그래도 실패하면 앞 단계의 글을 넣고 표시한다. 취소는 끝난 단계까지를 남긴다(`--out`이면 `.partial`)
 - `draft`는 `delegate`처럼 에이전트 루프가 직접 돌린다(`Agent::with_draft`). 무인 실행(예약 작업, 웹훅, `task`)은 동시 요청 2개로 줄이고, 서브에이전트에는 주지 않는다. 무인 실행에서는 `levels` 최대 3, `polish` 끔, 실행의 토큰 상한을 호출마다 확인한다(Argus 리뷰 권장). 사용량은 답한 모델별 `subagent_usage`에 `"source": "draft"`를 붙여 남긴다. 처음에는 새 항목 `draft_usage`로 형식을 10으로 올렸지만, 리뷰에서 두 릴리스 연속 호환이 끊기는 것을 피하기로 하고 형식 9로 되돌렸다(릴리스된 0.5.0 바이너리로 열기와 이어 쓰기를 확인). 예비 모델로 넘어가면 호출마다 답한 모델(`StreamEvent::AnsweredBy`)을 기록하고 끝날 때 한 번 알린다
 - `/write`는 Junees가 직접 도는 한 턴이다(`Agent::write`): 입력한 줄이 사람의 입력, 글이 답이고, `--out`은 `write_file`을 승인과 체크포인트를 거쳐 부른다
-- 대시보드 대화는 `draft_level`, `draft_done` 이벤트를 보낸다. 화면(`web/dashboard/draft.js`, `view-draft.js`)은 `draft` 도구 블록 안의 카드로, 단계마다 칸의 글이 바뀌고 끝나면 접는다. 같은 화면 작업에서 22단계의 `model_switch` 줄도 그렸다. 새로 고침한 대화는 도구 결과로 카드를 그린다(세션 API가 결과를 2,000자에서 자르는 한계가 있다)
+- 대시보드 대화는 `draft_level`, `draft_done` 이벤트를 보낸다. 화면(`web/dashboard/draft.js`, `view-draft.js`)은 `draft` 도구 블록 안의 카드로, 단계마다 칸의 글이 바뀌고 끝나면 접는다. 같은 화면 작업에서 22단계의 `model_switch` 줄도 그렸다. 새로 고친 대화는 세션 API의 `draft` 상태와 `tool_use_id`로 카드를 그리고, 모델이 쓴 글에서는 상태를 읽지 않는다(#138)
 - 속도: 루프백 가짜 API(출력 토큰당 5ms)에서 3,200토큰 글이 한 번에 쓰기 16.4초, parallel 4에서 7.0초, parallel 8에서 3.9초 (`scripts/write_bench.sh`, [docs/write.md](write.md#속도-측정))
 - 남은 것: 실제 API로 품질 비교(`scripts/write_eval.sh`, 키가 생기면), `junees write`의 사용량을 `junees usage`에 넣기

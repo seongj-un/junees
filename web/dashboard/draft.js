@@ -56,7 +56,7 @@ export function requestText(inputPreview) {
 /** A fresh card state for a `draft` call whose input text is `inputPreview`. */
 export function newDraft(inputPreview) {
   const { levels, polish } = requestedOptions(inputPreview);
-  return { levels, polish, title: "", level: 0, kind: null, sections: [], done: null, ended: false };
+  return { levels, polish, title: "", level: 0, kind: null, sections: [], done: null, ended: false, lost: false };
 }
 
 /**
@@ -167,6 +167,7 @@ export function stepText(step) {
 /** The line that says how far a running draft has come (the card's live region). */
 export function progressText(state) {
   if (state.done) return summaryLine(state.done);
+  if (state.ended && state.lost) return "단계 이벤트를 받지 못해 요약을 알 수 없습니다. 새로 고치면 기록에서 다시 그립니다.";
   if (state.ended) return "글 생성이 끝나기 전에 이 답이 끝났습니다. 끝난 단계까지의 글만 남았습니다.";
   if (state.level === 0) return "글의 뼈대를 만드는 중입니다.";
   const all = steps(state);
@@ -244,63 +245,45 @@ export function levelRowLabel(row) {
 }
 
 // ---- the tool result (after a reload the events do not come again) ----
+//
+// The session API sends what a `draft` call came to as its own `draft` object on the
+// tool result (same fields as `draft_done`, `sequential_ms` and `by_level` null when
+// not known), and pairs a call with its result by `tool_use_id`. Nothing about the
+// state is read from the text the model wrote.
 
-const STATUS_LINE =
-  /\[draft\] levels (\d+)\/(\d+)( \+ polish)?, (\d+) sections, failed sections: (.*?), (\d+) calls, (\d+) input and (\d+) output tokens, ([\d.]+)s \(about ([\d.]+)s one call at a time\)/;
+/** The `draft` object of a tool result block, or null (a result the server could not read a status from). */
+export function resultStatus(block) {
+  const draft = block?.draft;
+  return draft && typeof draft === "object" && !Array.isArray(draft) ? draft : null;
+}
 
 /**
- * The parts of a `draft` tool result: the text, `---`, then one status
- * line (a cancelled or token-limit result puts a line before the text, and
- * a failure has only the line). Returns `{ stop, error, article, status }`.
- * `stop` is read from that first line (`done`, `cancelled`, `limit`,
- * `failed`) and `error` is the server's reason for the last two, in English.
- * `status` holds the numbers of the status line the way `applyDone` keeps
- * them, or is null when the line is missing (the server cut the result) or
- * not in the shape this page knows.
+ * The text of a result as `{ head, omitted, tail }`. A result the server cut
+ * has its first 2,000 characters (`text_preview`) and its last 500
+ * (`text_tail`) with `omitted_chars` between them: `omitted` is that number,
+ * `null` when the tail or the number is missing (then nothing after `head`
+ * is known). With nothing omitted the two parts are one text. The status
+ * line Junees puts at the end of a result is cut off when the server read a
+ * status from it (`draft` is not null), without reading it.
  */
-export function parseDraftResult(text) {
-  const raw = String(text ?? "");
-  let body = raw;
-  let line = "";
-  const seam = raw.lastIndexOf("\n---\n[draft] ");
-  const alone = raw.lastIndexOf("\n[draft] levels ");
-  if (seam >= 0) {
-    body = raw.slice(0, seam);
-    line = raw.slice(seam + 5);
-  } else if (alone >= 0) {
-    body = raw.slice(0, alone);
-    line = raw.slice(alone + 1);
-  }
-  const match = STATUS_LINE.exec(line);
-  let status = null;
-  if (match) {
-    const failed = match[5] === "none" ? [] : match[5].replace(/ \(.*\)$/, "").split(", ").filter(Boolean);
-    status = {
-      levelsDone: Number(match[1]),
-      levels: Number(match[2]),
-      polished: Boolean(match[3]),
-      failedSections: failed,
-      calls: Number(match[6]),
-      inputTokens: Number(match[7]),
-      outputTokens: Number(match[8]),
-      cacheReadTokens: 0,
-      elapsedMs: Math.round(Number(match[9]) * 1000),
-      sequentialMs: Math.round(Number(match[10]) * 1000),
-    };
-  }
-  // `<reason>; the levels finished before...:\n\n# Title...` or `draft failed: <reason>`.
-  const heading = body.search(/^# /m);
-  const lead = (heading > 0 ? body.slice(0, heading) : heading === 0 ? "" : body).trim();
-  const article = heading >= 0 ? body.slice(heading) : "";
-  let stop = "done";
-  if (lead.startsWith("cancelled by the user")) stop = "cancelled";
-  else if (lead.startsWith("draft stopped:")) stop = "limit";
-  else if (lead.startsWith("draft failed:")) stop = "failed";
-  const error =
-    stop === "limit" || stop === "failed"
-      ? lead.replace(/^draft (failed|stopped): /, "").replace(/; the levels finished before:?$/, "").trim() || null
-      : null;
-  return { stop, error, article, status };
+export function resultText(block) {
+  const known = resultStatus(block) !== null;
+  const clean = (text) => (known ? withoutStatusLine(text) : text);
+  const preview = String(block?.text_preview ?? "");
+  if (block?.truncated !== true) return { head: clean(preview), omitted: 0, tail: "" };
+  const tail = typeof block.text_tail === "string" ? block.text_tail : null;
+  const omitted = Number.isSafeInteger(block.omitted_chars) && block.omitted_chars >= 0 ? block.omitted_chars : null;
+  if (tail === null || omitted === null) return { head: preview, omitted: null, tail: "" };
+  if (omitted === 0) return { head: clean(preview + tail), omitted: 0, tail: "" };
+  return { head: preview, omitted, tail: clean(tail) };
+}
+
+/** `text` without its last line when that is Junees's `[draft] ...` status line, and the `---` before it. */
+function withoutStatusLine(text) {
+  const at = text.lastIndexOf("\n");
+  if (at < 0 || !text.slice(at + 1).startsWith("[draft] ")) return text;
+  const before = text.slice(0, at);
+  return before.endsWith("\n---") ? before.slice(0, -4) : before;
 }
 
 /**
@@ -371,26 +354,33 @@ export function retryText(retryAt, now) {
 }
 
 /**
- * Which tool results of a session's messages answer a `draft` call, as
- * `"<message index>:<block number>"`. The session API gives a tool result no
- * name, so each is paired with the call before it: a message with tool
- * calls is followed by the user message holding their results in the same
- * order. A message whose partner is not in the list, or whose counts differ,
- * is left out rather than guessed at.
+ * Which tool results of a session's messages are a `draft` call's, as
+ * `"<message index>:<block number>"`: the results whose `tool_use_id` is the
+ * id of a `draft` `tool_use` in the list, and the results that carry the
+ * server's `draft` field (it is there only on the result of a `draft` call,
+ * `null` when no status could be read). The second rule is for a call that
+ * is not in the list: the chat screen gets only the last 20 messages, so the
+ * first one can be a result whose call lies before the window. A call or
+ * result without an id (a session answer from before the ids) is left out, and
+ * so is a result whose call is not in the list and that has no `draft` field;
+ * its block stays a plain tool block.
  */
 export function draftResultKeys(messages) {
   const keys = new Set();
-  const byIndex = new Map((Array.isArray(messages) ? messages : []).map((m) => [m.index, m]));
-  for (const message of byIndex.values()) {
-    if (message.role !== "assistant" || !Array.isArray(message.blocks)) continue;
-    const uses = message.blocks.filter((b) => b?.type === "tool_use");
-    if (!uses.some((b) => b.name === "draft")) continue;
-    const reply = byIndex.get(message.index + 1);
-    if (!reply || reply.role !== "user" || !Array.isArray(reply.blocks)) continue;
-    const results = reply.blocks.map((block, n) => [block, n]).filter(([block]) => block?.type === "tool_result");
-    if (results.length !== uses.length) continue;
-    uses.forEach((use, i) => {
-      if (use.name === "draft") keys.add(`${reply.index}:${results[i][1]}`);
+  const list = Array.isArray(messages) ? messages : [];
+  const ids = new Set();
+  for (const message of list) {
+    for (const block of Array.isArray(message?.blocks) ? message.blocks : []) {
+      if (block?.type === "tool_use" && block.name === "draft" && typeof block.tool_use_id === "string" && block.tool_use_id) {
+        ids.add(block.tool_use_id);
+      }
+    }
+  }
+  for (const message of list) {
+    (Array.isArray(message?.blocks) ? message.blocks : []).forEach((block, n) => {
+      if (block?.type !== "tool_result") return;
+      const paired = typeof block.tool_use_id === "string" && ids.has(block.tool_use_id);
+      if (paired || "draft" in block) keys.add(`${message.index}:${n}`);
     });
   }
   return keys;

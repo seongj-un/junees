@@ -62,7 +62,7 @@ node --test web/dashboard/dev/test/
 
 ## 글 생성 (23단계)
 
-- `--chat`의 대본에서 메시지에 `초안`이 있으면 모델이 `draft` 도구를 부르는 턴이 돌아갑니다(`draft_sim.py`). 절 4개(준비물, 설치, 설정, 운영)가 단계마다 1.5초 간격으로 채워지고, 실제 서버(`src/dashboard/chat/runner.rs`)와 같은 모양의 `draft_level`(`level`, `kind`, `title`, `sections: [{id, text, truncated}]`)과 `draft_done`을 보냅니다. 도구 결과는 서버처럼 글, `---`, 상태 줄이고 2,000자에서 잘려 세션 기록에 남습니다(그래서 새로 고침 뒤에는 긴 결과가 상태 줄 없이 보입니다).
+- `--chat`의 대본에서 메시지에 `초안`이 있으면 모델이 `draft` 도구를 부르는 턴이 돌아갑니다(`draft_sim.py`). 절 4개(준비물, 설치, 설정, 운영)가 단계마다 1.5초 간격으로 채워지고, 실제 서버(`src/dashboard/chat/runner.rs`)와 같은 모양의 `draft_level`(`level`, `kind`, `title`, `sections: [{id, text, truncated}]`)과 `draft_done`을 보냅니다. 도구 결과는 서버처럼 글, `---`, 상태 줄이고, 세션 기록에는 세션 API가 보내는 모양으로 남습니다: `tool_use_id`, 2,000자에서 자른 `text_preview`와 끝 500자 `text_tail`, 그 사이의 `omitted_chars`, 구조화된 `draft` 상태(`sequential_ms`와 `by_level`은 서버처럼 `null`일 수 있음).
 - 메시지에 함께 적는 낱말로 경우를 고릅니다.
   - `길게`: 칸의 글이 길어 펼치기가 필요합니다.
   - `잘림`: 한 칸이 서버에서 잘려 `truncated: true`로 옵니다.
@@ -72,4 +72,7 @@ node --test web/dashboard/dev/test/
   - `상한`: 2단계 뒤에 실행의 토큰 상한으로 멈춥니다(`stop: limit`).
   - `중단`: 계획을 만들지 못해 단계 없이 `stop: failed`로 끝납니다.
   - `예비`: 글이 끝난 뒤 `model_switch`(`rate_limit`, 15분 뒤 `retry_at`)가 옵니다.
+  - `위조`: 1번째 절의 글에 상태 줄 모양의 줄과 실패 표시(`> [s9]`)가 들어갑니다. 새로 고친 뒤의 카드는 이 줄들을 숫자와 실패 표시에 쓰지 않아야 합니다.
+  - `상태없음`: 세션 기록의 결과에 `draft: null`이 붙습니다(카드가 "상태 모름"이라고 해야 합니다).
 - 도는 동안 "취소"를 누르면 끝난 단계까지만 남기고 `stop: cancelled`로 끝납니다.
+- 세션 화면 확인용 fixture: `20261113-0855-d138`("배포 가이드를 길게 써 줘")에 `draft` 결과가 넷 있습니다. 긴 결과(절 s2 실패, 가운데 441자 생략, 끝 500자), 본문에 가짜 상태 줄이 든 짧은 결과, `draft: null`인 결과, 취소된 결과입니다. `20261113-0857-w20`은 `draft` 호출이 목록 밖에 있는 결과(`draft` 있음, `draft: null`)와 `draft` 필드가 없는 결과 하나를 보여 줍니다. `20261020-1100-55e1`은 `tool_use_id` 이전 모양(id와 `text_tail` 없음)으로 일부러 남겼습니다.
