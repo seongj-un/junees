@@ -582,6 +582,7 @@ fn make_provider(config: &Config) -> Result<Box<dyn Provider>> {
 
 /// Junees's own agent for the conversation. It asks before risky tool
 /// calls when `input` is given (the prompt) and the settings want it.
+#[allow(clippy::too_many_arguments)]
 fn api_agent(
     config: &Config,
     cwd: &Path,
@@ -680,10 +681,10 @@ async fn load_hooks(
         eprint!("{}", junees::hooks::trust_question(file));
         eprint!("  이 훅을 실행할까요? [y/N] ");
         let answer = input.next_line().await.ok().flatten().unwrap_or_default();
-        if matches!(answer.trim(), "y" | "Y" | "yes") {
-            if let Err(err) = found.trust_untrusted(home) {
-                eprintln!("  !! {err:#}");
-            }
+        if matches!(answer.trim(), "y" | "Y" | "yes")
+            && let Err(err) = found.trust_untrusted(home)
+        {
+            eprintln!("  !! {err:#}");
         }
     }
     found.skip_untrusted();
