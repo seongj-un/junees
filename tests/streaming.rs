@@ -87,6 +87,7 @@ fn text_of(events: &[StreamEvent]) -> String {
             StreamEvent::Thinking => "(thinking)",
             StreamEvent::Retrying => "(retrying)",
             StreamEvent::ServerToolUse { .. } => "(server tool)",
+            StreamEvent::ModelSwitch(_) | StreamEvent::Notice(_) => "(switch)",
         })
         .collect()
 }

@@ -585,6 +585,7 @@ impl ApiError {
             status,
             kind,
             message: self.message,
+            retry_after: None,
         }
     }
 }

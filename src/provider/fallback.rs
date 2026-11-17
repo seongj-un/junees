@@ -179,21 +179,40 @@ pub fn client(
     settings: &Settings,
     config: &crate::config::Config,
 ) -> Result<Box<dyn super::Provider>> {
+    client_giving_up(settings, config, None)
+}
+
+/// [`client`], returning at once when the API asks to wait longer than
+/// `give_up` (see `AnthropicProvider::with_give_up`).
+pub(super) fn client_giving_up(
+    settings: &Settings,
+    config: &crate::config::Config,
+    give_up: Option<Duration>,
+) -> Result<Box<dyn super::Provider>> {
     Ok(match &settings.target {
-        Target::Anthropic { api_key, base_url } => Box::new(
-            super::anthropic::AnthropicProvider::new(
+        Target::Anthropic { api_key, base_url } => {
+            let client = super::anthropic::AnthropicProvider::new(
                 api_key.clone(),
                 base_url.clone(),
                 settings.model.clone(),
             )?
             .with_thinking(config.thinking_budget)
             .with_streaming(config.stream)
-            .with_web_search(config.web_search.clone()),
-        ),
-        Target::OpenAi(openai) => Box::new(
-            super::openai::OpenAiProvider::new(openai.clone(), settings.model.clone())?
-                .with_streaming(config.stream),
-        ),
+            .with_web_search(config.web_search.clone());
+            match give_up {
+                Some(give_up) => Box::new(client.with_give_up(give_up)),
+                None => Box::new(client),
+            }
+        }
+        Target::OpenAi(openai) => {
+            let client =
+                super::openai::OpenAiProvider::new(openai.clone(), settings.model.clone())?
+                    .with_streaming(config.stream);
+            match give_up {
+                Some(give_up) => Box::new(client.with_give_up(give_up)),
+                None => Box::new(client),
+            }
+        }
     })
 }
 
@@ -213,6 +232,10 @@ pub fn read_times(get: &impl Fn(&str) -> Option<String>) -> Result<(Duration, Du
     }
     Ok((after, parse(WAIT_LIMIT_ENV, DEFAULT_WAIT_LIMIT)?))
 }
+
+mod switch;
+
+pub use switch::{Reason, Switch, Switching, Wait};
 
 #[cfg(test)]
 mod tests;

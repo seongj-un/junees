@@ -17,13 +17,46 @@ pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 /// at a time, so a large file to write can mean a long pause; at the old
 /// whole-call limit, no call that used to finish can time out here.
 pub const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-pub(super) const MAX_RETRY_AFTER_SECS: u64 = 60;
+pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 60;
 
 /// One failed attempt and whether another one may help.
 pub(super) struct Failure {
     pub error: ProviderError,
     pub retryable: bool,
     pub retry_after: Option<u64>,
+}
+
+impl Failure {
+    /// The error, with the wait the API asked for.
+    pub fn into_error(self) -> ProviderError {
+        match self.error {
+            ProviderError::Api {
+                status,
+                kind,
+                message,
+                retry_after: None,
+            } => ProviderError::Api {
+                status,
+                kind,
+                message,
+                retry_after: self.retry_after,
+            },
+            error => error,
+        }
+    }
+
+    /// Whether another attempt is worth it: the failure may pass, attempts
+    /// are left, and the API does not ask to wait longer than `give_up`
+    /// (the caller has something better to do then: another model, or a
+    /// wait it plans itself).
+    pub fn try_again(&self, attempt: u32, give_up: Option<Duration>) -> bool {
+        self.retryable
+            && attempt < MAX_ATTEMPTS
+            && !give_up.is_some_and(|give_up| {
+                self.retry_after
+                    .is_some_and(|secs| Duration::from_secs(secs) > give_up)
+            })
+    }
 }
 
 pub(super) fn send_failure(err: reqwest::Error) -> Failure {

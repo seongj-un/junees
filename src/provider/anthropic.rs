@@ -8,7 +8,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use super::http::{
-    Failure, MAX_ATTEMPTS, REQUEST_TIMEOUT, backoff, body_failure, idle_failure, is_retryable,
+    Failure, REQUEST_TIMEOUT, backoff, body_failure, idle_failure, is_retryable,
     is_retryable_error, retry_after, send_failure,
 };
 use super::stream::{Assembler, SseParser};
@@ -35,9 +35,19 @@ pub struct AnthropicProvider {
     idle_timeout: Duration,
     /// The API's web search tool, offered to the requests that allow it.
     web_search: Option<WebSearch>,
+    /// See [`AnthropicProvider::with_give_up`].
+    give_up: Option<Duration>,
 }
 
 impl AnthropicProvider {
+    /// Returns the error at once, instead of trying again, when the API
+    /// asks to wait longer than `give_up`: the caller switches to another
+    /// model or plans the wait itself ([`super::fallback`]).
+    pub fn with_give_up(mut self, give_up: Duration) -> Self {
+        self.give_up = Some(give_up);
+        self
+    }
+
     pub fn new(api_key: String, base_url: String, model: String) -> anyhow::Result<Self> {
         // Timeouts are set per request: a stream has no overall one. No
         // redirects: reqwest keeps `x-api-key` on a hop to another host
@@ -56,6 +66,7 @@ impl AnthropicProvider {
             stream: false,
             idle_timeout: STREAM_IDLE_TIMEOUT,
             web_search: None,
+            give_up: None,
         })
     }
 
@@ -436,11 +447,11 @@ impl Provider for AnthropicProvider {
         loop {
             match self.send_once(&url, &body).await {
                 Ok(response) => return Ok(response),
-                Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
+                Err(failure) if failure.try_again(attempt, self.give_up) => {
                     tokio::time::sleep(backoff(attempt, failure.retry_after)).await;
                     attempt += 1;
                 }
-                Err(failure) => return Err(failure.error),
+                Err(failure) => return Err(failure.into_error()),
             }
         }
     }
@@ -474,14 +485,14 @@ impl Provider for AnthropicProvider {
             let mut reported = false;
             match self.stream_once(&url, &body, events, &mut reported).await {
                 Ok(response) => return Ok(response),
-                Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
+                Err(failure) if failure.try_again(attempt, self.give_up) => {
                     if reported {
                         let _ = events.send(StreamEvent::Retrying);
                     }
                     tokio::time::sleep(backoff(attempt, failure.retry_after)).await;
                     attempt += 1;
                 }
-                Err(failure) => return Err(failure.error),
+                Err(failure) => return Err(failure.into_error()),
             }
         }
     }
@@ -501,11 +512,13 @@ fn api_error(status: StatusCode, body: &[u8]) -> ProviderError {
             status: status.as_u16(),
             kind: Some(parsed.error.kind),
             message: parsed.error.message,
+            retry_after: None,
         },
         Err(_) => ProviderError::Api {
             status: status.as_u16(),
             kind: None,
             message: String::from_utf8_lossy(body).trim().to_string(),
+            retry_after: None,
         },
     }
 }
