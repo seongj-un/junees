@@ -1033,12 +1033,13 @@ impl Draft {
 
     /// [`Self::sequential_estimate`] where the comparison means something:
     /// the draft finished ([`Stop::Done`]) and one call at a time would have
-    /// taken longer than it did. A draft that stopped early leaves out the
-    /// calls it dropped while `elapsed` counts the time they ran, so the
-    /// sum would read shorter than the draft took.
+    /// taken longer than it did, as far as the lines show it (tenths of a
+    /// second, so a line never reads "0.1s, about 0.1s"). A draft that
+    /// stopped early leaves out the calls it dropped while `elapsed` counts
+    /// the time they ran, so the sum would read shorter than the draft took.
     pub fn sequential_comparison(&self) -> Option<Duration> {
         let estimate = self.sequential_estimate();
-        (self.stop == Stop::Done && estimate > self.elapsed).then_some(estimate)
+        (self.stop == Stop::Done && tenths(estimate) > tenths(self.elapsed)).then_some(estimate)
     }
 
     /// Usage per level, in level order.
@@ -1116,5 +1117,17 @@ pub fn level_line(level: &LevelDone) -> String {
 
 /// `12.3초`.
 pub fn seconds(duration: Duration) -> String {
-    format!("{:.1}초", duration.as_secs_f64())
+    format!("{}초", tenths_text(duration))
+}
+
+/// A duration in tenths of a second, rounded half up: the precision the
+/// summary and the status line show, and so the one comparisons use.
+fn tenths(duration: Duration) -> u128 {
+    (duration.as_millis() + 50) / 100
+}
+
+/// `12.3`: seconds to the tenth ([`tenths`]).
+pub(crate) fn tenths_text(duration: Duration) -> String {
+    let tenths = tenths(duration);
+    format!("{}.{}", tenths / 10, tenths % 10)
 }

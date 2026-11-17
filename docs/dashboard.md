@@ -142,7 +142,7 @@ junees dashboard --chat --dir ~/work/x # 페이지에서 ~/work/x의 Junees와 �
   - `null`: 결과가 `draft` 결과 모양이 아닐 때입니다. 잘못된 입력, 시작 전에 이미 넘은 토큰 상한, 실행되기 전에 끝난 호출(답이 잘림, 취소), `draft`가 없는 대화에서 부른 호출이 여기에 듭니다.
   - `stop`: `done`, `cancelled`, `failed`, `limit`. `error`: `failed`, `limit`의 이유(비밀 값을 가리고 2,000자까지), 그 밖에는 `null`.
   - `levels`, `levels_done`, `polished`, `sections`(절 수, `draft_done`에는 없는 필드), `failed_sections`, `calls`, `input_tokens`(캐시 쓰기와 읽기 포함), `output_tokens`: 상태 줄의 값 그대로입니다.
-  - `elapsed_ms`, `sequential_ms`: 상태 줄이 0.1초 단위로 적으므로 100밀리초 단위입니다(실시간 `draft_done`은 밀리초). `sequential_ms`는 `stop`이 `done`이고 걸린 시간보다 길 때만 값이 있고, 그 밖에는 `null`입니다. 이 규칙 전의 상태 줄(늘 추정을 적음)도 같은 규칙으로 읽습니다.
+  - `elapsed_ms`, `sequential_ms`: 상태 줄이 0.1초 단위로 적으므로 100밀리초 단위입니다(실시간 `draft_done`은 밀리초). `sequential_ms`는 `stop`이 `done`이고 걸린 시간보다 (0.1초 단위로) 길 때만 값이 있고, 그 밖에는 `null`입니다. 이 규칙 전의 상태 줄(늘 추정을 적음)도 같은 규칙으로 읽습니다.
   - `cache_read_tokens`: 토큰 줄에서 더합니다. 한 답에 `draft` 호출이 여럿이면, 호출 순서대로 상태 줄의 입력과 출력 토큰에 정확히 맞을 때까지 줄을 나눠 가집니다. 맞지 않거나 줄이 남으면(답한 모델 이름이 없는 provider는 표시 없는 줄을 남깁니다) 그 답의 모든 호출에서 `null`입니다. 다른 호출의 토큰을 붙이지 않기 위해서입니다.
   - `by_level`: 세션 기록에 단계별 값이 없어 늘 `null`입니다.
   - 기록에 없는 것: 예비 모델 전환(`model_switch`)은 세션 기록에 이벤트로 남지 않아 다시 그릴 수 없습니다. 세션 기록 형식은 9 그대로이고, 새 항목을 쓰지 않습니다.

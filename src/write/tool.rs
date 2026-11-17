@@ -198,7 +198,7 @@ pub fn status_line(draft: &Draft) -> String {
     };
     format!(
         "[draft] levels {}/{}{}, {} sections, failed sections: {failed}, {} calls, {} input \
-         and {} output tokens, {:.1}s{}",
+         and {} output tokens, {}s{}",
         draft.levels_done,
         draft.levels,
         if draft.polished { " + polish" } else { "" },
@@ -206,11 +206,14 @@ pub fn status_line(draft: &Draft) -> String {
         draft.calls.len(),
         usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens,
         usage.output_tokens,
-        draft.elapsed.as_secs_f64(),
+        super::tenths_text(draft.elapsed),
         // Only where it compares: see `Draft::sequential_comparison`.
         draft
             .sequential_comparison()
-            .map(|estimate| format!(" (about {:.1}s one call at a time)", estimate.as_secs_f64()))
+            .map(|estimate| format!(
+                " (about {}s one call at a time)",
+                super::tenths_text(estimate)
+            ))
             .unwrap_or_default(),
     )
 }

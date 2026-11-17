@@ -619,6 +619,14 @@ fn the_one_at_a_time_estimate_shows_only_for_drafts_that_finished_faster() {
         status.ends_with(", 1.0s (about 1.7s one call at a time)"),
         "{status}"
     );
+    // A tenth more, as the lines round it (half up), is enough.
+    let barely = ended(Stop::Done, 1_000, &[1_050]);
+    assert!(
+        tool::status_line(&barely).ends_with(", 1.0s (about 1.1s one call at a time)"),
+        "{}",
+        tool::status_line(&barely)
+    );
+    assert_eq!(seconds(Duration::from_millis(250)), "0.3초");
     for draft in [
         // Stopped early: the dropped calls' time is in `elapsed` only.
         ended(Stop::Cancelled, 2_200, &[1_100]),
@@ -628,6 +636,8 @@ fn the_one_at_a_time_estimate_shows_only_for_drafts_that_finished_faster() {
         // Finished, but no faster than one call at a time.
         ended(Stop::Done, 1_000, &[400, 600]),
         ended(Stop::Done, 1_000, &[300]),
+        // Faster only below what the lines show: both read 1.0s.
+        ended(Stop::Done, 1_000, &[1_049]),
     ] {
         assert_eq!(draft.sequential_comparison(), None, "{:?}", draft.stop);
         let summary = draft.summary(None);
@@ -638,7 +648,7 @@ fn the_one_at_a_time_estimate_shows_only_for_drafts_that_finished_faster() {
         assert!(!summary.contains("순차"), "{summary}");
         let status = tool::status_line(&draft);
         assert!(
-            status.ends_with(&format!("{:.1}s", draft.elapsed.as_secs_f64())),
+            status.ends_with(&format!(", {}s", tenths_text(draft.elapsed))),
             "{status}"
         );
     }

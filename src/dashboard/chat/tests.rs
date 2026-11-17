@@ -397,7 +397,7 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
         lang: crate::write::Lang::En,
         stop: Stop::Done,
         calls: vec![call(1, Kind::Concept, true), call(3, Kind::Body, false)],
-        elapsed: Duration::from_millis(150),
+        elapsed: Duration::from_millis(100),
         switch: None,
     };
     super::runner::on_event(
@@ -431,7 +431,7 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
         json!({
             "type": "draft_done", "stop": "done", "error": null, "levels": 3, "levels_done": 3,
             "polished": false, "failed_sections": [], "calls": 2, "input_tokens": 24,
-            "output_tokens": 10, "cache_read_tokens": 4, "elapsed_ms": 150, "sequential_ms": 200,
+            "output_tokens": 10, "cache_read_tokens": 4, "elapsed_ms": 100, "sequential_ms": 200,
             "by_level": [
                 {"level": 1, "kind": "concept", "calls": 1, "failed_calls": 0,
                  "input_tokens": 12, "output_tokens": 5},
@@ -451,8 +451,9 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
         &mut out,
         crate::agent::Event::DraftDone(&stopped),
     );
+    // 150 and 200 ms both read 0.2s.
     let mut even = draft;
-    even.elapsed = Duration::from_millis(200);
+    even.elapsed = Duration::from_millis(150);
     super::runner::on_event(
         &shared,
         &room,
