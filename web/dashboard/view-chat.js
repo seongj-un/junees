@@ -21,9 +21,11 @@ import {
   unfinishedTurns,
 } from "./chat-stream.js";
 import { code, el, notice } from "./dom.js";
+import { draftResultKeys, requestText, retryText, switchHeadline } from "./draft.js";
 import { formatInt, formatUsd } from "./format.js";
 import { linkHistory, parseCheckpoints, undoneBy, undoPlan, unknownVerdict } from "./checkpoints.js";
 import { chatHash, sessionHash } from "./routes.js";
+import { DraftCard } from "./view-draft.js";
 import { messageView, peek, toolBody } from "./view-session.js";
 import { changePanel, confirmUndo, outcomeView, turnFooter } from "./view-undo.js";
 
@@ -139,6 +141,9 @@ class ChatView {
     /** Checkpoints of an undo whose answer never came: no undo for them until the list tells. */
     this.unsure = new Set();
     this.unsureTries = 0;
+    this.draftCount = 0;
+    /** The model-switch lines whose "다시 시도" time is counted from now. */
+    this.switches = [];
   }
 
   // ---- lifecycle ----
@@ -376,6 +381,7 @@ class ChatView {
     this.turns.clear();
     this.questions.clear();
     this.cpSlots.clear();
+    this.switches = [];
     this.log.replaceChildren();
     this.setRunning(false);
     this.setStatus("");
@@ -407,6 +413,7 @@ class ChatView {
   showHistory(messages, total) {
     const left = total - (this.historyMessages?.length ?? messages.length);
     const shown = left + messages.length;
+    const draftKeys = draftResultKeys(messages);
     this.history.replaceChildren(
       el(
         "p",
@@ -414,7 +421,7 @@ class ChatView {
         shown > messages.length ? `이전 대화 ${formatInt(shown)}개 중 마지막 ${formatInt(messages.length)}개` : `이전 대화 ${formatInt(messages.length)}개`,
         el("a", { href: sessionHash(this.id) }, "전체 보기"),
       ),
-      el("ol", { class: "msgs", "aria-label": "이전 대화" }, messages.map((m) => messageView(m, new Date()))),
+      el("ol", { class: "msgs", "aria-label": "이전 대화" }, messages.map((m) => messageView(m, new Date(), draftKeys))),
     );
     this.history.hidden = messages.length === 0;
     if (messages.length) this.empty.hidden = true;
@@ -527,6 +534,12 @@ class ChatView {
         return this.approval(event, replayed);
       case "approval_closed":
         return this.approvalClosed(event);
+      case "draft_level":
+        return this.draftLevel(event, replayed);
+      case "draft_done":
+        return this.draftDone(event);
+      case "model_switch":
+        return this.modelSwitch(event, replayed);
       case "usage":
         return this.usage(event);
       case "turn_end":
@@ -597,6 +610,11 @@ class ChatView {
   toolUse(event) {
     const entry = this.current ?? this.turn(null);
     entry.text = null;
+    if (event.name === "draft") {
+      this.draftTool(entry, event.input_preview);
+      this.follow();
+      return;
+    }
     const head = el("span", { class: "tool-kind" }, toolLabel(event.name));
     const node = el(
       "details",
@@ -617,6 +635,14 @@ class ChatView {
   toolResult(event) {
     const entry = this.current ?? this.turn(null);
     const tool = entry.tools.find((t) => !t.done && t.name === event.name) ?? null;
+    if (tool?.draft) {
+      // The card shows the text and the summary already; the tool result
+      // only settles a card whose draft_done never came.
+      tool.done = true;
+      tool.draft.settle(event.text_preview);
+      this.follow();
+      return;
+    }
     const result = [
       el("p", { class: "chat-tool-label" }, event.is_error ? "오류" : "결과"),
       toolBody(event.text_preview),
@@ -640,6 +666,93 @@ class ChatView {
       );
     }
     this.follow();
+  }
+
+  /** A `draft` tool block: its card, and the request folded under it. */
+  draftTool(entry, input) {
+    this.draftCount += 1;
+    const card = new DraftCard(`chat${this.n}-draft${this.draftCount}`, input);
+    const request = requestText(input);
+    const node = el(
+      "details",
+      { class: "tool chat-tool chat-draft", open: true },
+      el(
+        "summary",
+        null,
+        el("span", { class: "tool-sum" }, el("span", { class: "tool-kind" }, toolLabel("draft")), code("draft"), el("span", { class: "tool-peek" }, peek(request))),
+      ),
+      el(
+        "div",
+        { class: "chat-draft-body" },
+        card.node,
+        request ? el("details", { class: "draft-request" }, el("summary", null, "요청 내용"), toolBody(request)) : null,
+      ),
+    );
+    entry.body.append(node);
+    const tool = { name: "draft", node, head: null, done: false, draft: card };
+    entry.tools.push(tool);
+    return tool;
+  }
+
+  /** The `draft` call that is still being made; one is made when its tool_use was not seen (a replay that starts later). */
+  openDraft() {
+    const entry = this.current ?? this.turn(null);
+    entry.text = null;
+    return entry.tools.find((t) => t.draft && !t.draft.finished) ?? this.draftTool(entry, "");
+  }
+
+  draftLevel(event, replayed) {
+    // After the focus and scroll of a replayed burst have settled, nothing
+    // jumps: the card only changes its text.
+    if (this.openDraft().draft.level(event, !replayed)) this.follow();
+  }
+
+  draftDone(event) {
+    const tool = this.openDraft();
+    const card = tool.draft;
+    // The card folds: keep the keyboard on it instead of on a cell that goes away.
+    const hadFocus = card.fold.contains(document.activeElement);
+    if (card.done(event)) {
+      if (hadFocus) card.node.focus({ preventScroll: true });
+      this.follow();
+    }
+  }
+
+  /** "주 모델이 막혀 예비 모델로 이어 갑니다", with the time the main model may be tried again. */
+  modelSwitch(event, replayed) {
+    const entry = this.current ?? this.turn(null);
+    entry.text = null;
+    const retry = typeof event.retry_at === "string" ? event.retry_at : null;
+    const detail = [
+      "주 모델: ",
+      code(String(event.from ?? "알 수 없음")),
+      " · 예비 모델: ",
+      code(String(event.to ?? "알 수 없음")),
+    ];
+    let wait = null;
+    if (retry && retryText(retry, new Date()) !== null) {
+      wait = el("span", { class: "chat-switch-retry" });
+      const item = { wait, retry };
+      this.switches.push(item);
+      this.updateSwitch(item, new Date());
+      detail.push(" · 다시 시도: ", wait);
+    }
+    entry.body.append(
+      el(
+        "div",
+        { class: "chat-switch" },
+        el("p", { class: "chat-switch-head" }, switchHeadline(event)),
+        el("p", { class: "chat-switch-detail" }, detail),
+        wait ? el("p", { class: "chat-switch-hint" }, "그 시각 뒤에 처음 시작하는 턴의 첫 호출부터 주 모델로 보냅니다.") : null,
+      ),
+    );
+    if (!replayed && this.connected) this.ctx.announce(`${switchHeadline(event)}.`);
+    this.follow();
+  }
+
+  updateSwitch(item, now) {
+    const text = retryText(item.retry, now) ?? "";
+    if (item.wait.textContent !== text) item.wait.textContent = text;
   }
 
   approval(event, replayed = false) {
@@ -710,6 +823,7 @@ class ChatView {
 
   updateClocks() {
     const now = Date.now();
+    for (const item of this.switches) this.updateSwitch(item, new Date(now));
     for (const question of this.questions.values()) this.updateClock(question, now);
   }
 
@@ -772,6 +886,8 @@ class ChatView {
 
   turnEnd(event) {
     const entry = this.current;
+    // A card whose draft_done never came: say it stopped here.
+    for (const tool of entry?.tools ?? []) tool.draft?.abandon();
     const note = stopReasonText(event.stop_reason);
     if (entry && note) entry.body.append(el("p", { class: "msg-note chat-stop" }, note));
     if (entry && !entry.body.childElementCount) entry.body.append(el("p", { class: "msg-note" }, "글 없이 끝났습니다."));

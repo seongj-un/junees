@@ -4,12 +4,14 @@ import test from "node:test";
 import {
   applyDone,
   applyLevel,
+  draftResultKeys,
   kindLabel,
   levelKinds,
   newDraft,
   parseArticle,
   parseDraftResult,
   progressText,
+  requestText,
   requestedOptions,
   retryText,
   sectionFailed,
@@ -277,8 +279,8 @@ test("the article splits into sections and takes failure notes out of the text",
 test("the retry time is relative to now and never a negative number", () => {
   const now = new Date("2026-11-17T09:00:00Z");
   assert.equal(retryText("2026-11-17T09:15:00Z", now), "15분 뒤");
-  assert.equal(retryText("2026-11-17T09:00:20Z", now), "곧 다시 시도합니다");
-  assert.equal(retryText("2026-11-17T08:59:00Z", now), "지금 다시 시도할 수 있습니다");
+  assert.equal(retryText("2026-11-17T09:00:20Z", now), "곧");
+  assert.equal(retryText("2026-11-17T08:59:00Z", now), "지금부터 가능");
   assert.equal(retryText("2026-11-17T11:30:00Z", now), "2시간 30분 뒤");
   assert.equal(retryText("2026-11-17T11:00:00Z", now), "2시간 뒤");
   assert.equal(retryText(null, now), null);
@@ -290,4 +292,36 @@ test("the switch headline names why and keeps an unknown reason", () => {
   assert.equal(switchHeadline({ reason: "overloaded" }), "서버가 붐벼 예비 모델로 이어 갑니다");
   assert.equal(switchHeadline({ reason: "unavailable" }), "응답이 없어 예비 모델로 이어 갑니다");
   assert.equal(switchHeadline({ reason: "quota" }), "사유(quota)로 예비 모델로 이어 갑니다");
+});
+
+test("an answer that ends without draft_done leaves its steps skipped", () => {
+  const state = newDraft("{}");
+  applyLevel(state, level(1, "concept", ["a"]));
+  state.ended = true;
+  assert.deepEqual(steps(state).map((s) => s.state), ["done", "skipped", "skipped"]);
+  assert.match(progressText(state), /^글 생성이 끝나기 전에 이 답이 끝났습니다\./);
+});
+
+test("draft results are paired with their calls by order, never by their text", () => {
+  const use = (name) => ({ type: "tool_use", name, input_preview: "{}" });
+  const result = (text) => ({ type: "tool_result", is_error: false, text_preview: text });
+  const messages = [
+    { index: 0, role: "user", blocks: [{ type: "text", text: "보고서를 써 줘" }] },
+    { index: 1, role: "assistant", blocks: [{ type: "text", text: "쓰겠습니다" }, use("read_file"), use("draft")] },
+    { index: 2, role: "user", blocks: [result("# not a draft\n---\n[draft] levels 3/3"), result("# T")] },
+    { index: 3, role: "assistant", blocks: [use("draft")] },
+    { index: 4, role: "user", blocks: [result("# T")] },
+    // A call whose results are not in the list (another page) or are fewer: no guess.
+    { index: 5, role: "assistant", blocks: [use("draft"), use("bash")] },
+    { index: 6, role: "user", blocks: [result("x")] },
+    { index: 8, role: "assistant", blocks: [use("draft")] },
+  ];
+  assert.deepEqual([...draftResultKeys(messages)].sort(), ["2:1", "4:0"]);
+  assert.deepEqual([...draftResultKeys(null)], []);
+});
+
+test("the request is shown as the model wrote it, not as JSON", () => {
+  assert.equal(requestText('{"request":"배포 가이드를 써 줘\\n표 포함","levels":3}'), "배포 가이드를 써 줘\n표 포함");
+  assert.equal(requestText('{"request":"cut'), '{"request":"cut');
+  assert.equal(requestText(undefined), "");
 });

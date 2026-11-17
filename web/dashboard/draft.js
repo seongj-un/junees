@@ -42,10 +42,21 @@ export function requestedOptions(inputPreview) {
   return { levels, polish: input?.polish === true };
 }
 
+/** The request the model gave `draft`, for showing; the raw input text when it is not whole JSON. */
+export function requestText(inputPreview) {
+  try {
+    const input = JSON.parse(String(inputPreview ?? ""));
+    if (typeof input?.request === "string") return input.request;
+  } catch {
+    // Cut by the server: show what there is.
+  }
+  return String(inputPreview ?? "");
+}
+
 /** A fresh card state for a `draft` call whose input text is `inputPreview`. */
 export function newDraft(inputPreview) {
   const { levels, polish } = requestedOptions(inputPreview);
-  return { levels, polish, title: "", level: 0, kind: null, sections: [], done: null };
+  return { levels, polish, title: "", level: 0, kind: null, sections: [], done: null, ended: false };
 }
 
 /**
@@ -135,7 +146,8 @@ export function applyDone(state, event) {
  */
 export function steps(state) {
   const total = state.levels;
-  const finished = state.done !== null;
+  // `ended`: the answer ended without a `draft_done`.
+  const finished = state.done !== null || state.ended;
   return levelKinds(state.levels, state.polish).map((kind, i) => {
     const number = i + 1;
     let status;
@@ -155,6 +167,7 @@ export function stepText(step) {
 /** The line that says how far a running draft has come (the card's live region). */
 export function progressText(state) {
   if (state.done) return summaryLine(state.done);
+  if (state.ended) return "글 생성이 끝나기 전에 이 답이 끝났습니다. 끝난 단계까지의 글만 남았습니다.";
   if (state.level === 0) return "글의 뼈대를 만드는 중입니다.";
   const all = steps(state);
   const last = all.find((s) => s.number === state.level);
@@ -335,17 +348,44 @@ export function switchHeadline(event) {
 
 /**
  * When the main model may be tried again, from `retry_at`, relative to
- * `now` (a Date); null when the server sent none. The first call of the
- * first turn that starts after it goes to the main model.
+ * `now` (a Date), to follow the label `다시 시도: `; null when the server
+ * sent none. The first call of the first turn that starts after it goes to
+ * the main model.
  */
 export function retryText(retryAt, now) {
   const at = typeof retryAt === "string" ? new Date(retryAt) : null;
   if (!at || Number.isNaN(at.getTime())) return null;
   const seconds = Math.round((at.getTime() - now.getTime()) / 1000);
-  if (seconds <= 0) return "지금 다시 시도할 수 있습니다";
-  if (seconds < 45) return "곧 다시 시도합니다";
+  if (seconds <= 0) return "지금부터 가능";
+  if (seconds < 45) return "곧";
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}분 뒤`;
   const hours = Math.floor(minutes / 60);
   return minutes % 60 ? `${hours}시간 ${minutes % 60}분 뒤` : `${hours}시간 뒤`;
+}
+
+/**
+ * Which tool results of a session's messages answer a `draft` call, as
+ * `"<message index>:<block number>"`. The session API gives a tool result no
+ * name, so each is paired with the call before it: a message with tool
+ * calls is followed by the user message holding their results in the same
+ * order. A message whose partner is not in the list, or whose counts differ,
+ * is left out rather than guessed at.
+ */
+export function draftResultKeys(messages) {
+  const keys = new Set();
+  const byIndex = new Map((Array.isArray(messages) ? messages : []).map((m) => [m.index, m]));
+  for (const message of byIndex.values()) {
+    if (message.role !== "assistant" || !Array.isArray(message.blocks)) continue;
+    const uses = message.blocks.filter((b) => b?.type === "tool_use");
+    if (!uses.some((b) => b.name === "draft")) continue;
+    const reply = byIndex.get(message.index + 1);
+    if (!reply || reply.role !== "user" || !Array.isArray(reply.blocks)) continue;
+    const results = reply.blocks.map((block, n) => [block, n]).filter(([block]) => block?.type === "tool_result");
+    if (results.length !== uses.length) continue;
+    uses.forEach((use, i) => {
+      if (use.name === "draft") keys.add(`${reply.index}:${results[i][1]}`);
+    });
+  }
+  return keys;
 }
