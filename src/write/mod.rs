@@ -828,11 +828,11 @@ impl Draft {
         }
         let mut out = format!("# {}\n", self.title);
         for section in &self.sections {
-            out.push_str(&format!(
-                "\n## {}\n\n{}\n",
-                section.concept,
-                section.best_text()
-            ));
+            out.push_str(&format!("\n## {}\n", section.concept));
+            // A section with only its concept has nothing under the heading.
+            if section.gist.is_some() || section.body.is_some() || !section.outline.is_empty() {
+                out.push_str(&format!("\n{}\n", section.best_text()));
+            }
             if !section.failed.is_empty() {
                 out.push_str(&format!("\n> {}\n", self.failure_note(section)));
             }

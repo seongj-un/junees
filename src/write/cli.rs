@@ -170,6 +170,13 @@ pub async fn main(args: Args, get: impl Fn(&str) -> Option<String>) -> Result<u8
         }
     };
     signal.abort();
+    // Levels sent while the draft ended are still queued; the screen goes
+    // away now, so only the progress lines need them.
+    if screen.is_none() {
+        while let Ok(level) = levels.try_recv() {
+            eprintln!("  [draft] {}", super::level_line(&level));
+        }
+    }
     // Back to the normal screen before the final text.
     drop(screen);
     finish(&draft, args.out.as_deref(), &prices)
