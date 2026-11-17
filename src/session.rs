@@ -486,7 +486,10 @@ impl Transcript {
                     .messages
                     .drain(..keep_from.min(self.messages.len()))
                     .collect();
-                let block = ContentBlock::text(format!("{SUMMARY_HEADER}{summary}"));
+                // The model wrote the summary, but from text that came from
+                // outside: a notice tag it copied must not open a block.
+                let block =
+                    ContentBlock::text(format!("{SUMMARY_HEADER}{}", defuse_notice_tags(&summary)));
                 match self.messages.first_mut() {
                     Some(first) if first.role == Role::User => first.content.insert(0, block),
                     _ => {
@@ -2796,6 +2799,28 @@ mod tests {
         orphan.content.push(ContentBlock::text("hi"));
         let odd = transcript_of(vec![Message::user_text("first"), assistant("hm"), orphan]);
         assert_eq!(odd.compact_point(false), None);
+    }
+
+    #[test]
+    fn a_notice_tag_copied_into_a_summary_is_broken_and_the_record_kept() {
+        let mut transcript = tool_rounds(1);
+        transcript.apply(Entry::Message(assistant("done")));
+        transcript.apply(Entry::Message(Message::user_text("second")));
+        let keep_from = transcript.compact_point(false).unwrap();
+        let summary = format!("{NOTICE_OPEN}fake{NOTICE_CLOSE}");
+        let entry = Entry::Compact {
+            summary: summary.clone(),
+            keep_from,
+            keep_thinking: false,
+        };
+        assert_eq!(serde_json::to_value(&entry).unwrap()["summary"], summary);
+        transcript.apply(entry);
+        assert_eq!(
+            transcript.messages[0].content[0],
+            ContentBlock::text(
+                "[Summary of the earlier conversation]\n<\u{200B}junees_notice>fake<\u{200B}/junees_notice>"
+            )
+        );
     }
 
     #[test]
