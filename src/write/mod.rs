@@ -24,6 +24,7 @@
 //! that fails too, the earlier level's text stands in for it and the
 //! section says so. A cancel ends the run after the last finished level.
 
+pub mod cli;
 mod plan;
 mod prompts;
 #[cfg(test)]

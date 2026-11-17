@@ -139,6 +139,10 @@ async fn run() -> Result<ExitCode> {
             print!("{}", junees::usage::args::HELP);
             return Ok(ExitCode::SUCCESS);
         }
+        Command::WriteHelp => {
+            println!("{}", junees::write::cli::HELP);
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::DashboardHelp => {
             print!("{}", junees::dashboard::HELP);
             return Ok(ExitCode::SUCCESS);
@@ -234,6 +238,10 @@ async fn run() -> Result<ExitCode> {
     match command {
         Command::Run(args) => conversation(args, settings, input).await,
         Command::Task(command) => run_task(command, &settings).await,
+        Command::Write(args) => {
+            let code = junees::write::cli::main(args, |key| settings.get(key)).await?;
+            Ok(ExitCode::from(code))
+        }
         Command::Gateway => discord_gateway(&settings).await,
         Command::Telegram => telegram_gateway(&settings).await,
         Command::Slack => slack_gateway(&settings).await,
@@ -250,6 +258,7 @@ async fn run() -> Result<ExitCode> {
         | Command::DoctorHelp
         | Command::Usage(_)
         | Command::UsageHelp
+        | Command::WriteHelp
         | Command::Dashboard(_)
         | Command::DashboardHelp
         | Command::Update(_)

@@ -30,6 +30,10 @@ Usage:
   junees sessions search <words>
                           search the saved sessions (--all: every folder; see
                           `junees sessions --help`)
+  junees write \"<request>\"
+                          write a long text coarse to fine, sections in
+                          parallel (--levels, --parallel, --polish, --out;
+                          see `junees write --help`)
   junees usage            tokens and estimated cost of the saved sessions
                           (--days N, --by day|model|folder|source, --all; see
                           `junees usage --help`)
@@ -248,6 +252,10 @@ pub enum Command {
     Dashboard(crate::dashboard::Options),
     /// `junees dashboard --help`.
     DashboardHelp,
+    /// `junees write ...`: a draft made level by level ([`crate::write`]).
+    Write(crate::write::cli::Args),
+    /// `junees write --help`.
+    WriteHelp,
     /// `junees usage ...`.
     Usage(crate::usage::args::UsageArgs),
     /// `junees usage --help`.
@@ -398,6 +406,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
                     None => Command::RewindHelp,
                 },
             );
+        }
+        Some("write") => {
+            args.next();
+            return Ok(crate::write::cli::parse(args)?.map_or(Command::WriteHelp, Command::Write));
         }
         Some("usage") => {
             args.next();
