@@ -463,7 +463,7 @@ Junees가 컨텍스트 창 하나에 담기지 않는 큰 작업을, 여러 세�
 - NCM(Next-Concept Modeling, arXiv 2610.14162)의 생성 방식만 하네스 수준에서 적용했다. 각 단계의 생성기는 설정한 모델이고, 같은 단계의 섹션은 API 요청을 동시에 보낸다. NCM 모델은 넣지 않았다(대화·도구 호출을 못 하는 연구 모델이고 GPU가 필요하다)
 - 엔진은 새 모듈 `src/write/`(`mod.rs` 단계와 실패 대체, `plan.rs` L1 JSON, `prompts.rs`, `tool.rs` `draft` 도구, `cli.rs` `junees write`). 같은 단계의 요청은 세마포어(`write_parallel`, 기본 4, 최대 8) 하나를 나누고 시스템 프롬프트를 바이트 단위로 공유한다. 두 번째 물결이 있는 단계에만 캐시 표시를 붙인다
 - 실패한 단위는 한 번 다시 요청하고, 그래도 실패하면 앞 단계의 글을 넣고 표시한다. 취소는 끝난 단계까지를 남긴다(`--out`이면 `.partial`)
-- `draft`는 `delegate`처럼 에이전트 루프가 직접 돌린다(`Agent::with_draft`). 무인 실행(예약 작업, 웹훅, `task`)은 동시 요청 2개로 줄이고, 서브에이전트에는 주지 않는다. 사용량은 새 기록 항목 `draft_usage`(세션 기록 형식 10)
+- `draft`는 `delegate`처럼 에이전트 루프가 직접 돌린다(`Agent::with_draft`). 무인 실행(예약 작업, 웹훅, `task`)은 동시 요청 2개로 줄이고, 서브에이전트에는 주지 않는다. 무인 실행에서는 `levels` 최대 3, `polish` 끔, 실행의 토큰 상한을 호출마다 확인한다(Argus 리뷰 권장). 사용량은 답한 모델별 `subagent_usage`에 `"source": "draft"`를 붙여 남긴다. 처음에는 새 항목 `draft_usage`로 형식을 10으로 올렸지만, 리뷰에서 두 릴리스 연속 호환이 끊기는 것을 피하기로 하고 형식 9로 되돌렸다(릴리스된 0.5.0 바이너리로 열기와 이어 쓰기를 확인). 예비 모델로 넘어가면 호출마다 답한 모델(`StreamEvent::AnsweredBy`)을 기록하고 끝날 때 한 번 알린다
 - `/write`는 Junees가 직접 도는 한 턴이다(`Agent::write`): 입력한 줄이 사람의 입력, 글이 답이고, `--out`은 `write_file`을 승인과 체크포인트를 거쳐 부른다
 - 대시보드 대화는 `draft_level`, `draft_done` 이벤트를 보낸다. 화면은 Daedalus 배정
 - 속도: 루프백 가짜 API(출력 토큰당 5ms)에서 3,200토큰 글이 한 번에 쓰기 16.4초, parallel 4에서 7.0초, parallel 8에서 3.9초 (`scripts/write_bench.sh`, [docs/write.md](write.md#속도-측정))
