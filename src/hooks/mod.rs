@@ -97,30 +97,17 @@ pub const CHANGED: &str = "훅이 부르는 파일이 바뀌어 실행하지 않
 pub const NOT_PINNED: &str = "훅이 부르는 파일을 고정하지 못해 실행하지 않았습니다";
 
 /// The pin of the file `spec` runs (`command[0]` with a `/`), when it is
-/// in `workdir`: the model may change files there, so the hook must run
-/// only what was read (and, for a project's hooks, trusted). A program
-/// found on PATH and files outside `workdir` are not pinned.
-pub fn pin_for(spec: &Spec, workdir: &Path) -> Option<Pin> {
+/// in `workdir` or, for a project's hook, in the project's folder
+/// `project`: the model may change files there, so the hook must run only
+/// what was read (and, for a project's hooks, trusted). A program found on
+/// PATH and files outside those folders are not pinned.
+pub fn pin_for(spec: &Spec, workdir: &Path, project: Option<&Path>) -> Option<Pin> {
     let program = &spec.command[0];
     if !program.contains('/') {
         return None;
     }
-    let path = Path::new(program);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        workdir.join(path)
-    };
-    let workdir = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
-    // The folders resolved (a linked folder cannot point it elsewhere),
-    // the file itself never followed.
-    let resolved = match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
-            .map(|parent| parent.join(name))
-            .unwrap_or(path.clone()),
-        _ => path.clone(),
-    };
-    if !resolved.starts_with(&workdir) {
+    let resolved = resolve(program, workdir)?;
+    if !inside(&resolved, workdir, project) {
         return None;
     }
     let digest = pinned_digest(&resolved);
@@ -128,6 +115,77 @@ pub fn pin_for(spec: &Spec, workdir: &Path) -> Option<Pin> {
         path: resolved,
         digest,
     })
+}
+
+/// `path` as a process working in `workdir` finds it: absolute, its
+/// folders resolved (a linked folder cannot point it elsewhere unseen),
+/// the last part as written (never followed). `None` when it names no
+/// file (`..`, a trailing `/`) or its folder does not exist and it climbs
+/// with `..`, so where it leads cannot be told.
+fn resolve(path: &str, workdir: &Path) -> Option<PathBuf> {
+    if path.ends_with('/') || path.ends_with("/.") {
+        return None;
+    }
+    let workdir = canonical(workdir);
+    let given = Path::new(path);
+    let path = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        workdir.join(given)
+    };
+    let name = path.file_name()?;
+    if path.components().next_back() != Some(std::path::Component::Normal(name)) {
+        return None;
+    }
+    let parent = path.parent()?;
+    match std::fs::canonicalize(parent) {
+        Ok(parent) => Some(parent.join(name)),
+        Err(_)
+            if !path
+                .components()
+                .any(|part| part == std::path::Component::ParentDir) =>
+        {
+            Some(path)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Whether the resolved `path` is in `workdir` or in `project`.
+fn inside(path: &Path, workdir: &Path, project: Option<&Path>) -> bool {
+    std::iter::once(workdir)
+        .chain(project)
+        .any(|folder| path.starts_with(canonical(folder)))
+}
+
+/// `path` with its links resolved, or as given when it cannot be.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A project's hook may run a file only inside the project's folder
+/// `project` or the session's working folder: the person trusting the
+/// file sees `./tools/check.sh`, and a `tools` that links to `/tmp`, a
+/// path climbing out with `..` or an absolute path elsewhere would run a
+/// file nobody pinned, which others may change without asking again.
+fn check_project_program(spec: &Spec, project: &Path, workdir: &Path) -> Result<(), String> {
+    let program = &spec.command[0];
+    if !program.contains('/') {
+        return Ok(());
+    }
+    let leads = match resolve(program, workdir) {
+        Some(resolved) if inside(&resolved, workdir, Some(project)) => return Ok(()),
+        Some(resolved) => format!("leads to {}", resolved.display()),
+        None => "cannot be resolved".to_string(),
+    };
+    Err(format!(
+        "hook at line {}: `command` starts with `{}`, which {leads}, outside the project \
+         folder {}; a project hook may run a file inside the project (pinned, so a change \
+         asks again) or a program name on PATH",
+        spec.line,
+        crate::prompt_text::escape_hidden(program),
+        project.display()
+    ))
 }
 
 /// The SHA-256 of the regular file `path` (no link, at most
@@ -283,16 +341,34 @@ pub fn project_file_in(
         Err(err) => return Err(format!("cannot read {}: {err}", path.display())),
     };
     let mut digest = digest(&bytes);
+    // `<top>/.junees/hooks.toml`.
+    let project = path
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(project_dir)
+        .to_path_buf();
     let (text, hooks) = match String::from_utf8(bytes) {
         Ok(text) => {
-            let hooks = config::parse(&text, 1).map_err(|err| format!("{err:#}"));
+            let hooks = config::parse(&text, 1)
+                .map_err(|err| format!("{err:#}"))
+                .and_then(|specs| {
+                    for spec in &specs {
+                        check_project_program(spec, &project, workdir)?;
+                    }
+                    Ok(specs)
+                });
             (text, hooks)
         }
         Err(_) => (String::new(), Err("it is not UTF-8 text".to_string())),
     };
     let pins: Vec<Option<Pin>> = hooks
         .as_ref()
-        .map(|specs| specs.iter().map(|spec| pin_for(spec, workdir)).collect())
+        .map(|specs| {
+            specs
+                .iter()
+                .map(|spec| pin_for(spec, workdir, Some(&project)))
+                .collect()
+        })
         .unwrap_or_default();
     if pins.iter().any(Option::is_some) {
         let mut all = format!("{digest}\n");
@@ -391,7 +467,7 @@ impl Found {
         // A project's hooks were pinned when the file was read and trusted.
         for hook in &mut hooks {
             if matches!(hook.origin, Origin::User(_)) {
-                hook.pin = pin_for(&hook.spec, workdir);
+                hook.pin = pin_for(&hook.spec, workdir, None);
             }
         }
         Some(std::sync::Arc::new(Hooks::new(

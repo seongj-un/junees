@@ -876,16 +876,84 @@ mod pinning {
             .unwrap()
             .remove(0)
         };
-        assert!(pin_for(&spec("./x.sh"), &work).is_some());
+        assert!(pin_for(&spec("./x.sh"), &work, None).is_some());
         let inside = work.join("x.sh");
-        assert!(pin_for(&spec(inside.to_str().unwrap()), &work).is_some());
-        assert!(pin_for(&spec("/bin/sh"), &work).is_none());
-        assert!(pin_for(&spec("sh"), &work).is_none());
-        assert!(pin_for(&spec("../x.sh"), &work).is_none());
+        assert!(pin_for(&spec(inside.to_str().unwrap()), &work, None).is_some());
+        assert!(pin_for(&spec("/bin/sh"), &work, None).is_none());
+        assert!(pin_for(&spec("sh"), &work, None).is_none());
+        assert!(pin_for(&spec("../x.sh"), &work, None).is_none());
         // A link in the working folder is not followed: it cannot be pinned.
         std::os::unix::fs::symlink("/bin/sh", work.join("link")).unwrap();
-        let pin = pin_for(&spec("./link"), &work).unwrap();
+        let pin = pin_for(&spec("./link"), &work, None).unwrap();
         assert!(pin.digest.unwrap_err().contains("link"));
+    }
+
+    #[test]
+    fn a_project_hook_may_not_run_a_file_outside_the_project() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let outside = root.path().join("outside");
+        write(&outside.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        std::os::unix::fs::symlink(&outside, repo.join("tools")).unwrap();
+        let file = |program: &str| {
+            write(
+                &repo.join(super::super::PROJECT_FILE),
+                &format!(
+                    "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"notify\"]\n\
+                     [[hooks]]\nevent = \"pre_tool\"\ncommand = [\"{program}\"]\n"
+                ),
+            );
+        };
+        let outside_path = outside.canonicalize().unwrap().join("check.sh");
+        for program in [
+            "./tools/check.sh".to_string(),
+            "tools/check.sh".to_string(),
+            "../outside/check.sh".to_string(),
+            "./missing/../../outside/check.sh".to_string(),
+            outside_path.display().to_string(),
+        ] {
+            file(&program);
+            let found = find(Some(&home), &repo, &repo).unwrap();
+            // Not one of its hooks runs, and it cannot be trusted.
+            assert!(
+                found.hooks.is_empty() && found.untrusted.is_none(),
+                "{program}"
+            );
+            let warning = found.warnings.join("\n");
+            assert!(
+                warning.contains("hook at line 4")
+                    && warning.contains("outside the project folder")
+                    && warning.contains(&program),
+                "{program}: {warning}"
+            );
+            let read = super::super::project_file(&repo, Some(root.path()), Some(&home))
+                .unwrap()
+                .unwrap();
+            let err = format!("{:#}", trust::trust(&home, &read).unwrap_err());
+            assert!(
+                err.contains("outside the project folder"),
+                "{program}: {err}"
+            );
+        }
+        // Inside the project, a missing file included: pinned (and the
+        // missing one would not run).
+        for program in ["./check.sh", "./missing/check.sh"] {
+            file(program);
+            let found = find(Some(&home), &repo, &repo).unwrap();
+            let file = found.untrusted.expect(program);
+            assert!(file.pins[1].is_some(), "{program}");
+        }
+        // From a session in a subfolder, a file higher up in the project is
+        // the project's, and pinned.
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        file("../check.sh");
+        let found = find(Some(&home), &sub, &sub).unwrap();
+        let pin = found.untrusted.unwrap().pins[1].clone().unwrap();
+        assert_eq!(pin.path, repo.canonicalize().unwrap().join("check.sh"));
+        assert!(pin.digest.is_ok());
     }
 
     /// Hooks of `toml` in `dir` with their files pinned as a run pins them.
@@ -894,7 +962,7 @@ mod pinning {
             .unwrap()
             .into_iter()
             .map(|spec| {
-                let pin = pin_for(&spec, dir);
+                let pin = pin_for(&spec, dir, None);
                 Hook {
                     spec,
                     origin: Origin::User(dir.join("hooks.toml")),
