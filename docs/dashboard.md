@@ -262,6 +262,7 @@ junees dashboard --chat [--dir <폴더>]
 - `text` `{delta}`: 모델 답의 다음 조각입니다. 비밀 값을 가리려면 낱말이 온전해야 하므로, 토큰 단위가 아니라 공백이나 줄 끝까지 모아 보냅니다. 이어 붙이면 답이 됩니다. Junees가 덧붙이는 줄도 `text`로 옵니다. 경고, 대화 요약(compaction), 인용한 웹 페이지, 그리고 응답이 끊겨 다시 받을 때의 "(the reply broke off; asking for it again)"가 그렇습니다.
 - `tool_use` `{name, input_preview}`: 도구 호출입니다. bash는 명령, 입력이 문자열 하나인 도구는 그 문자열, 나머지는 입력 JSON입니다. API가 직접 도는 도구(웹 검색)와 서브에이전트의 한 줄(`name`: `subagent <번호>`)도 이 이벤트로 옵니다.
 - `tool_result` `{name, is_error, text_preview}`
+- `hook` `{event, command, origin, result, took_ms, message?, reason?, error?, blocked?}`: 훅 하나가 돌았습니다([훅](hooks.md#세션-기록과-모델이-보는-것)). `result`는 `passed`, `blocked`, `timed_out`, `failed`입니다. 세션 기록에는 같은 내용이 Junees의 안내 줄(`notes`)로 남으므로, 새로 고친 뒤에는 이 이벤트가 아니라 그 안내 줄로 보입니다. 이 이벤트를 그리는 화면은 아직 없습니다.
 - `model_switch` `{from, to, reason, retry_at}`: 주 모델(`from`)이 막혀 예비 모델(`to`)로 넘어갔습니다([예비 모델](configuration.md#예비-모델)). `reason`은 `rate_limit`(429), `overloaded`(529), `unavailable`(5xx나 응답 없음) 중 하나입니다. `retry_at`은 주 모델을 다시 시도할 수 있는 시각(RFC 3339 UTC, 초 단위)이고, 그 뒤 처음 시작하는 턴의 첫 호출이 주 모델로 갑니다. 넘어가기 전에 보낸 `text`가 있으면 그 앞에 응답이 끊겼다는 안내가 `text`로 옵니다. 무인 실행의 기다리기는 대화에 쓰지 않으므로 이 화면에는 오지 않습니다.
 - `approval` `{question_id, kind, summary, target, reasons, preview, options, expires_in, expires_at}`
   - `kind`는 도구 이름입니다. `summary`는 질문을 평범한 줄로 쓴 글입니다. 명령이나 경로, `- 이유` 줄들, 바뀌는 내용 미리보기 순서이고, 터미널의 `??` 표시나 들여쓰기는 없습니다.

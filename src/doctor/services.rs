@@ -4,7 +4,7 @@
 
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::claude_code::find_on_path;
 use crate::config_file::Settings;
@@ -487,5 +487,125 @@ pub(super) fn plugins(report: &mut Report, home: &Path) {
     }
     if plugins.plugins().is_empty() && plugins.problems().is_empty() {
         report.skip(AREA, "enabled", "no plugin is enabled");
+    }
+}
+
+/// The hooks ([`crate::hooks`]): the user's read and checked, and the
+/// project's of the folder `doctor` runs in, with its trust.
+pub(super) fn hooks(
+    report: &mut Report,
+    home: &Path,
+    user_home: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) {
+    const AREA: &str = "hooks";
+    let mut found = false;
+    match crate::hooks::user_hooks(home) {
+        Ok(hooks) => {
+            for hook in &hooks {
+                found = true;
+                hook_check(report, AREA, hook, path);
+            }
+        }
+        Err(err) => {
+            found = true;
+            report.fail(
+                AREA,
+                "user",
+                format!("{err:#}"),
+                "fix the hook (docs/hooks.md); Junees does not start while one is broken",
+            );
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match crate::hooks::project_file(&cwd, user_home, Some(home)) {
+        Ok(None) => {}
+        Ok(Some(file)) => {
+            found = true;
+            let name = format!("project {}", file.path.display());
+            match &file.hooks {
+                Err(err) => report.warn(
+                    AREA,
+                    &name,
+                    format!("not read, so not run: {err}"),
+                    "fix the file; its hooks run only after `junees hooks trust`",
+                ),
+                Ok(_) => {
+                    let trusted = crate::hooks::trust::is_trusted(home, &file);
+                    if trusted {
+                        report.ok(AREA, &name, "trusted (this exact content)");
+                    } else {
+                        report.warn(
+                            AREA,
+                            &name,
+                            "not trusted, so not run (new, or changed since it was trusted)",
+                            "read it, then `junees hooks trust` (a conversation in a terminal asks too)",
+                        );
+                    }
+                    for hook in file.hooks() {
+                        hook_check(report, AREA, &hook, path);
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            found = true;
+            report.warn(
+                AREA,
+                "project",
+                format!("{err}; its hooks do not run"),
+                "make it a regular file",
+            );
+        }
+    }
+    if !found {
+        report.skip(AREA, "hooks", "no hook is set");
+    }
+}
+
+/// One hook: its program found.
+fn hook_check(
+    report: &mut Report,
+    area: &'static str,
+    hook: &crate::hooks::Hook,
+    path: Option<&std::ffi::OsStr>,
+) {
+    let spec = &hook.spec;
+    let name = format!(
+        "{} {} (line {})",
+        hook.origin.kind(),
+        spec.event.name(),
+        spec.line
+    );
+    let matched = spec
+        .matcher
+        .as_ref()
+        .map(|matcher| {
+            format!(
+                ", match `{}`",
+                crate::prompt_text::escape_hidden(&matcher.source)
+            )
+        })
+        .unwrap_or_default();
+    let detail = format!("`{}`{matched}", spec.shown());
+    let program = &spec.command[0];
+    let found = if program.contains('/') {
+        // Relative to the folder a session works in; checked from here.
+        Path::new(program).is_file()
+    } else {
+        find_on_path(program, path).is_some()
+    };
+    if found {
+        report.ok(area, &name, detail);
+    } else {
+        report.warn(
+            area,
+            &name,
+            format!(
+                "{detail}: the program `{}` is not found here",
+                crate::prompt_text::escape_hidden(program)
+            ),
+            "install it or fix `command`; a hook that cannot start follows its on_error",
+        );
     }
 }

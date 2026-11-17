@@ -43,6 +43,9 @@ Usage:
   junees dashboard        a page about this Junees in the browser, on
                           127.0.0.1 (--listen, --no-open; --chat to talk with
                           Junees there; see `junees dashboard --help`)
+  junees hooks [list]     show the hooks a session here runs; also `hooks
+                          trust` / `hooks untrust` (this project's
+                          .junees/hooks.toml) and `hooks test <event>`
   junees plugin list      show the plugins ($JUNEES_HOME/plugins); also
                           plugin install <folder> [--name <n>], enable <name> [--trust],
                           disable <name>, remove <name>
@@ -243,6 +246,8 @@ pub enum Command {
     Webhook(crate::webhook::cli::WebhookCommand),
     /// `junees plugin ...` (or `junees plugins`).
     Plugin(crate::plugins::manage::PluginCommand),
+    /// `junees hooks ...`.
+    Hooks(crate::hooks::cli::HooksCommand),
     /// `junees mcp login|logout <server>`.
     Mcp(crate::mcp::oauth::cli::McpCommand),
     /// `junees sessions search ...`.
@@ -432,6 +437,13 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command> {
         Some("update") => {
             args.next();
             return Ok(crate::update::parse(args)?.map_or(Command::UpdateHelp, Command::Update));
+        }
+        Some("hooks") => {
+            args.next();
+            if matches!(args.peek().map(String::as_str), Some("-h" | "--help")) {
+                return Ok(Command::Help);
+            }
+            return crate::hooks::cli::parse(args).map(Command::Hooks);
         }
         Some("plugin" | "plugins") => {
             args.next();

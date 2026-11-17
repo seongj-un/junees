@@ -466,6 +466,21 @@ impl ApiEngine {
         if let Some(settings) = config.subagents {
             agent = agent.with_delegate(settings);
         }
+        // Nobody can be asked: the user's hooks, and the project's only
+        // when a person trusted them before. A webhook run's project is
+        // the route's folder, as for the instruction files.
+        let project = match spec.trigger {
+            Trigger::Webhook { context_dir, .. } => context_dir,
+            _ => dir,
+        };
+        let mut hooks = crate::hooks::find(home, project, dir)?;
+        hooks.skip_untrusted();
+        for warning in &hooks.warnings {
+            eprintln!("  !! {warning}");
+        }
+        if let Some(hooks) = hooks.build(dir, &settings, crate::hooks::hider()) {
+            agent = agent.with_hooks(hooks);
+        }
         // Nobody watches: fewer requests at once.
         agent = agent.with_draft(crate::write::tool::Settings::unattended(
             config.write_parallel,

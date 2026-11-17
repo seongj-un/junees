@@ -141,6 +141,16 @@ pub const STATE_CHANGING: &[SelfCommand] = &[
         asks: "웹훅 경로를 지금 실행하고 답을 보냅니다",
     },
     SelfCommand {
+        words: &["hooks", "trust"],
+        does: "trusts this project's hooks file (its commands run in later sessions)",
+        asks: "이 프로젝트의 훅 파일을 승인합니다(다음 세션부터 그 명령이 실행됩니다)",
+    },
+    SelfCommand {
+        words: &["hooks", "untrust"],
+        does: "stops trusting this project's hooks file",
+        asks: "이 프로젝트의 훅 파일 승인을 거둡니다",
+    },
+    SelfCommand {
         words: &["plugin", "install"],
         does: "installs a plugin (programs Junees runs)",
         asks: "플러그인을 설치합니다(Junees가 실행할 프로그램)",
@@ -358,6 +368,8 @@ mod tests {
             ("junees plugins enable p", "junees plugins enable"),
             ("junees plugins disable p", "junees plugins disable"),
             ("junees plugins remove p", "junees plugins remove"),
+            ("junees hooks trust", "junees hooks trust"),
+            ("junees hooks untrust", "junees hooks untrust"),
             ("junees mcp login docs", "junees mcp login"),
             ("junees mcp logout docs", "junees mcp logout"),
             ("junees update", "junees update"),

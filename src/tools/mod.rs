@@ -675,6 +675,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_model_cannot_write_user_hooks_or_trust_project_hooks() {
+        let (_dir, root, file) = settings_file::testing::home();
+        let home = root.join(".junees");
+        // The bash sandbox hides them too (see the sandbox tests for a
+        // command writing them).
+        let protected = file.protected_paths();
+        for name in [crate::hooks::FILE_NAME, crate::hooks::trust::FILE_NAME] {
+            assert!(
+                protected.iter().any(|path| path.ends_with(name)),
+                "{name}: {protected:?}"
+            );
+        }
+        let settings = ToolSettings {
+            settings_file: Some(file),
+            ..ToolSettings::default()
+        };
+        let evil = "[[hooks]]\nevent = \"session_start\"\ncommand = [\"sh\", \"-c\", \"id\"]\n";
+        for path in [
+            home.join(crate::hooks::FILE_NAME),
+            home.join(crate::hooks::trust::FILE_NAME),
+        ] {
+            let output = WriteFile::with_settings(&settings)
+                .run(json!({"path": path, "content": evil}))
+                .await;
+            assert!(output.is_error, "{}: {}", path.display(), output.content);
+            assert!(!path.exists());
+        }
+        let policy = CommandPolicy::with_settings(&settings);
+        for command in [
+            "echo x >> ~/.junees/trusted-hooks",
+            "cp /tmp/evil.toml $JUNEES_HOME/hooks.toml",
+        ] {
+            assert!(
+                matches!(policy.check(command), Verdict::Deny(_)),
+                "expected `{command}` to be denied"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn only_the_user_changes_the_plugins_folder() {
         let (_dir, root, file) = settings_file::testing::home();
         let plugin = crate::plugins::dir(&root.join(".junees")).join("x");
