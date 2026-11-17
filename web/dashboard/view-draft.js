@@ -224,17 +224,20 @@ export class DraftCard {
     const article = parseArticle(parts.head);
     if (article.title) this.state.title = article.title;
     const failedIds = this.state.done?.failedSections ?? [];
-    this.state.sections = article.sections.map((s, i) => ({
-      id: s.failedId ?? "",
-      concept: s.concept,
-      text: s.text,
-      kind: null,
-      level: 0,
-      truncated: false,
-      // A note in the text only places a failure the server's list names.
-      failed: s.failedId !== null && failedIds.includes(s.failedId),
-      key: i + 1,
-    }));
+    this.state.sections = article.sections.map((s, i) => {
+      // A note in the text names a section only when the server's list does too.
+      const failed = s.failedId !== null && failedIds.includes(s.failedId);
+      return {
+        id: failed ? s.failedId : "",
+        concept: s.concept,
+        text: s.text,
+        kind: null,
+        level: 0,
+        truncated: false,
+        failed,
+        key: i + 1,
+      };
+    });
     if (parts.omitted !== 0) this.gap = { omitted: parts.omitted, tail: parts.tail };
     this.draw(false);
     this.fold.open = false;
