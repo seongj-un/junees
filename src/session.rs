@@ -1576,14 +1576,22 @@ pub struct Logged {
     /// Empty for journals from before format 9, whose notes are part of the
     /// input's text.
     pub notices: Vec<usize>,
+    /// The tokens of `draft` calls recorded while this message was the
+    /// last one (`subagent_usage` lines marked [`DRAFT_SOURCE`]), in the
+    /// order written: one per answering model of each call. For an
+    /// assistant message, the calls of its `draft` tool uses, which run
+    /// before their results are written; a call whose provider named no
+    /// model wrote an unmarked line, which is not here.
+    pub draft_usage: Vec<Usage>,
 }
 
 /// The conversation the journal at `path` records, every message as it
 /// was written: compactions and cleared tool results do not shorten it,
 /// as they do the history the model sees ([`Transcript`]). Appended input
 /// joins the user message before it, as on replay; a Claude Code turn is
-/// two messages (the input and the reply). Lines that do not read are
-/// skipped.
+/// two messages (the input and the reply). The tokens of `draft` calls go
+/// with the message they followed ([`Logged::draft_usage`]); other usage
+/// lines are left out. Lines that do not read are skipped.
 pub fn read_conversation(path: &Path) -> Result<Vec<Logged>> {
     let file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut reader = io::BufReader::new(file);
@@ -1617,6 +1625,7 @@ pub fn read_conversation(path: &Path) -> Result<Vec<Logged>> {
                     },
                     at: ts,
                     notices: Vec::new(),
+                    draft_usage: Vec::new(),
                 });
                 (messages.len() - 1, 0)
             }
@@ -1626,6 +1635,7 @@ pub fn read_conversation(path: &Path) -> Result<Vec<Logged>> {
                 message,
                 at: ts,
                 notices: Vec::new(),
+                draft_usage: Vec::new(),
             }),
             Entry::AppendText { text } => {
                 append(vec![ContentBlock::text(text)]);
@@ -1642,6 +1652,7 @@ pub fn read_conversation(path: &Path) -> Result<Vec<Logged>> {
                     message: Message::user_text(turn.input),
                     at: ts,
                     notices: Vec::new(),
+                    draft_usage: Vec::new(),
                 });
                 messages.push(Logged {
                     message: Message {
@@ -1650,12 +1661,31 @@ pub fn read_conversation(path: &Path) -> Result<Vec<Logged>> {
                     },
                     at: ts,
                     notices: Vec::new(),
+                    draft_usage: Vec::new(),
                 });
+            }
+            Entry::SubagentUsage(usage) if draft_marked(&line) => {
+                if let Some(last) = messages.last_mut() {
+                    last.draft_usage.push(usage);
+                }
             }
             _ => {}
         }
     }
     Ok(messages)
+}
+
+/// Whether a `subagent_usage` line counts a `draft` call's tokens
+/// (`"source": "draft"`). Read apart from [`LineIn`], whose flattened
+/// entry would take a `source` field from the meta line.
+fn draft_marked(line: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Marked {
+        #[serde(default)]
+        source: Option<String>,
+    }
+    serde_json::from_str::<Marked>(line)
+        .is_ok_and(|marked| marked.source.as_deref() == Some(DRAFT_SOURCE))
 }
 
 /// How many messages the journal at `path` records
@@ -2041,6 +2071,49 @@ mod tests {
         assert_eq!(lines[1]["type"], "message");
         let session = Session::load(writer.path()).unwrap();
         assert_eq!(session.transcript.messages, [Message::user_text("hi")]);
+    }
+
+    #[test]
+    fn read_conversation_keeps_draft_tokens_with_the_message_they_followed() {
+        let home = tempfile::tempdir().unwrap();
+        let (_, mut writer) = SessionWriter::create(home.path(), Path::new("/w"), "m").unwrap();
+        let usage = |input_tokens| Usage {
+            input_tokens,
+            output_tokens: 2,
+            cache_read_input_tokens: 1,
+            ..Usage::default()
+        };
+        writer
+            .record(&Entry::Message(Message::user_text("write it")))
+            .unwrap();
+        writer
+            .record(&Entry::Message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "draft".into(),
+                    input: serde_json::json!({"request": "r"}),
+                }],
+            }))
+            .unwrap();
+        writer.record_usage(&Entry::Usage(usage(100)), "m").unwrap();
+        writer.record_draft_usage(usage(7), "m").unwrap();
+        writer.record_draft_usage(usage(8), "fallback").unwrap();
+        // A delegate call's tokens, and a draft's whose model is unknown.
+        writer.record(&Entry::SubagentUsage(usage(9))).unwrap();
+        writer
+            .record(&Entry::Message(Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result("t1", "text", false)],
+            }))
+            .unwrap();
+        let logged = read_conversation(writer.path()).unwrap();
+        let drafts: Vec<Vec<u64>> = logged
+            .iter()
+            .map(|logged| logged.draft_usage.iter().map(|u| u.input_tokens).collect())
+            .collect();
+        assert_eq!(drafts, [vec![], vec![7, 8], vec![]]);
+        assert_eq!(logged[1].draft_usage[0], usage(7));
     }
 
     #[test]
