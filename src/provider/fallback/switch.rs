@@ -47,12 +47,13 @@ impl Reason {
         }
     }
 
-    /// For people: "사용 한도로 막혀".
+    /// For people: "사용 한도로 막혀". [`Self::Unavailable`] covers both a
+    /// 5xx answer and no answer at all, so its words say both.
     pub fn korean(self) -> &'static str {
         match self {
             Self::RateLimit => "사용 한도로",
             Self::Overloaded => "과부하로",
-            Self::Unavailable => "응답이 없어",
+            Self::Unavailable => "서버 오류나 연결 실패로",
         }
     }
 }
