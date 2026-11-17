@@ -180,15 +180,20 @@ pub(super) async fn api_key(report: &mut Report, settings: &Settings) {
 /// With a fallback model, one call with a one-token answer: whether its
 /// API takes the key and knows the model. Costs one input and one output
 /// token or so.
-pub(super) async fn fallback(report: &mut Report, config: Option<&crate::config::Config>) {
+pub(super) async fn fallback(
+    report: &mut Report,
+    settings: &Settings,
+    config: Option<&crate::config::Config>,
+) {
     use crate::message::Message;
     use crate::provider::{CompletionRequest, fallback};
     const NAME: &str = "fallback model";
-    let Some((config, settings)) =
-        config.and_then(|config| Some((config, config.fallback.as_ref()?)))
+    let (Some(config), Some(Ok((settings, _, _)))) =
+        (config, super::settings::read_fallback(settings))
     else {
         return;
     };
+    let settings = &settings;
     let client = match fallback::client(settings, config) {
         Ok(client) => client,
         Err(err) => {

@@ -104,36 +104,72 @@ pub(super) fn settings(
     }
 }
 
+/// The fallback model's settings as the `api` backend reads them, when
+/// `fallback_model` is set: the model and where, `fallback_after` and
+/// `wait_limit`. The doctor reads the rest without a key, so this reads
+/// them on its own.
+pub(super) fn read_fallback(
+    settings: &Settings,
+) -> Option<
+    anyhow::Result<(
+        crate::provider::fallback::Settings,
+        std::time::Duration,
+        std::time::Duration,
+    )>,
+> {
+    use crate::provider::{Kind, fallback, openai};
+    let get = |key: &str| {
+        settings
+            .get(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    get(fallback::MODEL_ENV)?;
+    let kind = Kind::parse(get(crate::provider::PROVIDER_ENV).as_deref()).unwrap_or_default();
+    let main_openai = (kind == Kind::OpenAi)
+        .then(|| openai::Settings::read(get).ok())
+        .flatten();
+    let key = get("ANTHROPIC_API_KEY").unwrap_or_default();
+    let url = get("ANTHROPIC_BASE_URL").unwrap_or_else(|| crate::config::DEFAULT_BASE_URL.into());
+    let read = fallback::read(
+        &get,
+        &fallback::Main {
+            kind,
+            anthropic_key: &key,
+            anthropic_url: &url,
+            openai: main_openai.as_ref(),
+        },
+    )
+    .and_then(|read| {
+        let (after, wait) = fallback::read_times(&get)?;
+        Ok((read.expect("fallback_model is set"), after, wait))
+    });
+    Some(read)
+}
+
 /// The fallback model (`fallback_model`), when it is set: which one and
 /// where, or what is wrong with its settings.
 pub(super) fn fallback(report: &mut Report, settings: &Settings, read: &Read) {
-    use crate::provider::fallback;
     const NAME: &str = "fallback model";
-    let Some(model) = settings.get(fallback::MODEL_ENV) else {
+    let Some(found) = read_fallback(settings) else {
         return;
     };
     if read.backend == Backend::ClaudeCode {
         report.skip(
             AREA,
             NAME,
-            format!(
-                "{} (not used: the claude-code backend calls no model API itself)",
-                model.trim()
-            ),
+            "set, but not used: the claude-code backend calls no model API itself",
         );
         return;
     }
-    match &read.config {
-        Some(config) => {
-            let Some(fallback) = &config.fallback else {
-                return;
-            };
-            let wait = if config.wait_limit.is_zero() {
+    match found {
+        Ok((fallback, after, wait_limit)) => {
+            let wait = if wait_limit.is_zero() {
                 "unattended runs do not wait for usage limits".to_string()
             } else {
                 format!(
                     "unattended runs wait up to {} for usage limits",
-                    crate::korean::duration(config.wait_limit)
+                    crate::task::budget::format_duration(wait_limit)
                 )
             };
             report.ok(
@@ -144,44 +180,17 @@ pub(super) fn fallback(report: &mut Report, settings: &Settings, read: &Read) {
                     fallback.model,
                     fallback.kind().as_str(),
                     fallback.address(),
-                    crate::korean::duration(config.fallback_after),
+                    crate::task::budget::format_duration(after),
                 ),
             );
         }
-        // The settings did not read: say whether the fallback's part is
-        // why (the main provider's own problems are reported above).
-        None => {
-            let get = |key: &str| {
-                settings
-                    .get(key)
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            };
-            let kind = crate::provider::Kind::parse(get(crate::provider::PROVIDER_ENV).as_deref())
-                .unwrap_or_default();
-            let main_openai = (kind == crate::provider::Kind::OpenAi)
-                .then(|| crate::provider::openai::Settings::read(get).ok())
-                .flatten();
-            let checked = fallback::read(
-                &get,
-                &fallback::Main {
-                    kind,
-                    anthropic_key: "-",
-                    anthropic_url: crate::config::DEFAULT_BASE_URL,
-                    openai: main_openai.as_ref(),
-                },
-            )
-            .and_then(|_| fallback::read_times(&get));
-            if let Err(err) = checked {
-                report.fail(
-                    AREA,
-                    NAME,
-                    format!("{err:#}"),
-                    "check fallback_model, fallback_provider, fallback_base_url, \
-                     fallback_api_key, fallback_after and wait_limit (docs/configuration.md)",
-                );
-            }
-        }
+        Err(err) => report.fail(
+            AREA,
+            NAME,
+            format!("{err:#}"),
+            "check fallback_model, fallback_provider, fallback_base_url, fallback_api_key, \
+             fallback_after and wait_limit (docs/configuration.md)",
+        ),
     }
 }
 

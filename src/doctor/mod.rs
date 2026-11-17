@@ -407,7 +407,9 @@ pub async fn run_with(
     if online {
         online::api_key(&mut report, settings).await;
         online::openai_models(&mut report, settings).await;
-        online::fallback(&mut report, read.config.as_ref()).await;
+        if read.backend != crate::claude_code::Backend::ClaudeCode {
+            online::fallback(&mut report, settings, read.config.as_ref()).await;
+        }
         online::transcribe(&mut report, settings).await;
         online::release(&mut report, settings).await;
         if has_slack(settings) {
