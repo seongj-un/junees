@@ -244,12 +244,16 @@ async fn a_working_folder_holding_the_state_folder_keeps_the_hook_files_protecte
     std::fs::write(junees.join("hooks.toml"), "# hooks\n").unwrap();
     std::fs::write(junees.join("trusted-hooks"), "").unwrap();
     std::fs::write(junees.join("hooks/fmt.sh"), "exit 0\n").unwrap();
+    std::fs::create_dir_all(junees.join("hook-copies/run/0")).unwrap();
+    std::fs::write(junees.join("hook-copies/run/0/check.sh"), "exit 0\n").unwrap();
     std::fs::write(home.join("sub/x.sh"), "").unwrap();
     let command = format!(
         "echo x >> {j}/hooks.toml || echo hooks-refused; \
          cat {j}/trusted-hooks || echo trust-read-refused; \
          echo x >> {j}/trusted-hooks || echo trust-refused; \
          echo x >> {j}/hooks/fmt.sh || echo script-refused; \
+         echo x >> {j}/hook-copies/run/0/check.sh || echo copy-refused; \
+         sh {j}/hook-copies/run/0/check.sh && echo copy-runs; \
          echo ok > {h}/sub/x.sh && echo sub-ok",
         h = home.display(),
         j = junees.display(),
@@ -261,6 +265,8 @@ async fn a_working_folder_holding_the_state_folder_keeps_the_hook_files_protecte
         "trust-read-refused",
         "trust-refused",
         "script-refused",
+        "copy-refused",
+        "copy-runs",
         "sub-ok",
     ] {
         assert!(text.contains(line), "missing {line}: {text}");

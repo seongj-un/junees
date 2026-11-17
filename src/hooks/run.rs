@@ -11,7 +11,12 @@
 //! - a pinned file that changed or cannot be checked: the hook does not
 //!   run, and a hook that can block blocks whatever its `on_error` says
 //!   (the file may have been tampered with).
+//!
+//! A hook with pinned files runs private copies of the bytes it checked
+//! ([`Copies`]), so a file swapped between the check and the start is
+//! never what runs.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -177,6 +182,8 @@ pub struct Hooks {
     /// The bash tool's sandbox, when it has one.
     sandbox: Option<Arc<Sandbox>>,
     hide: Hide,
+    /// Where the copies of pinned files are made ([`Copies`]).
+    copies: PathBuf,
     /// Runs every command in this folder as the bash tests do
     /// ([`crate::tools::testing::confine`]).
     #[cfg(test)]
@@ -197,9 +204,19 @@ impl Hooks {
             hidden_env: hidden_env.to_vec(),
             sandbox: sandbox.map(Arc::new),
             hide,
+            copies: default_copies_folder(),
             #[cfg(test)]
             test_dir: None,
         }
+    }
+
+    /// Makes the copies of pinned files in `folder` (Junees's state
+    /// folder's [`super::COPIES_FOLDER`], which the model's tools and the
+    /// sandbox may not change) instead of a folder in the temporary
+    /// folder.
+    pub fn with_copies(mut self, folder: PathBuf) -> Self {
+        self.copies = folder;
+        self
     }
 
     pub fn hooks(&self) -> &[Hook] {
@@ -343,16 +360,26 @@ impl Hooks {
     ) -> (Outcome, Option<String>, Duration, Option<&'static str>) {
         let spec = &hook.spec;
         let started = tokio::time::Instant::now();
-        if let Err(failure) = check_pin(hook) {
-            let what = format!("{} ({})", failure.what, failure.detail);
-            return (
-                Outcome::Failed(what),
-                None,
-                started.elapsed(),
-                Some(failure.what),
-            );
-        }
-        let result = self.spawn(spec, event, session_id, payload).await;
+        let checked = match check_pin(hook) {
+            Ok(checked) => checked,
+            Err(failure) => {
+                let what = format!("{} ({})", failure.what, failure.detail);
+                return (
+                    Outcome::Failed(what),
+                    None,
+                    started.elapsed(),
+                    Some(failure.what),
+                );
+            }
+        };
+        // Removed when this returns: the command has ended by then.
+        let result = match Copies::make(&self.copies, hook, checked) {
+            Ok(copies) => self.spawn(spec, &copies, event, session_id, payload).await,
+            Err(err) => Err(format!(
+                "cannot make a private copy of the file it runs in {}: {err}",
+                self.copies.display()
+            )),
+        };
         let took = started.elapsed();
         let (outcome, message) = match result {
             Err(why) => (Outcome::Failed(why), None),
@@ -398,16 +425,19 @@ impl Hooks {
         Some(crate::tools::truncate_middle(&message, MAX_MESSAGE_CHARS))
     }
 
-    /// Starts the hook's command and waits for it.
+    /// Starts the hook's command (with `copies` in place of its pinned
+    /// files) and waits for it.
     async fn spawn(
         &self,
         spec: &Spec,
+        copies: &Copies,
         event: Event,
         session_id: Option<&str>,
         payload: &Value,
     ) -> Result<(Exit, String, String), String> {
         let shown = spec.shown();
-        let program = PathBuf::from(&spec.command[0]);
+        let argv = copies.argv(&spec.command);
+        let program = PathBuf::from(&argv[0]);
         // A relative path is the session folder's, whatever Junees's own
         // working folder is.
         let program = if program.is_relative() && spec.command[0].contains('/') {
@@ -417,7 +447,7 @@ impl Hooks {
         };
         let mut process = tokio::process::Command::new(program);
         process
-            .args(&spec.command[1..])
+            .args(&argv[1..])
             .current_dir(&self.workdir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -431,6 +461,12 @@ impl Hooks {
             process.env_remove(name);
         }
         process.env("JUNEES_HOOK_EVENT", event.name());
+        // The script's own path, which `$0` and `__file__` no longer are
+        // when it runs from a copy.
+        match &copies.hook_file {
+            Some(path) => process.env("JUNEES_HOOK_FILE", path),
+            None => process.env_remove("JUNEES_HOOK_FILE"),
+        };
         match session_id {
             Some(id) => process.env("JUNEES_SESSION_ID", id),
             None => process.env_remove("JUNEES_SESSION_ID"),
@@ -450,7 +486,18 @@ impl Hooks {
             Some(confinement) => confinement.apply(&mut process),
             None => crate::tools::own_session(&mut process),
         }
-        let spawned = process.spawn();
+        let mut spawned = process.spawn();
+        // A copy just written may still be open for writing in a process
+        // another thread is forking (until that one execs).
+        for _ in 0..100 {
+            match &spawned {
+                Err(err) if copies.program && err.raw_os_error() == Some(libc::ETXTBSY) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    spawned = process.spawn();
+                }
+                _ => break,
+            }
+        }
         drop(confinement);
         let mut child = spawned.map_err(|err| format!("cannot run `{shown}`: {err}"))?;
         let mut group = GroupGuard(child.id());
@@ -526,11 +573,12 @@ struct PinFailure {
     detail: String,
 }
 
-/// Refuses to run a hook whose pinned file ([`super::Pin`]) could not be
-/// read when the hook was, or is no longer what it was then: the model may
-/// have rewritten it during the session. (A swap between this check and
-/// the start remains possible for a process already running there.)
-fn check_pin(hook: &Hook) -> Result<(), PinFailure> {
+/// Refuses to run a hook whose pinned files ([`super::Pin`]) could not be
+/// read when the hook was, or are no longer what they were then: the model
+/// may have rewritten them during the session. The bytes checked, one per
+/// pin, are what runs ([`Copies`]).
+fn check_pin(hook: &Hook) -> Result<Vec<Vec<u8>>, PinFailure> {
+    let mut checked = Vec::new();
     for pin in &hook.pins {
         let path = pin.path.display();
         match &pin.digest {
@@ -540,8 +588,8 @@ fn check_pin(hook: &Hook) -> Result<(), PinFailure> {
                     detail: format!("{path} could not be pinned when the hook was read: {err}"),
                 });
             }
-            Ok(expected) => match super::pinned_digest(&pin.path) {
-                Ok(now) if now == *expected => {}
+            Ok(expected) => match super::pinned_bytes(&pin.path) {
+                Ok(bytes) if super::digest(&bytes) == *expected => checked.push(bytes),
                 Ok(_) => {
                     return Err(PinFailure {
                         what: super::CHANGED,
@@ -557,7 +605,144 @@ fn check_pin(hook: &Hook) -> Result<(), PinFailure> {
             },
         }
     }
+    Ok(checked)
+}
+
+/// The folder for copies of pinned files when the run has no state
+/// folder: in the temporary folder, one per user.
+fn default_copies_folder() -> PathBuf {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    std::env::temp_dir().join(format!("junees-hook-copies-{uid}"))
+}
+
+/// The copies of the pinned files of one run of a hook, in a fresh 0700
+/// folder under the copies folder, removed when dropped.
+///
+/// Running the bytes that were checked closes the gap between the check
+/// and the start: a process still running in the working folder may swap
+/// the file there, but not the copy (the copies folder is one of the
+/// state folder's data folders, which the model's tools and the sandbox
+/// may not change).
+pub(super) struct Copies {
+    /// The run's folder, when it has copies.
+    pub(super) dir: Option<PathBuf>,
+    /// The word of `command` each copy replaces, and the copy.
+    words: Vec<(usize, PathBuf)>,
+    /// The pinned file the hook is about (an interpreter's script, else
+    /// the program), as written: `JUNEES_HOOK_FILE`.
+    hook_file: Option<PathBuf>,
+    /// The program itself runs from a copy.
+    program: bool,
+}
+
+impl Copies {
+    /// Copies `checked` (the bytes of `hook`'s pins, in order) into a new
+    /// folder under `folder`.
+    pub(super) fn make(folder: &Path, hook: &Hook, checked: Vec<Vec<u8>>) -> std::io::Result<Self> {
+        let mut copies = Self {
+            dir: None,
+            words: Vec::new(),
+            hook_file: None,
+            program: false,
+        };
+        if hook.pins.is_empty() {
+            return Ok(copies);
+        }
+        let dir = folder.join(random_name()?);
+        private_folder(folder, true)?;
+        private_folder(&dir, false)?;
+        copies.dir = Some(dir.clone());
+        for (pin, bytes) in hook.pins.iter().zip(checked) {
+            let name = pin
+                .path
+                .file_name()
+                .ok_or_else(|| std::io::Error::other("the pinned file has no name"))?;
+            let at = dir.join(pin.arg.to_string());
+            private_folder(&at, false)?;
+            let copy = at.join(name);
+            // Runnable only if the file was: a script without its `x` bit
+            // fails as it did before.
+            let runnable = std::fs::symlink_metadata(&pin.path).is_ok_and(|meta| {
+                std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0
+            });
+            write_copy(&copy, &bytes, if runnable { 0o700 } else { 0o600 })?;
+            copies.program |= pin.arg == 0;
+            copies.hook_file = Some(pin.path.clone());
+            copies.words.push((pin.arg, copy));
+        }
+        Ok(copies)
+    }
+
+    /// `command` with the copied words replaced by their copies.
+    pub(super) fn argv(&self, command: &[String]) -> Vec<OsString> {
+        let mut argv: Vec<OsString> = command.iter().map(OsString::from).collect();
+        for (arg, copy) in &self.words {
+            argv[*arg] = copy.clone().into_os_string();
+        }
+        argv
+    }
+}
+
+impl Drop for Copies {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// A name nobody can guess ahead: 16 random bytes in hex.
+fn random_name() -> std::io::Result<String> {
+    use ring::rand::SecureRandom;
+    let mut bytes = [0u8; 16];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| std::io::Error::other("no random bytes"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Makes `path` a folder only its owner may open (0700). With `shared`
+/// (the copies folder itself, kept between runs) an existing one is
+/// accepted when it is a real folder of this user, and narrowed to 0700;
+/// otherwise it must be new.
+fn private_folder(path: &Path, shared: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let made = std::fs::DirBuilder::new()
+        .recursive(shared)
+        .mode(0o700)
+        .create(path);
+    if !shared {
+        return made;
+    }
+    made?;
+    let meta = std::fs::symlink_metadata(path)?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if !meta.is_dir() || meta.uid() != uid {
+        return Err(std::io::Error::other(
+            "it is not a folder of this user (a link, or someone else's)",
+        ));
+    }
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
+}
+
+/// Writes `bytes` to the new file `path` with `mode`, never following or
+/// replacing what is there.
+fn write_copy(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.flush()
 }
 
 /// Why a hook failed, in one line.

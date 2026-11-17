@@ -140,6 +140,11 @@ pub const DATA_FOLDERS: &[DataFolder] = &[
         tool: None,
     },
     DataFolder {
+        name: crate::hooks::COPIES_FOLDER,
+        holds: "the copies of the files hooks run, while they run",
+        tool: None,
+    },
+    DataFolder {
         name: "webhooks",
         holds: "the webhook routes and their output",
         tool: None,

@@ -1103,6 +1103,127 @@ mod pinning {
         assert!(found.untrusted.is_some() && found.hooks.is_empty());
     }
 
+    /// What a hook script reports about itself: its `$0`, the
+    /// `JUNEES_HOOK_FILE` it got, its folder and that folder's mode, and a
+    /// file it found next to its original.
+    const SHOW: &str = "#!/bin/sh\n\
+        printf '%s\\n' \"$0\" \"${JUNEES_HOOK_FILE:-none}\" \"$(pwd)\" \\\n\
+          \"$(stat -c %a \"$(dirname \"$0\")\")\" \\\n\
+          \"$(cat \"$(dirname \"${JUNEES_HOOK_FILE:-$0}\")/sibling.txt\")\" > shown.txt\n";
+
+    #[tokio::test]
+    async fn a_pinned_file_runs_from_a_private_copy_removed_after_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let work = dir.join("work");
+        let copies = dir.join("state/hook-copies");
+        write(&work.join("bin/show.sh"), SHOW);
+        write(&work.join("bin/sibling.txt"), "found it");
+        let input = json!({});
+        for (command, original) in [
+            (r#"["./bin/show.sh"]"#, "bin/show.sh"),
+            (r#"["sh", "bin/show.sh"]"#, "bin/show.sh"),
+        ] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                work.join("bin/show.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            let hooks = pinned_hooks(
+                &work,
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {command}\n"),
+            )
+            .with_copies(copies.clone());
+            let fired = hooks
+                .fire(
+                    Event::PreTool,
+                    Input {
+                        tool: Some(("bash", &input)),
+                        ..Input::default()
+                    },
+                )
+                .await;
+            assert_eq!(fired.records[0].outcome, Outcome::Passed, "{fired:?}");
+            let shown = std::fs::read_to_string(work.join("shown.txt")).unwrap();
+            let lines: Vec<&str> = shown.lines().collect();
+            // It ran from a copy in a 0700 folder under the copies folder,
+            // in the session's folder, told where its original is.
+            assert!(
+                lines[0].starts_with(copies.to_str().unwrap()),
+                "{command}: {shown}"
+            );
+            assert!(lines[0].ends_with("/show.sh"), "{command}: {shown}");
+            assert_eq!(lines[1], work.join(original).to_str().unwrap(), "{command}");
+            assert_eq!(lines[2], work.to_str().unwrap(), "{command}");
+            assert_eq!(lines[3], "700", "{command}");
+            assert_eq!(lines[4], "found it", "{command}");
+            // Nothing is left behind.
+            assert_eq!(std::fs::read_dir(&copies).unwrap().count(), 0, "{command}");
+        }
+        // A hook that runs no pinned file gets no JUNEES_HOOK_FILE.
+        let hooks = pinned_hooks(
+            &work,
+            "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"/bin/sh\", \"-c\", \"echo ${JUNEES_HOOK_FILE:-none} > shown.txt\"]\n",
+        );
+        let fired = hooks.fire(Event::TurnEnd, Input::default()).await;
+        assert_eq!(fired.records[0].outcome, Outcome::Passed, "{fired:?}");
+        assert_eq!(
+            std::fs::read_to_string(work.join("shown.txt")).unwrap(),
+            "none\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_copy_holds_the_checked_bytes_and_keeps_the_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        write(&dir.join("x.sh"), "checked\n");
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"./x.sh\"]\n",
+        );
+        let hook = &hooks.hooks()[0];
+        // The file changes after the check: the copy is what was checked.
+        write(&dir.join("x.sh"), "swapped\n");
+        let copies =
+            super::super::run::Copies::make(&dir.join("copies"), hook, vec![b"checked\n".to_vec()])
+                .unwrap();
+        let argv = copies.argv(&hook.spec.command);
+        assert_eq!(std::fs::read(&argv[0]).unwrap(), b"checked\n");
+        // Not runnable: the original had no `x` bit.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&argv[0]).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let run_dir = copies.dir.clone().unwrap();
+        drop(copies);
+        assert!(!run_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn a_copies_folder_that_is_a_link_is_not_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        write(&dir.join("x.sh"), "touch ran\n");
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("copies")).unwrap();
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"sh\", \"x.sh\"]\n",
+        )
+        .with_copies(dir.join("copies"));
+        let fired = hooks.fire(Event::TurnEnd, Input::default()).await;
+        assert!(!dir.join("ran").exists());
+        let Outcome::Failed(what) = &fired.records[0].outcome else {
+            panic!("{fired:?}");
+        };
+        assert!(
+            what.contains("private copy") && what.contains("link"),
+            "{what}"
+        );
+        assert_eq!(std::fs::read_dir(dir.join("elsewhere")).unwrap().count(), 0);
+    }
+
     /// Hooks of `toml` in `dir` with their files pinned as a run pins them.
     fn pinned_hooks(dir: &std::path::Path, toml: &str) -> Hooks {
         let hooks = config::parse(toml, 1)

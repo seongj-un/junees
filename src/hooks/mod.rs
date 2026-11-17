@@ -92,6 +92,11 @@ pub struct Pin {
 /// A larger file a hook runs cannot be pinned (the hook does not run).
 const MAX_PINNED_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The folder under `$JUNEES_HOME` where a hook's pinned files are copied
+/// to run ([`run`]): one of the data folders the model's tools and the
+/// sandbox may not change.
+pub const COPIES_FOLDER: &str = "hook-copies";
+
 /// What a hook whose file changed after it was read says instead of
 /// running.
 pub const CHANGED: &str = "훅이 부르는 파일이 바뀌어 실행하지 않았습니다";
@@ -343,8 +348,14 @@ fn check_project_program(spec: &Spec, project: &Path, workdir: &Path) -> Result<
 /// The SHA-256 of the regular file `path` (no link, at most
 /// [`MAX_PINNED_BYTES`]), or why it cannot be had.
 pub fn pinned_digest(path: &Path) -> Result<String, String> {
+    pinned_bytes(path).map(|bytes| digest(&bytes))
+}
+
+/// The bytes of the regular file `path` (no link, at most
+/// [`MAX_PINNED_BYTES`]), or why they cannot be had.
+pub fn pinned_bytes(path: &Path) -> Result<Vec<u8>, String> {
     match read_capped(path, MAX_PINNED_BYTES) {
-        Ok(Some(bytes)) => Ok(digest(&bytes)),
+        Ok(Some(bytes)) => Ok(bytes),
         Ok(None) => Err("it does not exist".into()),
         Err(err) => Err(err.to_string()),
     }
@@ -629,13 +640,17 @@ impl Found {
                 hook.pins = pins_for(&hook.spec, workdir, None);
             }
         }
-        Some(std::sync::Arc::new(Hooks::new(
+        let mut built = Hooks::new(
             hooks,
             workdir,
             &tools.hidden_env,
             crate::sandbox::Sandbox::for_tools(tools),
             hide,
-        )))
+        );
+        if let Some(state) = tools.settings_file.as_ref().and_then(|file| file.folder()) {
+            built = built.with_copies(state.join(COPIES_FOLDER));
+        }
+        Some(std::sync::Arc::new(built))
     }
 }
 
