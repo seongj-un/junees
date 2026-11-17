@@ -396,7 +396,9 @@ impl Agent {
             .hooks
             .as_ref()
             .filter(|hooks| hooks.has(crate::hooks::Event::PreTool))?;
+        let session_id = self.session_id();
         let input = crate::hooks::run::Input {
+            session_id: session_id.as_deref(),
             tool: Some((name, input)),
             ..Default::default()
         };
@@ -427,7 +429,9 @@ impl Agent {
         else {
             return;
         };
+        let session_id = self.session_id();
         let input = crate::hooks::run::Input {
+            session_id: session_id.as_deref(),
             tool: Some((name, input)),
             result: Some((output.is_error, &output.content)),
             ..Default::default()
@@ -532,14 +536,22 @@ impl Agent {
         let mut hook_notes = Vec::new();
         if let Some(hooks) = self.turn_hooks() {
             use crate::hooks::{Event as Point, run::Input};
-            hooks.set_session_id(self.session_id());
+            let session_id = self.session_id();
+            let session_id = session_id.as_deref();
             let mut points = Vec::new();
             if self.transcript.messages.is_empty() {
-                points.push((Point::SessionStart, Input::default()));
+                points.push((
+                    Point::SessionStart,
+                    Input {
+                        session_id,
+                        ..Input::default()
+                    },
+                ));
             }
             points.push((
                 Point::UserPrompt,
                 Input {
+                    session_id,
                     prompt: Some(input),
                     ..Input::default()
                 },
@@ -598,10 +610,12 @@ impl Agent {
             };
             // The turn is over: a cancel does not stop these (each has its
             // time limit).
+            let session_id = self.session_id();
             let fired = hooks
                 .fire(
                     crate::hooks::Event::TurnEnd,
                     crate::hooks::run::Input {
+                        session_id: session_id.as_deref(),
                         result: Some((result.is_err(), &text)),
                         ..Default::default()
                     },

@@ -195,6 +195,8 @@ pub struct ApiEngines {
     provider: ProviderFactory,
     mcp: Arc<Mcp>,
     plugins: Arc<Plugins>,
+    /// The hooks every channel's agent runs ([`crate::hooks`]).
+    hooks: Option<Arc<crate::hooks::Hooks>>,
     /// Added to the system prompt: which chat the user writes from.
     note: &'static str,
 }
@@ -217,6 +219,7 @@ impl ApiEngines {
             provider,
             mcp: Arc::new(Mcp::none()),
             plugins: Arc::new(Plugins::none()),
+            hooks: None,
             note: GATEWAY_NOTE,
         }
     }
@@ -238,6 +241,12 @@ impl ApiEngines {
     /// channel.
     pub fn with_plugins(mut self, plugins: Arc<Plugins>) -> Self {
         self.plugins = plugins;
+        self
+    }
+
+    /// Runs these hooks in every channel's conversation.
+    pub fn with_hooks(mut self, hooks: Option<Arc<crate::hooks::Hooks>>) -> Self {
+        self.hooks = hooks;
         self
     }
 
@@ -344,6 +353,9 @@ impl ApiEngines {
         }
         if let Some(after_turn) = self.plugins.after_turn() {
             agent = agent.with_after_turn(after_turn);
+        }
+        if let Some(hooks) = &self.hooks {
+            agent = agent.with_hooks(Arc::clone(hooks));
         }
         Ok(agent)
     }

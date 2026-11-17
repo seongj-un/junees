@@ -111,6 +111,23 @@ async fn run() -> Result<ExitCode> {
         Command::Task(TaskCommand::Status { json }) => {
             return task_status(json).map(|()| ExitCode::SUCCESS);
         }
+        Command::Hooks(command) => {
+            let home = junees::config_file::home_dir(|key| std::env::var(key).ok());
+            let user_home = home_dir();
+            let cwd = std::env::current_dir()?;
+            // `test` runs the hooks in the bash sandbox the settings set.
+            let tools = Config::from_env_without_key()
+                .map(|config| config.tools)
+                .unwrap_or_default();
+            let place = junees::hooks::cli::Place {
+                home: home.as_deref(),
+                cwd: &cwd,
+                user_home: user_home.as_deref(),
+                tools: &tools,
+            };
+            print!("{}", junees::hooks::cli::run(&command, &place).await?);
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Plugin(command) => {
             let home = junees::config_file::home_dir(|key| std::env::var(key).ok());
             print!("{}", plugins::manage::run(&command, home.as_deref())?);
@@ -251,6 +268,7 @@ async fn run() -> Result<ExitCode> {
         | Command::Help
         | Command::Version
         | Command::Plugin(_)
+        | Command::Hooks(_)
         | Command::Mcp(_)
         | Command::SessionsHelp
         | Command::SessionsSearch(_)
@@ -572,6 +590,7 @@ fn api_agent(
     mcp: &Mcp,
     plugins: &Plugins,
     context: &ContextFiles,
+    hooks: Option<&Arc<junees::hooks::Hooks>>,
 ) -> Result<Agent> {
     let memory = conversation_memory(config, cwd);
     let gate = input.and_then(|input| approval::for_conversation(config, cwd, input));
@@ -637,7 +656,45 @@ fn api_agent(
     if let Some(after_turn) = plugins.after_turn() {
         agent = agent.with_after_turn(after_turn);
     }
+    if let Some(hooks) = hooks {
+        agent = agent.with_hooks(Arc::clone(hooks));
+    }
     Ok(agent)
+}
+
+/// The hooks of a session in `cwd` ([`junees::hooks`]): the user's, and
+/// the project's when trusted. With `ask` (a conversation in a terminal),
+/// an untrusted project hooks file is shown whole and the person asked
+/// whether to trust it; otherwise it is left out with a warning.
+async fn load_hooks(
+    config: &Config,
+    cwd: &Path,
+    ask: Option<&SharedLines>,
+) -> Result<Option<Arc<junees::hooks::Hooks>>> {
+    use std::io::IsTerminal;
+    let mut found = junees::hooks::find(config.home.as_deref(), cwd)?;
+    if let (Some(file), Some(input), Some(home)) = (&found.untrusted, ask, config.home.as_deref())
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
+    {
+        eprint!("{}", junees::hooks::trust_question(file));
+        eprint!("  이 훅을 실행할까요? [y/N] ");
+        let answer = input.next_line().await.ok().flatten().unwrap_or_default();
+        if matches!(answer.trim(), "y" | "Y" | "yes") {
+            if let Err(err) = found.trust_untrusted(home) {
+                eprintln!("  !! {err:#}");
+            }
+        }
+    }
+    found.skip_untrusted();
+    for warning in &found.warnings {
+        eprintln!("  !! {warning}");
+    }
+    let hooks = found.build(cwd, &config.tools, junees::hooks::hider());
+    if let Some(hooks) = &hooks {
+        eprintln!("(hooks: {} run in this session)", hooks.hooks().len());
+    }
+    Ok(hooks)
 }
 
 /// Reads the enabled plugins of `$JUNEES_HOME/plugins` and says on stderr
@@ -785,10 +842,24 @@ async fn conversation(
         Backend::ClaudeCode => Arc::new(Plugins::none()),
     };
     let context = project_context(&config, &cwd);
+    // Read once: `/new` and `/backend api` keep them.
+    let hooks = match backend {
+        Backend::Api => load_hooks(&config, &cwd, interactive.then_some(&input)).await?,
+        Backend::ClaudeCode => None,
+    };
     let (mut engine, banner) = match backend {
         Backend::Api => {
             let input = interactive.then_some(&input);
-            let agent = api_agent(&config, &cwd, &cancel, input, &mcp, &plugins, &context)?;
+            let agent = api_agent(
+                &config,
+                &cwd,
+                &cancel,
+                input,
+                &mcp,
+                &plugins,
+                &context,
+                hooks.as_ref(),
+            )?;
             (Engine::Api(Box::new(agent)), config.model.clone())
         }
         Backend::ClaudeCode => {
@@ -849,6 +920,7 @@ async fn conversation(
                 input,
                 mcp,
                 plugins,
+                hooks,
             };
             let code = repl.run().await;
             repl.mcp.shutdown().await;
@@ -981,6 +1053,7 @@ async fn gateway_engines(settings: &Settings, note: &'static str) -> Result<Gate
             ApiEngines::new(config.clone(), cwd.clone())
                 .with_mcp(Arc::clone(&mcp))
                 .with_plugins(load_plugins(&config, &cwd))
+                .with_hooks(load_hooks(&config, &cwd, None).await?)
                 .with_note(note),
         ),
         Backend::ClaudeCode => {
@@ -1035,6 +1108,7 @@ async fn dashboard_chat(dir: Option<&Path>) -> Result<junees::dashboard::chat::S
     let engines = ApiEngines::new(config.clone(), dir.clone())
         .with_mcp(Arc::clone(&mcp))
         .with_plugins(load_plugins(&config, &dir))
+        .with_hooks(load_hooks(&config, &dir, None).await?)
         .with_note(junees::dashboard::chat::DASHBOARD_NOTE);
     Ok(junees::dashboard::chat::Setup {
         engines,
@@ -1387,6 +1461,9 @@ struct Repl {
     /// The enabled plugins on the api backend (none on the claude-code one
     /// until `/backend api` reads them).
     plugins: Arc<Plugins>,
+    /// The hooks of the api backend, read when the session started (none
+    /// on the claude-code one until `/backend api` reads them).
+    hooks: Option<Arc<junees::hooks::Hooks>>,
     /// The project instruction files the session read when it started
     /// (`/context` shows them).
     context: ContextFiles,
@@ -2025,6 +2102,9 @@ impl Repl {
                 if self.plugins.plugins().is_empty() {
                     self.plugins = load_plugins(&config, &self.cwd);
                 }
+                if self.hooks.is_none() {
+                    self.hooks = load_hooks(&config, &self.cwd, Some(&self.input)).await?;
+                }
                 Engine::Api(Box::new(api_agent(
                     &config,
                     &self.cwd,
@@ -2033,6 +2113,7 @@ impl Repl {
                     &self.mcp,
                     &self.plugins,
                     &self.context,
+                    self.hooks.as_ref(),
                 )?))
             }
             Backend::ClaudeCode => {

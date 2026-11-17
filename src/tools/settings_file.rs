@@ -569,10 +569,16 @@ impl SettingsFile {
     }
 
     /// Whether the absolute `path` leads to the settings file, the MCP
-    /// server list, or into the secrets folder.
+    /// server list, the user's hooks file and the hook trust list (hooks
+    /// there run without a question), or into the secrets folder.
     fn same(&self, path: &Path) -> bool {
         self.same_as(path, &self.path)
             || self.same_as(path, &self.mcp_path())
+            || self.same_as(path, &self.path.with_file_name(crate::hooks::FILE_NAME))
+            || self.same_as(
+                path,
+                &self.path.with_file_name(crate::hooks::trust::FILE_NAME),
+            )
             || self.lands(path).is_some_and(|path| {
                 self.resolved_secrets()
                     .into_iter()

@@ -355,6 +355,26 @@ pub fn hide_known_secrets<'a>(settings: &Settings, texts: impl Iterator<Item = &
     redact::redact_known(&hidden, texts);
 }
 
+/// [`hide_known_secrets`] for later texts: what hooks are given
+/// ([`crate::hooks`]).
+pub fn known_secrets_hider(settings: &Settings) -> crate::hooks::run::Hide {
+    let mut hidden = redact::Hidden::default();
+    hidden.add_settings(settings);
+    std::sync::Arc::new(move |text: &mut String| {
+        redact::redact_known(&hidden, std::iter::once(text));
+    })
+}
+
+/// [`known_secrets_hider`] when the settings cannot be read: the secret
+/// variables of this process.
+pub fn env_secrets_hider() -> crate::hooks::run::Hide {
+    let mut hidden = redact::Hidden::default();
+    hidden.add_env();
+    std::sync::Arc::new(move |text: &mut String| {
+        redact::redact_known(&hidden, std::iter::once(text));
+    })
+}
+
 /// Runs every check on `settings`. `broken` is why the settings file could
 /// not be read, if it could not (the checks then go on without it).
 pub async fn run(settings: &Settings, broken: Option<&anyhow::Error>, online: bool) -> Report {

@@ -336,13 +336,13 @@ mod runner {
             "cat > input.json\nenv > env.txt\npwd > pwd.txt\n",
         );
         let hooks = hooks_in(dir.path(), &hook("pre_tool", "dump.sh", ""));
-        hooks.set_session_id(Some("20261117-abc".into()));
         let input =
             json!({"command": format!("curl -H 'x-api-key: {SECRET}' x"), "n": [1, SECRET]});
         let fired = hooks
             .fire(
                 Event::PreTool,
                 Input {
+                    session_id: Some("20261117-abc"),
                     tool: Some(("bash", &input)),
                     ..Input::default()
                 },
@@ -636,5 +636,139 @@ mod runner {
             fired.warnings
         );
         assert_eq!(fired.records[0].json()["result"], "failed");
+    }
+}
+
+// --- finding, trusting and the CLI ------------------------------------------
+
+mod finding {
+    use std::path::Path;
+
+    use super::super::cli::{self, HooksCommand, Place};
+    use super::super::{Event, find, trust};
+    use super::{repository, write};
+
+    const PROJECT: &str = "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"./check.sh\"]\n";
+
+    fn place<'a>(home: &'a Path, cwd: &'a Path, user_home: &'a Path) -> Place<'a> {
+        static TOOLS: std::sync::OnceLock<crate::tools::ToolSettings> = std::sync::OnceLock::new();
+        Place {
+            home: Some(home),
+            cwd,
+            user_home: Some(user_home),
+            tools: TOOLS.get_or_init(Default::default),
+        }
+    }
+
+    #[test]
+    fn an_untrusted_project_file_is_held_back_until_trusted() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        write(&repo.join(super::super::PROJECT_FILE), PROJECT);
+        write(
+            &home.join(super::super::FILE_NAME),
+            "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"notify\"]\n",
+        );
+        let mut found = find(Some(&home), &repo).unwrap();
+        // The user's hook runs; the project's waits for a person.
+        assert_eq!(found.hooks.len(), 1);
+        assert!(found.untrusted.is_some());
+        found.skip_untrusted();
+        assert!(found.untrusted.is_none() && found.hooks.len() == 1);
+        assert!(
+            found.warnings[0].contains("junees hooks trust"),
+            "{:?}",
+            found.warnings
+        );
+        // Trusted (a person said yes): it runs from then on.
+        let mut found = find(Some(&home), &repo).unwrap();
+        found.trust_untrusted(&home).unwrap();
+        assert_eq!(found.hooks.len(), 2);
+        let found = find(Some(&home), &repo).unwrap();
+        assert!(found.untrusted.is_none() && found.hooks.len() == 2);
+        // A change asks again.
+        write(
+            &repo.join(super::super::PROJECT_FILE),
+            &PROJECT.replace("check", "other"),
+        );
+        let found = find(Some(&home), &repo).unwrap();
+        assert!(found.untrusted.is_some() && found.hooks.len() == 1);
+        // The question shows the whole file.
+        let question = super::super::trust_question(found.untrusted.as_ref().unwrap());
+        assert!(
+            question.contains("./other.sh") && question.contains("다시 묻습니다"),
+            "{question}"
+        );
+    }
+
+    #[test]
+    fn parses_the_commands() {
+        let parse = |words: &[&str]| cli::parse(words.iter().map(|word| word.to_string()));
+        assert_eq!(parse(&[]).unwrap(), HooksCommand::List);
+        assert_eq!(parse(&["trust"]).unwrap(), HooksCommand::Trust);
+        assert_eq!(parse(&["untrust"]).unwrap(), HooksCommand::Untrust);
+        assert_eq!(
+            parse(&["test", "post_tool", "--tool", "write_file"]).unwrap(),
+            HooksCommand::Test {
+                event: Event::PostTool,
+                tool: "write_file".into()
+            }
+        );
+        assert!(
+            format!("{:#}", parse(&["test", "later"]).unwrap_err()).contains("unknown hook event")
+        );
+        assert!(format!("{:#}", parse(&["trust", "x"]).unwrap_err()).contains("usage"));
+    }
+
+    #[tokio::test]
+    async fn list_trust_untrust_and_test() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let place = place(&home, &repo, root.path());
+        let out = cli::run(&HooksCommand::List, &place).await.unwrap();
+        assert!(
+            out.contains("user hooks: none") && out.contains("project hooks: none"),
+            "{out}"
+        );
+        let err = cli::run(&HooksCommand::Trust, &place).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no project hooks file"),
+            "{err:#}"
+        );
+        write(&repo.join(super::super::PROJECT_FILE), PROJECT);
+        let out = cli::run(&HooksCommand::List, &place).await.unwrap();
+        assert!(
+            out.contains("not trusted") && out.contains("line 1: pre_tool -> ./check.sh"),
+            "{out}"
+        );
+        let out = cli::run(&HooksCommand::Trust, &place).await.unwrap();
+        assert!(
+            out.contains("trusted") && out.contains("  | command = [\"./check.sh\"]"),
+            "{out}"
+        );
+        let out = cli::run(&HooksCommand::List, &place).await.unwrap();
+        assert!(out.contains(": trusted\n"), "{out}");
+        let out = cli::run(&HooksCommand::Untrust, &place).await.unwrap();
+        assert!(out.contains("no longer trusted"), "{out}");
+        let file = super::super::project_file(&repo, Some(root.path()), Some(&home))
+            .unwrap()
+            .unwrap();
+        assert!(!trust::is_trusted(&home, &file));
+        // `test` runs nothing untrusted.
+        let out = cli::run(
+            &HooksCommand::Test {
+                event: Event::PreTool,
+                tool: "bash".into(),
+            },
+            &place,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.contains("not trusted") && out.contains("no hook runs here"),
+            "{out}"
+        );
     }
 }

@@ -16,6 +16,7 @@
 //!   trusted its exact content ([`trust`]); unattended runs never ask and
 //!   skip it with a warning.
 
+pub mod cli;
 pub mod config;
 pub mod run;
 pub mod trust;
@@ -186,6 +187,112 @@ pub fn project_file(
         text,
         hooks,
     }))
+}
+
+/// The hooks a run finds for a project in `project_dir`: the user's, the
+/// project's when trusted, and an untrusted project file to ask about or
+/// skip.
+#[derive(Debug, Default)]
+pub struct Found {
+    pub hooks: Vec<Hook>,
+    /// A project hooks file that is not trusted with its current content.
+    pub untrusted: Option<ProjectFile>,
+    /// What the person should know (a project file that cannot be read).
+    pub warnings: Vec<String>,
+}
+
+/// The hooks of a run of the state folder `home` on the project in
+/// `project_dir`. Fails when a user hook is broken: a policy hook that
+/// silently dropped out would let calls through.
+pub fn find(home: Option<&Path>, project_dir: &Path) -> Result<Found> {
+    let mut found = Found::default();
+    if let Some(home) = home {
+        found.hooks = user_hooks(home)?;
+    }
+    let user_home = std::env::var_os("HOME").map(PathBuf::from);
+    match project_file(project_dir, user_home.as_deref(), home) {
+        Ok(None) => {}
+        Ok(Some(file)) => match &file.hooks {
+            Err(err) => found.warnings.push(format!(
+                "the project hooks file {} cannot be read, so its hooks do not run: {err}",
+                file.path.display()
+            )),
+            Ok(_) if home.is_some_and(|home| trust::is_trusted(home, &file)) => {
+                found.hooks.extend(file.hooks());
+            }
+            Ok(_) => found.untrusted = Some(file),
+        },
+        Err(err) => found
+            .warnings
+            .push(format!("{err}; the project's hooks do not run")),
+    }
+    Ok(found)
+}
+
+impl Found {
+    /// Leaves the untrusted project file out, with a warning: runs that
+    /// cannot ask (unattended, gateways, `-p`).
+    pub fn skip_untrusted(&mut self) {
+        if let Some(file) = self.untrusted.take() {
+            self.warnings.push(format!(
+                "the project hooks file {} is not trusted (new, or changed since it was \
+                 trusted), so its hooks do not run; read it, then run `junees hooks trust` \
+                 in the project",
+                file.path.display()
+            ));
+        }
+    }
+
+    /// Trusts the untrusted project file (a person said yes) and adds its
+    /// hooks.
+    pub fn trust_untrusted(&mut self, home: &Path) -> Result<()> {
+        if let Some(file) = self.untrusted.take() {
+            trust::trust(home, &file)?;
+            self.hooks.extend(file.hooks());
+        }
+        Ok(())
+    }
+
+    /// The hooks to give the agent of a session working in `workdir`
+    /// under `tools` (its bash sandbox and hidden variables); `None`
+    /// without any.
+    pub fn build(
+        self,
+        workdir: &Path,
+        tools: &crate::tools::ToolSettings,
+        hide: run::Hide,
+    ) -> Option<std::sync::Arc<Hooks>> {
+        if self.hooks.is_empty() {
+            return None;
+        }
+        Some(std::sync::Arc::new(Hooks::new(
+            self.hooks,
+            workdir,
+            &tools.hidden_env,
+            crate::sandbox::Sandbox::for_tools(tools),
+            hide,
+        )))
+    }
+}
+
+/// The question a person answers before a project's hooks file first
+/// runs, whole: they approve what they read.
+pub fn trust_question(file: &ProjectFile) -> String {
+    format!(
+        "  이 프로젝트의 훅 파일을 처음 보거나, 승인한 뒤 내용이 바뀌었습니다: {}\n  \
+         승인하면 이 내용의 훅이 이 세션부터 실행됩니다(내용이 바뀌면 다시 묻습니다).\n{}",
+        file.path.display(),
+        cli::quoted(&file.text)
+    )
+}
+
+/// Hides the values of the secret settings and variables in what hooks
+/// get ([`crate::doctor::hide_known_secrets`]).
+pub fn hider() -> run::Hide {
+    match crate::config_file::Settings::from_env() {
+        Ok(settings) => crate::doctor::known_secrets_hider(&settings),
+        Err(_) => crate::doctor::env_secrets_hider(),
+    }
 }
 
 /// The SHA-256 of `bytes` in hex.

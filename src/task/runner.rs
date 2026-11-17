@@ -257,6 +257,16 @@ impl TaskEnv<'_> {
         agent = agent.with_draft(crate::write::tool::Settings::unattended(
             self.write_parallel,
         ));
+        // Nobody can be asked: the user's hooks, and the project's only
+        // when a person trusted them before.
+        let mut hooks = crate::hooks::find(self.home.as_deref(), &self.root)?;
+        hooks.skip_untrusted();
+        for warning in &hooks.warnings {
+            report(Report::Event(Event::Warning(warning)));
+        }
+        if let Some(hooks) = hooks.build(&self.root, &self.tool_settings, crate::hooks::hider()) {
+            agent = agent.with_hooks(hooks);
+        }
         let Some(home) = &self.home else {
             return Ok((agent, None));
         };

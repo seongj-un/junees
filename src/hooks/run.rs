@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -42,6 +42,8 @@ pub type Hide = Arc<dyn Fn(&mut String) + Send + Sync>;
 /// What a hook is told about.
 #[derive(Default)]
 pub struct Input<'a> {
+    /// The session's id, once its journal exists.
+    pub session_id: Option<&'a str>,
     pub tool: Option<(&'a str, &'a Value)>,
     /// A tool's result (`post_tool`) or how a turn ended (`turn_end`):
     /// whether it is an error, and its text.
@@ -164,8 +166,6 @@ pub struct Hooks {
     /// The bash tool's sandbox, when it has one.
     sandbox: Option<Arc<Sandbox>>,
     hide: Hide,
-    /// The session's id, once its journal exists.
-    session_id: Mutex<Option<String>>,
     /// Runs every command in this folder as the bash tests do
     /// ([`crate::tools::testing::confine`]).
     #[cfg(test)]
@@ -186,7 +186,6 @@ impl Hooks {
             hidden_env: hidden_env.to_vec(),
             sandbox: sandbox.map(Arc::new),
             hide,
-            session_id: Mutex::new(None),
             #[cfg(test)]
             test_dir: None,
         }
@@ -205,18 +204,6 @@ impl Hooks {
         self.hooks.iter().any(|hook| hook.spec.event == event)
     }
 
-    /// Sets the session id the hooks get from now on.
-    pub fn set_session_id(&self, id: Option<String>) {
-        *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = id;
-    }
-
-    fn session_id(&self) -> Option<String> {
-        self.session_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
-
     /// Runs the hooks of `event` (for a tool call: those whose `match`
     /// takes the tool's name), one at a time in their order, until one
     /// blocks.
@@ -233,7 +220,9 @@ impl Hooks {
         }
         let payload = self.payload(event, &input);
         for hook in selected {
-            let (outcome, message, took) = self.run(&hook.spec, event, &payload).await;
+            let (outcome, message, took) = self
+                .run(&hook.spec, event, input.session_id, &payload)
+                .await;
             let failed = matches!(outcome, Outcome::TimedOut(_) | Outcome::Failed(_));
             let failure_blocked =
                 failed && event.can_block() && hook.spec.on_error == OnError::Block;
@@ -298,7 +287,7 @@ impl Hooks {
         };
         let mut payload = json!({
             "event": event.name(),
-            "session_id": self.session_id(),
+            "session_id": input.session_id,
             "cwd": self.workdir.display().to_string(),
         });
         if let Some((name, tool_input)) = input.tool {
@@ -323,10 +312,11 @@ impl Hooks {
         &self,
         spec: &Spec,
         event: Event,
+        session_id: Option<&str>,
         payload: &Value,
     ) -> (Outcome, Option<String>, Duration) {
         let started = tokio::time::Instant::now();
-        let result = self.spawn(spec, event, payload).await;
+        let result = self.spawn(spec, event, session_id, payload).await;
         let took = started.elapsed();
         let (outcome, message) = match result {
             Err(why) => (Outcome::Failed(why), None),
@@ -377,6 +367,7 @@ impl Hooks {
         &self,
         spec: &Spec,
         event: Event,
+        session_id: Option<&str>,
         payload: &Value,
     ) -> Result<(Exit, String, String), String> {
         let shown = spec.shown();
@@ -404,7 +395,7 @@ impl Hooks {
             process.env_remove(name);
         }
         process.env("JUNEES_HOOK_EVENT", event.name());
-        match self.session_id() {
+        match session_id {
             Some(id) => process.env("JUNEES_SESSION_ID", id),
             None => process.env_remove("JUNEES_SESSION_ID"),
         };
