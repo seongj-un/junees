@@ -65,7 +65,15 @@ struct Dashboard {
 
 impl Dashboard {
     async fn start(home: &Home, api: &str, args: &[&str]) -> Self {
-        let mut child = home.command(api, args).spawn().unwrap();
+        Self::start_with(home, api, args, &[]).await
+    }
+
+    async fn start_with(home: &Home, api: &str, args: &[&str], env: &[(&str, &str)]) -> Self {
+        let mut command = home.command(api, args);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let line = tokio::time::timeout(WAIT, lines.next_line())
             .await
@@ -826,4 +834,65 @@ async fn an_approval_shows_the_whole_command() {
     );
     events.until("turn_end").await;
     assert!(exists(&home.work, "one.txt"));
+}
+
+#[tokio::test]
+async fn a_switch_to_the_fallback_model_is_an_event() {
+    let home = Home::new();
+    let limited =
+        json!({"type": "error", "error": {"type": "rate_limit_error", "message": "limit"}});
+    // retry-after: 0 from the fake: the main model is tried four times.
+    let (api, _served) = common::fake_api(vec![(429, limited); 4]).await;
+    let (fallback, served) = common::fake_api(vec![(200, common::text_reply("from small"))]).await;
+    let dashboard = Dashboard::start_with(
+        &home,
+        &api,
+        &["--chat"],
+        &[
+            ("JUNEES_MODEL", "big"),
+            ("JUNEES_FALLBACK_MODEL", "small"),
+            ("JUNEES_FALLBACK_BASE_URL", &fallback),
+            ("JUNEES_FALLBACK_API_KEY", "sk-fake-fallback"),
+        ],
+    )
+    .await;
+    let id = dashboard.post("/api/chat", json!({})).await.1["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut events = dashboard.events(&id, None).await;
+    dashboard
+        .post(&format!("/api/chat/{id}/messages"), json!({"text": "hi"}))
+        .await;
+    events.until("turn_end").await;
+    let switch = events
+        .seen
+        .iter()
+        .map(|(_, event)| event)
+        .find(|event| event["type"] == "model_switch")
+        .unwrap_or_else(|| panic!("{:?}", events.seen))
+        .clone();
+    assert_eq!(
+        (&switch["from"], &switch["to"], &switch["reason"]),
+        (&json!("big"), &json!("small"), &json!("rate_limit"))
+    );
+    let retry_at = switch["retry_at"].as_str().unwrap();
+    assert!(
+        retry_at.len() == 20 && retry_at.ends_with('Z'),
+        "{retry_at}"
+    );
+    let texts: Vec<&Value> = events
+        .seen
+        .iter()
+        .map(|(_, event)| event)
+        .filter(|event| event["type"] == "text")
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.to_string().contains("from small")),
+        "{texts:?}"
+    );
+    let request = &served.await.unwrap()[0];
+    assert!(request.contains("x-api-key: sk-fake-fallback"), "{request}");
 }

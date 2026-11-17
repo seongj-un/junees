@@ -588,4 +588,38 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_switch_to_the_fallback_model_ends_the_reply() {
+        use crate::provider::fallback::{Reason, Switch};
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let switch = Switch {
+            from: "big".into(),
+            to: "small".into(),
+            reason: Reason::Overloaded,
+            retry_at: std::time::SystemTime::now(),
+            retry_in: std::time::Duration::from_secs(120),
+        };
+        let mut collector = Collector::new(&tx);
+        collector.event(Event::ModelSwitch(&switch));
+        collector.event(Event::TextDelta("answer"));
+        collector.event(Event::TextEnd);
+        collector.finish();
+        drop(tx);
+        let mut seen = Vec::new();
+        while let Ok(progress) = rx.try_recv() {
+            seen.push(match progress {
+                Progress::Text(text) => format!("text {text}"),
+                Progress::Note(note) => format!("note {note}"),
+                _ => "other".into(),
+            });
+        }
+        assert_eq!(
+            seen,
+            [
+                "text answer",
+                "note big 모델이 과부하로 막혀 small 모델로 이어 갑니다 (다시 시도: 2분 뒤)"
+            ]
+        );
+    }
 }
