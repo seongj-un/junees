@@ -397,7 +397,7 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
         lang: crate::write::Lang::En,
         stop: Stop::Done,
         calls: vec![call(1, Kind::Concept, true), call(3, Kind::Body, false)],
-        elapsed: Duration::from_millis(150),
+        elapsed: Duration::from_millis(100),
         switch: None,
     };
     super::runner::on_event(
@@ -431,7 +431,7 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
         json!({
             "type": "draft_done", "stop": "done", "error": null, "levels": 3, "levels_done": 3,
             "polished": false, "failed_sections": [], "calls": 2, "input_tokens": 24,
-            "output_tokens": 10, "cache_read_tokens": 4, "elapsed_ms": 150, "sequential_ms": 200,
+            "output_tokens": 10, "cache_read_tokens": 4, "elapsed_ms": 100, "sequential_ms": 200,
             "by_level": [
                 {"level": 1, "kind": "concept", "calls": 1, "failed_calls": 0,
                  "input_tokens": 12, "output_tokens": 5},
@@ -440,4 +440,31 @@ fn draft_levels_and_the_end_go_out_as_events_with_secrets_hidden() {
             ]
         })
     );
+    // A draft that stopped early has no one-at-a-time estimate: the
+    // calls it dropped ran for part of `elapsed` but are not in the sum.
+    let mut stopped = draft.clone();
+    stopped.stop = Stop::Cancelled;
+    stopped.elapsed = Duration::from_millis(300);
+    super::runner::on_event(
+        &shared,
+        &room,
+        &mut out,
+        crate::agent::Event::DraftDone(&stopped),
+    );
+    // 150 and 200 ms both read 0.2s.
+    let mut even = draft;
+    even.elapsed = Duration::from_millis(150);
+    super::runner::on_event(
+        &shared,
+        &room,
+        &mut out,
+        crate::agent::Event::DraftDone(&even),
+    );
+    let events = types(&room);
+    assert_eq!(events[2]["stop"], "cancelled");
+    assert_eq!(events[2]["elapsed_ms"], 300);
+    assert_eq!(events[2]["sequential_ms"], Value::Null);
+    // Finished, but no faster than one call at a time.
+    assert_eq!(events[3]["stop"], "done");
+    assert_eq!(events[3]["sequential_ms"], Value::Null);
 }

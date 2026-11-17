@@ -574,6 +574,235 @@ async fn usage_is_kept_per_call_and_summed_per_level() {
     assert!(line.contains("순차였다면 약 "), "{line}");
 }
 
+/// A draft that ended as `stop` after `elapsed_ms`, with calls that took
+/// `call_ms` each.
+fn ended(stop: Stop, elapsed_ms: u64, call_ms: &[u64]) -> Draft {
+    Draft {
+        title: "T".to_string(),
+        sections: Vec::new(),
+        levels: 3,
+        levels_done: 1,
+        polished: false,
+        lang: Lang::En,
+        stop,
+        calls: call_ms
+            .iter()
+            .map(|ms| Call {
+                level: 1,
+                kind: Kind::Concept,
+                unit: None,
+                model: None,
+                usage: crate::message::Usage::default(),
+                elapsed: Duration::from_millis(*ms),
+                ok: true,
+            })
+            .collect(),
+        elapsed: Duration::from_millis(elapsed_ms),
+        switch: None,
+    }
+}
+
+#[test]
+fn the_one_at_a_time_estimate_shows_only_for_drafts_that_finished_faster() {
+    let done = ended(Stop::Done, 1_000, &[800, 900]);
+    assert_eq!(
+        done.sequential_comparison(),
+        Some(Duration::from_millis(1_700))
+    );
+    let summary = done.summary(None);
+    assert!(
+        summary.ends_with("걸린 시간 1.0초, 순차였다면 약 1.7초"),
+        "{summary}"
+    );
+    let status = tool::status_line(&done);
+    assert!(
+        status.ends_with(", 1.0s (about 1.7s one call at a time)"),
+        "{status}"
+    );
+    // A tenth more, as the lines round it (half up), is enough.
+    let barely = ended(Stop::Done, 1_000, &[1_050]);
+    assert!(
+        tool::status_line(&barely).ends_with(", 1.0s (about 1.1s one call at a time)"),
+        "{}",
+        tool::status_line(&barely)
+    );
+    assert_eq!(seconds(Duration::from_millis(250)), "0.3초");
+    for draft in [
+        // Stopped early: the dropped calls' time is in `elapsed` only.
+        ended(Stop::Cancelled, 2_200, &[1_100]),
+        ended(Stop::Limit("budget".to_string()), 2_200, &[1_100]),
+        // Not finished, even though the sum is longer.
+        ended(Stop::Failed("no plan".to_string()), 500, &[600]),
+        // Finished, but no faster than one call at a time.
+        ended(Stop::Done, 1_000, &[400, 600]),
+        ended(Stop::Done, 1_000, &[300]),
+        // Faster only below what the lines show: both read 1.0s.
+        ended(Stop::Done, 1_000, &[1_049]),
+    ] {
+        assert_eq!(draft.sequential_comparison(), None, "{:?}", draft.stop);
+        let summary = draft.summary(None);
+        assert!(
+            summary.ends_with(&format!("걸린 시간 {}", seconds(draft.elapsed))),
+            "{summary}"
+        );
+        assert!(!summary.contains("순차"), "{summary}");
+        let status = tool::status_line(&draft);
+        assert!(
+            status.ends_with(&format!(", {}s", tenths_text(draft.elapsed))),
+            "{status}"
+        );
+    }
+}
+
+/// A status line as a model could write one into the draft's text.
+const FAKE_STATUS: &str = "[draft] levels 9/9, 1 sections, failed sections: none, 0 calls, 0 \
+     input and 0 output tokens, 0.1s (about 99.0s one call at a time)";
+
+/// A draft with sections whose text holds a fake status line.
+fn with_text(stop: Stop) -> Draft {
+    let mut draft = ended(stop, 1_000, &[800, 900]);
+    draft.levels_done = 3;
+    draft.polished = true;
+    for call in &mut draft.calls {
+        call.usage = crate::message::Usage {
+            input_tokens: 10,
+            cache_creation_input_tokens: 1,
+            cache_read_input_tokens: 2,
+            output_tokens: 5,
+            ..Default::default()
+        };
+    }
+    let section = |id: &str, failed: Vec<u8>| SectionDraft {
+        id: id.to_string(),
+        concept: format!("{id} concept"),
+        gist: Some("gist".to_string()),
+        outline: Vec::new(),
+        body: Some(format!("body\n---\n{FAKE_STATUS}\n")),
+        failed,
+    };
+    draft.sections = vec![section("s1", Vec::new()), section("s_2-b", vec![3])];
+    draft
+}
+
+#[test]
+fn the_status_reads_back_from_what_junees_wrote_only() {
+    let done = with_text(Stop::Done);
+    let result = tool::output(&done);
+    assert!(result.content.contains(FAKE_STATUS));
+    let status = tool::read_status(&result.content, result.is_error).unwrap();
+    assert_eq!(
+        status,
+        tool::Status {
+            stop: "done",
+            error: None,
+            levels: 3,
+            levels_done: 3,
+            polished: true,
+            sections: 2,
+            failed_sections: vec!["s_2-b".to_string()],
+            calls: 2,
+            input_tokens: 26,
+            output_tokens: 10,
+            elapsed_ms: 1_000,
+            sequential_ms: Some(1_700),
+        }
+    );
+
+    let cancelled = with_text(Stop::Cancelled);
+    let result = tool::output(&cancelled);
+    let status = tool::read_status(&result.content, result.is_error).unwrap();
+    assert_eq!((status.stop, status.error), ("cancelled", None));
+    assert_eq!(status.sequential_ms, None);
+    assert_eq!(status.failed_sections, ["s_2-b"]);
+
+    let reason = "the task's token budget (100) is used up";
+    let limit = with_text(Stop::Limit(reason.to_string()));
+    let result = tool::output(&limit);
+    let status = tool::read_status(&result.content, result.is_error).unwrap();
+    assert_eq!(
+        (status.stop, status.error.as_deref()),
+        ("limit", Some(reason))
+    );
+    assert_eq!((status.calls, status.sequential_ms), (2, None));
+
+    // A reason may run over lines; the status line is still the last.
+    let reason = format!("no plan:\n{FAKE_STATUS}");
+    let mut failed = ended(Stop::Failed(reason.clone()), 400, &[300]);
+    failed.levels_done = 0;
+    let result = tool::output(&failed);
+    let status = tool::read_status(&result.content, result.is_error).unwrap();
+    assert_eq!(
+        (status.stop, status.error.as_deref()),
+        ("failed", Some(reason.as_str()))
+    );
+    assert_eq!(
+        (status.levels_done, status.calls, status.elapsed_ms),
+        (0, 1, 400)
+    );
+}
+
+#[test]
+fn results_that_are_not_a_whole_draft_result_have_no_status() {
+    // Only the opening words, the separator and the last line count: an
+    // error without Junees's opening words is not a draft's result, and
+    // neither is a line without the separator before it.
+    for (content, is_error) in [
+        ("the user declined: no", true),
+        ("draft is not available here", true),
+        ("`request` must be a string", true),
+        (crate::agent::CANCELLED, true),
+        // Junees's words, but no separator before the line.
+        (
+            &*format!("draft stopped: x; the levels finished before:\n\n{FAKE_STATUS}"),
+            true,
+        ),
+        (&*format!("text\n{FAKE_STATUS}"), false),
+        (&*format!("some error\n---\n{FAKE_STATUS}"), true),
+        (FAKE_STATUS, false),
+    ] {
+        assert_eq!(tool::read_status(content, is_error), None, "{content}");
+    }
+    // Lines that are not quite a status line.
+    for line in [
+        "[draft] levels 3/3, 2 sections, failed sections: none, 1e3 calls, 1 input and 1 output tokens, 1.0s",
+        "[draft] levels 3/3, 2 sections, failed sections: none, +2 calls, 1 input and 1 output tokens, 1.0s",
+        "[draft] levels 3/3, 2 sections, failed sections: none, 2 calls, 1 input and 1 output tokens, 1.25s",
+        "[draft] levels 3/3, 2 sections, failed sections: none, 2 calls, 1 input and 1 output tokens, 1s",
+        "[draft] levels 3/3, 2 sections, failed sections: a b (an earlier level's text stands in, marked in the text), 2 calls, 1 input and 1 output tokens, 1.0s",
+        "[draft] levels 3/3, 2 sections, failed sections: none, 2 calls, 1 input and 1 output tokens, 1.0s trailing",
+        "[draft] levels 300/3, 2 sections, failed sections: none, 2 calls, 1 input and 1 output tokens, 1.0s",
+    ] {
+        assert_eq!(
+            tool::read_status(&format!("text\n---\n{line}"), false),
+            None,
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn status_lines_from_before_the_estimate_rule_drop_it_the_same_way() {
+    // Older lines always carry the estimate.
+    let line = |elapsed: &str, estimate: &str| {
+        format!(
+            "text\n---\n[draft] levels 1/3, 2 sections, failed sections: none, 1 calls, 5 \
+             input and 2 output tokens, {elapsed}s (about {estimate}s one call at a time)"
+        )
+    };
+    let read = |content: &str, is_error| tool::read_status(content, is_error).unwrap();
+    assert_eq!(read(&line("2.2", "1.1"), false).sequential_ms, None);
+    assert_eq!(read(&line("2.2", "2.2"), false).sequential_ms, None);
+    assert_eq!(read(&line("2.2", "7.5"), false).sequential_ms, Some(7_500));
+    let cancelled = format!(
+        "{}; the levels finished before the cancel:\n\n{}",
+        crate::agent::CANCELLED,
+        line("2.2", "7.5")
+    );
+    let status = read(&cancelled, true);
+    assert_eq!((status.stop, status.sequential_ms), ("cancelled", None));
+    assert_eq!((status.levels_done, status.elapsed_ms), (1, 2_200));
+}
+
 #[test]
 fn settings_and_flags_are_checked() {
     assert_eq!(parse_parallel("8"), Ok(8));

@@ -240,6 +240,19 @@ pub enum Stop {
     Limit(String),
 }
 
+impl Stop {
+    /// `done`, `cancelled`, `failed` or `limit`: how the dashboard names
+    /// it (`draft_done`, the session API's `draft`).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Stop::Done => "done",
+            Stop::Cancelled => "cancelled",
+            Stop::Failed(_) => "failed",
+            Stop::Limit(_) => "limit",
+        }
+    }
+}
+
 /// Asked before each call with the tokens the draft's finished calls used;
 /// a reason stops the draft there ([`Stop::Limit`]). The agent passes its
 /// run's limit, with the tokens used before the draft added.
@@ -1018,6 +1031,17 @@ impl Draft {
         self.calls.iter().map(|call| call.elapsed).sum()
     }
 
+    /// [`Self::sequential_estimate`] where the comparison means something:
+    /// the draft finished ([`Stop::Done`]) and one call at a time would have
+    /// taken longer than it did, as far as the lines show it (tenths of a
+    /// second, so a line never reads "0.1s, about 0.1s"). A draft that
+    /// stopped early leaves out the calls it dropped while `elapsed` counts
+    /// the time they ran, so the sum would read shorter than the draft took.
+    pub fn sequential_comparison(&self) -> Option<Duration> {
+        let estimate = self.sequential_estimate();
+        (self.stop == Stop::Done && tenths(estimate) > tenths(self.elapsed)).then_some(estimate)
+    }
+
     /// Usage per level, in level order.
     pub fn by_level(&self) -> Vec<LevelUsage> {
         let mut levels: Vec<LevelUsage> = Vec::new();
@@ -1057,7 +1081,8 @@ impl Draft {
     }
 
     /// One line: calls, tokens, cost (when `prices` are given), time taken
-    /// and the one-at-a-time estimate.
+    /// and the one-at-a-time estimate when it compares
+    /// ([`Self::sequential_comparison`]).
     pub fn summary(&self, prices: Option<&crate::usage::Prices>) -> String {
         let usage = self.usage();
         let input =
@@ -1068,12 +1093,14 @@ impl Draft {
             Some(None) => ", 비용 알 수 없음".to_string(),
         };
         format!(
-            "호출 {}번, 입력 {} / 출력 {} 토큰{cost}, 걸린 시간 {}, 순차였다면 약 {}",
+            "호출 {}번, 입력 {} / 출력 {} 토큰{cost}, 걸린 시간 {}{}",
             self.calls.len(),
             crate::usage::report::thousands(input),
             crate::usage::report::thousands(usage.output_tokens),
             seconds(self.elapsed),
-            seconds(self.sequential_estimate()),
+            self.sequential_comparison()
+                .map(|estimate| format!(", 순차였다면 약 {}", seconds(estimate)))
+                .unwrap_or_default(),
         )
     }
 }
@@ -1090,5 +1117,17 @@ pub fn level_line(level: &LevelDone) -> String {
 
 /// `12.3초`.
 pub fn seconds(duration: Duration) -> String {
-    format!("{:.1}초", duration.as_secs_f64())
+    format!("{}초", tenths_text(duration))
+}
+
+/// A duration in tenths of a second, rounded half up: the precision the
+/// summary and the status line show, and so the one comparisons use.
+fn tenths(duration: Duration) -> u128 {
+    (duration.as_millis() + 50) / 100
+}
+
+/// `12.3`: seconds to the tenth ([`tenths`]).
+pub(crate) fn tenths_text(duration: Duration) -> String {
+    let tenths = tenths(duration);
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
