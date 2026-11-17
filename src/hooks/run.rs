@@ -8,6 +8,9 @@
 //!   are the reason.
 //! - anything else, a time-out, a program that does not start: the
 //!   hook's `on_error` (allow, with a warning, by default).
+//! - a pinned file that changed or cannot be checked: the hook does not
+//!   run, and a hook that can block blocks whatever its `on_error` says
+//!   (the file may have been tampered with).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -90,8 +93,13 @@ pub struct Record {
     pub took: Duration,
     /// Its `message` for the model, cleaned.
     pub message: Option<String>,
-    /// Its failure blocked (`on_error = "block"`).
+    /// Its failure blocked (`on_error = "block"`, or a pinned file
+    /// that failed its check at a point that can block).
     pub failure_blocked: bool,
+    /// It did not run because a file it runs failed its check: what
+    /// happened, in the words of the record line ([`super::CHANGED`],
+    /// [`super::NOT_PINNED`]).
+    pub pin_failure: Option<&'static str>,
 }
 
 impl Record {
@@ -101,15 +109,15 @@ impl Record {
             Outcome::Passed => "통과".to_string(),
             Outcome::Blocked(_) => "막음".to_string(),
             Outcome::TimedOut(limit) => format!("시간 초과({}초)", limit.as_secs_f64()),
-            Outcome::Failed(what) if what.starts_with(super::CHANGED) => {
-                format!("실패, {}", super::CHANGED)
-            }
-            Outcome::Failed(_) => "실패".to_string(),
+            Outcome::Failed(_) => match self.pin_failure {
+                Some(what) => format!("실패, {what}"),
+                None => "실패".to_string(),
+            },
         };
-        let result = if self.failure_blocked {
-            format!("{result}, 실패 시 막는 설정이라 막음")
-        } else {
-            result
+        let result = match (self.failure_blocked, self.pin_failure) {
+            (false, _) => result,
+            (true, Some(_)) => format!("{result}, 확인하지 못한 파일이라 막음"),
+            (true, None) => format!("{result}, 실패 시 막는 설정이라 막음"),
         };
         format!(
             "[훅] {} `{}`: {result} ({:.2}초)",
@@ -223,10 +231,15 @@ impl Hooks {
         }
         let payload = self.payload(event, &input);
         for hook in selected {
-            let (outcome, message, took) = self.run(hook, event, input.session_id, &payload).await;
+            let (outcome, message, took, pin_failure) =
+                self.run(hook, event, input.session_id, &payload).await;
             let failed = matches!(outcome, Outcome::TimedOut(_) | Outcome::Failed(_));
-            let failure_blocked =
-                failed && event.can_block() && hook.spec.on_error == OnError::Block;
+            // A pinned file that changed is a sign of tampering, not a
+            // broken hook: a policy hook the model disarms by editing its
+            // script must still block.
+            let failure_blocked = failed
+                && event.can_block()
+                && (hook.spec.on_error == OnError::Block || pin_failure.is_some());
             let record = Record {
                 event,
                 command: hook.spec.shown(),
@@ -235,6 +248,7 @@ impl Hooks {
                 took,
                 message: message.clone(),
                 failure_blocked,
+                pin_failure,
             };
             fired.notes.push(record.line());
             if let Some(message) = &message {
@@ -256,6 +270,16 @@ impl Hooks {
                 }
                 Outcome::TimedOut(_) | Outcome::Failed(_) => {
                     let what = failure(&outcome);
+                    if failure_blocked && pin_failure.is_some() {
+                        fired.blocked = Some(format!(
+                            "the {} hook `{}` did not run ({what}); a hook whose file fails its \
+                             check blocks whatever its on_error says, since the file may have \
+                             been tampered with",
+                            event.name(),
+                            hook.spec.shown()
+                        ));
+                        break;
+                    }
                     if failure_blocked {
                         fired.blocked = Some(format!(
                             "the {} hook `{}` failed ({what}), and it blocks when it fails \
@@ -308,20 +332,27 @@ impl Hooks {
         payload
     }
 
-    /// Runs one hook: how it ended, its message, how long it took.
+    /// Runs one hook: how it ended, its message, how long it took, and
+    /// what kept it from running when a file it runs failed its check.
     async fn run(
         &self,
         hook: &Hook,
         event: Event,
         session_id: Option<&str>,
         payload: &Value,
-    ) -> (Outcome, Option<String>, Duration) {
+    ) -> (Outcome, Option<String>, Duration, Option<&'static str>) {
         let spec = &hook.spec;
         let started = tokio::time::Instant::now();
-        let result = match check_pin(hook) {
-            Err(why) => Err(why),
-            Ok(()) => self.spawn(spec, event, session_id, payload).await,
-        };
+        if let Err(failure) = check_pin(hook) {
+            let what = format!("{} ({})", failure.what, failure.detail);
+            return (
+                Outcome::Failed(what),
+                None,
+                started.elapsed(),
+                Some(failure.what),
+            );
+        }
+        let result = self.spawn(spec, event, session_id, payload).await;
         let took = started.elapsed();
         let (outcome, message) = match result {
             Err(why) => (Outcome::Failed(why), None),
@@ -351,7 +382,7 @@ impl Hooks {
                 (Outcome::Failed(what), None)
             }
         };
-        (outcome, message, took)
+        (outcome, message, took, None)
     }
 
     /// The `message` of a hook's stdout, if it is `{"message": "..."}`:
@@ -486,26 +517,39 @@ fn secret_names(hidden: &[String]) -> Vec<String> {
     names
 }
 
+/// Why a hook did not run: a file it runs failed its check.
+#[derive(Debug)]
+struct PinFailure {
+    /// What happened, in the record line's words.
+    what: &'static str,
+    /// Which file and why, in English.
+    detail: String,
+}
+
 /// Refuses to run a hook whose pinned file ([`super::Pin`]) could not be
 /// read when the hook was, or is no longer what it was then: the model may
 /// have rewritten it during the session. (A swap between this check and
 /// the start remains possible for a process already running there.)
-fn check_pin(hook: &Hook) -> Result<(), String> {
+fn check_pin(hook: &Hook) -> Result<(), PinFailure> {
     let Some(pin) = &hook.pin else {
         return Ok(());
     };
     let path = pin.path.display();
     match &pin.digest {
-        Err(err) => Err(format!(
-            "the file it runs ({path}) could not be pinned when the hook was read ({err}), so \
-             it was not run"
-        )),
+        Err(err) => Err(PinFailure {
+            what: super::NOT_PINNED,
+            detail: format!("{path} could not be pinned when the hook was read: {err}"),
+        }),
         Ok(expected) => match super::pinned_digest(&pin.path) {
             Ok(now) if now == *expected => Ok(()),
-            _ => Err(format!(
-                "{} ({path} changed since the hook was read)",
-                super::CHANGED
-            )),
+            Ok(_) => Err(PinFailure {
+                what: super::CHANGED,
+                detail: format!("{path} changed since the hook was read"),
+            }),
+            Err(err) => Err(PinFailure {
+                what: super::CHANGED,
+                detail: format!("{path} cannot be read as it was pinned: {err}"),
+            }),
         },
     }
 }

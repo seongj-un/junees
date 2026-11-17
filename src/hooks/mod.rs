@@ -92,6 +92,9 @@ const MAX_PINNED_BYTES: u64 = 16 * 1024 * 1024;
 /// What a hook whose file changed after it was read says instead of
 /// running.
 pub const CHANGED: &str = "훅이 부르는 파일이 바뀌어 실행하지 않았습니다";
+/// What a hook whose file could not be pinned when it was read (missing,
+/// a link, too large) says instead of running.
+pub const NOT_PINNED: &str = "훅이 부르는 파일을 고정하지 못해 실행하지 않았습니다";
 
 /// The pin of the file `spec` runs (`command[0]` with a `/`), when it is
 /// in `workdir`: the model may change files there, so the hook must run

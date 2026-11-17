@@ -782,7 +782,9 @@ mod pinning {
     use serde_json::json;
 
     use super::super::run::{Hooks, Input, Outcome};
-    use super::super::{CHANGED, Hook, Origin, config, find, pin_for, trust, user_hooks};
+    use super::super::{
+        CHANGED, Hook, NOT_PINNED, Origin, config, find, pin_for, trust, user_hooks,
+    };
     use super::{repository, write};
     use crate::hooks::Event;
 
@@ -906,16 +908,15 @@ mod pinning {
     }
 
     #[tokio::test]
-    async fn a_script_changed_during_the_session_does_not_run_and_follows_on_error() {
+    async fn a_script_changed_during_the_session_does_not_run_and_blocks_whatever_on_error_says() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path().canonicalize().unwrap();
-        write(&dir.join("guard.sh"), "#!/bin/sh\nexit 0\n");
         let input = json!({});
         let call = || Input {
             tool: Some(("bash", &input)),
             ..Input::default()
         };
-        for (on_error, blocks) in [("allow", false), ("block", true)] {
+        for on_error in ["allow", "block"] {
             write(&dir.join("guard.sh"), "#!/bin/sh\nexit 0\n");
             let hooks = pinned_hooks(
                 &dir,
@@ -933,14 +934,76 @@ mod pinning {
                 panic!("{fired:?}");
             };
             assert!(what.starts_with(CHANGED), "{what}");
-            assert!(
-                fired.notes[0].contains(&format!("실패, {CHANGED}")),
+            assert_eq!(
+                fired.notes[0]
+                    .split(": ")
+                    .nth(1)
+                    .unwrap()
+                    .split(" (")
+                    .next(),
+                Some(format!("실패, {CHANGED}, 확인하지 못한 파일이라 막음").as_str()),
                 "{:?}",
                 fired.notes
             );
-            assert_eq!(fired.blocked.is_some(), blocks, "{on_error}: {fired:?}");
-            assert_eq!(fired.warnings.is_empty(), blocks, "{on_error}: {fired:?}");
+            // A changed policy script is a sign of tampering: it blocks
+            // even with the default on_error.
+            let blocked = fired.blocked.as_deref().unwrap_or_default();
+            assert!(
+                blocked.contains("whatever its on_error says"),
+                "{on_error}: {fired:?}"
+            );
+            assert!(fired.warnings.is_empty(), "{on_error}: {fired:?}");
+            assert_eq!(fired.records[0].json()["blocked"], true);
         }
+        // A point that cannot block only warns.
+        write(&dir.join("after.sh"), "#!/bin/sh\nexit 0\n");
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"post_tool\"\ncommand = [\"./after.sh\"]\n",
+        );
+        write(&dir.join("after.sh"), "#!/bin/sh\ntouch ran\n");
+        let fired = hooks
+            .fire(
+                Event::PostTool,
+                Input {
+                    tool: Some(("bash", &input)),
+                    result: Some((false, "ok")),
+                    ..Input::default()
+                },
+            )
+            .await;
+        assert!(!dir.join("ran").exists());
+        assert!(fired.blocked.is_none(), "{fired:?}");
+        assert!(fired.warnings[0].contains(CHANGED), "{:?}", fired.warnings);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_could_not_be_pinned_blocks_a_prompt_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        // Missing when the hooks were read; the model writes it later.
+        let hooks = pinned_hooks(
+            &dir,
+            "[[hooks]]\nevent = \"user_prompt\"\ncommand = [\"./late.sh\"]\n",
+        );
+        assert!(hooks.hooks()[0].pin.as_ref().unwrap().digest.is_err());
+        write(&dir.join("late.sh"), "#!/bin/sh\ntouch ran\n");
+        let fired = hooks
+            .fire(
+                Event::UserPrompt,
+                Input {
+                    prompt: Some("hi"),
+                    ..Input::default()
+                },
+            )
+            .await;
+        assert!(!dir.join("ran").exists());
+        assert!(fired.blocked.is_some(), "{fired:?}");
+        assert!(
+            fired.notes[0].contains(&format!("실패, {NOT_PINNED}, 확인하지 못한 파일이라 막음")),
+            "{:?}",
+            fired.notes
+        );
     }
 
     #[tokio::test]
