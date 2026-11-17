@@ -201,8 +201,8 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 19. 대시보드 대화: `junees dashboard --chat`으로 페이지에서 Junees와 대화하고, 승인 질문을 버튼으로 답하기(이벤트 스트림, 터미널과 같은 신뢰 수준, [docs/dashboard.md](docs/dashboard.md#대화---chat)) (완료)
 20. 파일 체크포인트: `write_file`, `edit_file`이 바꾼 파일을 턴 단위로 기록하고 `/undo`, `junees rewind`, 대시보드 API로 되돌리기 ([docs/checkpoints.md](docs/checkpoints.md)) (완료)
 21. 코드 탐색 도구: Junees 안에서 도는 읽기 전용 `grep`, `glob`, `list_dir`(ripgrep의 무시 규칙, 만나는 파일마다 읽기 규칙, 상한과 시간 제한) ([docs/tools.md](docs/tools.md#코드-탐색-grep-glob-list_dir)) (완료)
-22. 예비 모델과 사용 한도 대응: 주 모델이 오래 막히면 `fallback_model`로 넘어가고, 무인 실행은 `wait_limit` 안에서 한도가 풀리기를 기다린다 ([docs/configuration.md](docs/configuration.md#예비-모델))
-23. NCM식 글 쓰기: `junees write`, `/write`, `draft` 도구가 거친 개념에서 세부로 내려가며 긴 글을 쓰고, 같은 단계의 섹션은 앞 단계에만 조건을 걸어 동시에 요청한다(NCM의 생성 방식을 하네스에 적용, [docs/write.md](docs/write.md))
+22. 예비 모델과 사용 한도 대응: 주 모델이 오래 막히면 `fallback_model`로 넘어가고, 무인 실행은 `wait_limit` 안에서 한도가 풀리기를 기다린다 ([docs/configuration.md](docs/configuration.md#예비-모델)) (완료)
+23. NCM식 글 쓰기: `junees write`, `/write`, `draft` 도구가 거친 개념에서 세부로 내려가며 긴 글을 쓰고, 같은 단계의 섹션은 앞 단계에만 조건을 걸어 동시에 요청한다(NCM의 생성 방식을 하네스에 적용, [docs/write.md](docs/write.md), 대시보드의 단계별 카드) (완료)
 
 ## 개발
 
