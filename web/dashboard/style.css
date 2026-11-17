@@ -370,9 +370,13 @@ a.button {
 }
 
 .view-head h1 {
+  min-width: 0;
+  max-width: 100%;
   font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.01em;
+  /* A session title is the person's first line and may be one long path. */
+  overflow-wrap: anywhere;
 }
 
 .view-head h1:focus {

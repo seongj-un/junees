@@ -104,6 +104,8 @@ function blockView(block, messageIndex, n) {
           { class: "undo-note" },
           el("p", { class: "undo-note-head" }, "되돌린 파일을 Junees에게 알린 내용"),
           noticeLines(block.text).map((line) => el("p", null, line)),
+          // The server cuts a block past 8,000 characters, a notice too.
+          block.truncated ? el("p", { class: "msg-cut" }, cut(block), " 긴 안내라 앞부분만 보여 줍니다.") : null,
         );
       }
       return el(
