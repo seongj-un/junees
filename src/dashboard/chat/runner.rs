@@ -32,6 +32,8 @@ const TEXT_CHUNK: usize = 64;
 const TEXT_MOST: usize = 8 * 1024;
 /// Characters of a tool's name in an event.
 const NAME_CHARS: usize = 200;
+/// Characters of one section's text in a `draft_level` event.
+const DRAFT_CHARS: usize = 32 * 1024;
 
 /// What the thread is asked to do.
 pub enum Command {
@@ -280,7 +282,71 @@ fn end_turn_with(
     room.push(end);
 }
 
-fn on_event(shared: &Shared, room: &Room, out: &mut TextOut, event: Event<'_>) {
+/// `draft_level`: a `draft` call finished a level; every section's text at
+/// that level, secrets hidden and cut to [`DRAFT_CHARS`].
+fn draft_level(shared: &Shared, level: &crate::write::LevelDone) -> serde_json::Value {
+    let sections: Vec<_> = level
+        .sections
+        .iter()
+        .map(|(id, text)| {
+            let (text, truncated) = cut(&shared.settings, text, DRAFT_CHARS);
+            json!({ "id": id, "text": text, "truncated": truncated })
+        })
+        .collect();
+    json!({
+        "type": "draft_level",
+        "level": level.level,
+        "kind": level.kind.code(),
+        "title": preview(shared, &level.title, PREVIEW_CHARS),
+        "sections": sections,
+    })
+}
+
+/// `draft_done`: how a `draft` call ended and what its calls used.
+fn draft_done(shared: &Shared, draft: &crate::write::Draft) -> serde_json::Value {
+    let usage = draft.usage();
+    let (stop, error) = match &draft.stop {
+        crate::write::Stop::Done => ("done", None),
+        crate::write::Stop::Cancelled => ("cancelled", None),
+        crate::write::Stop::Failed(reason) => ("failed", Some(preview(shared, reason, PREVIEW_CHARS))),
+    };
+    let levels: Vec<_> = draft
+        .by_level()
+        .iter()
+        .map(|level| {
+            json!({
+                "level": level.level,
+                "kind": level.kind.code(),
+                "calls": level.calls,
+                "failed_calls": level.failed_calls,
+                "input_tokens": level.usage.input_tokens
+                    + level.usage.cache_creation_input_tokens
+                    + level.usage.cache_read_input_tokens,
+                "output_tokens": level.usage.output_tokens,
+            })
+        })
+        .collect();
+    json!({
+        "type": "draft_done",
+        "stop": stop,
+        "error": error,
+        "levels": draft.levels,
+        "levels_done": draft.levels_done,
+        "polished": draft.polished,
+        "failed_sections": draft.failed_sections(),
+        "calls": draft.calls.len(),
+        "input_tokens": usage.input_tokens
+            + usage.cache_creation_input_tokens
+            + usage.cache_read_input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_input_tokens,
+        "elapsed_ms": draft.elapsed.as_millis() as u64,
+        "sequential_ms": draft.sequential_estimate().as_millis() as u64,
+        "by_level": levels,
+    })
+}
+
+pub(super) fn on_event(shared: &Shared, room: &Room, out: &mut TextOut, event: Event<'_>) {
     match event {
         Event::TextDelta(delta) => out.push(shared, room, delta),
         Event::TextEnd => out.flush(shared, room),
@@ -306,8 +372,14 @@ fn on_event(shared: &Shared, room: &Room, out: &mut TextOut, event: Event<'_>) {
                 "retry_at": retry_at,
             }));
         }
-        // Shown by the tool's call and result.
-        Event::DraftLevel(_) | Event::DraftDone(_) => {}
+        Event::DraftLevel(level) => {
+            out.flush(shared, room);
+            room.push(draft_level(shared, level));
+        }
+        Event::DraftDone(draft) => {
+            out.flush(shared, room);
+            room.push(draft_done(shared, draft));
+        }
         Event::Compacted {
             before_messages,
             after_messages,
