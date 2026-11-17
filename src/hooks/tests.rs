@@ -993,7 +993,9 @@ mod pinning {
             (&["perl", "-e", "x"], code("-e")),
             (&["sh"], Script::None),
             (&["python3", "-"], Script::None),
-            (&["python3.12", "x.py"], Script::NotInterpreter),
+            (&["python3.12", "x.py"], Script::File(1)),
+            (&["/usr/local/bin/node22", "-e", "x"], code("-e")),
+            (&["deno", "run", "x.ts"], Script::NotInterpreter),
             (&["make", "lint"], Script::NotInterpreter),
         ] {
             assert_eq!(script(words), expected, "{words:?}");
@@ -1098,6 +1100,102 @@ mod pinning {
             (r#"["notify-send", "x"]"#, false),
         ] {
             assert_eq!(indirect(&hook(words, project)), None, "{words}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_file_an_interpreter_is_given_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        for name in ["a.pl", "b.pl", "a.js", "b.js"] {
+            write(&dir.join(name), "1;\n");
+        }
+        let input = json!({});
+        // An option Junees does not know takes `a.*` as its value; the
+        // interpreter runs `b.*`.
+        for (command, runs) in [
+            (r#"["perl", "-I", "./a.pl", "./b.pl"]"#, "b.pl"),
+            (r#"["node", "--title", "./a.js", "./b.js"]"#, "b.js"),
+            (r#"["node", "--env-file", "./a.js", "./b.js"]"#, "b.js"),
+            (r#"["node", "-C", "./a.js", "./b.js"]"#, "b.js"),
+            (r#"["node", "--loader=./a.js", "b.js"]"#, "a.js"),
+            (r#"["perl", "-I./a.pl", "b.pl"]"#, "a.pl"),
+        ] {
+            for name in ["a.pl", "b.pl", "a.js", "b.js"] {
+                write(&dir.join(name), "1;\n");
+            }
+            let hooks = pinned_hooks(
+                &dir,
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {command}\n"),
+            );
+            let pins = &hooks.hooks()[0].pins;
+            assert!(
+                pins.iter().any(|pin| pin.path == dir.join(runs)),
+                "{command}: {pins:?}"
+            );
+            // At most one is run from a copy: the word read as the script.
+            assert!(
+                pins.iter().filter(|pin| pin.copied).count() <= 1,
+                "{command}"
+            );
+            write(&dir.join(runs), "system('touch ran');\n");
+            let fired = hooks
+                .fire(
+                    Event::PreTool,
+                    Input {
+                        tool: Some(("bash", &input)),
+                        ..Input::default()
+                    },
+                )
+                .await;
+            assert!(!dir.join("ran").exists(), "{command}");
+            let Outcome::Failed(what) = &fired.records[0].outcome else {
+                panic!("{command}: {fired:?}");
+            };
+            assert!(what.starts_with(CHANGED) && what.contains(runs), "{what}");
+            assert!(fired.blocked.is_some(), "{command}: {fired:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_interpreter_may_not_be_given_a_path_outside_the_project() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        write(&root.path().join("outside/y.py"), "pass\n");
+        write(&repo.join("x.py"), "pass\n");
+        for (command, refused) in [
+            (
+                r#"["python3", "x.py", "../outside/y.py"]"#,
+                Some("../outside/y.py"),
+            ),
+            (
+                r#"["node", "--require=/opt/x.js", "a.js"]"#,
+                Some("/opt/x.js"),
+            ),
+            (r#"["python3.12", "/opt/x.py"]"#, Some("/opt/x.py")),
+            (r#"["sh", "-c", "echo /opt/x"]"#, None),
+            (r#"["python3", "./x.py", "--out=./report"]"#, None),
+            // Not an interpreter: only `command[0]` is looked at.
+            (r#"["notify-send", "/opt/x"]"#, None),
+        ] {
+            write(
+                &repo.join(super::super::PROJECT_FILE),
+                &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {command}\n"),
+            );
+            let found = find(Some(&home), &repo, &repo).unwrap();
+            match refused {
+                Some(path) => {
+                    let warning = found.warnings.join("\n");
+                    assert!(
+                        found.untrusted.is_none()
+                            && warning.contains("gives the interpreter")
+                            && warning.contains(path),
+                        "{command}: {warning}"
+                    );
+                }
+                None => assert!(found.untrusted.is_some(), "{command}: {:?}", found.warnings),
+            }
         }
     }
 

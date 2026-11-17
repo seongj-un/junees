@@ -646,7 +646,7 @@ impl Copies {
             hook_file: None,
             program: false,
         };
-        if hook.pins.is_empty() {
+        if !hook.pins.iter().any(|pin| pin.copied) {
             return Ok(copies);
         }
         let dir = folder.join(random_name()?);
@@ -654,6 +654,10 @@ impl Copies {
         private_folder(&dir, false)?;
         copies.dir = Some(dir.clone());
         for (pin, bytes) in hook.pins.iter().zip(checked) {
+            // Only checked: the interpreter is given it as it is.
+            if !pin.copied {
+                continue;
+            }
             let name = pin
                 .path
                 .file_name()

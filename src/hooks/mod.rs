@@ -82,8 +82,12 @@ pub struct Pin {
     /// Its path, the folders resolved, the last part as written.
     pub path: PathBuf,
     /// The word of `command` that names it: 0 for the program, else an
-    /// interpreter's script argument.
+    /// interpreter's argument.
     pub arg: usize,
+    /// The hook runs a copy of it in place of that word: the program, or
+    /// the script an interpreter runs. Other files an interpreter is given
+    /// are only checked.
+    pub copied: bool,
     /// The SHA-256 of its content when the hook was read, or why it
     /// could not be read (the hook then does not run).
     pub digest: Result<String, String>,
@@ -110,25 +114,85 @@ pub const NOT_PINNED: &str = "훅이 부르는 파일을 고정하지 못해 실
 /// a project's hooks, trusted). The files are `command[0]` when it has a
 /// `/`, and the script a known interpreter runs ([`script_arg`]). A
 /// program found on PATH and files outside those folders are not pinned.
+///
+/// Which word an interpreter runs is read from its options, and an option
+/// Junees does not know can make it read wrong (`node --title ./a.js
+/// ./b.js` runs `b.js`). So every other argument of an interpreter that
+/// names an existing file there (also as `--opt=./x` or `-X./x`) is
+/// pinned too, checked before each run without being copied.
 pub fn pins_for(spec: &Spec, workdir: &Path, project: Option<&Path>) -> Vec<Pin> {
+    let command = &spec.command;
+    let mut pins: Vec<Pin> = Vec::new();
     let mut words = Vec::new();
-    if spec.command[0].contains('/') {
+    if command[0].contains('/') {
         words.push(0);
     }
-    if let Script::File(arg) = script_arg(&spec.command) {
+    let script = script_arg(command);
+    if let Script::File(arg) = script {
         words.push(arg);
     }
-    words
-        .into_iter()
-        .filter_map(|arg| {
-            let resolved = resolve(&spec.command[arg], workdir)?;
-            inside(&resolved, workdir, project).then(|| Pin {
+    for arg in words {
+        let Some(resolved) = resolve(&command[arg], workdir) else {
+            continue;
+        };
+        if inside(&resolved, workdir, project) {
+            pins.push(Pin {
                 digest: pinned_digest(&resolved),
                 path: resolved,
                 arg,
-            })
-        })
-        .collect()
+                copied: true,
+            });
+        }
+    }
+    if script == Script::NotInterpreter {
+        return pins;
+    }
+    for (arg, word) in command.iter().enumerate().skip(1) {
+        if script == Script::File(arg) {
+            continue;
+        }
+        for candidate in path_candidates(word) {
+            let Some(resolved) = resolve(candidate, workdir) else {
+                continue;
+            };
+            // Files and links (a link cannot be pinned, so the hook does
+            // not run); a folder is not pinned.
+            let exists = std::fs::symlink_metadata(&resolved).is_ok_and(|meta| !meta.is_dir());
+            if exists
+                && inside(&resolved, workdir, project)
+                && !pins.iter().any(|pin| pin.path == resolved)
+            {
+                pins.push(Pin {
+                    digest: pinned_digest(&resolved),
+                    path: resolved,
+                    arg,
+                    copied: false,
+                });
+            }
+        }
+    }
+    pins
+}
+
+/// The paths a word of an interpreter's command may name: the word, the
+/// value of `--opt=value`, and the value of a short option written
+/// `-Xvalue`.
+fn path_candidates(word: &str) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    if let Some(long) = word.strip_prefix("--") {
+        if let Some((_, value)) = long.split_once('=') {
+            candidates.push(value);
+        }
+    } else if let Some(short) = word.strip_prefix('-') {
+        if let Some((at, letter)) = short.char_indices().next() {
+            let value = &short[at + letter.len_utf8()..];
+            candidates.push(value.strip_prefix('=').unwrap_or(value));
+        }
+    } else {
+        candidates.push(word);
+    }
+    candidates.retain(|candidate| !candidate.is_empty());
+    candidates
 }
 
 /// What a known interpreter in `command[0]` runs.
@@ -252,11 +316,18 @@ pub fn indirect(hook: &Hook) -> Option<String> {
     }
 }
 
-/// The names of the interpreters whose script is pinned.
-pub fn interpreter_names() -> impl Iterator<Item = &'static str> {
+/// The known interpreter named `name`, also with a version after the
+/// name (`python3.12`, `node22`, `perl5.36`).
+fn interpreter(name: &str) -> Option<&'static Interpreter> {
+    let bare = without_version(name);
     INTERPRETERS
         .iter()
-        .flat_map(|known| known.names.iter().copied())
+        .find(|known| known.names.contains(&name) || known.names.contains(&bare))
+}
+
+/// `name` without the digits and dots of a version at its end.
+fn without_version(name: &str) -> &str {
+    name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
 }
 
 /// What the interpreter `command[0]` (by its file name) runs: the first
@@ -267,10 +338,7 @@ pub fn script_arg(command: &[String]) -> Script {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    let Some(known) = INTERPRETERS
-        .iter()
-        .find(|known| known.names.contains(&name))
-    else {
+    let Some(known) = interpreter(name) else {
         return Script::NotInterpreter;
     };
     let mut at = 1;
@@ -369,24 +437,47 @@ fn canonical(path: &Path) -> PathBuf {
 /// file sees `./tools/check.sh`, and a `tools` that links to `/tmp`, a
 /// path climbing out with `..` or an absolute path elsewhere would run a
 /// file nobody pinned, which others may change without asking again.
+///
+/// The same holds for the arguments of an interpreter that look like a
+/// path (a `/` and no space, also as `--opt=value`): any of them may be
+/// what it runs.
 fn check_project_program(spec: &Spec, project: &Path, workdir: &Path) -> Result<(), String> {
-    let program = &spec.command[0];
-    if !program.contains('/') {
-        return Ok(());
+    let command = &spec.command;
+    let mut paths = vec![(0, command[0].as_str())];
+    if script_arg(command) != Script::NotInterpreter {
+        for (arg, word) in command.iter().enumerate().skip(1) {
+            let value = match word.strip_prefix("--") {
+                Some(long) => long.split_once('=').map(|(_, value)| value),
+                None if word.starts_with('-') => None,
+                None => Some(word.as_str()),
+            };
+            paths.extend(value.map(|value| (arg, value)));
+        }
     }
-    let leads = match resolve(program, workdir) {
-        Some(resolved) if inside(&resolved, workdir, Some(project)) => return Ok(()),
-        Some(resolved) => format!("leads to {}", resolved.display()),
-        None => "cannot be resolved".to_string(),
-    };
-    Err(format!(
-        "hook at line {}: `command` starts with `{}`, which {leads}, outside the project \
-         folder {}; a project hook may run a file inside the project (pinned, so a change \
-         asks again) or a program name on PATH",
-        spec.line,
-        crate::prompt_text::escape_hidden(program),
-        project.display()
-    ))
+    for (arg, path) in paths {
+        if !path.contains('/') || path.contains(char::is_whitespace) {
+            continue;
+        }
+        let leads = match resolve(path, workdir) {
+            Some(resolved) if inside(&resolved, workdir, Some(project)) => continue,
+            Some(resolved) => format!("leads to {}", resolved.display()),
+            None => "cannot be resolved".to_string(),
+        };
+        let place = if arg == 0 {
+            "starts with".to_string()
+        } else {
+            format!("gives the interpreter (word {})", arg + 1)
+        };
+        return Err(format!(
+            "hook at line {}: `command` {place} `{}`, which {leads}, outside the project \
+             folder {}; a project hook may run a file inside the project (pinned, so a \
+             change asks again) or a program name on PATH",
+            spec.line,
+            crate::prompt_text::escape_hidden(path),
+            project.display()
+        ));
+    }
+    Ok(())
 }
 
 /// The SHA-256 of the regular file `path` (no link, at most
