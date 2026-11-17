@@ -2380,7 +2380,7 @@ async fn hooks_are_listed_and_a_broken_user_hook_fails() {
 #[tokio::test]
 async fn hooks_that_run_project_files_indirectly_get_a_warning() {
     let fixture = Fixture::new();
-    for program in ["make", "python3", "sh", "notify-send"] {
+    for program in ["make", "python3", "sh", "notify-send", "ksh"] {
         fixture.program(program);
     }
     std::fs::create_dir_all(&fixture.home).unwrap();
@@ -2390,7 +2390,8 @@ async fn hooks_that_run_project_files_indirectly_get_a_warning() {
          [[hooks]]\nevent = \"post_tool\"\ncommand = [\"python3\", \"-m\", \"tools.fmt\"]\n\
          [[hooks]]\nevent = \"turn_end\"\ncommand = [\"sh\", \"scripts/notify.sh\"]\n\
          [[hooks]]\nevent = \"session_start\"\ncommand = [\"notify-send\", \"hi\"]\n\
-         [[hooks]]\nevent = \"user_prompt\"\ncommand = [\"sh\", \"/opt/hooks/check.sh\"]\n",
+         [[hooks]]\nevent = \"user_prompt\"\ncommand = [\"sh\", \"/opt/hooks/check.sh\"]\n\
+         [[hooks]]\nevent = \"pre_tool\"\ncommand = [\"ksh\", \"/opt/hooks/check.ksh\"]\n",
     )
     .unwrap();
     let report = fixture.run(false).await;
@@ -2428,5 +2429,12 @@ async fn hooks_that_run_project_files_indirectly_get_a_warning() {
         "user user_prompt (line 13)",
         Status::Ok,
         "/opt/hooks/check.sh",
+    );
+    expect(
+        &report,
+        "hooks",
+        "user pre_tool (line 16)",
+        Status::Warn,
+        "`ksh` is an interpreter Junees does not know",
     );
 }

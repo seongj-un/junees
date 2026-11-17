@@ -282,15 +282,30 @@ const BUILD_TOOLS: &[(&str, &str)] = &[
     ("cargo", "build.rs and the project's settings"),
 ];
 
+/// Interpreters Junees does not read the options of, so the script they
+/// run is not pinned.
+const UNKNOWN_INTERPRETERS: &[&str] = &[
+    "dash", "ash", "ksh", "mksh", "csh", "tcsh", "fish", "deno", "bun", "php", "lua", "luajit",
+    "Rscript", "tclsh", "pwsh",
+];
+
 /// Why `hook` runs files Junees cannot pin, if it does (`junees doctor`
-/// warns): a build tool, an interpreter given code or a module, or a user
-/// hook whose script is relative to whichever project the session is in.
+/// warns): a build tool, an interpreter Junees does not know or one given
+/// code or a module, or a user hook whose script is relative to whichever
+/// project the session is in.
 pub fn indirect(hook: &Hook) -> Option<String> {
     let command = &hook.spec.command;
     let name = Path::new(&command[0])
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
+    if UNKNOWN_INTERPRETERS.contains(&name) || UNKNOWN_INTERPRETERS.contains(&without_version(name))
+    {
+        return Some(format!(
+            "`{}` is an interpreter Junees does not know, so the script it runs is not pinned",
+            crate::prompt_text::escape_hidden(name)
+        ));
+    }
     if let Some((tool, files)) = BUILD_TOOLS.iter().find(|(tool, _)| *tool == name) {
         return Some(format!(
             "`{tool}` runs what {files} of the working folder say, which Junees cannot pin"

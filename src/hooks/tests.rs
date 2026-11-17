@@ -1089,6 +1089,19 @@ mod pinning {
                 false,
                 "relative to the session's folder",
             ),
+            (r#"["python3.12", "-m", "x"]"#, true, "`python3.12 -m`"),
+            (r#"["node", "-r", "./x.js", "y.js"]"#, true, "`node -r`"),
+            (
+                r#"["deno", "run", "x.ts"]"#,
+                true,
+                "`deno` is an interpreter Junees does not know",
+            ),
+            (
+                r#"["/usr/bin/php8.2", "x.php"]"#,
+                true,
+                "`php8.2` is an interpreter",
+            ),
+            (r#"["dash", "x.sh"]"#, false, "`dash` is an interpreter"),
         ] {
             let why = indirect(&hook(words, project)).unwrap_or_default();
             assert!(why.contains(part), "{words}: {why}");
