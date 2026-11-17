@@ -319,7 +319,8 @@ async fn init_then_run_builds_the_features_and_commits() {
             "mark_feature_passing",
             "session_search",
             "skill_view",
-            "delegate"
+            "delegate",
+            "draft"
         ]
     );
     let results = tool_results(&requests[4]);
