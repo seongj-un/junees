@@ -38,15 +38,31 @@ fn entries(home: &Path) -> Vec<(String, String)> {
 
 /// Whether a person trusted `file` with its current content.
 pub fn is_trusted(home: &Path, file: &ProjectFile) -> bool {
-    if file.hooks.is_err() {
-        return false;
-    }
+    status(home, file) == Status::Current
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) enum Status {
+    New,
+    Current,
+    Changed,
+}
+
+/// Match the current digest and check for prior approval in one read.
+pub(super) fn status(home: &Path, file: &ProjectFile) -> Status {
     let Some(path) = file.path.to_str() else {
-        return false;
+        return Status::New;
     };
-    entries(home)
-        .iter()
-        .any(|(digest, trusted)| *digest == file.digest && trusted == path)
+    let mut status = Status::New;
+    for (digest, trusted) in entries(home) {
+        if trusted == path {
+            if file.hooks.is_ok() && digest == file.digest {
+                return Status::Current;
+            }
+            status = Status::Changed;
+        }
+    }
+    status
 }
 
 /// Whether a trust entry still exists for this path, independently of

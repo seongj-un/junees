@@ -676,7 +676,7 @@ mod finding {
         // The user's hook runs; the project's waits for a person.
         assert_eq!(found.hooks.len(), 1);
         assert!(found.untrusted.is_some());
-        found.skip_untrusted();
+        found.skip_untrusted().unwrap();
         assert!(found.untrusted.is_none() && found.hooks.len() == 1);
         assert!(
             found.warnings[0].contains("junees hooks trust"),
@@ -893,6 +893,65 @@ mod project_validation {
         assert!(trust::untrust(&home, &project_path(&repo, None)).unwrap());
         let absent = load().unwrap();
         assert!(absent.hooks.is_empty() && absent.warnings.is_empty());
+    }
+
+    #[test]
+    fn failed_reapproval_keeps_the_changed_hooks_pending() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let path = repo.join(PROJECT_FILE);
+        let good = "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"check\"]\n";
+        write(&path, good);
+        find(Some(&home), &repo, &repo)
+            .unwrap()
+            .trust_untrusted(&home)
+            .unwrap();
+        let before = std::fs::read(trust::path(&home)).unwrap();
+
+        write(&path, &format!("# revised policy\n{good}"));
+        let mut pending = find(Some(&home), &repo, &repo).unwrap();
+        let invalid_state = root.path().join("not-a-folder");
+        write(&invalid_state, "ordinary file\n");
+        assert!(pending.trust_untrusted(&invalid_state).is_err());
+        assert!(pending.untrusted().is_some());
+        assert_eq!(std::fs::read(trust::path(&home)).unwrap(), before);
+        let tools = crate::tools::ToolSettings::default();
+        let hide = || std::sync::Arc::new(|_: &mut String| {});
+        let err = pending
+            .build(&repo, &tools, hide())
+            .err()
+            .expect("reapproval was not saved");
+        assert!(err.to_string().contains("no longer matches its approval"));
+
+        // The same valid edit is held until the person decides.
+        let mut pending = find(Some(&home), &repo, &repo).unwrap();
+        assert!(pending.requires_reapproval());
+        pending.trust_untrusted(&home).unwrap();
+        assert!(
+            pending
+                .build(&repo, &tools, hide())
+                .unwrap()
+                .hooks
+                .is_some()
+        );
+        assert_ne!(std::fs::read(trust::path(&home)).unwrap(), before);
+
+        // Explicitly revoking approval lets a later run omit the hooks.
+        write(&path, &format!("# another valid edit\n{good}"));
+        let err = find(Some(&home), &repo, &repo)
+            .unwrap()
+            .build(&repo, &tools, hide())
+            .err()
+            .expect("an unattended run must stop");
+        assert!(err.to_string().contains("junees hooks untrust"));
+        assert!(trust::untrust(&home, &project_path(&repo, None)).unwrap());
+        let loaded = find(Some(&home), &repo, &repo)
+            .unwrap()
+            .build(&repo, &tools, hide())
+            .unwrap();
+        assert!(loaded.hooks.is_none());
+        assert_eq!(loaded.warnings.len(), 1);
     }
 }
 

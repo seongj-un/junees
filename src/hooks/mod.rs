@@ -817,14 +817,18 @@ fn read_project_file(path: PathBuf, workdir: &Path) -> Result<Option<ProjectFile
 }
 
 /// The hooks a run finds for a project in `project_dir`: the user's, the
-/// project's when trusted, and an untrusted project file to ask about or
-/// skip.
+/// project's when trusted, and any project file awaiting approval.
 #[derive(Debug, Default)]
 pub struct Found {
-    pub hooks: Vec<Hook>,
-    /// A project hooks file that is not trusted with its current content.
-    pub untrusted: Option<ProjectFile>,
-    /// What the person should know (a project file that cannot be read).
+    hooks: Vec<Hook>,
+    untrusted: Option<ProjectFile>,
+    requires_reapproval: bool,
+    warnings: Vec<String>,
+}
+
+/// Executable hooks (if any) and warnings after resolving approval.
+pub struct Loaded {
+    pub hooks: Option<std::sync::Arc<Hooks>>,
     pub warnings: Vec<String>,
 }
 
@@ -849,9 +853,11 @@ pub fn find(home: Option<&Path>, project_dir: &Path, workdir: &Path) -> Result<F
         Ok(Some(file)) => match &file.hooks {
             Err(err) => Some(err.clone()),
             Ok(_) => {
-                if home.is_some_and(|home| trust::is_trusted(home, &file)) {
+                let status = home.map_or(trust::Status::New, |home| trust::status(home, &file));
+                if status == trust::Status::Current {
                     found.hooks.extend(file.hooks());
                 } else {
+                    found.requires_reapproval = status == trust::Status::Changed;
                     found.untrusted = Some(file);
                 }
                 return Ok(found);
@@ -880,40 +886,60 @@ pub fn find(home: Option<&Path>, project_dir: &Path, workdir: &Path) -> Result<F
 }
 
 impl Found {
-    /// Leaves the untrusted project file out, with a warning: runs that
-    /// cannot ask (unattended, gateways, `-p`).
-    pub fn skip_untrusted(&mut self) {
-        if let Some(file) = self.untrusted.take() {
-            self.warnings.push(format!(
-                "the project hooks file {} is not trusted (new, or changed since it was \
-                 trusted), so its hooks do not run; read it, then run `junees hooks trust` \
-                 in the project",
-                file.path.display()
-            ));
-        }
+    /// The project file to show to a person who can approve it.
+    pub fn untrusted(&self) -> Option<&ProjectFile> {
+        self.untrusted.as_ref()
     }
 
-    /// Trusts the untrusted project file (a person said yes) and adds its
-    /// hooks.
-    pub fn trust_untrusted(&mut self, home: &Path) -> Result<()> {
-        if let Some(file) = self.untrusted.take() {
-            trust::trust(home, &file)?;
-            self.hooks.extend(file.hooks());
+    pub fn requires_reapproval(&self) -> bool {
+        self.requires_reapproval
+    }
+
+    /// Skip a never-approved project, but never drop a changed policy.
+    fn skip_untrusted(&mut self) -> Result<()> {
+        if let Some(file) = &self.untrusted {
+            let path = crate::prompt_text::escape_hidden(&file.path.display().to_string());
+            if self.requires_reapproval {
+                anyhow::bail!(
+                    "the previously trusted project hooks file {path} no longer matches its approval; \
+                     review it and run `junees hooks trust` to approve it or \
+                     `junees hooks untrust` to explicitly remove its approval"
+                );
+            }
+            self.warnings.push(format!(
+                "the project hooks file {path} is not trusted, so its hooks do not run; \
+                 read it, then run `junees hooks trust` in the project"
+            ));
+            self.untrusted = None;
         }
         Ok(())
     }
 
-    /// The hooks to give the agent of a session working in `workdir`
-    /// under `tools` (its bash sandbox and hidden variables); `None`
-    /// without any.
+    /// Add the approved hooks only after saving their approval succeeds.
+    pub fn trust_untrusted(&mut self, home: &Path) -> Result<()> {
+        if let Some(file) = &self.untrusted {
+            trust::trust(home, file)?;
+            self.hooks.extend(file.hooks());
+            self.untrusted = None;
+            self.requires_reapproval = false;
+        }
+        Ok(())
+    }
+
+    /// Build this session's hooks or fail if a changed policy still needs
+    /// approval, including when the caller cannot ask or the user declines.
     pub fn build(
-        self,
+        mut self,
         workdir: &Path,
         tools: &crate::tools::ToolSettings,
         hide: run::Hide,
-    ) -> Option<std::sync::Arc<Hooks>> {
+    ) -> Result<Loaded> {
+        self.skip_untrusted()?;
         if self.hooks.is_empty() {
-            return None;
+            return Ok(Loaded {
+                hooks: None,
+                warnings: self.warnings,
+            });
         }
         let mut hooks = self.hooks;
         // A project's hooks were pinned when the file was read and trusted.
@@ -932,7 +958,10 @@ impl Found {
         if let Some(state) = tools.settings_file.as_ref().and_then(|file| file.folder()) {
             built = built.with_copies(state.join(COPIES_FOLDER));
         }
-        Some(std::sync::Arc::new(built))
+        Ok(Loaded {
+            hooks: Some(std::sync::Arc::new(built)),
+            warnings: self.warnings,
+        })
     }
 }
 

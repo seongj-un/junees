@@ -473,12 +473,12 @@ impl ApiEngine {
             Trigger::Webhook { context_dir, .. } => context_dir,
             _ => dir,
         };
-        let mut hooks = crate::hooks::find(home, project, dir)?;
-        hooks.skip_untrusted();
+        let hooks =
+            crate::hooks::find(home, project, dir)?.build(dir, &settings, crate::hooks::hider())?;
         for warning in &hooks.warnings {
             eprintln!("  !! {warning}");
         }
-        if let Some(hooks) = hooks.build(dir, &settings, crate::hooks::hider()) {
+        if let Some(hooks) = hooks.hooks {
             agent = agent.with_hooks(hooks);
         }
         // Nobody watches: fewer requests at once.

@@ -666,7 +666,8 @@ fn api_agent(
 /// The hooks of a session in `cwd` ([`junees::hooks`]): the user's, and
 /// the project's when trusted. With `ask` (a conversation in a terminal),
 /// an untrusted project hooks file is shown whole and the person asked
-/// whether to trust it; otherwise it is left out with a warning.
+/// whether to trust it. Only a never-approved project may continue
+/// without its hooks if approval is not granted.
 async fn load_hooks(
     config: &Config,
     cwd: &Path,
@@ -674,10 +675,15 @@ async fn load_hooks(
 ) -> Result<Option<Arc<junees::hooks::Hooks>>> {
     use std::io::IsTerminal;
     let mut found = junees::hooks::find(config.home.as_deref(), cwd, cwd)?;
-    if let (Some(file), Some(input), Some(home)) = (&found.untrusted, ask, config.home.as_deref())
+    if let (Some(file), Some(input), Some(home)) = (found.untrusted(), ask, config.home.as_deref())
         && std::io::stdin().is_terminal()
         && std::io::stderr().is_terminal()
     {
+        if found.requires_reapproval() {
+            eprintln!(
+                "  이전에 승인한 프로젝트 훅이 바뀌었습니다. 재승인하지 않으면 시작하지 않습니다."
+            );
+        }
         eprint!("{}", junees::hooks::trust_question(file));
         eprint!("  이 훅을 실행할까요? [y/N] ");
         let answer = input.next_line().await.ok().flatten().unwrap_or_default();
@@ -687,15 +693,14 @@ async fn load_hooks(
             eprintln!("  !! {err:#}");
         }
     }
-    found.skip_untrusted();
-    for warning in &found.warnings {
+    let loaded = found.build(cwd, &config.tools, junees::hooks::hider())?;
+    for warning in &loaded.warnings {
         eprintln!("  !! {warning}");
     }
-    let hooks = found.build(cwd, &config.tools, junees::hooks::hider());
-    if let Some(hooks) = &hooks {
+    if let Some(hooks) = &loaded.hooks {
         eprintln!("(hooks: {} run in this session)", hooks.hooks().len());
     }
-    Ok(hooks)
+    Ok(loaded.hooks)
 }
 
 /// Reads the enabled plugins of `$JUNEES_HOME/plugins` and says on stderr

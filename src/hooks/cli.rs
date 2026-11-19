@@ -203,14 +203,17 @@ fn list(place: &Place<'_>) -> Result<String> {
 }
 
 async fn test(event: Event, tool: &str, place: &Place<'_>) -> Result<String> {
-    let mut found = super::find(place.home, place.cwd, place.cwd)?;
-    found.skip_untrusted();
-    let mut out: String = found
+    let loaded = super::find(place.home, place.cwd, place.cwd)?.build(
+        place.cwd,
+        place.tools,
+        super::hider(),
+    )?;
+    let mut out: String = loaded
         .warnings
         .iter()
         .map(|warning| format!("!! {warning}\n"))
         .collect();
-    let Some(hooks) = found.build(place.cwd, place.tools, super::hider()) else {
+    let Some(hooks) = loaded.hooks else {
         out.push_str("no hook runs here\n");
         return Ok(out);
     };
