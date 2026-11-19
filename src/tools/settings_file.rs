@@ -296,7 +296,7 @@ impl SettingsFile {
     }
 
     /// The settings file, the MCP server list, the user's hooks file and
-    /// the hook trust list ([`crate::hooks`]), the secrets folder and the
+    /// the hook trust list and its lock ([`crate::hooks`]), the secrets folder and the
     /// browser profiles ([`crate::browser::PROFILES_FOLDER`]): the paths
     /// the bash sandbox ([`crate::sandbox`]) keeps commands from reading.
     pub fn protected_paths(&self) -> Vec<PathBuf> {
@@ -305,6 +305,8 @@ impl SettingsFile {
             self.mcp_path(),
             self.path.with_file_name(crate::hooks::FILE_NAME),
             self.path.with_file_name(crate::hooks::trust::FILE_NAME),
+            self.path
+                .with_file_name(crate::hooks::trust::LOCK_FILE_NAME),
         ];
         paths.extend(self.path.parent().map(secrets_dir));
         paths.extend(
@@ -490,9 +492,13 @@ impl SettingsFile {
             })
         };
         let mcp = self.mcp_path();
+        let hook_lock = self
+            .path
+            .with_file_name(crate::hooks::trust::LOCK_FILE_NAME);
         [
             (&*self.path, Named::File),
             (&*mcp, Named::File),
+            (&*hook_lock, Named::File),
             (folder, Named::Folder),
         ]
         .into_iter()
@@ -585,8 +591,8 @@ impl SettingsFile {
     }
 
     /// Whether the absolute `path` leads to the settings file, the MCP
-    /// server list, the user's hooks file and the hook trust list (hooks
-    /// there run without a question), or into the secrets folder.
+    /// server list, the user's hooks file, the hook trust list and its
+    /// lock, or into the secrets folder.
     fn same(&self, path: &Path) -> bool {
         self.same_as(path, &self.path)
             || self.same_as(path, &self.mcp_path())
@@ -594,6 +600,12 @@ impl SettingsFile {
             || self.same_as(
                 path,
                 &self.path.with_file_name(crate::hooks::trust::FILE_NAME),
+            )
+            || self.same_as(
+                path,
+                &self
+                    .path
+                    .with_file_name(crate::hooks::trust::LOCK_FILE_NAME),
             )
             || self.lands(path).is_some_and(|path| {
                 self.resolved_secrets()
@@ -830,6 +842,21 @@ mod tests {
 
     use super::testing::{home, relative};
     use super::{Named, expand_braces};
+
+    #[test]
+    fn approval_ledger_lock_is_registered_as_private_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let state = root.join("state");
+        std::fs::create_dir(&state).unwrap();
+        let file = super::SettingsFile::new(state.join("config.toml"), Some(root.clone()));
+        let name = crate::hooks::trust::LOCK_FILE_NAME;
+        let path = state.join(name);
+        // All three consumers know the name before the first approval.
+        assert!(file.is(&path));
+        assert!(matches!(file.names(name, Some(&state)), Some(Named::File)));
+        assert!(file.protected_paths().contains(&path));
+    }
 
     #[test]
     fn knows_the_file_by_any_path() {

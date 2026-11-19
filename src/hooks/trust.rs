@@ -4,8 +4,9 @@
 //! any change asks again. The file sits in the state folder, which the
 //! model's tools may not change ([`crate::tools::SettingsFile`]).
 
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -14,6 +15,8 @@ use super::{MAX_FILE_BYTES, ProjectFile};
 
 /// The trust file's name in the state folder.
 pub const FILE_NAME: &str = "trusted-hooks";
+/// A stable inode for the writer lock; the ledger itself is replaced.
+pub(crate) const LOCK_FILE_NAME: &str = "trusted-hooks.lock";
 
 /// The trust file of the state folder `home`.
 pub fn path(home: &Path) -> PathBuf {
@@ -89,19 +92,6 @@ impl Ledger {
         path.to_str()
             .is_some_and(|path| self.0.iter().any(|(_, trusted)| trusted == path))
     }
-
-    pub(super) fn approve(mut self, home: &Path, file: &ProjectFile) -> Result<()> {
-        if let Err(err) = &file.hooks {
-            bail!(
-                "{} cannot be read, so it cannot be trusted: {err}",
-                file.path.display()
-            );
-        }
-        let path = shown_path(&file.path)?;
-        self.0.retain(|(_, trusted)| *trusted != path);
-        self.0.push((file.digest.clone(), path));
-        save(home, &self.0)
-    }
 }
 
 /// Whether a person trusted `file` with its current content.
@@ -112,16 +102,59 @@ pub fn is_trusted(home: &Path, file: &ProjectFile) -> Result<bool> {
 /// Trusts `file` with its current content, replacing what was trusted
 /// for its path before.
 pub fn trust(home: &Path, file: &ProjectFile) -> Result<()> {
-    Ledger::read(Some(home))?.approve(home, file)
+    if let Err(err) = &file.hooks {
+        bail!(
+            "{} cannot be read, so it cannot be trusted: {err}",
+            file.path.display()
+        );
+    }
+    update(home, shown_path(&file.path)?, Some(&file.digest)).map(|_| ())
 }
 
 /// Forgets every trust of the file at `file`; whether there was one.
 pub fn untrust(home: &Path, file: &Path) -> Result<bool> {
-    let path = shown_path(file)?;
+    update(home, shown_path(file)?, None)
+}
+
+/// Apply one approval (or revocation) to the latest ledger under the
+/// writer lock. Neither project validation nor a human prompt holds it.
+fn update(home: &Path, entry: String, digest: Option<&str>) -> Result<bool> {
+    if digest.is_some() {
+        std::fs::create_dir_all(home)
+            .with_context(|| format!("cannot create {}", home.display()))?;
+    }
+    let lock_path = home.join(LOCK_FILE_NAME);
+    let name = crate::prompt_text::escape_hidden(&lock_path.display().to_string());
+    let lock = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        // Revoking an approval from a missing state folder is a no-op.
+        Err(err) if digest.is_none() && err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err).with_context(|| format!("cannot open {name}")),
+    };
+    let meta = lock
+        .metadata()
+        .with_context(|| format!("cannot inspect {name}"))?;
+    if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
+        bail!("{name} must be a regular file with no group or other permissions");
+    }
+    if !crate::flock::try_exclusive(&lock).with_context(|| format!("cannot lock {name}"))? {
+        bail!("{name} is locked by another junees; try again");
+    }
+
     let Ledger(mut entries) = Ledger::read(Some(home))?;
     let before = entries.len();
-    entries.retain(|(_, trusted)| *trusted != path);
-    if entries.len() == before {
+    entries.retain(|(_, trusted)| *trusted != entry);
+    if let Some(digest) = digest {
+        entries.push((digest.to_string(), entry));
+    } else if entries.len() == before {
         return Ok(false);
     }
     save(home, &entries)?;
@@ -159,7 +192,6 @@ fn save(home: &Path, entries: &[(String, String)]) -> Result<()> {
         text.push_str(path);
         text.push('\n');
     }
-    std::fs::create_dir_all(home).with_context(|| format!("cannot create {}", home.display()))?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
