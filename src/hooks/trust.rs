@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::ProjectFile;
+use super::{MAX_FILE_BYTES, ProjectFile};
 
 /// The trust file's name in the state folder.
 pub const FILE_NAME: &str = "trusted-hooks";
@@ -20,27 +20,6 @@ pub fn path(home: &Path) -> PathBuf {
     home.join(FILE_NAME)
 }
 
-/// The (digest, path) entries; unreadable files and malformed lines
-/// trust nothing.
-fn entries(home: &Path) -> Vec<(String, String)> {
-    let Ok(Some(bytes)) = super::read_file(&path(home)) else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter_map(|line| {
-            let (digest, path) = line.split_once(' ')?;
-            (digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
-                .then(|| (digest.to_string(), path.to_string()))
-        })
-        .collect()
-}
-
-/// Whether a person trusted `file` with its current content.
-pub fn is_trusted(home: &Path, file: &ProjectFile) -> bool {
-    status(home, file) == Status::Current
-}
-
 #[derive(PartialEq, Eq)]
 pub(super) enum Status {
     New,
@@ -48,50 +27,98 @@ pub(super) enum Status {
     Changed,
 }
 
-/// Match the current digest and check for prior approval in one read.
-pub(super) fn status(home: &Path, file: &ProjectFile) -> Status {
-    let Some(path) = file.path.to_str() else {
-        return Status::New;
-    };
-    let mut status = Status::New;
-    for (digest, trusted) in entries(home) {
-        if trusted == path {
-            if file.hooks.is_ok() && digest == file.digest {
-                return Status::Current;
-            }
-            status = Status::Changed;
+/// A validated snapshot of the approval record. Only absence means that
+/// there is no record to read; never use an unreadable record as empty.
+#[derive(Default)]
+pub(crate) struct Ledger(Vec<(String, String)>);
+
+impl Ledger {
+    pub(crate) fn read(home: Option<&Path>) -> Result<Self> {
+        let Some(home) = home else {
+            return Ok(Self::default());
+        };
+        let path = path(home);
+        let name = crate::prompt_text::escape_hidden(&path.display().to_string());
+        let Some(bytes) = super::read_file(&path).with_context(|| format!("cannot read {name}"))?
+        else {
+            return Ok(Self::default());
+        };
+        let text = std::str::from_utf8(&bytes)
+            .with_context(|| format!("cannot parse {name}: it is not UTF-8 text"))?;
+        let mut entries = Vec::new();
+        for (index, line) in text.lines().enumerate() {
+            let Some((digest, path)) = line.split_once(' ').filter(|(digest, path)| {
+                digest.len() == 64
+                    && digest.bytes().all(|b| b.is_ascii_hexdigit())
+                    && !path.is_empty()
+                    && !path.contains(['\r', '\0'])
+            }) else {
+                bail!(
+                    "cannot parse {name}: invalid approval entry at line {}",
+                    index + 1
+                );
+            };
+            entries.push((digest.to_string(), path.to_string()));
         }
+        Ok(Self(entries))
     }
-    status
+
+    /// Match the current digest and check for prior approval in one read.
+    pub(super) fn status(&self, file: &ProjectFile) -> Status {
+        let Some(path) = file.path.to_str() else {
+            return Status::New;
+        };
+        let mut status = Status::New;
+        for (digest, trusted) in &self.0 {
+            if trusted == path {
+                if file.hooks.is_ok() && *digest == file.digest {
+                    return Status::Current;
+                }
+                status = Status::Changed;
+            }
+        }
+        status
+    }
+
+    pub(crate) fn is_trusted(&self, file: &ProjectFile) -> bool {
+        self.status(file) == Status::Current
+    }
+
+    /// Whether there is a prior entry, not permission to run this file.
+    pub(super) fn was_trusted(&self, path: &Path) -> bool {
+        path.to_str()
+            .is_some_and(|path| self.0.iter().any(|(_, trusted)| trusted == path))
+    }
+
+    pub(super) fn approve(mut self, home: &Path, file: &ProjectFile) -> Result<()> {
+        if let Err(err) = &file.hooks {
+            bail!(
+                "{} cannot be read, so it cannot be trusted: {err}",
+                file.path.display()
+            );
+        }
+        let path = shown_path(&file.path)?;
+        self.0.retain(|(_, trusted)| *trusted != path);
+        self.0.push((file.digest.clone(), path));
+        save(home, &self.0)
+    }
 }
 
-/// Whether a trust entry still exists for this path, independently of
-/// the current content. This does not authorize any hook to run.
-pub(super) fn was_trusted(home: &Path, path: &Path) -> bool {
-    path.to_str()
-        .is_some_and(|path| entries(home).iter().any(|(_, trusted)| trusted == path))
+/// Whether a person trusted `file` with its current content.
+pub fn is_trusted(home: &Path, file: &ProjectFile) -> Result<bool> {
+    Ok(Ledger::read(Some(home))?.is_trusted(file))
 }
 
 /// Trusts `file` with its current content, replacing what was trusted
 /// for its path before.
 pub fn trust(home: &Path, file: &ProjectFile) -> Result<()> {
-    if let Err(err) = &file.hooks {
-        bail!(
-            "{} cannot be read, so it cannot be trusted: {err}",
-            file.path.display()
-        );
-    }
-    let path = shown_path(&file.path)?;
-    let mut entries = entries(home);
-    entries.retain(|(_, trusted)| *trusted != path);
-    entries.push((file.digest.clone(), path));
-    save(home, &entries)
+    Ledger::read(Some(home))?.approve(home, file)
 }
 
 /// Forgets every trust of the file at `file`; whether there was one.
 pub fn untrust(home: &Path, file: &Path) -> Result<bool> {
     let path = shown_path(file)?;
-    let mut entries = entries(home);
+    let Ledger(mut entries) = Ledger::read(Some(home))?;
     let before = entries.len();
     entries.retain(|(_, trusted)| *trusted != path);
     if entries.len() == before {
@@ -108,23 +135,37 @@ fn shown_path(path: &Path) -> Result<String> {
     if text.contains(['\n', '\r']) {
         bail!("the hooks file's path holds a line break, so it cannot be trusted");
     }
+    if text.is_empty() || text.contains('\0') {
+        bail!("the hooks file's path is invalid, so it cannot be trusted");
+    }
     Ok(text.to_string())
 }
 
 /// Writes the entries through a fresh temporary file (`O_EXCL`, no
 /// links, `0600`) renamed over the trust file.
 fn save(home: &Path, entries: &[(String, String)]) -> Result<()> {
-    std::fs::create_dir_all(home).with_context(|| format!("cannot create {}", home.display()))?;
     let target = path(home);
+    let mut text = String::new();
+    for (digest, path) in entries {
+        if text.len() + digest.len() + path.len() + 2 > MAX_FILE_BYTES as usize {
+            bail!(
+                "cannot write {}: the approval record would exceed {} KiB",
+                target.display(),
+                MAX_FILE_BYTES / 1024
+            );
+        }
+        text.push_str(digest);
+        text.push(' ');
+        text.push_str(path);
+        text.push('\n');
+    }
+    std::fs::create_dir_all(home).with_context(|| format!("cannot create {}", home.display()))?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let temp = home.join(format!(".{FILE_NAME}.{}.{nanos}.tmp", std::process::id()));
-    let mut text = String::new();
-    for (digest, path) in entries {
-        text.push_str(&format!("{digest} {path}\n"));
-    }
+
     let written = (|| -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)

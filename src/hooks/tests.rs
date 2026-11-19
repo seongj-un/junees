@@ -261,9 +261,9 @@ fn trust_holds_for_the_exact_content_and_path() {
             .unwrap()
     };
     let file = read();
-    assert!(!trust::is_trusted(&home, &file));
+    assert!(!trust::is_trusted(&home, &file).unwrap());
     trust::trust(&home, &file).unwrap();
-    assert!(trust::is_trusted(&home, &read()));
+    assert!(trust::is_trusted(&home, &read()).unwrap());
     let mode = std::fs::metadata(trust::path(&home)).unwrap();
     assert_eq!(
         std::os::unix::fs::PermissionsExt::mode(&mode.permissions()) & 0o777,
@@ -274,13 +274,13 @@ fn trust_holds_for_the_exact_content_and_path() {
         &repo.join(PROJECT_FILE),
         "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"y\"]\n",
     );
-    assert!(!trust::is_trusted(&home, &read()));
+    assert!(!trust::is_trusted(&home, &read()).unwrap());
     // Trusting the new content replaces the old entry.
     trust::trust(&home, &read()).unwrap();
     let text = std::fs::read_to_string(trust::path(&home)).unwrap();
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(trust::untrust(&home, &read().path).unwrap());
-    assert!(!trust::is_trusted(&home, &read()));
+    assert!(!trust::is_trusted(&home, &read()).unwrap());
     assert!(!trust::untrust(&home, &read().path).unwrap());
     // A broken file cannot be trusted.
     write(&repo.join(PROJECT_FILE), "[[hooks]]\nevent = \"nope\"\n");
@@ -725,6 +725,151 @@ mod finding {
     }
 
     #[tokio::test]
+    async fn listing_reports_a_trust_record_io_error_even_without_project_hooks() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let place = place(&home, &repo, root.path());
+        assert!(cli::run(&HooksCommand::List, &place).await.is_ok());
+
+        // A directory in place of the ledger gives a deterministic I/O
+        // error even when the tests run as a user that can read any file.
+        let ledger = trust::path(&home);
+        std::fs::create_dir_all(&ledger).unwrap();
+        for command in [
+            HooksCommand::List,
+            HooksCommand::Trust,
+            HooksCommand::Untrust,
+        ] {
+            let err = format!("{:#}", cli::run(&command, &place).await.unwrap_err());
+            assert!(
+                err.contains("trusted-hooks") && err.contains("not a regular file"),
+                "{err}"
+            );
+        }
+        let err = format!("{:#}", find(Some(&home), &repo, &repo).unwrap_err());
+        assert!(
+            err.contains("trusted-hooks") && err.contains("not a regular file"),
+            "{err}"
+        );
+        assert!(ledger.is_dir());
+    }
+
+    #[tokio::test]
+    async fn damaged_trust_records_are_reported_and_not_rewritten() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let place = place(&home, &repo, root.path());
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        write(&repo.join(super::super::PROJECT_FILE), PROJECT);
+        cli::run(&HooksCommand::Trust, &place).await.unwrap();
+        let ledger = trust::path(&home);
+        let original = std::fs::read(&ledger).unwrap();
+        for (tail, cause) in [
+            (&b"unfinished entry\n"[..], "line 2"),
+            (&[0xff], "not UTF-8"),
+        ] {
+            let damaged = [original.as_slice(), tail].concat();
+            std::fs::write(&ledger, &damaged).unwrap();
+            for command in [
+                HooksCommand::List,
+                HooksCommand::Trust,
+                HooksCommand::Untrust,
+            ] {
+                let err = format!("{:#}", cli::run(&command, &place).await.unwrap_err());
+                assert!(
+                    err.contains("trusted-hooks") && err.contains(cause),
+                    "{err}"
+                );
+                assert_eq!(std::fs::read(&ledger).unwrap(), damaged);
+            }
+            let err = format!("{:#}", find(Some(&home), &repo, &repo).unwrap_err());
+            assert!(
+                err.contains("trusted-hooks") && err.contains(cause),
+                "{err}"
+            );
+        }
+        std::fs::write(&ledger, &original).unwrap();
+        assert!(
+            cli::run(&HooksCommand::Untrust, &place)
+                .await
+                .unwrap()
+                .contains("no longer trusted")
+        );
+        assert!(std::fs::read(&ledger).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn trust_record_read_and_write_have_the_same_byte_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let current = place(&home, &repo, root.path());
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        write(&repo.join(super::super::PROJECT_FILE), PROJECT);
+        cli::run(&HooksCommand::Trust, &current).await.unwrap();
+
+        let ledger = trust::path(&home);
+        let mut text = std::fs::read_to_string(&ledger).unwrap();
+        let limit = super::super::MAX_FILE_BYTES as usize;
+        let digest = "a".repeat(64);
+        let remaining = limit - text.len();
+        let rows = remaining / 128;
+        for index in 0..rows {
+            let prefix = format!("{digest} /fixtures/{index:04}/");
+            let len = 128
+                + if index + 1 == rows {
+                    remaining % 128
+                } else {
+                    0
+                };
+            text.push_str(&prefix);
+            text.push_str(&"a".repeat(len - prefix.len() - 1));
+            text.push('\n');
+        }
+        assert_eq!(text.len(), limit);
+        std::fs::write(&ledger, &text).unwrap();
+
+        // An equal-sized replacement is allowed at exactly the read limit.
+        cli::run(&HooksCommand::Trust, &current).await.unwrap();
+        let bytes = std::fs::read(&ledger).unwrap();
+        assert_eq!(bytes.len(), limit);
+        assert!(
+            cli::run(&HooksCommand::List, &current)
+                .await
+                .unwrap()
+                .contains(": trusted\n")
+        );
+
+        let other = repository(&root.path().join("different project"));
+        write(&other.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        write(&other.join(super::super::PROJECT_FILE), PROJECT);
+        let second = place(&home, &other, root.path());
+        let err = format!(
+            "{:#}",
+            cli::run(&HooksCommand::Trust, &second).await.unwrap_err()
+        );
+        assert!(
+            err.contains("trusted-hooks") && err.contains("exceed 256 KiB"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(&ledger).unwrap(), bytes);
+
+        let mut oversized = bytes;
+        oversized.push(b'\n');
+        std::fs::write(&ledger, oversized).unwrap();
+        let err = format!(
+            "{:#}",
+            cli::run(&HooksCommand::List, &current).await.unwrap_err()
+        );
+        assert!(
+            err.contains("trusted-hooks") && err.contains("larger than 256 KiB"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
     async fn list_trust_untrust_and_test() {
         let root = tempfile::tempdir().unwrap();
         let repo = repository(root.path());
@@ -759,7 +904,7 @@ mod finding {
         let file = super::super::project_file(&repo, Some(root.path()), Some(&home))
             .unwrap()
             .unwrap();
-        assert!(!trust::is_trusted(&home, &file));
+        assert!(!trust::is_trusted(&home, &file).unwrap());
         // `test` runs nothing untrusted.
         let out = cli::run(
             &HooksCommand::Test {
@@ -850,7 +995,7 @@ mod project_validation {
             "{err}"
         );
         assert_eq!(std::fs::read(trust::path(&home)).unwrap(), before);
-        assert!(trust::is_trusted(&home, &original));
+        assert!(trust::is_trusted(&home, &original).unwrap());
         let err = find(Some(&home), &repo, &repo).unwrap_err().to_string();
         assert!(
             err.contains("data/sample.txt") && err.contains("larger than"),
@@ -1035,7 +1180,7 @@ mod pinning {
         write(&repo.join("check.sh"), "#!/bin/sh\nexit 0 # revised\n");
         let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_some() && found.hooks.is_empty());
-        assert!(!trust::is_trusted(&home, found.untrusted.as_ref().unwrap()));
+        assert!(!trust::is_trusted(&home, found.untrusted.as_ref().unwrap()).unwrap());
         // A missing script cannot be pinned; an approved policy cannot be loaded.
         std::fs::remove_file(repo.join("check.sh")).unwrap();
         let err = find(Some(&home), &repo, &repo).unwrap_err().to_string();
@@ -1486,7 +1631,7 @@ mod pinning {
         let data = repo.join("data/settings.txt");
         write(&data, "sample settings\n");
         let available = read();
-        assert!(!trust::is_trusted(&home, &available));
+        assert!(!trust::is_trusted(&home, &available).unwrap());
         assert_ne!(missing.digest, available.digest);
         trust::trust(&home, &available).unwrap();
         let hook = available.hooks().remove(0);

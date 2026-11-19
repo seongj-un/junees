@@ -73,13 +73,14 @@ pub async fn run(command: &HooksCommand, place: &Place<'_>) -> Result<String> {
         HooksCommand::List => list(place),
         HooksCommand::Trust => {
             let home = need_home(place)?;
+            let ledger = trust::Ledger::read(Some(home))?;
             let Some(file) = project(place)? else {
                 bail!(
                     "there is no project hooks file for this folder (looked for {})",
                     project_path(place.cwd, place.user_home).display()
                 );
             };
-            trust::trust(home, &file)?;
+            ledger.approve(home, &file)?;
             Ok(format!(
                 "trusted {} as it is now (sha256 {}); its hooks run from the next session in \
                  this project, and any change asks again. It holds:\n{}",
@@ -156,6 +157,7 @@ fn hook_line(hook: &Hook) -> String {
 }
 
 fn list(place: &Place<'_>) -> Result<String> {
+    let ledger = trust::Ledger::read(place.home)?;
     let mut out = String::new();
     match place.home {
         None => out.push_str("user hooks: none (no state folder)\n"),
@@ -183,10 +185,10 @@ fn list(place: &Place<'_>) -> Result<String> {
             project_path(place.cwd, place.user_home).display()
         )),
         Some(file) => {
-            let state = match (&file.hooks, place.home) {
-                (Err(err), _) => format!("cannot be read, so they do not run: {err}"),
-                (Ok(_), Some(home)) if trust::is_trusted(home, &file) => "trusted".into(),
-                (Ok(_), _) => "not trusted (new, or changed since it was trusted), so they do \
+            let state = match &file.hooks {
+                Err(err) => format!("cannot be read, so they do not run: {err}"),
+                Ok(_) if ledger.is_trusted(&file) => "trusted".into(),
+                Ok(_) => "not trusted (new, or changed since it was trusted), so they do \
                                not run; read the file, then `junees hooks trust`"
                     .into(),
             };

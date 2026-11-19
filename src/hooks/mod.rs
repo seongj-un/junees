@@ -836,6 +836,7 @@ pub struct Loaded {
 /// `project_dir`. Fails when a user hook or a previously trusted project
 /// file cannot be validated: a policy hook must not silently drop out.
 pub fn find(home: Option<&Path>, project_dir: &Path, workdir: &Path) -> Result<Found> {
+    let ledger = trust::Ledger::read(home)?;
     let mut found = Found::default();
     if let Some(home) = home {
         found.hooks = user_hooks(home)?;
@@ -853,7 +854,7 @@ pub fn find(home: Option<&Path>, project_dir: &Path, workdir: &Path) -> Result<F
         Ok(Some(file)) => match &file.hooks {
             Err(err) => Some(err.clone()),
             Ok(_) => {
-                let status = home.map_or(trust::Status::New, |home| trust::status(home, &file));
+                let status = ledger.status(&file);
                 if status == trust::Status::Current {
                     found.hooks.extend(file.hooks());
                 } else {
@@ -866,7 +867,7 @@ pub fn find(home: Option<&Path>, project_dir: &Path, workdir: &Path) -> Result<F
         Err(err) => Some(err),
     };
     let name = crate::prompt_text::escape_hidden(&path.display().to_string());
-    if home.is_some_and(|home| trust::was_trusted(home, &path)) {
+    if ledger.was_trusted(&path) {
         let err = error.as_deref().unwrap_or(if own {
             "the path now refers to the user's own hooks file"
         } else {

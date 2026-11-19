@@ -517,6 +517,18 @@ pub(super) fn hooks(
             );
         }
     }
+    let ledger = match crate::hooks::trust::Ledger::read(Some(home)) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            report.fail(
+                AREA,
+                "trusted-hooks",
+                format!("{err:#}"),
+                "check the approval record's file and contents (docs/hooks.md)",
+            );
+            return;
+        }
+    };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match crate::hooks::project_file(&cwd, user_home, Some(home)) {
         Ok(None) => {}
@@ -531,8 +543,7 @@ pub(super) fn hooks(
                     "fix the file; its hooks run only after `junees hooks trust`",
                 ),
                 Ok(_) => {
-                    let trusted = crate::hooks::trust::is_trusted(home, &file);
-                    if trusted {
+                    if ledger.is_trusted(&file) {
                         report.ok(AREA, &name, "trusted (this exact content)");
                     } else {
                         report.warn(
