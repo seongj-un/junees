@@ -38,12 +38,22 @@ fn entries(home: &Path) -> Vec<(String, String)> {
 
 /// Whether a person trusted `file` with its current content.
 pub fn is_trusted(home: &Path, file: &ProjectFile) -> bool {
+    if file.hooks.is_err() {
+        return false;
+    }
     let Some(path) = file.path.to_str() else {
         return false;
     };
     entries(home)
         .iter()
         .any(|(digest, trusted)| *digest == file.digest && trusted == path)
+}
+
+/// Whether a trust entry still exists for this path, independently of
+/// the current content. This does not authorize any hook to run.
+pub(super) fn was_trusted(home: &Path, path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|path| entries(home).iter().any(|(_, trusted)| trusted == path))
 }
 
 /// Trusts `file` with its current content, replacing what was trusted

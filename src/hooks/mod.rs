@@ -179,7 +179,7 @@ fn pin_paths_for(
             }
             // Explicit interpreter inputs must be present at approval;
             // errors inspecting one are not treated as absence. A missing
-            // program retains its existing non-runnable pin.
+            // program is reported when its pin is read.
             if arg != 0
                 && explicit
                 && let Err(err) = &metadata
@@ -533,15 +533,11 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// An explicit path argument, not ordinary text containing a slash.
-/// A selected program/script is already a file candidate regardless of
-/// spelling. For other words, a path with spaces can be made explicit
-/// with a leading `./`, `../` or `/`.
+/// An explicit path argument, not a logical name such as `team/default`.
+/// The selected program and script are handled separately. Other values
+/// without these prefixes are still candidates if they name existing files.
 fn explicit_path(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || (value.contains('/') && !value.contains(char::is_whitespace) && !value.contains("://"))
+    value.starts_with('/') || value.starts_with("./") || value.starts_with("../")
 }
 
 fn outside_project(
@@ -747,14 +743,17 @@ pub fn project_file_in(
     junees_home: Option<&Path>,
 ) -> Result<Option<ProjectFile>, String> {
     let path = project_path(project_dir, user_home);
-    if let Some(home) = junees_home {
-        let own =
-            std::fs::canonicalize(home.join(FILE_NAME)).unwrap_or_else(|_| home.join(FILE_NAME));
-        let found = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        if own == found {
-            return Ok(None);
-        }
+    if junees_home.is_some_and(|home| is_user_hooks_file(&path, home)) {
+        return Ok(None);
     }
+    read_project_file(path, workdir)
+}
+
+fn is_user_hooks_file(path: &Path, home: &Path) -> bool {
+    canonical(path) == canonical(&home.join(FILE_NAME))
+}
+
+fn read_project_file(path: PathBuf, workdir: &Path) -> Result<Option<ProjectFile>, String> {
     let bytes = match read_file(&path) {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return Ok(None),
@@ -765,21 +764,32 @@ pub fn project_file_in(
     let project = path
         .parent()
         .and_then(Path::parent)
-        .unwrap_or(project_dir)
-        .to_path_buf();
+        .ok_or_else(|| format!("{} has no project folder", path.display()))?;
     let mut pins = Vec::new();
     let (text, hooks) = match String::from_utf8(bytes) {
         Ok(text) => {
             let hooks = config::parse(&text, 1)
                 .map_err(|err| format!("{err:#}"))
                 .and_then(|specs| {
-                    pins = specs
+                    let checked = specs
                         .iter()
-                        .map(|spec| pin_paths_for(spec, workdir, Some(&project)))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .into_iter()
-                        .map(pins_from)
-                        .collect();
+                        .map(|spec| {
+                            let pins = pins_from(pin_paths_for(spec, workdir, Some(project))?);
+                            for pin in &pins {
+                                if let Err(err) = &pin.digest {
+                                    let path = crate::prompt_text::escape_hidden(
+                                        &pin.path.display().to_string(),
+                                    );
+                                    return Err(format!(
+                                        "hook at line {}: cannot pin `{path}`: {err}",
+                                        spec.line
+                                    ));
+                                }
+                            }
+                            Ok(pins)
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    pins = checked;
                     Ok(specs)
                 });
             (text, hooks)
@@ -791,8 +801,9 @@ pub fn project_file_in(
     if pins.iter().any(|pins| !pins.is_empty()) {
         let mut all = format!("{digest}\n");
         for pin in pins.iter().flatten() {
-            let state = pin.digest.as_deref().unwrap_or("unreadable");
-            all.push_str(&format!("{}\t{state}\n", pin.path.display()));
+            if let Ok(state) = &pin.digest {
+                all.push_str(&format!("{}\t{state}\n", pin.path.display()));
+            }
         }
         digest = self::digest(all.as_bytes());
     }
@@ -818,29 +829,52 @@ pub struct Found {
 }
 
 /// The hooks of a run of the state folder `home` on the project in
-/// `project_dir`. Fails when a user hook is broken: a policy hook that
-/// silently dropped out would let calls through.
+/// `project_dir`. Fails when a user hook or a previously trusted project
+/// file cannot be validated: a policy hook must not silently drop out.
 pub fn find(home: Option<&Path>, project_dir: &Path, workdir: &Path) -> Result<Found> {
     let mut found = Found::default();
     if let Some(home) = home {
         found.hooks = user_hooks(home)?;
     }
     let user_home = std::env::var_os("HOME").map(PathBuf::from);
-    match project_file_in(project_dir, workdir, user_home.as_deref(), home) {
-        Ok(None) => {}
+    let path = project_path(project_dir, user_home.as_deref());
+    let own = home.is_some_and(|home| is_user_hooks_file(&path, home));
+    let file = if own {
+        Ok(None)
+    } else {
+        read_project_file(path.clone(), workdir)
+    };
+    let error = match file {
+        Ok(None) => None,
         Ok(Some(file)) => match &file.hooks {
-            Err(err) => found.warnings.push(format!(
-                "the project hooks file {} cannot be read, so its hooks do not run: {err}",
-                file.path.display()
-            )),
-            Ok(_) if home.is_some_and(|home| trust::is_trusted(home, &file)) => {
-                found.hooks.extend(file.hooks());
+            Err(err) => Some(err.clone()),
+            Ok(_) => {
+                if home.is_some_and(|home| trust::is_trusted(home, &file)) {
+                    found.hooks.extend(file.hooks());
+                } else {
+                    found.untrusted = Some(file);
+                }
+                return Ok(found);
             }
-            Ok(_) => found.untrusted = Some(file),
         },
-        Err(err) => found
-            .warnings
-            .push(format!("{err}; the project's hooks do not run")),
+        Err(err) => Some(err),
+    };
+    let name = crate::prompt_text::escape_hidden(&path.display().to_string());
+    if home.is_some_and(|home| trust::was_trusted(home, &path)) {
+        let err = error.as_deref().unwrap_or(if own {
+            "the path now refers to the user's own hooks file"
+        } else {
+            "the file does not exist"
+        });
+        anyhow::bail!(
+            "cannot validate the previously trusted project hooks file {name}: {err}; \
+             fix it or explicitly remove its approval with `junees hooks untrust`"
+        );
+    }
+    if let Some(err) = error {
+        found.warnings.push(format!(
+            "cannot validate the project hooks file {name}; its hooks do not run: {err}"
+        ));
     }
     Ok(found)
 }
