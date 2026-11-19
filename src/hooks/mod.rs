@@ -72,7 +72,7 @@ pub struct Hook {
     pub origin: Origin,
     /// The files it runs, when they are in the session's working folder
     /// (which the model may change): pinned when the hook was read, and
-    /// checked again before each run ([`pins_for`]).
+    /// checked again before each run ([`pin_paths_for`]).
     pub pins: Vec<Pin>,
 }
 
@@ -108,10 +108,9 @@ pub const CHANGED: &str = "훅이 부르는 파일이 바뀌어 실행하지 않
 /// a link, too large) says instead of running.
 pub const NOT_PINNED: &str = "훅이 부르는 파일을 고정하지 못해 실행하지 않았습니다";
 
-/// The pins of the files `spec` runs, when they are in `workdir` or, for
+/// The user hook pins for files the hook runs, when they are in `workdir` or, for
 /// a project's hook, in the project's folder `project`: the model may
-/// change files there, so the hook must run only what was read (and, for
-/// a project's hooks, trusted). The files are `command[0]` when it has a
+/// change files there, so the hook must run only what was read. The files are `command[0]` when it has a
 /// `/`, and the script a known interpreter runs ([`script_arg`]). A
 /// program found on PATH and files outside those folders are not pinned.
 ///
@@ -120,58 +119,116 @@ pub const NOT_PINNED: &str = "훅이 부르는 파일을 고정하지 못해 실
 /// ./b.js` runs `b.js`). So every other argument of an interpreter that
 /// names an existing file there (also as `--opt=./x` or `-X./x`) is
 /// pinned too, checked before each run without being copied.
-pub fn pins_for(spec: &Spec, workdir: &Path, project: Option<&Path>) -> Vec<Pin> {
-    let command = &spec.command;
-    let mut pins: Vec<Pin> = Vec::new();
-    let mut words = Vec::new();
-    if command[0].contains('/') {
-        words.push(0);
-    }
-    let script = script_arg(command);
-    if let Script::File(arg) = script {
-        words.push(arg);
-    }
-    for arg in words {
-        let Some(resolved) = resolve(&command[arg], workdir) else {
+fn user_pins(spec: &Spec, workdir: &Path) -> Vec<Pin> {
+    pins_from(pin_paths_for(spec, workdir, None).expect("only project paths are validated"))
+}
+
+struct PinPath {
+    arg: usize,
+    path: PathBuf,
+    copied: bool,
+}
+
+fn pins_from(paths: Vec<PinPath>) -> Vec<Pin> {
+    paths
+        .into_iter()
+        .map(|PinPath { arg, path, copied }| Pin {
+            digest: pinned_digest(&path),
+            path,
+            arg,
+            copied,
+        })
+        .collect()
+}
+
+/// Resolve and validate the file words once, using the same plan at
+/// approval and before each run. Only the program and selected script
+/// are copied for execution.
+fn pin_paths_for(
+    spec: &Spec,
+    workdir: &Path,
+    project: Option<&Path>,
+) -> Result<Vec<PinPath>, String> {
+    let mut pins: Vec<PinPath> = Vec::new();
+    for (arg, candidate, copied) in file_words(&spec.command) {
+        let explicit = copied || explicit_path(candidate);
+        let Some(path) = resolve(candidate, workdir) else {
+            if let Some(project) = project.filter(|_| explicit) {
+                return Err(project_path_error(
+                    spec,
+                    project,
+                    arg,
+                    candidate,
+                    "cannot be resolved, possibly outside",
+                ));
+            }
             continue;
         };
-        if inside(&resolved, workdir, project) {
-            pins.push(Pin {
-                digest: pinned_digest(&resolved),
-                path: resolved,
-                arg,
-                copied: true,
-            });
+        let in_scope = inside(&path, workdir, project);
+        if let Some(project) = project.filter(|_| explicit && !in_scope) {
+            return Err(outside_project(spec, project, arg, candidate, &path));
         }
-    }
-    if script == Script::NotInterpreter {
-        return pins;
-    }
-    for (arg, word) in command.iter().enumerate().skip(1) {
-        if script == Script::File(arg) {
+        // User hooks retain their existing scope and non-runnable pins.
+        if project.is_none() && !in_scope {
             continue;
         }
-        for candidate in path_candidates(word) {
-            let Some(resolved) = resolve(candidate, workdir) else {
-                continue;
-            };
-            // Files and links (a link cannot be pinned, so the hook does
-            // not run); a folder is not pinned.
-            let exists = std::fs::symlink_metadata(&resolved).is_ok_and(|meta| !meta.is_dir());
-            if exists
-                && inside(&resolved, workdir, project)
-                && !pins.iter().any(|pin| pin.path == resolved)
+        let metadata = std::fs::symlink_metadata(&path);
+        if let Some(project) = project {
+            if !in_scope && metadata.is_ok() {
+                return Err(outside_project(spec, project, arg, candidate, &path));
+            }
+            // Explicit interpreter inputs must be present at approval;
+            // errors inspecting one are not treated as absence. A missing
+            // program retains its existing non-runnable pin.
+            if arg != 0
+                && explicit
+                && let Err(err) = &metadata
             {
-                pins.push(Pin {
-                    digest: pinned_digest(&resolved),
-                    path: resolved,
-                    arg,
-                    copied: false,
-                });
+                let detail = if err.kind() == std::io::ErrorKind::NotFound {
+                    "does not exist in".to_string()
+                } else {
+                    format!("cannot be inspected ({err}) in")
+                };
+                return Err(project_path_error(spec, project, arg, candidate, &detail));
             }
         }
+        if in_scope
+            && (copied
+                || (metadata.is_ok_and(|meta| !meta.is_dir())
+                    && !pins.iter().any(|pin| pin.path == path)))
+        {
+            pins.push(PinPath { arg, path, copied });
+        }
     }
-    pins
+    Ok(pins)
+}
+
+/// Each potential file, including option values, as seen by both the
+/// project validator and the pin collector. The copy candidates come
+/// first to retain approval digests for unchanged pins.
+fn file_words(command: &[String]) -> impl Iterator<Item = (usize, &str, bool)> {
+    let program = command[0]
+        .contains('/')
+        .then(|| (0, command[0].as_str(), true));
+    let script = script_arg(command);
+    let copy = match script {
+        Script::File(arg) => Some((arg, command[arg].as_str(), true)),
+        _ => None,
+    };
+    program.into_iter().chain(copy).chain(
+        command
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(move |(arg, _)| {
+                script != Script::NotInterpreter && script != Script::File(*arg)
+            })
+            .flat_map(|(arg, word)| {
+                path_candidates(word)
+                    .into_iter()
+                    .map(move |path| (arg, path, false))
+            }),
+    )
 }
 
 /// The paths a word of an interpreter's command may name: the word, the
@@ -476,50 +533,66 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// A project's hook may run a file only inside the project's folder
-/// `project` or the session's working folder: the person trusting the
-/// file sees `./tools/check.sh`, and a `tools` that links to `/tmp`, a
-/// path climbing out with `..` or an absolute path elsewhere would run a
-/// file nobody pinned, which others may change without asking again.
-///
-/// The same holds for the arguments of an interpreter that look like a
-/// path (a `/` and no space, also as `--opt=value`): any of them may be
-/// what it runs.
-fn check_project_program(spec: &Spec, project: &Path, workdir: &Path) -> Result<(), String> {
-    let command = &spec.command;
-    let mut paths = vec![(0, command[0].as_str())];
-    if script_arg(command) != Script::NotInterpreter {
-        for (arg, word) in command.iter().enumerate().skip(1) {
-            let value = match word.strip_prefix("--") {
-                Some(long) => long.split_once('=').map(|(_, value)| value),
-                None if word.starts_with('-') => None,
-                None => Some(word.as_str()),
-            };
-            paths.extend(value.map(|value| (arg, value)));
-        }
-    }
-    for (arg, path) in paths {
-        if !path.contains('/') || path.contains(char::is_whitespace) {
-            continue;
-        }
-        let leads = match resolve(path, workdir) {
-            Some(resolved) if inside(&resolved, workdir, Some(project)) => continue,
-            Some(resolved) => format!("leads to {}", resolved.display()),
-            None => "cannot be resolved".to_string(),
-        };
-        let place = if arg == 0 {
-            "starts with".to_string()
-        } else {
-            format!("gives the interpreter (word {})", arg + 1)
-        };
-        return Err(format!(
-            "hook at line {}: `command` {place} `{}`, which {leads}, outside the project \
-             folder {}; a project hook may run a file inside the project (pinned, so a \
-             change asks again) or a program name on PATH",
-            spec.line,
-            crate::prompt_text::escape_hidden(path),
-            project.display()
-        ));
+/// An explicit path argument, not ordinary text containing a slash.
+/// A selected program/script is already a file candidate regardless of
+/// spelling. For other words, a path with spaces can be made explicit
+/// with a leading `./`, `../` or `/`.
+fn explicit_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || (value.contains('/') && !value.contains(char::is_whitespace) && !value.contains("://"))
+}
+
+fn outside_project(
+    spec: &Spec,
+    project: &Path,
+    arg: usize,
+    candidate: &str,
+    path: &Path,
+) -> String {
+    let path = crate::prompt_text::escape_hidden(&path.display().to_string());
+    project_path_error(
+        spec,
+        project,
+        arg,
+        candidate,
+        &format!("leads to {path}, outside"),
+    )
+}
+
+fn project_path_error(spec: &Spec, project: &Path, arg: usize, path: &str, detail: &str) -> String {
+    let place = if arg == 0 {
+        "starts with".to_string()
+    } else {
+        format!("gives the interpreter (word {})", arg + 1)
+    };
+    format!(
+        "hook at line {}: `command` {place} `{}`, which {detail} the project folder {}",
+        spec.line,
+        crate::prompt_text::escape_hidden(path),
+        crate::prompt_text::escape_hidden(&project.display().to_string()),
+    )
+}
+
+/// Revalidate the original project arguments, not just the locations
+/// they resolved to at approval: even an unchanged file at an old path
+/// is not evidence that the argument still names it.
+fn check_project_pins(hook: &Hook, workdir: &Path) -> Result<(), String> {
+    let Origin::Project(file) = &hook.origin else {
+        return Ok(());
+    };
+    let project = file
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| "the project hooks file has no project folder".to_string())?;
+    let paths = pin_paths_for(&hook.spec, workdir, Some(project))?;
+    if !paths
+        .iter()
+        .map(|pin| (pin.arg, &pin.path, pin.copied))
+        .eq(hook.pins.iter().map(|pin| (pin.arg, &pin.path, pin.copied)))
+    {
+        return Err("the file arguments no longer match the paths approved for this hook".into());
     }
     Ok(())
 }
@@ -609,7 +682,7 @@ pub struct ProjectFile {
     pub text: String,
     /// Its hooks, or why they cannot be read.
     pub hooks: Result<Vec<Spec>, String>,
-    /// The pins of its hooks ([`pins_for`]), in order; their digests are
+    /// The pins of its hooks ([`pin_paths_for`]), in order; their digests are
     /// part of [`ProjectFile::digest`].
     pub pins: Vec<Vec<Pin>>,
 }
@@ -694,29 +767,25 @@ pub fn project_file_in(
         .and_then(Path::parent)
         .unwrap_or(project_dir)
         .to_path_buf();
+    let mut pins = Vec::new();
     let (text, hooks) = match String::from_utf8(bytes) {
         Ok(text) => {
             let hooks = config::parse(&text, 1)
                 .map_err(|err| format!("{err:#}"))
                 .and_then(|specs| {
-                    for spec in &specs {
-                        check_project_program(spec, &project, workdir)?;
-                    }
+                    pins = specs
+                        .iter()
+                        .map(|spec| pin_paths_for(spec, workdir, Some(&project)))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .map(pins_from)
+                        .collect();
                     Ok(specs)
                 });
             (text, hooks)
         }
         Err(_) => (String::new(), Err("it is not UTF-8 text".to_string())),
     };
-    let pins: Vec<Vec<Pin>> = hooks
-        .as_ref()
-        .map(|specs| {
-            specs
-                .iter()
-                .map(|spec| pins_for(spec, workdir, Some(&project)))
-                .collect()
-        })
-        .unwrap_or_default();
     // Lines as before interpreter scripts were pinned, so a file trusted
     // then stays trusted unless one of its hooks runs such a script.
     if pins.iter().any(|pins| !pins.is_empty()) {
@@ -816,7 +885,7 @@ impl Found {
         // A project's hooks were pinned when the file was read and trusted.
         for hook in &mut hooks {
             if matches!(hook.origin, Origin::User(_)) {
-                hook.pins = pins_for(&hook.spec, workdir, None);
+                hook.pins = user_pins(&hook.spec, workdir);
             }
         }
         let mut built = Hooks::new(
