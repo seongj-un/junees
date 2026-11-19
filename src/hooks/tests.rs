@@ -666,6 +666,7 @@ mod finding {
         let root = tempfile::tempdir().unwrap();
         let repo = repository(root.path());
         let home = root.path().join("state");
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
         write(&repo.join(super::super::PROJECT_FILE), PROJECT);
         write(
             &home.join(super::super::FILE_NAME),
@@ -689,6 +690,7 @@ mod finding {
         let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_none() && found.hooks.len() == 2);
         // A change asks again.
+        write(&repo.join("other.sh"), "#!/bin/sh\nexit 0\n");
         write(
             &repo.join(super::super::PROJECT_FILE),
             &PROJECT.replace("check", "other"),
@@ -738,6 +740,7 @@ mod finding {
             format!("{err:#}").contains("no project hooks file"),
             "{err:#}"
         );
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
         write(&repo.join(super::super::PROJECT_FILE), PROJECT);
         let out = cli::run(&HooksCommand::List, &place).await.unwrap();
         assert!(
