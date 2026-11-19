@@ -360,7 +360,7 @@ impl Hooks {
     ) -> (Outcome, Option<String>, Duration, Option<&'static str>) {
         let spec = &hook.spec;
         let started = tokio::time::Instant::now();
-        let checked = match check_pin(hook) {
+        let checked = match check_pin(hook, &self.workdir) {
             Ok(checked) => checked,
             Err(failure) => {
                 let what = format!("{} ({})", failure.what, failure.detail);
@@ -577,7 +577,11 @@ struct PinFailure {
 /// read when the hook was, or are no longer what they were then: the model
 /// may have rewritten them during the session. The bytes checked, one per
 /// pin, are what runs ([`Copies`]).
-fn check_pin(hook: &Hook) -> Result<Vec<Vec<u8>>, PinFailure> {
+fn check_pin(hook: &Hook, workdir: &Path) -> Result<Vec<Vec<u8>>, PinFailure> {
+    super::check_project_pins(hook, workdir).map_err(|detail| PinFailure {
+        what: super::CHANGED,
+        detail,
+    })?;
     let mut checked = Vec::new();
     for pin in &hook.pins {
         let path = pin.path.display();
