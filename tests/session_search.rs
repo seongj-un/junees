@@ -168,6 +168,9 @@ async fn the_model_searches_this_folders_sessions() {
 #[tokio::test]
 async fn people_search_with_the_slash_command_and_the_cli() {
     let (dir, home, work) = setup();
+    let resume_hint = "Search result numbers show display order only. \
+                       To resume a regular terminal session, use `junees --resume <id>`. \
+                       In a conversation, `/sessions` lets you select a numbered entry from its own recent sessions list.";
     let mut child = junees_binary(&work, dir.path())
         .args(["--no-session"])
         .env("ANTHROPIC_API_KEY", "sk-fake")
@@ -209,10 +212,7 @@ async fn people_search_with_the_slash_command_and_the_cli() {
         "{stdout}"
     );
     assert!(stdout.contains("  2  20261101-101010-aaaa  "), "{stdout}");
-    assert!(
-        stdout.contains("Continue one with `junees --resume <id>`"),
-        "{stdout}"
-    );
+    assert!(stdout.contains(resume_hint), "{stdout}");
     // --all and --source.
     assert!(
         stdout.contains("2 sessions match `빌드` in every folder, newest first:\n"),
@@ -241,6 +241,7 @@ async fn people_search_with_the_slash_command_and_the_cli() {
         stdout.starts_with("1 session matches `\"빌드 실패\"` in this folder"),
         "{stdout}"
     );
+    assert!(stdout.contains(resume_hint), "{stdout}");
     assert!(
         stdout.contains("More sessions may match: use --limit"),
         "{stdout}"

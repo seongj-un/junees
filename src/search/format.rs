@@ -188,11 +188,17 @@ pub fn for_terminal(outcome: &Outcome, options: &Options) -> String {
                 out.push_str(&format!("       (+{more} more matches)\n"));
             }
         }
-        out.push_str("Continue one with `junees --resume <id>` (or /sessions in the conversation)");
+        out.push_str(
+            "Search result numbers show display order only. \
+             To resume a regular terminal session, use `junees --resume <id>`. \
+             In a conversation, `/sessions` lets you select a numbered entry from its own recent sessions list.\n",
+        );
         if outcome.hits.iter().any(|hit| hit.id.contains('/')) {
-            out.push_str("; a subagent's session <id>/<name> continues with its parent's <id>");
+            out.push_str(
+                "To resume a regular terminal parent of a subagent result (`<id>/<name>`), \
+                 pass only the parent's `<id>` to `junees --resume`.\n",
+            );
         }
-        out.push_str(".\n");
     }
     let hint = format!("use --limit (up to {MAX_LIMIT})");
     for note in notes(outcome, options, &hint) {
