@@ -270,17 +270,13 @@ async fn usage_all_by_source_prints_sorted_rows_and_total() {
     // Neither journal folder is the CLI cwd, so dropping --all loses the rows.
     let model = "usage-test-model";
     for (folder, channel, [input, write, read, output, searches]) in [
-        (&dir_b, None, [1000, 400, 1200, 400, 2]),
+        (&dir_b, None, [3600, 600, 1800, 1000, 3]),
         (
             &dir_a,
             Some(("discord", "100000000000000001")),
-            [500, 500, 1500, 500, 1],
+            [1000, 400, 1200, 400, 2],
         ),
-        (
-            &dir_b,
-            Some(("cron", "test-job")),
-            [3600, 600, 1800, 1000, 3],
-        ),
+        (&dir_b, Some(("cron", "test-job")), [500, 500, 1500, 500, 1]),
     ] {
         let (_, mut writer) = match channel {
             Some((source, channel)) => {
@@ -380,19 +376,19 @@ async fn usage_all_by_source_prints_sorted_rows_and_total() {
                     .is_some_and(|cell| cell.starts_with(|c: char| c.is_ascii_digit()))
         })
         .collect();
-    // Cron has 7,000 tokens; Discord and terminal tie at 3,000 but have
-    // different input counts, so the tie follows source name, not input.
+    // Terminal leads with 7,000 tokens despite sorting last by name. Cron
+    // and Discord tie at 3,000, so Cron comes first despite fewer input tokens.
     assert_eq!(
         rows,
         [
             [
-                "cron", "3,600", "600", "1,800", "1,000", "3", "30.0%", "$0.0488"
+                "terminal", "3,600", "600", "1,800", "1,000", "3", "30.0%", "$0.0488"
             ],
             [
-                "discord", "500", "500", "1,500", "500", "1", "60.0%", "$0.0180"
+                "cron", "500", "500", "1,500", "500", "1", "60.0%", "$0.0180"
             ],
             [
-                "terminal", "1,000", "400", "1,200", "400", "2", "46.1%", "$0.0276"
+                "discord", "1,000", "400", "1,200", "400", "2", "46.1%", "$0.0276"
             ],
             [
                 "total", "5,100", "1,500", "4,500", "1,900", "6", "40.5%", "$0.0944"
