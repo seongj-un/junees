@@ -1,11 +1,12 @@
 //! Usage and cost through the real binary: `/usage` in a conversation
-//! against a fake API (with a `/model` switch in between), then
-//! `junees usage` over the journal it wrote.
+//! against a fake API, and `junees usage` over real-format journals.
 
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use junees::message::{ContentBlock, Message, Role, ServerToolUsage, Usage};
+use junees::session::{Entry, Journal, SessionWriter};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
@@ -250,4 +251,149 @@ async fn usage_of_the_session_and_of_past_days() {
     let (ok, _, err) = usage_command(&work, home, &[], Some("claude-x=cheap")).await;
     assert!(!ok);
     assert!(err.contains("JUNEES_PRICES (`prices`)"), "{err}");
+}
+
+#[tokio::test]
+async fn usage_all_by_source_prints_sorted_rows_and_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let state = home.join("junees");
+    let work = home.join("work");
+    let dir_a = home.join("dir-a");
+    let dir_b = home.join("dir-b");
+    for folder in [&state, &work, &dir_a, &dir_b] {
+        std::fs::create_dir(folder).unwrap();
+    }
+
+    // The writer timestamps these journals when it writes them. The default
+    // seven-day window still includes them if the CLI runs just after midnight.
+    // Neither journal folder is the CLI cwd, so dropping --all loses the rows.
+    let model = "usage-test-model";
+    for (folder, channel, [input, write, read, output, searches]) in [
+        (&dir_b, None, [3600, 600, 1800, 1000, 3]),
+        (
+            &dir_a,
+            Some(("discord", "100000000000000001")),
+            [1000, 400, 1200, 400, 2],
+        ),
+        (&dir_b, Some(("cron", "test-job")), [500, 500, 1500, 500, 1]),
+    ] {
+        let (_, mut writer) = match channel {
+            Some((source, channel)) => {
+                SessionWriter::create_for_channel(&state, folder, model, None, source, channel)
+            }
+            None => SessionWriter::create(&state, folder, model),
+        }
+        .unwrap();
+        writer
+            .record(&Entry::Message(Message::user_text("Fixture question.")))
+            .unwrap();
+        writer
+            .record_usage(
+                &Entry::Usage(Usage {
+                    input_tokens: input,
+                    cache_creation_input_tokens: write,
+                    cache_read_input_tokens: read,
+                    output_tokens: output,
+                    server_tool_use: ServerToolUsage {
+                        web_search_requests: searches,
+                    },
+                    ..Usage::default()
+                }),
+                model,
+            )
+            .unwrap();
+        writer
+            .record(&Entry::Message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text("Fixture answer.")],
+            }))
+            .unwrap();
+    }
+
+    let mut command = junees_binary(&work, home);
+    command
+        .args(["usage", "--all", "--by", "source"])
+        .env_clear()
+        .env("HOME", home)
+        .env("JUNEES_HOME", &state)
+        .env("JUNEES_TIMEZONE", "UTC")
+        .env("JUNEES_PRICES", "usage-test-model=2/8/3/1")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .expect("junees usage did not exit")
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut lines = stdout.lines();
+    let title = lines.next().expect("missing usage title");
+    assert!(
+        title.starts_with("Usage in every folder ") && title.ends_with(", by source:"),
+        "{title}"
+    );
+    let headings: Vec<_> = lines
+        .next()
+        .expect("missing usage table headings")
+        .split("  ")
+        .map(str::trim)
+        .filter(|cell| !cell.is_empty())
+        .collect();
+    assert_eq!(
+        headings,
+        [
+            "input",
+            "cache write",
+            "cache read",
+            "output",
+            "web searches",
+            "cache hit",
+            "cost"
+        ],
+        "{stdout}"
+    );
+
+    // Inspect all remaining lines for rows, even after the explanatory notes,
+    // so any extra total or row after total fails without pinning the notes.
+    let rows: Vec<Vec<_>> = lines
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|cells| {
+            cells.first() == Some(&"total")
+                || cells
+                    .get(1)
+                    .is_some_and(|cell| cell.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .collect();
+    // Terminal leads with 7,000 tokens despite sorting last by name. Cron
+    // and Discord tie at 3,000, so Cron comes first despite fewer input tokens.
+    assert_eq!(
+        rows,
+        [
+            [
+                "terminal", "3,600", "600", "1,800", "1,000", "3", "30.0%", "$0.0488"
+            ],
+            [
+                "cron", "500", "500", "1,500", "500", "1", "60.0%", "$0.0180"
+            ],
+            [
+                "discord", "1,000", "400", "1,200", "400", "2", "46.1%", "$0.0276"
+            ],
+            [
+                "total", "5,100", "1,500", "4,500", "1,900", "6", "40.5%", "$0.0944"
+            ],
+        ],
+        "{stdout}"
+    );
 }
