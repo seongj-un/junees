@@ -1,10 +1,14 @@
-//! Runs the real binary twice against a fake API server and checks that the
-//! second run continues the conversation saved by the first.
+//! Exercises the real CLI's saved-session paths against a fake API,
+//! including resuming completed and interrupted conversations.
 
 use std::path::Path;
 use std::process::{Output, Stdio};
+use std::time::Duration;
 
+use junees::message::{ContentBlock, Message, Role};
+use junees::session::{Entry, Journal, Session, SessionWriter};
 use serde_json::{Value, json};
+use tokio::time::timeout;
 
 mod common;
 use common::{body_of, fake_api, text_reply};
@@ -152,6 +156,125 @@ async fn resume_takes_an_id_prefix() {
     assert_eq!(messages[0]["content"][0]["text"], "remember 42");
     assert_eq!(messages[2]["content"][0]["text"], "which number?");
     assert_eq!(only_session_id(home.path()), id);
+}
+
+#[tokio::test]
+async fn resume_recovers_an_interrupted_tool_call_once() {
+    const TOOL_ID: &str = "toolu_interrupted_read";
+    const REASON: &str = "interrupted: Junees stopped before this tool finished";
+    const WAIT: Duration = Duration::from_secs(30);
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("notes.txt"), "Local fixture notes.\n").unwrap();
+
+    // Leave a normal journal ending at the request, without running the tool.
+    let (meta, mut writer) = SessionWriter::create(home.path(), &project, "test-model").unwrap();
+    let journal = writer.path().to_path_buf();
+    writer
+        .record(&Entry::Message(Message::user_text("Read the notes.")))
+        .unwrap();
+    writer
+        .record(&Entry::Message(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: TOOL_ID.into(),
+                name: "read_file".into(),
+                input: json!({"path": "notes.txt"}),
+            }],
+        }))
+        .unwrap();
+    drop(writer);
+
+    let turns = [
+        ("What happened to the read?", "The read was interrupted."),
+        ("Can we continue?", "Yes, we can continue."),
+    ];
+    let (url, server) = fake_api(
+        turns
+            .iter()
+            .map(|(_, reply)| (200, text_reply(reply)))
+            .collect(),
+    )
+    .await;
+    for (prompt, reply) in turns {
+        let mut cli = common::junees_binary(&project, home.path());
+        cli.env_clear()
+            .env("HOME", home.path())
+            .env("JUNEES_HOME", home.path())
+            .env("ANTHROPIC_API_KEY", "sk-fake")
+            .env("ANTHROPIC_BASE_URL", &url)
+            .args(["--resume", &meta.id, "-p", prompt])
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        let output = timeout(WAIT, cli.output())
+            .await
+            .expect("junees --resume did not exit")
+            .unwrap();
+        assert!(output.status.success(), "{prompt}: {}", stderr(&output));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("{reply}\n")
+        );
+
+        // Read without repairing: the first run must save the result and
+        // the second must leave exactly that one result in the same journal.
+        let saved = Session::load(&journal).unwrap();
+        let results: Vec<_> = saved
+            .transcript
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    ..
+                } if tool_use_id == TOOL_ID => Some((content.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, [(REASON, true)], "{prompt}: saved recovery");
+    }
+    assert_eq!(only_session_id(home.path()), meta.id);
+
+    let requests = timeout(WAIT, server)
+        .await
+        .expect("fake API did not receive both resume requests")
+        .unwrap();
+    assert_eq!(requests.len(), turns.len());
+    for (request, (prompt, _)) in requests.iter().zip(turns) {
+        let body = body_of(request);
+        let messages = body["messages"].as_array().unwrap();
+        let call = &messages[1]["content"][0];
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(call["type"], "tool_use");
+        assert_eq!(call["id"], TOOL_ID);
+
+        let count = messages
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .filter(|block| block["type"] == "tool_result" && block["tool_use_id"] == TOOL_ID)
+            .count();
+        assert_eq!(count, 1, "{prompt}: expected one recovery in {messages:?}");
+        assert_eq!(messages[2]["role"], "user");
+        let result = &messages[2]["content"][0];
+        assert_eq!(
+            result["type"], "tool_result",
+            "{prompt}: result must follow the call"
+        );
+        assert_eq!(result["tool_use_id"], TOOL_ID);
+        assert_eq!(result["is_error"], true);
+        assert_eq!(result["content"], REASON);
+
+        // The prompt may share the recovery's user message, but must come after it.
+        let latest = messages.last().unwrap();
+        assert_eq!(latest["role"], "user");
+        let last_block = latest["content"].as_array().unwrap().last().unwrap();
+        assert_eq!(last_block["type"], "text");
+        assert_eq!(last_block["text"], prompt);
+    }
 }
 
 #[tokio::test]
