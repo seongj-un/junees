@@ -464,7 +464,13 @@ fn subagent_journals_are_searched() {
     let found = search(home, &options("needle", Some("/w"))).unwrap();
     assert_eq!(ids(&found), [format!("{parent}/sub-1")]);
     let text = format::for_terminal(&found, &options("needle", Some("/w")));
-    assert!(text.contains("continues with its parent's <id>"), "{text}");
+    assert!(
+        text.ends_with(
+            "To resume a regular terminal parent of a subagent result (`<id>/<name>`), \
+             pass only the parent's `<id>` to `junees --resume`.\n"
+        ),
+        "{text}"
+    );
 }
 
 #[test]
@@ -495,6 +501,10 @@ fn no_sessions_folder_finds_nothing() {
         text,
         "No session in this folder (/w) matches `needle`. `all: true` searches every folder.\n"
     );
+    assert_eq!(
+        format::for_terminal(&found, &options("needle", Some("/w"))),
+        "No session in this folder (/w) matches `needle`. --all searches every folder.\n"
+    );
 }
 
 #[test]
@@ -520,7 +530,9 @@ fn the_terminal_list_is_numbered() {
     assert_eq!(lines[4], "       user: needle one\\u{1b}]0;x");
     assert_eq!(
         lines[5],
-        "Continue one with `junees --resume <id>` (or /sessions in the conversation)."
+        "Search result numbers show display order only. \
+         To resume a regular terminal session, use `junees --resume <id>`. \
+         In a conversation, `/sessions` lets you select a numbered entry from its own recent sessions list."
     );
     assert_eq!(lines.len(), 6);
 }
