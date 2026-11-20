@@ -159,6 +159,117 @@ async fn resume_takes_an_id_prefix() {
 }
 
 #[tokio::test]
+async fn resume_discards_only_the_torn_journal_tail() {
+    use std::io::Write;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    const FIRST_INPUT: &str = "The notebook is blue.";
+    const FIRST_REPLY: &str = "I noted the blue notebook.";
+    const NEXT_INPUT: &str = "The pencil is green.";
+    const NEXT_REPLY: &str = "I noted the green pencil.";
+
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let (url, server) = fake_api(vec![
+        (200, text_reply(FIRST_REPLY)),
+        (200, text_reply(NEXT_REPLY)),
+    ])
+    .await;
+    let run = |args: &[&str]| {
+        let mut cli = common::junees_binary(&project, home.path());
+        cli.env_clear()
+            .env("HOME", home.path())
+            .env("JUNEES_HOME", home.path())
+            .env("ANTHROPIC_API_KEY", "sk-fake")
+            .env("ANTHROPIC_BASE_URL", &url)
+            .args(args)
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        async move {
+            let output = timeout(WAIT, cli.output())
+                .await
+                .expect("junees did not exit")
+                .unwrap();
+            assert!(output.status.success(), "{}", stderr(&output));
+            output
+        }
+    };
+
+    let first = run(&["-p", FIRST_INPUT]).await;
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout),
+        format!("{FIRST_REPLY}\n")
+    );
+    let id = only_session_id(home.path());
+    let journal = home.path().join("sessions").join(format!("{id}.jsonl"));
+    let before = std::fs::read(&journal).unwrap();
+    assert!(before.ends_with(b"\n"));
+
+    // Simulate a plain-text message write cut short, with no final newline.
+    let tail = br#"{"type":"message","role":"user","content":[{"type":"text","text":"The spare notebook is"#;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .unwrap()
+        .write_all(tail)
+        .unwrap();
+
+    let resumed = run(&["--resume", &id, "-p", NEXT_INPUT]).await;
+    assert_eq!(
+        String::from_utf8_lossy(&resumed.stdout),
+        format!("{NEXT_REPLY}\n")
+    );
+    assert_eq!(only_session_id(home.path()), id);
+    let after = std::fs::read(&journal).unwrap();
+    let appended = after
+        .strip_prefix(before.as_slice())
+        .expect("resume changed bytes in the original journal");
+    assert!(!appended.windows(tail.len()).any(|bytes| bytes == tail));
+
+    let assistant = |text: &str| Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::text(text)],
+    };
+    // Parse each new line directly so the assertion cannot repair the journal.
+    let saved: Vec<_> = appended
+        .strip_suffix(b"\n")
+        .expect("the resumed journal must end with a complete line")
+        .split(|&byte| byte == b'\n')
+        .filter_map(
+            |line| match serde_json::from_slice::<Entry>(line).unwrap() {
+                Entry::Message(message) => Some(message),
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(
+        saved,
+        [Message::user_text(NEXT_INPUT), assistant(NEXT_REPLY)]
+    );
+
+    let requests = timeout(WAIT, server)
+        .await
+        .expect("fake API did not receive both requests")
+        .unwrap();
+    let [first, resumed] = requests.as_slice() else {
+        panic!("expected two requests, got {}", requests.len());
+    };
+    let messages = |request: &str| {
+        serde_json::from_value::<Vec<Message>>(body_of(request)["messages"].take()).unwrap()
+    };
+    assert_eq!(messages(first), [Message::user_text(FIRST_INPUT)]);
+    assert_eq!(
+        messages(resumed),
+        [
+            Message::user_text(FIRST_INPUT),
+            assistant(FIRST_REPLY),
+            Message::user_text(NEXT_INPUT),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn resume_recovers_an_interrupted_tool_call_once() {
     const TOOL_ID: &str = "toolu_interrupted_read";
     const REASON: &str = "interrupted: Junees stopped before this tool finished";
