@@ -724,6 +724,98 @@ mod finding {
         assert!(format!("{:#}", parse(&["trust", "x"]).unwrap_err()).contains("usage"));
     }
 
+    const LEDGER_PROJECT: &str = "[[hooks]]\nevent = \"session_start\"\ncommand = [\"true\"]\n";
+
+    #[tokio::test]
+    async fn approval_ledger_keeps_independent_changes_during_reapproval() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("state");
+        let project_a = repository(root.path());
+        let project_b = repository(&root.path().join("second"));
+        let a = place(&home, &project_a, root.path());
+        let b = place(&home, &project_b, root.path());
+        let file_a = project_a
+            .canonicalize()
+            .unwrap()
+            .join(super::super::PROJECT_FILE);
+        write(&file_a, LEDGER_PROJECT);
+        write(&project_b.join(super::super::PROJECT_FILE), LEDGER_PROJECT);
+
+        cli::run(&HooksCommand::Trust, &a).await.unwrap();
+        write(&file_a, &format!("# revision one\n{LEDGER_PROJECT}"));
+        let mut pending = find(Some(&home), &project_a, &project_a).unwrap();
+        assert!(pending.requires_reapproval());
+        let expected_a = pending.untrusted().unwrap().digest.clone();
+
+        cli::run(&HooksCommand::Trust, &b).await.unwrap();
+        pending.trust_untrusted(&home).unwrap();
+        let ledger = trust::path(&home);
+        let after = std::fs::read_to_string(&ledger).unwrap();
+        assert_eq!(after.lines().count(), 2);
+        let a_entry = format!("{expected_a} {}\n", file_a.display());
+        assert!(after.contains(&a_entry));
+        assert!(
+            cli::run(&HooksCommand::List, &b)
+                .await
+                .unwrap()
+                .contains(": trusted\n")
+        );
+
+        write(&file_a, &format!("# revision two\n{LEDGER_PROJECT}"));
+        let mut pending = find(Some(&home), &project_a, &project_a).unwrap();
+        assert!(pending.requires_reapproval());
+        let expected_a = pending.untrusted().unwrap().digest.clone();
+        cli::run(&HooksCommand::Untrust, &b).await.unwrap();
+        pending.trust_untrusted(&home).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&ledger).unwrap(),
+            format!("{expected_a} {}\n", file_a.display())
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_ledger_contention_preserves_the_record_and_pending_decision() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = repository(root.path());
+        let home = root.path().join("state");
+        let current = place(&home, &repo, root.path());
+        let project_file = repo.join(super::super::PROJECT_FILE);
+        write(&project_file, LEDGER_PROJECT);
+        cli::run(&HooksCommand::Trust, &current).await.unwrap();
+        let before = std::fs::read(trust::path(&home)).unwrap();
+        write(&project_file, &format!("# new revision\n{LEDGER_PROJECT}"));
+        let mut pending = find(Some(&home), &repo, &repo).unwrap();
+
+        // A separate descriptor acts as an ordinary competing writer.
+        let lock = std::fs::File::open(home.join(trust::LOCK_FILE_NAME)).unwrap();
+        assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(crate::flock::try_exclusive(&lock).unwrap());
+        let assert_busy = |error: anyhow::Error| {
+            let error = format!("{error:#}");
+            assert!(
+                error.contains(trust::LOCK_FILE_NAME) && error.contains("try again"),
+                "{error}"
+            );
+            assert_eq!(std::fs::read(trust::path(&home)).unwrap(), before);
+        };
+        for command in [HooksCommand::Trust, HooksCommand::Untrust] {
+            assert_busy(cli::run(&command, &current).await.unwrap_err());
+        }
+        assert_busy(pending.trust_untrusted(&home).unwrap_err());
+        assert!(pending.requires_reapproval() && pending.untrusted().is_some());
+        drop(lock);
+
+        pending.trust_untrusted(&home).unwrap();
+        assert!(
+            cli::run(&HooksCommand::List, &current)
+                .await
+                .unwrap()
+                .contains(": trusted\n")
+        );
+    }
+
     #[tokio::test]
     async fn listing_reports_a_trust_record_io_error_even_without_project_hooks() {
         let root = tempfile::tempdir().unwrap();

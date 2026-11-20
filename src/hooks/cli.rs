@@ -73,14 +73,15 @@ pub async fn run(command: &HooksCommand, place: &Place<'_>) -> Result<String> {
         HooksCommand::List => list(place),
         HooksCommand::Trust => {
             let home = need_home(place)?;
-            let ledger = trust::Ledger::read(Some(home))?;
             let Some(file) = project(place)? else {
+                // Report a ledger read error even with no project to approve.
+                trust::Ledger::read(Some(home))?;
                 bail!(
                     "there is no project hooks file for this folder (looked for {})",
                     project_path(place.cwd, place.user_home).display()
                 );
             };
-            ledger.approve(home, &file)?;
+            trust::trust(home, &file)?;
             Ok(format!(
                 "trusted {} as it is now (sha256 {}); its hooks run from the next session in \
                  this project, and any change asks again. It holds:\n{}",
