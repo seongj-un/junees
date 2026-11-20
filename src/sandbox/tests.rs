@@ -1388,6 +1388,7 @@ fn the_tools_sandbox_follows_the_settings() {
             junees.join("mcp.json"),
             junees.join("hooks.toml"),
             junees.join("trusted-hooks"),
+            junees.join("trusted-hooks.lock"),
             junees.join("secrets"),
             junees.join(crate::browser::PROFILES_FOLDER)
         ]
