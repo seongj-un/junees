@@ -126,13 +126,13 @@ junees usage --json --all --by model  # 모든 폴더의 모델별 집계를 JSO
 성공하면 표준 출력(stdout)에 JSON 객체 하나와 줄바꿈만 쓴다. 인자나 설정 등이 잘못되면 기존 CLI처럼 표준 오류(stderr)에 오류를 쓰고 0이 아닌 코드로 끝난다. `--json`을 빼면 기존 표가 나오며, 대화의 `/usage`에는 이 옵션이 없다.
 
 - `schema_version`: 정수 `1`. `by`: `day`, `model`, `folder`, `source` 중 하나.
-- `range`: `days`는 오늘을 포함한 조회 일수, `start_date`와 `end_date`는 `timezone` 기준 `YYYY-MM-DD` 날짜(마지막 날짜는 오늘). 기존 표처럼 시작일의 현지 자정을 하한으로 사용하며, 별도의 시각 상한을 적용하지 않는다. `scope.all`은 `--all` 여부이며, `scope.folder`는 현재 작업 폴더 이름(`--all`이면 `null`)이다.
-- `rows`: `{ "name": ..., "totals": ... }` 배열. 날짜는 오래된 순, 모델·폴더·출처는 `context_tokens` 내림차순, 동률이면 이름 오름차순이다. `total` 객체는 전체 합계이고 `rows[].totals`와 같은 필드를 가진다. 기록이 없으면 성공하며 `rows`는 `[]`, `total`의 토큰과 검색 건수는 `0`이다.
-- `input_tokens`(캐시 제외), `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `reasoning_tokens`, `web_search_requests`는 정수다. 추론 토큰은 출력에 이미 포함된다. `context_tokens`는 입력·캐시 쓰기·캐시 읽기·출력의 합에서 출력에 포함된 추론 토큰을 뺀 값이다. `cache_hit_permille`은 기존 표와 같은 캐시 적중률의 천분율 정수(입력이 없으면 `null`)다.
+- `range`: `days`는 오늘을 포함한 조회 일수, `start_date`와 `end_date`는 `timezone` 기준 `YYYY-MM-DD` 날짜(마지막 날짜는 오늘). 기존 표처럼 시작일의 현지 자정을 하한으로 사용하며, 별도의 시각 상한을 적용하지 않는다. `scope.all`은 `--all` 여부다. `scope.folder`에는 현재 작업 폴더의 전체 경로가 나올 수 있다. 경로 표시에서 `--all`은 `scope.folder`만 `null`로 바꾸며, `--by folder` 행의 경로까지 숨기지는 않는다.
+- `rows`: `{ "name": ..., "totals": ... }` 배열. 날짜는 오래된 순, 모델·폴더·출처는 `context_tokens` 내림차순, 동률이면 마스킹 전 집계 키 오름차순이다. 표시 이름(`rows[].name`)은 마스킹 뒤 같아질 수 있으므로 고유 키가 아니다. `total` 객체는 전체 합계이고 `rows[].totals`와 같은 필드를 가진다. 기록이 없으면 성공하며 `rows`는 `[]`, `total`의 토큰과 검색 건수는 `0`이다.
+- `input_tokens`(캐시 제외), `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `reasoning_tokens`, `web_search_requests`는 정수다. 추론 토큰은 출력에 이미 포함된다. `context_tokens`는 입력·캐시 쓰기·캐시 읽기·출력의 합에서 출력에 포함된 추론 토큰을 뺀 값이다. `cache_hit_permille`은 `캐시 읽기 × 1000`을 `캐시 제외 입력 + 캐시 쓰기 + 캐시 읽기`로 정수 나눗셈한 천분율이다. 세 값이 모두 `0`일 때만 `null`이다. 캐시 읽기만 있으면 `1000`, 캐시 쓰기만 있으면 `0`이다.
 - `cost.estimated_usd_nanos`는 가격을 아는 API 사용분만의 추정 비용으로, 정수 `1`은 `0.000000001`달러(USD)다. 가격이 적용된 사용분이 없으면 `null`이다(빈 보고서, 미가격 모델 또는 구독만 있는 경우 포함). 가격이 실제로 0인 사용분의 추정값 `0`과 다르다. `cost.unpriced_models`는 비용에서 뺀 모델, `cost.subscription`은 비용에서 뺀 Claude Code 구독 턴의 포함 여부, `cost.base_rated_models`는 호출별 길이를 알 수 없어 기본 요율을 적용한 모델 목록이다. `pricing.scope`는 `priced_api_usage_only`이며, `list_prices_source`·`list_prices_checked`는 가격표 출처와 확인 날짜, `overrides`는 `prices` 덮어쓰기 설정 여부, `cache_write_ttl_minutes`는 비용 가정인 `5`분이다. 실제 청구 금액이나 구독료를 뜻하지 않는다.
-- `journal_warnings`: 기존 표에서 알리던 읽을 수 없는 줄(`broken_lines`)과 크기 초과로 건너뛴 줄(`oversized_lines`)의 개수 및 읽기 상한(`max_line_bytes`).
+- `journal_warnings`: 기존 표에서 알리던 읽을 수 없는 줄(`broken_lines`)과 크기 초과로 건너뛴 줄(`oversized_lines`)의 개수 및 읽기 상한(`max_line_bytes`). 두 개수가 모두 `0`이어도 모든 기록 파일을 끝까지 읽었다는 뜻은 아니다.
 
-세션 ID, 채널 ID, 메시지, 프롬프트, 도구 출력이나 설정의 비밀 값은 보고서 필드에 넣지 않는다. 모델명·폴더명 등 표시용 이름에서 알려진 자격 증명 패턴을 발견하면 `[redacted]`로 표시한다. 마스킹은 집계 뒤에 적용되므로 이름이 가려진 행이 여럿 나올 수 있다.
+세션 ID, 채널 ID, 메시지, 프롬프트, 도구 출력이나 설정의 비밀 값은 보고서에 별도 필드로 넣지 않는다. 모델명·폴더명 등 표시용 이름에서 알려진 자격 증명 패턴을 발견하면 `[redacted]`로 표시한다. 이 마스킹으로 보고서의 익명화가 보장되지는 않는다.
 
 ## 장기 작업 모드
 
