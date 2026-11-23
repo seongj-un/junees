@@ -6,6 +6,17 @@ import { SESSION_ID, sessionHash } from "./routes.js";
 
 export const LIMIT = 50;
 
+const searchText = (text) => (text ?? "").normalize("NFC").toLowerCase();
+
+/** Filter only the loaded list, leaving its original order intact. */
+export function filterSessions(sessions, query) {
+  const needle = searchText(query.trim());
+  if (!needle) return sessions;
+  return sessions.filter(
+    (session) => searchText(session.title).includes(needle) || searchText(session.cwd).includes(needle),
+  );
+}
+
 /**
  * The preview without the title it starts with: the server takes the title
  * from the first line of the same message, so showing both repeats it.
@@ -59,18 +70,7 @@ function tokensCell(session) {
   ];
 }
 
-export function render(root, data, { now }) {
-  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
-  if (sessions.length === 0) {
-    root.replaceChildren(
-      notice({
-        title: "아직 저장된 세션이 없습니다",
-        body: [code("junees"), "로 대화를 시작하면 여기에 최근 세션이 나타납니다."],
-      }),
-    );
-    return;
-  }
-
+function sessionsTable(sessions, now) {
   const table = dataTable({
     caption: "최근 세션. 제목을 누르면 대화를 엽니다.",
     rowKey: (s) => s.id,
@@ -90,15 +90,91 @@ export function render(root, data, { now }) {
   });
   table.classList.add("table-clickable");
   openOnRowClick(table);
+  return table;
+}
 
-  root.replaceChildren(
+// Only a still-mounted filter is reused. Leaving the screen drops the query.
+const mountedFilters = new WeakMap();
+
+function mountFilter(root) {
+  let sessions;
+  let now;
+  const input = el("input", {
+    id: "session-search",
+    type: "search",
+    class: "session-filter-input",
+    autocomplete: "off",
+    spellcheck: "false",
+    "aria-describedby": "session-search-scope",
+  });
+  const clear = el("button", { type: "button", class: "button button-secondary" }, "지우기");
+  const summary = el("p", { class: "summary", role: "status" });
+  const results = el("div");
+
+  function paintResults() {
+    const query = input.value.trim();
+    const matches = filterSessions(sessions, query);
+    const total = formatInt(sessions.length);
+    const message = query
+      ? `검색 결과 ${formatInt(matches.length)}개 / 불러온 세션 ${total}개`
+      : sessions.length >= LIMIT
+        ? `최근에 바뀐 세션 ${total}개를 보여 줍니다.`
+        : `세션 ${total}개`;
+    if (summary.textContent !== message) summary.textContent = message;
+    clear.disabled = !input.value;
+
+    const active = document.activeElement;
+    const focusId = results.contains(active) ? active.id : null;
+    if (sessions.length === 0) {
+      results.replaceChildren(
+        notice({
+          title: "아직 저장된 세션이 없습니다",
+          body: [code("junees"), "로 대화를 시작하면 여기에 최근 세션이 나타납니다."],
+        }),
+      );
+    } else if (matches.length === 0) {
+      results.replaceChildren(
+        notice({
+          title: "검색 결과가 없습니다",
+          body: "다른 검색어를 입력하거나 검색어를 지워 보세요.",
+        }),
+      );
+    } else {
+      results.replaceChildren(sessionsTable(matches, now));
+    }
+    if (focusId) (document.getElementById(focusId) ?? input).focus({ preventScroll: true });
+  }
+
+  input.addEventListener("input", paintResults);
+  clear.addEventListener("click", () => {
+    input.value = "";
+    input.focus();
+    paintResults();
+  });
+
+  const filter = el(
+    "div",
+    { class: "session-filter" },
+    el("label", { for: input.id }, "제목 또는 작업 폴더 검색"),
+    el("div", { class: "session-filter-fields" }, input, clear),
     el(
       "p",
-      { class: "summary" },
-      sessions.length >= LIMIT
-        ? `최근에 바뀐 세션 ${formatInt(sessions.length)}개를 보여 줍니다.`
-        : `세션 ${formatInt(sessions.length)}개`,
+      { class: "summary", id: "session-search-scope" },
+      `이미 불러온 최근 세션 최대 ${LIMIT}개에서만 검색합니다.`,
     ),
-    table,
   );
+  const update = (data, at) => {
+    sessions = data;
+    now = at;
+    paintResults();
+  };
+  mountedFilters.set(filter, update);
+  root.replaceChildren(filter, summary, results);
+  return update;
+}
+
+export function render(root, data, { now }) {
+  // Keep the input node itself across refreshes, including its caret and IME state.
+  const update = mountedFilters.get(root.firstElementChild) ?? mountFilter(root);
+  update(Array.isArray(data.sessions) ? data.sessions : [], now);
 }
