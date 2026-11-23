@@ -1,7 +1,9 @@
-//! The text of `/usage` and `junees usage`.
+//! Reports for `/usage` and `junees usage`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
+
+use serde_json::{Value, json};
 
 use super::args::{By, UsageArgs};
 use super::prices::{self, Prices};
@@ -145,30 +147,6 @@ pub fn period(
         groups.entry(key).or_default().add(&record, prices);
     })?;
 
-    let place = if args.all {
-        "in every folder".to_string()
-    } else {
-        format!("in this folder ({})", escape_hidden(&cwd))
-    };
-    let zone_name = escape_hidden(zone.name());
-    let range = if args.days == 1 {
-        format!("today ({}, {zone_name})", date(today))
-    } else {
-        format!(
-            "the last {} days ({} to {}, {zone_name})",
-            args.days,
-            date(first),
-            date(today)
-        )
-    };
-    if groups.is_empty() {
-        let mut out = format!("No usage recorded {place} {range}.\n");
-        if !args.all {
-            out.push_str("--all shows every folder.\n");
-        }
-        out.push_str(&notes(&Totals::default(), &stats, prices));
-        return Ok(out);
-    }
     let by = match args.by {
         By::Day => "day",
         By::Model => "model",
@@ -183,10 +161,95 @@ pub fn period(
     for (_, totals) in &rows {
         total.merge(totals);
     }
+
+    let zone_name = escape_hidden(zone.name());
+    let start_date = date(first);
+    let end_date = date(today);
+    let folder = folder.map(escape_hidden);
+    if args.json {
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(name, totals)| json!({"name": json_label(name), "totals": json_totals(totals)}))
+            .collect();
+        let report = json!({
+            "schema_version": 1,
+            "by": by,
+            "range": {"days": args.days, "start_date": start_date, "end_date": end_date,
+                      "timezone": json_label(&zone_name)},
+            "scope": {"all": args.all, "folder": folder.as_deref().map(json_label)},
+            "rows": rows,
+            "total": json_totals(&total),
+            "pricing": {
+                "scope": "priced_api_usage_only",
+                "list_prices_source": prices::SOURCE,
+                "list_prices_checked": prices::CHECKED,
+                "overrides": prices.overridden(),
+                "cache_write_ttl_minutes": 5,
+            },
+            "journal_warnings": {
+                "broken_lines": stats.broken_lines,
+                "oversized_lines": stats.long_lines,
+                "max_line_bytes": crate::search::MAX_LINE_BYTES,
+            },
+        });
+        return Ok(format!("{report}\n"));
+    }
+
+    let place = match folder {
+        Some(folder) => format!("in this folder ({folder})"),
+        None => "in every folder".to_string(),
+    };
+    let range = if args.days == 1 {
+        format!("today ({end_date}, {zone_name})")
+    } else {
+        format!(
+            "the last {} days ({start_date} to {end_date}, {zone_name})",
+            args.days
+        )
+    };
+    if rows.is_empty() {
+        let mut out = format!("No usage recorded {place} {range}.\n");
+        if !args.all {
+            out.push_str("--all shows every folder.\n");
+        }
+        out.push_str(&notes(&total, &stats, prices));
+        return Ok(out);
+    }
     let mut out = format!("Usage {place} {range}, by {by}:\n");
     out.push_str(&table(&rows, Some(&total)));
     out.push_str(&notes(&total, &stats, prices));
     Ok(out)
+}
+
+/// Only expose report fields, not the serialized journal or its metadata.
+fn json_totals(totals: &Totals) -> Value {
+    let usage = &totals.usage;
+    json!({
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+        "cache_read_input_tokens": usage.cache_read_input_tokens,
+        "reasoning_tokens": usage.reasoning_tokens,
+        "web_search_requests": usage.web_searches(),
+        "context_tokens": totals.tokens(),
+        "cache_hit_permille": totals.cache_hit_permille(),
+        "cost": {
+            "estimated_usd_nanos": totals.priced.then_some(totals.cost),
+            "unpriced_models": totals.unpriced.iter().map(|name| json_label(name)).collect::<Vec<_>>(),
+            "subscription": totals.subscription,
+            "base_rated_models": totals.base_rated.iter().map(|name| json_label(name)).collect::<Vec<_>>(),
+        },
+    })
+}
+
+/// Labels may contain credentials pasted into model names or paths. Keep
+/// grouping and sorting on the original keys; only mask the displayed name.
+fn json_label(label: &str) -> &str {
+    if crate::secrets::find_outgoing_secret(label).is_some() {
+        "[redacted]"
+    } else {
+        label
+    }
 }
 
 /// What a record's tokens are grouped under by model: the model's name,

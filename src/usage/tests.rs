@@ -601,7 +601,12 @@ fn run(home: &Path, days: u32, by: By, all: bool, zone_name: &str, now: u64) -> 
     period(
         home,
         Path::new("/work"),
-        &UsageArgs { days, by, all },
+        &UsageArgs {
+            days,
+            by,
+            all,
+            ..UsageArgs::default()
+        },
         &Prices::default(),
         &zone(zone_name),
         now,
@@ -656,6 +661,108 @@ fn days_split_at_midnight_of_the_configured_zone() {
     );
     let three = run(home.path(), 3, By::Day, true, "UTC", later);
     assert_eq!(input(&three, "total").as_deref(), Some("6,500"), "{three}");
+}
+
+#[test]
+fn json_days_follow_the_same_local_midnight_cutoff_as_text() {
+    let home = period_home();
+    let now = at(2026, 11, 11, 12, 0);
+    let args = args::parse(["--json", "--all", "--days=1"].map(str::to_string))
+        .unwrap()
+        .unwrap();
+    for (zone_name, input) in [("UTC", 6500), ("KST-9", 7500)] {
+        let json = period(
+            home.path(),
+            Path::new("/work"),
+            &args,
+            &Prices::default(),
+            &zone(zone_name),
+            now,
+        )
+        .unwrap();
+        let report: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            report["range"],
+            json!({
+                "days": 1, "start_date": "2026-11-11", "end_date": "2026-11-11", "timezone": zone_name
+            })
+        );
+        let rows = report["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "2026-11-11");
+        assert_eq!(rows[0]["totals"]["input_tokens"], input);
+        assert_eq!(rows[0]["totals"], report["total"]);
+    }
+    let args = args::parse(["--json", "--all", "--days=2"].map(str::to_string))
+        .unwrap()
+        .unwrap();
+    let json = period(
+        home.path(),
+        Path::new("/work"),
+        &args,
+        &Prices::default(),
+        &zone("UTC"),
+        now,
+    )
+    .unwrap();
+    let report: Value = serde_json::from_str(&json).unwrap();
+    let rows = report["rows"].as_array().unwrap();
+    let names: Vec<_> = rows
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["2026-11-10", "2026-11-11"]);
+    assert_eq!(report["range"]["start_date"], "2026-11-10");
+}
+
+#[test]
+fn json_keeps_scan_and_base_rate_warnings_and_redacts_credential_labels() {
+    use std::io::Write as _;
+
+    let home = tempfile::tempdir().unwrap();
+    let now = at(2026, 11, 11, 12, 0);
+    let credential = "sk-ant-fixtureNotARealAPIKey";
+    let path = journal(
+        home.path(),
+        "20261111-110000-cafe",
+        json!({"created_at": now, "cwd": format!("/work/{credential}")}),
+        &[
+            usage_line("subagent_usage", now, 130_000, 2, Some("claude-haiku-5-5")),
+            usage_line("usage", now, 10, 0, Some(credential)),
+        ],
+    );
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(b"{broken}\n").unwrap();
+    file.write_all(&vec![b'x'; crate::search::MAX_LINE_BYTES + 1])
+        .unwrap();
+    file.write_all(b"\n").unwrap();
+    drop(file);
+
+    let args = args::parse(["--json", "--all", "--by=folder"].map(str::to_string))
+        .unwrap()
+        .unwrap();
+    let json = period(
+        home.path(),
+        Path::new("/work"),
+        &args,
+        &Prices::default(),
+        &zone("UTC"),
+        now,
+    )
+    .unwrap();
+    assert!(!json.contains(credential));
+    let report: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["by"], "folder");
+    assert_eq!(report["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(report["rows"][0]["name"], "[redacted]");
+    assert_eq!(report["rows"][0]["totals"], report["total"]);
+    assert_eq!(report["total"]["input_tokens"], 130_010);
+    let cost = &report["total"]["cost"];
+    assert_eq!(cost["estimated_usd_nanos"], 13_001_000);
+    assert_eq!(cost["unpriced_models"], json!(["[redacted]"]));
+    assert_eq!(cost["base_rated_models"], json!(["claude-haiku-5-5"]));
+    assert_eq!(report["journal_warnings"]["broken_lines"], 1);
+    assert_eq!(report["journal_warnings"]["oversized_lines"], 1);
 }
 
 #[test]
@@ -971,7 +1078,8 @@ fn usage_arguments() {
         Ok(Some(UsageArgs {
             days: 30,
             by: By::Model,
-            all: true
+            all: true,
+            json: false,
         }))
     );
     assert_eq!(
@@ -979,7 +1087,8 @@ fn usage_arguments() {
         Ok(Some(UsageArgs {
             days: 1,
             by: By::Source,
-            all: false
+            all: false,
+            json: false,
         }))
     );
     assert_eq!(parse(&["--all", "--help"]), Ok(None));
