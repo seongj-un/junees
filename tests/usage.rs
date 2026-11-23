@@ -400,3 +400,129 @@ async fn usage_all_by_source_merges_folders_and_prints_sorted_rows_and_total() {
         "{stdout}"
     );
 }
+
+#[tokio::test]
+async fn usage_all_by_folder_keeps_same_named_folders_separate() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let state = home.join("junees");
+    let work = home.join("work");
+    let dir_a = home.join("checkout a/project");
+    let dir_b = home.join("checkout b/project");
+    for folder in [&state, &work, &dir_a, &dir_b] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+
+    // Neither journal is from the CLI cwd. The two paths share a basename,
+    // but each folder contributes different usage to the report.
+    let model = "usage-test-model";
+    for (folder, [input, write, read, output, searches]) in [
+        (&dir_a, [1200, 300, 500, 200, 1]),
+        (&dir_b, [2000, 400, 600, 300, 2]),
+    ] {
+        let (_, mut writer) = SessionWriter::create(&state, folder, model).unwrap();
+        writer
+            .record(&Entry::Message(Message::user_text("Fixture question.")))
+            .unwrap();
+        writer
+            .record_usage(
+                &Entry::Usage(Usage {
+                    input_tokens: input,
+                    cache_creation_input_tokens: write,
+                    cache_read_input_tokens: read,
+                    output_tokens: output,
+                    server_tool_use: ServerToolUsage {
+                        web_search_requests: searches,
+                    },
+                    ..Usage::default()
+                }),
+                model,
+            )
+            .unwrap();
+        writer
+            .record(&Entry::Message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text("Fixture answer.")],
+            }))
+            .unwrap();
+    }
+
+    let mut command = junees_binary(&work, home);
+    command
+        .args(["usage", "--all", "--by", "folder"])
+        .env_clear()
+        .env("HOME", home)
+        .env("JUNEES_HOME", &state)
+        .env("JUNEES_TIMEZONE", "UTC")
+        .env("JUNEES_PRICES", "usage-test-model=2/8/3/1")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .expect("junees usage did not exit")
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut lines = stdout.lines();
+    let title = lines.next().expect("missing usage title");
+    assert!(
+        title.starts_with("Usage in every folder ") && title.ends_with(", by folder:"),
+        "{title}"
+    );
+    // Keep spaces inside path labels and compare all usage rows, including any
+    // that erroneously appear after the total.
+    let rows: Vec<Vec<_>> = lines
+        .map(|line| {
+            line.split("  ")
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|cells| {
+            cells.first() == Some(&"total")
+                || cells
+                    .get(1)
+                    .is_some_and(|cell| cell.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            [
+                dir_b.to_str().unwrap(),
+                "2,000",
+                "400",
+                "600",
+                "300",
+                "2",
+                "20.0%",
+                "$0.0282"
+            ],
+            [
+                dir_a.to_str().unwrap(),
+                "1,200",
+                "300",
+                "500",
+                "200",
+                "1",
+                "25.0%",
+                "$0.0154"
+            ],
+            [
+                "total", "3,200", "700", "1,100", "500", "3", "22.0%", "$0.0436"
+            ],
+        ],
+        "{stdout}"
+    );
+}
