@@ -101,7 +101,7 @@ junees sessions search --source discord 회의록   # 디스코드 채널 세션
 
 ## 사용량과 비용
 
-대화의 `/usage`는 지금 세션이 쓴 토큰과 추정 비용을, `junees usage`는 지난 며칠의 합계를 표로 보여 준다. 둘 다 세션 기록(`$JUNEES_HOME/sessions/*.jsonl`)만 읽는다(API 키가 필요 없고 기록을 바꾸지 않는다).
+대화의 `/usage`는 지금 세션이 쓴 토큰과 추정 비용을, `junees usage`는 지난 며칠의 합계를 표로 보여 준다. `junees usage`는 저장된 세션 기록(`$JUNEES_HOME/sessions/*.jsonl`)의 사용량만 집계한다. 대화의 `/usage`는 지금 세션의 미저장 사용량도 더한다. 두 조회 모두 API 키가 필요 없고 세션 기록을 바꾸지 않는다. 독립 명령인 [`junees write`](write.md)는 세션 기록을 남기지 않으므로 `junees usage --all`로 모든 작업 폴더를 조회해도 기간 보고서에 들어가지 않는다. 이 실행의 사용량은 끝에 표준 오류(stderr)로 나오는 요약에서 확인한다.
 
 ```bash
 junees usage                       # 지금 폴더의 세션, 오늘까지 7일, 날짜별
