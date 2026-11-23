@@ -48,10 +48,12 @@ gh attestation verify junees-0.1.0-x86_64-unknown-linux-musl.tar.gz --repo seong
 
 Rust 1.88 이상(edition 2024)이 필요하다.
 
+저장소에 커밋된 `Cargo.lock`을 따르도록 소스 설치·빌드 예시에 `--locked`를 붙였다.
+
 ```sh
-cargo install --git https://github.com/seongj-un/junees
+cargo install --locked --git https://github.com/seongj-un/junees
 # 또는 clone 뒤
-cargo install --path .
+cargo install --locked --path .
 ```
 
 ## 업데이트
