@@ -496,6 +496,37 @@ a.button {
   font-size: 14px;
 }
 
+.session-filter label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.session-filter-fields {
+  display: flex;
+  gap: 8px;
+  max-width: 440px;
+  margin: 4px 0;
+}
+
+.session-filter-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.session-filter-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.session-filter button:disabled {
+  cursor: default;
+}
+
 /* Badges */
 
 .badge {
