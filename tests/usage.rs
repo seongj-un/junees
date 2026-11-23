@@ -254,7 +254,7 @@ async fn usage_of_the_session_and_of_past_days() {
 }
 
 #[tokio::test]
-async fn usage_all_by_source_prints_sorted_rows_and_total() {
+async fn usage_all_by_source_merges_folders_and_prints_sorted_rows_and_total() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
     let state = home.join("junees");
@@ -270,7 +270,8 @@ async fn usage_all_by_source_prints_sorted_rows_and_total() {
     // Neither journal folder is the CLI cwd, so dropping --all loses the rows.
     let model = "usage-test-model";
     for (folder, channel, [input, write, read, output, searches]) in [
-        (&dir_b, None, [3600, 600, 1800, 1000, 3]),
+        (&dir_b, None, [1900, 200, 800, 600, 1]),
+        (&dir_a, None, [1700, 400, 1000, 400, 2]),
         (
             &dir_a,
             Some(("discord", "100000000000000001")),
@@ -376,8 +377,10 @@ async fn usage_all_by_source_prints_sorted_rows_and_total() {
                     .is_some_and(|cell| cell.starts_with(|c: char| c.is_ascii_digit()))
         })
         .collect();
-    // Terminal leads with 7,000 tokens despite sorting last by name. Cron
-    // and Discord tie at 3,000, so Cron comes first despite fewer input tokens.
+    // One terminal row combines both folders: 3,500 + 3,500 tokens,
+    // 1,800 / 6,000 prompt tokens read from cache, and $0.0200 + $0.0288.
+    // Terminal leads despite sorting last by name. Cron and Discord tie at
+    // 3,000 tokens, so Cron comes first despite fewer input tokens.
     assert_eq!(
         rows,
         [
