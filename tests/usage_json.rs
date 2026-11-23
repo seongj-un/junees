@@ -13,13 +13,17 @@ mod common;
 use common::junees_binary;
 
 async fn command(home: &Path, cwd: &Path, args: &[&str]) -> Output {
+    command_with_prices(home, cwd, args, "fixture-priced=1/4/2/0.5").await
+}
+
+async fn command_with_prices(home: &Path, cwd: &Path, args: &[&str], prices: &str) -> Output {
     let mut command = junees_binary(cwd, home);
     command
         .env_clear()
         .env("HOME", home)
         .env("JUNEES_HOME", home.join("state"))
         .env("JUNEES_TIMEZONE", "UTC")
-        .env("JUNEES_PRICES", "fixture-priced=1/4/2/0.5")
+        .env("JUNEES_PRICES", prices)
         .args(["usage"])
         .args(args)
         .stdin(Stdio::null())
@@ -251,6 +255,76 @@ async fn empty_report_has_zero_counts_and_no_estimate() {
     assert_eq!(report["journal_warnings"]["broken_lines"], 0);
     assert_eq!(report["journal_warnings"]["oversized_lines"], 0);
     assert!(!home.join("state").exists());
+}
+
+#[tokio::test]
+async fn free_usage_distinguishes_cache_hit_boundaries_from_null() {
+    for (case, usage, expected_hit) in [
+        (
+            "cache reads only",
+            Usage {
+                cache_read_input_tokens: 8,
+                ..Usage::default()
+            },
+            json!(1000),
+        ),
+        (
+            "cache writes only",
+            Usage {
+                cache_creation_input_tokens: 8,
+                ..Usage::default()
+            },
+            json!(0),
+        ),
+        (
+            "output only",
+            Usage {
+                output_tokens: 8,
+                ..Usage::default()
+            },
+            Value::Null,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let state = home.join("state");
+        let work = home.join("work");
+        fs::create_dir(&work).unwrap();
+        let (_, mut journal) = SessionWriter::create(&state, &work, "fixture-free").unwrap();
+        journal
+            .record_usage(&Entry::Usage(usage), "fixture-free")
+            .unwrap();
+        drop(journal);
+
+        let out = command_with_prices(
+            &home,
+            &work,
+            &["--json", "--by=model"],
+            "fixture-free=0/0/0/0",
+        )
+        .await;
+        let report = parse(&out);
+        let rows = report["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{case}");
+        assert_eq!(rows[0]["name"], "fixture-free", "{case}");
+        for (scope, totals) in [
+            ("model row", &rows[0]["totals"]),
+            ("total", &report["total"]),
+        ] {
+            assert_eq!(totals["context_tokens"], 8, "{case}: {scope}");
+            // `get` distinguishes a present JSON null from an omitted key.
+            assert_eq!(
+                totals.get("cache_hit_permille"),
+                Some(&expected_hit),
+                "{case}: {scope} cache hit rate"
+            );
+            assert_eq!(
+                totals["cost"]["estimated_usd_nanos"].as_u64(),
+                Some(0),
+                "{case}: {scope} priced zero cost"
+            );
+        }
+    }
 }
 
 #[tokio::test]
