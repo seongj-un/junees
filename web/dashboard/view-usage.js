@@ -1,4 +1,4 @@
-// 사용량: cost per day as bars and totals per model.
+// 사용량: daily costs and tokens, and totals per model.
 
 import { card, code, dataTable, el, notice } from "./dom.js";
 import { formatCompact, formatDay, formatDayShort, formatInt, formatUsd } from "./format.js";
@@ -59,8 +59,8 @@ function costChart(days, count) {
       "p",
       { class: "chart-empty" },
       days.some((d) => d.unpriced)
-        ? "이 기간의 사용은 가격을 알 수 없어(구독 사용이나 가격표에 없는 모델) 비용 막대를 그리지 않았습니다. 토큰 사용량은 아래 모델별 표에서 볼 수 있습니다."
-        : "이 기간에는 비용이 기록되지 않았습니다. 토큰 사용량은 아래 모델별 표에서 볼 수 있습니다.",
+        ? "가격을 알 수 없는 사용이 있어 비용 막대를 그리지 않았습니다. 날짜별 토큰은 아래 표에서 볼 수 있습니다."
+        : "이 기간에 막대로 표시할 비용이 없습니다. 날짜별 토큰은 아래 표에서 볼 수 있습니다.",
     );
   }
   const top = niceCeil(max);
@@ -119,29 +119,44 @@ function costChart(days, count) {
         el("span", null, formatDayShort(days[days.length - 1].date)),
       ),
     ),
+  );
+}
+
+function dailyTable(days, count) {
+  return el(
+    "details",
+    { class: "chart-table", id: "usage-day-table" },
+    el("summary", { id: "usage-day-table-toggle" }, "날짜별 토큰과 비용을 표로 보기"),
     el(
-      "details",
-      { class: "chart-table", id: "usage-day-table" },
-      el("summary", null, "날짜별 금액을 표로 보기"),
+      "div",
+      { class: "table-wrap" },
       el(
-        "div",
-        { class: "table-wrap" },
+        "table",
+        { class: "plain-table" },
+        el("caption", { class: "sr-only" }, `최근 ${count}일 날짜별 토큰과 비용`),
         el(
-          "table",
-          { class: "plain-table" },
-          el("caption", { class: "sr-only" }, `최근 ${count}일 날짜별 비용`),
-          el("thead", null, el("tr", null, el("th", { scope: "col" }, "날짜"), el("th", { scope: "col", class: "col-num" }, "토큰"), el("th", { scope: "col", class: "col-num" }, "비용"))),
+          "thead",
+          null,
           el(
-            "tbody",
+            "tr",
             null,
-            [...days].reverse().map((day) =>
-              el(
-                "tr",
-                null,
-                el("th", { scope: "row" }, formatDay(day.date)),
-                el("td", { class: "col-num num" }, formatInt(day.input + day.output)),
-                el("td", { class: "col-num num" }, costLabel(day.cost, day.unpriced)),
-              ),
+            el("th", { scope: "col" }, "날짜"),
+            ["입력 토큰", "출력 토큰", "비용"].map((label) =>
+              el("th", { scope: "col", class: "col-num" }, label),
+            ),
+          ),
+        ),
+        el(
+          "tbody",
+          null,
+          [...days].reverse().map((day) =>
+            el(
+              "tr",
+              null,
+              el("th", { scope: "row" }, formatDay(day.date)),
+              el("td", { class: "col-num num" }, formatInt(day.input)),
+              el("td", { class: "col-num num" }, formatInt(day.output)),
+              el("td", { class: "col-num num" }, costLabel(day.cost, day.unpriced)),
             ),
           ),
         ),
@@ -183,7 +198,7 @@ export function render(root, data, { params, now }) {
       stat("입력 토큰", formatCompact(total.input_tokens), cacheRead ? `캐시 읽기 ${formatCompact(cacheRead)}` : null),
       stat("출력 토큰", formatCompact(total.output_tokens)),
     ),
-    card("날짜별 비용", costChart(days, count)),
+    card("날짜별 사용량", costChart(days, count), dailyTable(days, count)),
     card(
       "모델별 합계",
       dataTable({
