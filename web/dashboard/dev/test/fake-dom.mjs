@@ -219,7 +219,30 @@ const document = {
   getElementById: (id) => document.body.querySelector(`#${id}`),
 };
 
-/** Puts a fresh `document` (and `Node`) on `globalThis`; returns the document. */
+/**
+ * Remembers how `names` are defined on `globalThis` right now, without reading
+ * their values. The returned function puts every one back as it was, and
+ * removes those that did not exist. All test files run in one process, so a
+ * test that swaps a global has to call it when it ends.
+ */
+export function saveGlobals(names) {
+  const saved = names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+  return () => {
+    for (const [name, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  };
+}
+
+/** The globals {@link installDom} replaces. */
+export const DOM_GLOBALS = Object.freeze(["document", "Node"]);
+
+/**
+ * Puts a fresh `document` (and `Node`) on `globalThis`; returns the document.
+ * It does not undo itself: take `saveGlobals(DOM_GLOBALS)` first and call it
+ * when the test ends.
+ */
 export function installDom() {
   document.body = new FakeElement("body");
   document.activeElement = document.body;
