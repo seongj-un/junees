@@ -34,10 +34,10 @@ python3 web/dashboard/dev/serve.py --token dev --mode empty
 DOM을 쓰지 않는 함수(`format.js`, `usage.js`, `routes.js`, 오류 문구와 페이지 합치기)는 Node 내장 테스트로 확인합니다. 의존성은 없습니다.
 
 ```sh
-node --test web/dashboard/dev/test/
+node --permission --allow-fs-read="$PWD" --test-isolation=none --test --test-concurrency=1 web/dashboard/dev/test/*.test.mjs
 ```
 
-CI의 `dashboard` 작업도 같은 테스트를 Node 26에서 한 프로세스로 돌립니다(`.github/workflows/ci.yml`).
+CI의 `dashboard` 작업이 Node 26에서 이 명령을 그대로 돌립니다(`.github/workflows/ci.yml`). 모든 테스트 파일이 한 프로세스에서 차례로 돌기 때문에, 테스트가 `globalThis`의 값을 바꿨다면 끝날 때 되돌려야 뒤에 도는 파일에 영향을 주지 않습니다. 권한 모델이 켜져 있어 저장소 폴더 밖 읽기, 파일 쓰기, 자식 프로세스는 막힙니다. 더 짧은 `node --test web/dashboard/dev/test/`는 파일마다 따로 프로세스를 띄우므로 이런 문제가 드러나지 않습니다.
 
 ## 대화 (19단계)
 
