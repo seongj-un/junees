@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { installDom, visible } from "./fake-dom.mjs";
+import { DOM_GLOBALS, installDom, saveGlobals, visible } from "./fake-dom.mjs";
 import {
   findEmptyBody,
   findMessages,
@@ -76,11 +76,25 @@ test("a query is literal text and looks only in what the screen shows", () => {
       { type: "thinking", text: "secret plan" },
       { type: "text", text: "[hidden: api key]" },
       { type: "tool_result", text_preview: "[hidden]" },
+      { type: "tool_result", text_preview: "[hidden]", text_tail: "[hidden: it looks like it holds a credential]", omitted_chars: 40 },
       { type: "image", media_type: "image/png" },
     ],
   };
   assert.equal(messageSearchText(unseen), "");
   assert.equal(messageMatches(unseen, "hidden"), false);
+  assert.equal(messageMatches(unseen, "credential"), false);
+  // A hidden end leaves the first part findable, and the other way round.
+  const hiddenEnd = { type: "tool_result", text_preview: "build log", text_tail: "[hidden: it looks like it holds a credential]", omitted_chars: 40 };
+  const hiddenStart = { type: "tool_result", text_preview: "[hidden: it looks like it holds a credential]", text_tail: "exit 0", omitted_chars: 40 };
+  const half = { index: 11, role: "user", blocks: [hiddenEnd, hiddenStart] };
+  assert.equal(messageSearchText(half), "build log\nexit 0");
+  assert.deepEqual(indexes(findMessages([half], "build log")), [11]);
+  assert.deepEqual(indexes(findMessages([half], "exit 0")), [11]);
+  assert.deepEqual(findMessages([half], "hidden"), []);
+  assert.deepEqual(findMessages([half], "credential"), []);
+  // A `[hidden]` inside a longer end is the tool's own text and stays findable.
+  const quoted = { index: 12, role: "user", blocks: [{ type: "tool_result", text_preview: "a", text_tail: "token is [hidden], done" }] };
+  assert.deepEqual(indexes(findMessages([quoted], "hidden")), [12]);
   assert.equal(messageMatches({ index: 10, role: "user" }, "x"), false);
 });
 
@@ -98,8 +112,19 @@ test("the scope and result lines say how far the search reached", () => {
 // Rendering. Each test uses its own session id: the screen keeps the pages
 // loaded with 더 보기 per session.
 
-function screen(id, { loaded = 3, total = talk.length } = {}) {
-  const document = installDom();
+// What a rendering test swaps on `globalThis`. Every test file runs in one
+// process, so each test puts these back when it ends.
+const SWAPPED = Object.freeze([...DOM_GLOBALS, "localStorage", "sessionStorage", "location", "history"]);
+const swappedNow = () => SWAPPED.map((name) => Object.getOwnPropertyDescriptor(globalThis, name));
+
+/** Installs the DOM stand-in for the test `t` and takes it out again after it. */
+function dom(t) {
+  t.after(saveGlobals(SWAPPED));
+  return installDom();
+}
+
+function screen(t, id, { loaded = 3, total = talk.length } = {}) {
+  const document = dom(t);
   const root = document.createElement("div");
   document.body.append(root);
   const calls = { fetched: [], announced: [], stored: 0 };
@@ -128,8 +153,8 @@ function screen(id, { loaded = 3, total = talk.length } = {}) {
   return { document, root, calls, draw, shown, status, more, input: root.querySelector("#session-find") };
 }
 
-test("the screen starts with a labelled, empty input and every loaded message", () => {
-  const s = screen("find-start");
+test("the screen starts with a labelled, empty input and every loaded message", (t) => {
+  const s = screen(t, "find-start");
   const label = s.root.querySelector("label");
   assert.equal(label.textContent, "불러온 메시지 안에서 찾기");
   assert.equal(label.getAttribute("for"), s.input.id);
@@ -141,8 +166,8 @@ test("the screen starts with a labelled, empty input and every loaded message", 
   assert.equal(s.more().textContent, "2개 더 보기");
 });
 
-test("typing shows only the messages that match, and 지우기 brings the list back", async () => {
-  const s = screen("find-type");
+test("typing shows only the messages that match, and 지우기 brings the list back", async (t) => {
+  const s = screen(t, "find-type");
   await s.input.type("배포");
   assert.deepEqual(s.shown(), [0, 2]);
   assert.equal(s.status(), "불러온 메시지 3개 중 2개를 찾았습니다.");
@@ -162,8 +187,8 @@ test("typing shows only the messages that match, and 지우기 brings the list b
   assert.equal(s.calls.fetched.length, 0);
 });
 
-test("no match shows its own notice, not the empty-session one, and keeps 더 보기", async () => {
-  const s = screen("find-none");
+test("no match shows its own notice, not the empty-session one, and keeps 더 보기", async (t) => {
+  const s = screen(t, "find-none");
   await s.input.type("한글");
   assert.deepEqual(s.shown(), []);
   assert.equal(s.status(), "불러온 메시지 3개 중 0개를 찾았습니다.");
@@ -178,8 +203,8 @@ test("no match shows its own notice, not the empty-session one, and keeps 더 �
   assert.deepEqual(s.shown(), [0, 1, 2]);
 });
 
-test("더 보기 applies the query to the new messages and sends it nowhere", async () => {
-  const s = screen("find-more");
+test("더 보기 applies the query to the new messages and sends it nowhere", async (t) => {
+  const s = screen(t, "find-more");
   await s.input.type("한글");
   await s.more().click();
   assert.deepEqual(s.calls.fetched, ["/api/sessions/find-more?offset=3&limit=100"]);
@@ -197,8 +222,8 @@ test("더 보기 applies the query to the new messages and sends it nowhere", as
   assert.deepEqual(s.shown(), [0, 1, 2, 3, 4]);
 });
 
-test("더 보기 without a match among the new messages keeps focus on a control", async () => {
-  const s = screen("find-more-none", { loaded: 2 });
+test("더 보기 without a match among the new messages keeps focus on a control", async (t) => {
+  const s = screen(t, "find-more-none", { loaded: 2 });
   await s.input.type("dashboard");
   await s.more().click();
   assert.deepEqual(s.shown(), [0]);
@@ -207,8 +232,8 @@ test("더 보기 without a match among the new messages keeps focus on a control
   assert.equal(s.document.activeElement, s.input);
 });
 
-test("더 보기 without a query behaves as before", async () => {
-  const s = screen("find-more-plain");
+test("더 보기 without a query behaves as before", async (t) => {
+  const s = screen(t, "find-more-plain");
   await s.more().click();
   assert.deepEqual(s.shown(), [0, 1, 2, 3, 4]);
   assert.deepEqual(s.calls.announced, ["메시지 2개를 더 불러왔습니다."]);
@@ -216,23 +241,23 @@ test("더 보기 without a query behaves as before", async () => {
   assert.equal(s.status(), "");
 });
 
-test("a refresh keeps the input node, its value, focus and caret, and filters the new list", async () => {
-  const s = screen("find-refresh");
+test("a refresh keeps the same input node mounted, with its value and focus, and filters the new list", async (t) => {
+  const s = screen(t, "find-refresh");
   s.input.focus();
   await s.input.type("배포");
-  s.input.selectionStart = 1;
   const bar = s.root.querySelector(".session-filter");
   const before = s.root.querySelector("li");
 
   s.draw();
   assert.equal(s.root.querySelector("#session-find"), s.input);
   assert.equal(s.root.querySelectorAll("#session-find").length, 1);
-  // Never taken out of the page: a re-inserted input loses focus and IME state.
+  // Never taken out of the page: a re-inserted input loses focus, caret and
+  // IME state. The stand-in has no caret, so the same node with zero detaches
+  // is what stands for it here.
   assert.equal(bar.detached, 0);
   assert.equal(s.input.detached, 0);
   assert.equal(s.document.activeElement, s.input);
   assert.equal(s.input.value, "배포");
-  assert.equal(s.input.selectionStart, 1);
   // The list itself is new, and the query holds on it.
   assert.notEqual(s.root.querySelector("li"), before);
   assert.deepEqual(s.shown(), [0, 2]);
@@ -245,8 +270,8 @@ test("a refresh keeps the input node, its value, focus and caret, and filters th
   assert.equal(s.calls.fetched.length, 0);
 });
 
-test("a refresh after 더 보기 keeps the loaded pages and the query", async () => {
-  const s = screen("find-refresh-more");
+test("a refresh after 더 보기 keeps the loaded pages and the query", async (t) => {
+  const s = screen(t, "find-refresh-more");
   await s.more().click();
   await s.input.type("한글");
   s.draw();
@@ -254,8 +279,8 @@ test("a refresh after 더 보기 keeps the loaded pages and the query", async ()
   assert.equal(s.status(), "불러온 메시지 5개 중 1개를 찾았습니다.");
 });
 
-test("another session starts with an empty input", async () => {
-  const s = screen("find-a");
+test("another session starts with an empty input", async (t) => {
+  const s = screen(t, "find-a");
   await s.input.type("배포");
   const root = s.root;
   render(
@@ -269,11 +294,21 @@ test("another session starts with an empty input", async () => {
   assert.equal(root.querySelectorAll("#session-find").length, 1);
 });
 
-test("a session without messages has no input", () => {
-  const document = installDom();
+test("a session without messages has no input", (t) => {
+  const document = dom(t);
   const root = document.createElement("div");
   document.body.append(root);
   render(root, { id: "find-empty", total: 0, messages: [] }, { now: new Date(), setTitle() {} });
   assert.equal(root.querySelector("#session-find"), null);
   assert.equal(root.querySelector(".notice-title").textContent, "이 세션에는 메시지가 없습니다");
+});
+
+test("a rendering test puts back the globals it swapped", async (t) => {
+  const before = swappedNow();
+  await t.test("while it runs, the stand-ins are in place", (inner) => {
+    const s = screen(inner, "find-globals");
+    assert.equal(globalThis.document, s.document);
+    assert.notDeepEqual(swappedNow(), before);
+  });
+  assert.deepEqual(swappedNow(), before);
 });
