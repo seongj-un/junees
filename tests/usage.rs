@@ -407,7 +407,7 @@ async fn usage_all_by_folder_keeps_same_named_folders_separate() {
     let home = dir.path();
     let state = home.join("junees");
     let work = home.join("work");
-    let dir_a = home.join("checkout a/project");
+    let dir_a = home.join("checkout  a/project");
     let dir_b = home.join("checkout b/project");
     for folder in [&state, &work, &dir_a, &dir_b] {
         std::fs::create_dir_all(folder).unwrap();
@@ -480,20 +480,20 @@ async fn usage_all_by_folder_keeps_same_named_folders_separate() {
         title.starts_with("Usage in every folder ") && title.ends_with(", by folder:"),
         "{title}"
     );
-    // Keep spaces inside path labels and compare all usage rows, including any
-    // that erroneously appear after the total.
-    let rows: Vec<Vec<_>> = lines
-        .map(|line| {
-            line.split("  ")
-                .map(str::trim)
-                .filter(|cell| !cell.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .filter(|cells| {
-            cells.first() == Some(&"total")
-                || cells
-                    .get(1)
-                    .is_some_and(|cell| cell.starts_with(|c: char| c.is_ascii_digit()))
+    // Read the seven value cells from the right, leaving spaces inside the
+    // label intact. Check all data rows, even after the total or the notes.
+    let rows: Vec<_> = lines
+        .filter_map(|line| {
+            let mut rest = line;
+            let mut cells = [""; 8];
+            for cell in cells[1..].iter_mut().rev() {
+                let (left, value) = rest.trim_end().rsplit_once("  ")?;
+                *cell = value;
+                rest = left;
+            }
+            cells[0] = rest.trim_end();
+            (cells[0] == "total" || cells[1].starts_with(|c: char| c.is_ascii_digit()))
+                .then_some(cells)
         })
         .collect();
     assert_eq!(
