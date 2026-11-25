@@ -169,14 +169,14 @@ pub fn period(
     if args.json {
         let rows: Vec<_> = rows
             .iter()
-            .map(|(name, totals)| json!({"name": json_label(name), "totals": json_totals(totals)}))
+            .map(|(name, totals)| json!({"name": display_label(name), "totals": json_totals(totals)}))
             .collect();
         let report = json!({
             "schema_version": 1,
             "by": by,
             "range": {"days": args.days, "start_date": start_date, "end_date": end_date,
-                      "timezone": json_label(&zone_name)},
-            "scope": {"all": args.all, "folder": folder.as_deref().map(json_label)},
+                      "timezone": display_label(&zone_name)},
+            "scope": {"all": args.all, "folder": folder.as_deref().map(display_label)},
             "rows": rows,
             "total": json_totals(&total),
             "pricing": {
@@ -195,10 +195,11 @@ pub fn period(
         return Ok(format!("{report}\n"));
     }
 
-    let place = match folder {
-        Some(folder) => format!("in this folder ({folder})"),
+    let place = match folder.as_deref() {
+        Some(folder) => format!("in this folder ({})", display_label(folder)),
         None => "in every folder".to_string(),
     };
+    let zone_name = display_label(&zone_name);
     let range = if args.days == 1 {
         format!("today ({end_date}, {zone_name})")
     } else {
@@ -235,16 +236,17 @@ fn json_totals(totals: &Totals) -> Value {
         "cache_hit_permille": totals.cache_hit_permille(),
         "cost": {
             "estimated_usd_nanos": totals.priced.then_some(totals.cost),
-            "unpriced_models": totals.unpriced.iter().map(|name| json_label(name)).collect::<Vec<_>>(),
+            "unpriced_models": totals.unpriced.iter().map(|name| display_label(name)).collect::<Vec<_>>(),
             "subscription": totals.subscription,
-            "base_rated_models": totals.base_rated.iter().map(|name| json_label(name)).collect::<Vec<_>>(),
+            "base_rated_models": totals.base_rated.iter().map(|name| display_label(name)).collect::<Vec<_>>(),
         },
     })
 }
 
 /// Labels may contain credentials pasted into model names or paths. Keep
-/// grouping and sorting on the original keys; only mask the displayed name.
-fn json_label(label: &str) -> &str {
+/// grouping and sorting on the original keys; only mask the displayed name,
+/// in the JSON report and in the text table and its notes alike.
+fn display_label(label: &str) -> &str {
     if crate::secrets::find_outgoing_secret(label).is_some() {
         "[redacted]"
     } else {
@@ -356,10 +358,14 @@ fn cells(label: &str, totals: &Totals) -> [String; 8] {
 }
 
 /// The rows, then the total, in columns: the label left-aligned, the
-/// numbers right-aligned.
+/// numbers right-aligned. Labels are masked here ([`display_label`]), so
+/// the widths follow what is shown and rows stay one per original key.
 fn table(rows: &[(String, Totals)], total: Option<&Totals>) -> String {
     let mut lines: Vec<[String; 8]> = vec![COLUMNS.map(str::to_string)];
-    lines.extend(rows.iter().map(|(label, totals)| cells(label, totals)));
+    lines.extend(
+        rows.iter()
+            .map(|(label, totals)| cells(display_label(label), totals)),
+    );
     if let Some(total) = total {
         lines.push(cells("total", total));
     }
@@ -405,7 +411,7 @@ fn notes(total: &Totals, stats: &Stats, prices: &Prices) -> String {
         ));
     }
     if !total.unpriced.is_empty() {
-        let models: Vec<&str> = total.unpriced.iter().map(String::as_str).collect();
+        let models: Vec<&str> = total.unpriced.iter().map(|m| display_label(m)).collect();
         out.push_str(&format!(
             "No price is known for {}: their tokens are counted but left out of the cost \
              (`prices` in config.toml sets one; see junees usage --help).\n",
@@ -413,7 +419,7 @@ fn notes(total: &Totals, stats: &Stats, prices: &Prices) -> String {
         ));
     }
     if !total.base_rated.is_empty() {
-        let models: Vec<&str> = total.base_rated.iter().map(String::as_str).collect();
+        let models: Vec<&str> = total.base_rated.iter().map(|m| display_label(m)).collect();
         out.push_str(&format!(
             "Some tokens of {} are only known as sums of several calls (subagents whose \
              own journals are missing or do not add up to what the session recorded, or \
