@@ -1,4 +1,4 @@
-// Run with: node --test --test-concurrency=1 web/dashboard/dev/test/*.test.mjs
+// How to run: see the 테스트 section of web/dashboard/dev/README.md.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 

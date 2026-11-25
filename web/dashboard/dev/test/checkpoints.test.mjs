@@ -1,3 +1,4 @@
+// How to run: see the 테스트 section of web/dashboard/dev/README.md.
 import assert from "node:assert/strict";
 import test from "node:test";
 
