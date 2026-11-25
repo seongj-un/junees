@@ -92,6 +92,12 @@ struct SlackState {
     limit_next: Mutex<usize>,
     /// Refuse `chat.postMessage` calls with `blocks` (`invalid_blocks`).
     refuse_blocks: AtomicBool,
+    /// Answer `chat.postMessage` calls with `blocks` only once `release`
+    /// is notified: the call shows in `requests` (Slack has the message,
+    /// people see its buttons) while the gateway still waits for the
+    /// answer that names it.
+    hold_blocks: AtomicBool,
+    release: Notify,
     /// The `ts` of the last message posted.
     last_ts: AtomicUsize,
     /// Path under `/files/` to bytes.
@@ -337,11 +343,19 @@ async fn serve(mut socket: TcpStream, state: Arc<SlackState>) {
             _ => answer(200, "", json!({"ok": false, "error": "invalid_auth"})),
         }
     };
+    let hold = status == 200
+        && path == "/api/chat.postMessage"
+        && body.get("blocks").is_some()
+        && state.hold_blocks.load(Ordering::SeqCst);
     state
         .requests
         .lock()
         .unwrap()
         .push(Received { path, auth, body });
+    if hold {
+        state.notify.notify_waiters();
+        state.release.notified().await;
+    }
     let head = format!(
         "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\n{headers}content-length: \
          {}\r\nconnection: close\r\n\r\n",
@@ -1395,6 +1409,86 @@ async fn buttons_answer_questions_of_allowed_users_only() {
         "{:?}",
         texts(&requests[1])
     );
+}
+
+/// Slack shows a message (and its buttons) before the gateway has read
+/// the answer to `chat.postMessage` that names it. A press in that
+/// moment is judged like any other, by the message it comes from, once
+/// that answer is in: the right id on another message answers nothing.
+#[tokio::test]
+async fn a_press_before_the_question_is_posted_waits_for_its_message() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let s = FakeSlack::start().await;
+    let file = cwd.path().join("note.txt");
+    let (api, served) = common::fake_api(vec![
+        (200, write_call(&file)),
+        (200, common::text_reply("wrote it")),
+    ])
+    .await;
+    let engines = Arc::new(
+        ApiEngines::new(api_config(&api, home.path(), "all"), cwd.path().into())
+            .with_note(SLACK_NOTE),
+    );
+    let running = start(
+        slack(&s, &[]),
+        engines,
+        Some(home.path().into()),
+        cwd.path(),
+    );
+    s.wait_connections(1).await;
+
+    s.state.hold_blocks.store(true, Ordering::SeqCst);
+    s.push(dm(USER, "write a note"));
+    s.until("a question with buttons", || !buttoned(&s, DM).is_empty())
+        .await;
+    let question = buttoned(&s, DM).remove(0);
+    let values = button_values(&question);
+    // Decline with the question's id from another message, then Allow
+    // on the question itself; the gateway knows neither message yet.
+    let mut elsewhere = question.clone();
+    elsewhere["_sent_ts"] = json!("1800000000.999999");
+    let early = [
+        s.press(press_on(USER, &elsewhere, &values[2])),
+        s.press(press_on(USER, &question, &values[0])),
+    ];
+    for envelope in &early {
+        s.wait_ack(envelope).await;
+    }
+    // Acknowledged envelopes are handled in order: once this one's note
+    // is out, the two presses before it have been taken in.
+    s.wait_ack(&s.press(press_on(USER, &question, "approve")))
+        .await;
+    s.until("the note for the unknown button", || {
+        ephemerals(&s, USER).len() == 1
+    })
+    .await;
+    assert_eq!(ephemerals(&s, USER), ["Junees does not know this button."]);
+    assert!(updates(&s).is_empty());
+    assert!(!file.exists());
+
+    // The answer arrives: the press from elsewhere answered nothing and
+    // is told so, the one on the question allowed the call.
+    s.state.release.notify_one();
+    s.wait_post(DM, |p| p == "wrote it").await;
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "written\n");
+    s.until("the question closed and the other press told", || {
+        updates(&s).len() == 1 && ephemerals(&s, USER).len() == 2
+    })
+    .await;
+    assert_eq!(
+        ephemerals(&s, USER)[1],
+        "이미 답했거나 시간이 지났거나 멈춘 질문이라 이 버튼은 이제 아무것도 하지 않습니다."
+    );
+    let update = updates(&s).remove(0);
+    assert_eq!(update["ts"], question["_sent_ts"]);
+    assert_eq!(
+        update["blocks"][1]["text"]["text"],
+        "*sam&lt;&amp;&gt;: 허용했습니다.*"
+    );
+    running.stop().await;
+    let requests = tokio::time::timeout(WAIT, served).await.unwrap().unwrap();
+    assert_eq!(requests.len(), 2);
 }
 
 /// A PNG header of `width` x `height`: enough for Junees, which never
