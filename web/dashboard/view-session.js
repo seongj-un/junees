@@ -220,7 +220,8 @@ const needleOf = (query) => searchText(query).trim();
 /**
  * The text of a message that 찾기 looks in: what the person and the model
  * wrote, a tool call's name and input, a tool result's first part and its
- * end. A block the server hid is left out, since its text is not on screen.
+ * end. A part the server hid (a block, a result's first part or its end) is
+ * left out: its `[hidden: ...]` line is the server's, not the message's.
  */
 export function messageSearchText(message) {
   const parts = [];
@@ -232,7 +233,7 @@ export function messageSearchText(message) {
       if (!isHiddenBlock(block.input_preview)) parts.push(block.input_preview);
     } else if (block?.type === "tool_result") {
       if (!isHiddenBlock(block.text_preview)) parts.push(block.text_preview);
-      parts.push(block.text_tail);
+      if (!isHiddenBlock(block.text_tail)) parts.push(block.text_tail);
     }
   }
   // A line break between parts, so a word never matches across two blocks.
