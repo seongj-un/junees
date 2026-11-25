@@ -212,6 +212,104 @@ export function renderControls(root, ctx) {
   root.replaceChildren(...links);
 }
 
+const searchText = (text) => String(text ?? "").normalize("NFC").toLowerCase();
+
+/** The query as compared: trimmed, any letter case. Empty means no 찾기. */
+const needleOf = (query) => searchText(query).trim();
+
+/**
+ * The text of a message that 찾기 looks in: what the person and the model
+ * wrote, a tool call's name and input, a tool result's first part and its
+ * end. A part the server hid (a block, a result's first part or its end) is
+ * left out: its `[hidden: ...]` line is the server's, not the message's.
+ */
+export function messageSearchText(message) {
+  const parts = [];
+  for (const block of Array.isArray(message?.blocks) ? message.blocks : []) {
+    if (block?.type === "text") {
+      if (!isHiddenBlock(block.text)) parts.push(block.text);
+    } else if (block?.type === "tool_use") {
+      parts.push(block.name);
+      if (!isHiddenBlock(block.input_preview)) parts.push(block.input_preview);
+    } else if (block?.type === "tool_result") {
+      if (!isHiddenBlock(block.text_preview)) parts.push(block.text_preview);
+      if (!isHiddenBlock(block.text_tail)) parts.push(block.text_tail);
+    }
+  }
+  // A line break between parts, so a word never matches across two blocks.
+  return parts.filter((part) => typeof part === "string" && part).join("\n");
+}
+
+/** Whether a message holds the query: a literal part of its text, any letter case. */
+export function messageMatches(message, query) {
+  const needle = needleOf(query);
+  if (!needle) return true;
+  return searchText(messageSearchText(message)).includes(needle);
+}
+
+/** The messages that hold the query, in their order; all of them for an empty query. */
+export function findMessages(messages, query) {
+  if (!needleOf(query)) return messages;
+  return messages.filter((message) => messageMatches(message, query));
+}
+
+/** The line under the input: how far 찾기 reaches. `left` is the count not loaded yet. */
+export function findScope(left) {
+  return left > 0
+    ? `이미 불러온 메시지에서만 찾습니다. 아직 불러오지 않은 ${formatInt(left)}개는 아래 더 보기로 불러온 뒤에 찾을 수 있습니다.`
+    : "이 세션의 메시지를 모두 불러와서 전체에서 찾습니다.";
+}
+
+/** The result line while a query is in the input; empty without one. */
+export function findSummary(query, loaded, matched) {
+  if (!needleOf(query)) return "";
+  return `불러온 메시지 ${formatInt(loaded)}개 중 ${formatInt(matched)}개를 찾았습니다.`;
+}
+
+/** What to do when nothing matched. */
+export function findEmptyBody(left) {
+  return left > 0
+    ? "아래 더 보기로 메시지를 더 불러오거나 다른 낱말을 입력해 보세요."
+    : "다른 낱말을 입력하거나 입력을 지워 보세요.";
+}
+
+// Only a still-mounted 찾기 of the same session is reused. Leaving the screen
+// drops the query: it is kept nowhere but in the input.
+const mountedFinds = new WeakMap();
+
+function mountFind(root, id) {
+  const input = el("input", {
+    id: "session-find",
+    type: "search",
+    class: "session-filter-input",
+    autocomplete: "off",
+    spellcheck: "false",
+    "aria-describedby": "session-find-scope",
+  });
+  const clear = el("button", { type: "button", class: "button button-secondary", disabled: true }, "지우기");
+  const scope = el("p", { class: "summary", id: "session-find-scope" });
+  const status = el("p", { class: "summary", role: "status" });
+  const headCard = el("div", { class: "card session-head" });
+  const body = el("div");
+  const find = el(
+    "div",
+    { class: "session-filter" },
+    el("label", { for: input.id }, "불러온 메시지 안에서 찾기"),
+    el("div", { class: "session-filter-fields" }, input, clear),
+    scope,
+  );
+  const shell = { id, input, clear, scope, status, headCard, body, paint: () => {} };
+  input.addEventListener("input", () => shell.paint());
+  clear.addEventListener("click", () => {
+    input.value = "";
+    input.focus();
+    shell.paint();
+  });
+  mountedFinds.set(find, shell);
+  root.replaceChildren(headCard, find, status, body);
+  return shell;
+}
+
 export function render(root, data, ctx) {
   if (more.id !== data.id) {
     Object.assign(more, { id: data.id, messages: [], next: 0, done: false });
@@ -242,12 +340,45 @@ export function render(root, data, ctx) {
     return;
   }
 
+  // Keep the input node itself across refreshes, with its caret and IME state.
+  const mounted = mountedFinds.get(root.children[1]);
+  const shell = mounted?.id === data.id ? mounted : mountFind(root, data.id);
+  const { input, clear, scope, status } = shell;
+
   const draftKeys = draftResultKeys(messages);
   const list = el("ol", { class: "msgs", "aria-label": "대화" }, messages.map((m) => messageView(m, now, draftKeys)));
+  const empty = el("div", { hidden: true });
   const count = el("p", { class: "summary", "aria-live": "polite" });
   const error = el("div", { class: "more-error", role: "alert", hidden: true });
   const button = el("button", { type: "button", class: "button button-secondary" }, "더 보기");
   const footer = el("div", { class: "more" }, count, error, button);
+
+  const setText = (node, text) => {
+    if (node.textContent !== text) node.textContent = text;
+  };
+
+  /** Shows only the messages that hold the input's text; returns how many of `among` do. */
+  const applyFind = (among = []) => {
+    const query = input.value;
+    const matched = new Set(findMessages(messages, query).map((m) => m.index));
+    // Hiding instead of rebuilding keeps folded blocks and draft cards as they are.
+    for (const item of list.children) item.hidden = !matched.has(Number(item.getAttribute("data-index")));
+    const left = more.done ? 0 : Math.max(0, total - more.next);
+    const none = matched.size === 0;
+    list.hidden = none;
+    empty.hidden = !none;
+    empty.replaceChildren(
+      ...(none ? [notice({ title: "찾는 낱말이 든 메시지가 없습니다", body: findEmptyBody(left) })] : []),
+    );
+    // The shared lines belong to the list on screen, not to one a refresh replaced.
+    if (list.isConnected) {
+      // Left in place and emptied, so the next result is announced.
+      setText(status, findSummary(query, messages.length, matched.size));
+      setText(scope, findScope(left));
+      clear.disabled = !input.value;
+    }
+    return among.filter((m) => matched.has(m.index));
+  };
 
   const update = () => {
     const left = more.done ? 0 : Math.max(0, total - more.next);
@@ -280,9 +411,20 @@ export function render(root, data, ctx) {
       list.append(...added.map((m) => messageView(m, now, pairs)));
       button.disabled = false;
       update();
-      // Keyboard and screen reader users land on the first new message.
-      if (added.length) list.querySelector(`[data-index="${added[0].index}"]`)?.focus();
-      if (list.isConnected) ctx.announce(`메시지 ${formatInt(added.length)}개를 더 불러왔습니다.`);
+      // The text being looked for applies to the new messages too.
+      const finding = Boolean(needleOf(input.value));
+      const visible = applyFind(added);
+      // Keyboard and screen reader users land on the first new message on
+      // screen; with none, on the button, or the input once the button is gone.
+      if (visible.length) list.querySelector(`[data-index="${visible[0].index}"]`)?.focus();
+      else if (added.length && list.isConnected) (button.hidden ? input : button).focus();
+      if (list.isConnected) {
+        ctx.announce(
+          finding
+            ? `메시지 ${formatInt(added.length)}개를 더 불러왔습니다. 그중 ${formatInt(visible.length)}개에 찾는 낱말이 있습니다.`
+            : `메시지 ${formatInt(added.length)}개를 더 불러왔습니다.`,
+        );
+      }
     } catch (err) {
       button.disabled = false;
       update();
@@ -293,7 +435,10 @@ export function render(root, data, ctx) {
   });
 
   update();
-  root.replaceChildren(el("div", { class: "card session-head" }, head), list, footer);
+  shell.headCard.replaceChildren(head);
+  shell.body.replaceChildren(list, empty, footer);
+  shell.paint = () => applyFind();
+  applyFind();
 }
 
 /** Korean text for a failed first load of this screen. */
