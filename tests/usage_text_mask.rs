@@ -8,7 +8,7 @@ use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use junees::message::Usage;
-use junees::session::{Entry, SessionWriter};
+use junees::session::{Entry, Journal, SessionWriter};
 
 mod common;
 use common::junees_binary;
