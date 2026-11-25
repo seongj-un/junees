@@ -17,6 +17,32 @@ export function filterSessions(sessions, query) {
   );
 }
 
+/** The first entry is the default: the order the server sent, newest first. */
+export const SORTS = Object.freeze([
+  Object.freeze({ value: "recent", label: "최근 순" }),
+  Object.freeze({ value: "cost", label: "비용 큰 순" }),
+  Object.freeze({ value: "messages", label: "메시지 많은 순" }),
+]);
+
+// No prototype, so a name like "constructor" is not taken for a sort.
+const SORT_FIELDS = Object.freeze({ __proto__: null, cost: "cost_usd", messages: "messages" });
+
+/**
+ * Order only the loaded list, without changing the array passed in. The
+ * largest value comes first and equal values keep the server order. A session
+ * whose value is unknown (`null` cost) goes last instead of counting as 0.
+ */
+export function sortSessions(sessions, sort) {
+  const field = SORT_FIELDS[sort];
+  if (!field) return sessions;
+  const known = (session) => typeof session[field] === "number" && Number.isFinite(session[field]);
+  // Array.prototype.sort is stable, so ties stay in server order.
+  return sessions.slice().sort((a, b) => {
+    if (!known(a) || !known(b)) return Number(known(b)) - Number(known(a));
+    return b[field] - a[field];
+  });
+}
+
 /**
  * The preview without the title it starts with: the server takes the title
  * from the first line of the same message, so showing both repeats it.
@@ -108,12 +134,18 @@ function mountFilter(root) {
     "aria-describedby": "session-search-scope",
   });
   const clear = el("button", { type: "button", class: "button button-secondary" }, "지우기");
+  // The choice lives only in this control: no URL, storage or request carries it.
+  const sort = el(
+    "select",
+    { id: "session-sort", class: "session-sort-select", "aria-describedby": "session-search-scope" },
+    SORTS.map((option) => el("option", { value: option.value }, option.label)),
+  );
   const summary = el("p", { class: "summary", role: "status" });
   const results = el("div");
 
   function paintResults() {
     const query = input.value.trim();
-    const matches = filterSessions(sessions, query);
+    const matches = sortSessions(filterSessions(sessions, query), sort.value);
     const total = formatInt(sessions.length);
     const message = query
       ? `검색 결과 ${formatInt(matches.length)}개 / 불러온 세션 ${total}개`
@@ -146,6 +178,7 @@ function mountFilter(root) {
   }
 
   input.addEventListener("input", paintResults);
+  sort.addEventListener("change", paintResults);
   clear.addEventListener("click", () => {
     input.value = "";
     input.focus();
@@ -157,10 +190,11 @@ function mountFilter(root) {
     { class: "session-filter" },
     el("label", { for: input.id }, "제목 또는 작업 폴더 검색"),
     el("div", { class: "session-filter-fields" }, input, clear),
+    el("div", { class: "session-sort" }, el("label", { for: sort.id }, "정렬"), sort),
     el(
       "p",
       { class: "summary", id: "session-search-scope" },
-      `이미 불러온 최근 세션 최대 ${LIMIT}개에서만 검색합니다.`,
+      `이미 불러온 최근 세션 최대 ${LIMIT}개에서만 검색하고 정렬합니다.`,
     ),
   );
   const update = (data, at) => {
@@ -174,7 +208,8 @@ function mountFilter(root) {
 }
 
 export function render(root, data, { now }) {
-  // Keep the input node itself across refreshes, including its caret and IME state.
+  // Keep the input and the sort control themselves across refreshes, so the
+  // caret, IME state and chosen order survive.
   const update = mountedFilters.get(root.firstElementChild) ?? mountFilter(root);
   update(Array.isArray(data.sessions) ? data.sessions : [], now);
 }

@@ -519,6 +519,23 @@ a.button {
   font: inherit;
 }
 
+.session-sort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.session-sort-select {
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
 .session-filter-input::-webkit-search-cancel-button {
   display: none;
 }

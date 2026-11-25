@@ -37,6 +37,8 @@ DOM을 쓰지 않는 함수(`format.js`, `usage.js`, `routes.js`, 오류 문구�
 node --test web/dashboard/dev/test/
 ```
 
+CI의 `dashboard` 작업도 같은 테스트를 Node 26에서 한 프로세스로 돌립니다(`.github/workflows/ci.yml`).
+
 ## 대화 (19단계)
 
 - `--chat`으로 띄우면 `/api/status`가 `"chat": true`를 돌려주고 `/api/chat` API가 켜집니다. 답은 `chat_sim.py`의 정해진 대본으로 만듭니다.
