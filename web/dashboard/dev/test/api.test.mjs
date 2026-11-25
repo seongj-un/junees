@@ -1,8 +1,15 @@
-// Run with: node --test web/dashboard/dev/test/
+// How to run: see the 테스트 section of web/dashboard/dev/README.md.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { ApiError, exchangeCode, getToken, takeCodeFromAddress, takeTokenFromAddress } from "../../api.js";
+import { saveGlobals } from "./fake-dom.mjs";
+
+/** Swaps `fetch` for the test `t` and puts the real one back when it ends. */
+function fakeFetch(t, fake) {
+  t.after(saveGlobals(["fetch"]));
+  globalThis.fetch = fake;
+}
 
 /** The parts of `window` the token helpers use. */
 function fakeWindow(hash) {
@@ -59,13 +66,13 @@ test("takeCodeFromAddress takes #code= once and clears the address", () => {
   assert.equal(takeCodeFromAddress(fakeWindow("#token=abc")), null);
 });
 
-test("exchangeCode keeps the token it gets for the code, without a Bearer", async () => {
+test("exchangeCode keeps the token it gets for the code, without a Bearer", async (t) => {
   const win = fakeWindow("");
   const sent = [];
-  globalThis.fetch = async (path, init) => {
+  fakeFetch(t, async (path, init) => {
     sent.push({ path, init });
     return new Response(JSON.stringify({ token: "tok" }), { status: 200 });
-  };
+  });
   assert.equal(await exchangeCode("c0de", win), "tok");
   assert.equal(getToken(win), "tok");
   assert.equal(sent[0].path, "/api/token");
@@ -75,9 +82,9 @@ test("exchangeCode keeps the token it gets for the code, without a Bearer", asyn
   assert.equal(sent[0].init.headers["Content-Type"], "application/json");
 });
 
-test("a refused code is a 401 bad_code, not a lock of the tab's token", async () => {
+test("a refused code is a 401 bad_code, not a lock of the tab's token", async (t) => {
   const win = fakeWindow("");
-  globalThis.fetch = async () => new Response(JSON.stringify({ error: "bad_code" }), { status: 401 });
+  fakeFetch(t, async () => new Response(JSON.stringify({ error: "bad_code" }), { status: 401 }));
   await assert.rejects(exchangeCode("old", win), (err) => {
     assert.ok(err instanceof ApiError);
     assert.deepEqual([err.kind, err.status, err.code], ["http", 401, "bad_code"]);
