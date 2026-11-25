@@ -1276,9 +1276,14 @@ async fn buttons_answer_questions_of_allowed_users_only() {
     );
     let already =
         "이미 답했거나 시간이 지났거나 멈춘 질문이라 이 버튼은 이제 아무것도 하지 않습니다.";
+    // In no fixed order: each note is its own request, and a press that
+    // came while the question was still being posted gets its note only
+    // once that post ended.
+    let mut notes = ephemerals(&s, USER);
+    notes.sort();
     assert_eq!(
-        ephemerals(&s, USER),
-        [already, already, "Junees does not know this button."]
+        notes,
+        ["Junees does not know this button.", already, already]
     );
     assert!(updates(&s).is_empty());
     assert!(!file.exists());
