@@ -496,6 +496,11 @@ a.button {
   font-size: 14px;
 }
 
+.session-totals {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 .session-filter label {
   font-size: 14px;
   font-weight: 600;

@@ -56,6 +56,7 @@ class FakeElement extends FakeNode {
     this.attributes = new Map();
     this.listeners = new Map();
     this.disabled = false;
+    this.hidden = false;
     this.ownValue = null;
     this.classList = {
       add: (name) => {
