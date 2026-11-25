@@ -43,6 +43,54 @@ export function sortSessions(sessions, sort) {
   });
 }
 
+const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+
+/** The sum of the values that are numbers, or `null` when none is. */
+function sumKnown(sessions, field) {
+  let sum = null;
+  for (const session of sessions) {
+    if (isNumber(session[field])) sum = (sum ?? 0) + session[field];
+  }
+  return sum;
+}
+
+/**
+ * Totals of the sessions passed in (the ones on screen). A value that is not
+ * a number is left out of its own sum instead of counting as 0, and a sum with
+ * no known value is `null`. `unpriced` counts the sessions whose cost is
+ * unknown, so a free session (0) and an unknown one stay apart.
+ */
+export function sumSessions(sessions) {
+  return {
+    count: sessions.length,
+    messages: sumKnown(sessions, "messages"),
+    input_tokens: sumKnown(sessions, "input_tokens"),
+    output_tokens: sumKnown(sessions, "output_tokens"),
+    cost_usd: sumKnown(sessions, "cost_usd"),
+    unpriced: sessions.filter((session) => !isNumber(session.cost_usd)).length,
+  };
+}
+
+/** The totals line for {@link sumSessions}; empty when no session is shown. */
+export function totalsText(totals) {
+  if (totals.count === 0) return "";
+  const input = totals.input_tokens;
+  const output = totals.output_tokens;
+  const tokens = input === null && output === null ? null : (input ?? 0) + (output ?? 0);
+  const unpriced = `비용을 모르는 세션 ${formatInt(totals.unpriced)}개`;
+  const cost =
+    totals.cost_usd === null
+      ? `비용 모름 (${unpriced})`
+      : totals.unpriced > 0
+        ? `비용 ${formatUsd(totals.cost_usd)} (${unpriced} 제외)`
+        : `비용 ${formatUsd(totals.cost_usd)}`;
+  return [
+    `보이는 세션 ${formatInt(totals.count)}개 합계: 메시지 ${formatInt(totals.messages)}`,
+    `토큰 ${formatInt(tokens)} (입력 ${formatInt(input)} · 출력 ${formatInt(output)})`,
+    cost,
+  ].join(" · ");
+}
+
 /**
  * The preview without the title it starts with: the server takes the title
  * from the first line of the same message, so showing both repeats it.
@@ -141,6 +189,9 @@ function mountFilter(root) {
     SORTS.map((option) => el("option", { value: option.value }, option.label)),
   );
   const summary = el("p", { class: "summary", role: "status" });
+  // Not a live region: the status line above already announces each change,
+  // so the totals are not read out again on every keystroke.
+  const totals = el("p", { class: "summary session-totals", id: "session-totals" });
   const results = el("div");
 
   function paintResults() {
@@ -154,6 +205,10 @@ function mountFilter(root) {
         : `세션 ${total}개`;
     if (summary.textContent !== message) summary.textContent = message;
     clear.disabled = !input.value;
+    // Sorting does not change the sum; an empty list shows no totals line.
+    const totalsLine = totalsText(sumSessions(matches));
+    if (totals.textContent !== totalsLine) totals.textContent = totalsLine;
+    totals.hidden = totalsLine === "";
 
     const active = document.activeElement;
     const focusId = results.contains(active) ? active.id : null;
@@ -194,7 +249,7 @@ function mountFilter(root) {
     el(
       "p",
       { class: "summary", id: "session-search-scope" },
-      `이미 불러온 최근 세션 최대 ${LIMIT}개에서만 검색하고 정렬합니다.`,
+      `이미 불러온 최근 세션 최대 ${LIMIT}개에서만 검색하고 정렬하며, 합계도 이 안에서만 냅니다.`,
     ),
   );
   const update = (data, at) => {
@@ -203,7 +258,7 @@ function mountFilter(root) {
     paintResults();
   };
   mountedFilters.set(filter, update);
-  root.replaceChildren(filter, summary, results);
+  root.replaceChildren(filter, summary, totals, results);
   return update;
 }
 
