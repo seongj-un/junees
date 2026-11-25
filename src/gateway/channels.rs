@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use super::Log;
-use super::ask::{AnswerSlot, DiscordAsk, Press, fence_safe};
+use super::ask::{AnswerSlot, DiscordAsk, Press, Pressed, fence_safe};
 use super::engine::{Conversation, Engines, Progress};
 use super::platform::{Attached, Kind, Platform};
 use super::sessions::{self, SessionIndex};
@@ -191,13 +191,14 @@ impl<P: Platform> Channels<P> {
     }
 
     /// A press on an approval question's button in `channel` (the router
-    /// checked that the user may answer); false when it answers nothing:
-    /// no question waits there, or another one does
-    /// ([`AnswerSlot::press`]).
-    pub fn press(&self, channel: &str, press: Press) -> bool {
+    /// checked that the user may answer). It answers nothing when no
+    /// question waits there, or another one does; while the question is
+    /// still being posted the press is held, and the caller learns what
+    /// it did once the post ends ([`AnswerSlot::press`]).
+    pub fn press(&self, channel: &str, press: Press) -> Pressed {
         self.channels
             .get(channel)
-            .is_some_and(|known| known.state.answers.press(press))
+            .map_or(Pressed::Refused, |known| known.state.answers.press(press))
     }
 
     /// A message of `user` for the bot that is no command: the answer to
@@ -957,12 +958,18 @@ async fn show<P: Platform>(
             flush_tools(shared, channel, tools).await;
             match shared.platform.post_question(channel, &question).await {
                 Ok(Some(message)) => answers.posted(&question.id, message),
-                Ok(None) => shared.say(channel, &question.text).await,
+                Ok(None) => {
+                    answers.unposted(&question.id);
+                    shared.say(channel, &question.text).await;
+                }
                 // The platform posted what it could without buttons; text
                 // answers still work.
-                Err(err) => (shared.log)(&format!(
-                    "{place} {channel}: cannot post the question with buttons: {err:#}"
-                )),
+                Err(err) => {
+                    answers.unposted(&question.id);
+                    (shared.log)(&format!(
+                        "{place} {channel}: cannot post the question with buttons: {err:#}"
+                    ));
+                }
             }
         }
         Progress::Answered { id, outcome } => {
