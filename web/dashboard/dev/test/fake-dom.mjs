@@ -2,7 +2,8 @@
 // under `node --test`. It is not a test file itself (no `.test.mjs` name).
 //
 // What it models on purpose, because the screens rely on it:
-// - attributes and the `hidden` / `disabled` / `id` properties that mirror them
+// - attributes and the `hidden` / `disabled` / `id` / `className` / `dataset`
+//   properties that mirror them
 // - moving a node detaches it from its old parent, and detaching the focused
 //   node (or an ancestor) drops focus to the body, as browsers do
 // - `detached` counts how often a node left its parent, so a test can tell a
@@ -78,6 +79,8 @@ class FakeElement extends FakeNode {
   #attrs = new Map();
   #listeners = new Map();
   value = "";
+  /** A checkbox's state. A test sets it and fires `change`, as a click on the box does. */
+  checked = false;
 
   constructor(tag) {
     super();
@@ -133,9 +136,47 @@ class FakeElement extends FakeNode {
     this.#flag("open", on);
   }
 
+  get className() {
+    return this.getAttribute("class") ?? "";
+  }
+
+  set className(names) {
+    this.setAttribute("class", names);
+  }
+
   get classList() {
-    const names = (this.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
-    return { contains: (name) => names.includes(name) };
+    const names = () => this.className.split(/\s+/).filter(Boolean);
+    const write = (list) => this.setAttribute("class", list.join(" "));
+    const list = {
+      contains: (name) => names().includes(name),
+      add: (name) => {
+        if (!list.contains(name)) write([...names(), name]);
+      },
+      remove: (name) => {
+        if (list.contains(name)) write(names().filter((other) => other !== name));
+      },
+      toggle: (name, on = !list.contains(name)) => {
+        if (on) list.add(name);
+        else list.remove(name);
+        return on;
+      },
+    };
+    return list;
+  }
+
+  /** `dataset.someName` reads and writes the `data-some-name` attribute. */
+  get dataset() {
+    const attr = (key) => `data-${String(key).replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+    return new Proxy(
+      {},
+      {
+        get: (_target, key) => (typeof key === "string" ? (this.getAttribute(attr(key)) ?? undefined) : undefined),
+        set: (_target, key, value) => {
+          this.setAttribute(attr(key), value);
+          return true;
+        },
+      },
+    );
   }
 
   get children() {

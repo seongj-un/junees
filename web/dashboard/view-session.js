@@ -198,9 +198,85 @@ export function messageView(message, now, draftKeys = NO_DRAFTS) {
       el("span", { class: "msg-index" }, `${formatInt(message.index + 1)}번째`),
     ),
     blocks.length
-      ? blocks.map((block, n) => blockView(block, message.index, n, draftKeys))
+      ? blocks.map((block, n) => {
+          const node = blockView(block, message.index, n, draftKeys);
+          // Marked, not left out: 도구 호출과 결과 숨기기 hides it in place.
+          if (hiddenWithTools(block, `${message.index}:${n}`, draftKeys)) node.setAttribute("data-tool", "");
+          return node;
+        })
       : el("p", { class: "msg-note" }, "내용 없음"),
   );
+}
+
+/**
+ * Whether a block is a tool call, a tool result or a server tool block (the
+ * kinds the screen names, and any other kind named `..._tool_use` or
+ * `..._tool_result`). Text, a Junees notice, an image, thinking and a kind
+ * the screen does not know are not.
+ */
+export function isToolBlock(block) {
+  const type = block?.type;
+  if (type === "tool_use" || type === "tool_result") return true;
+  if (type !== "other" || typeof block.kind !== "string") return false;
+  return Object.hasOwn(OTHER_KINDS, block.kind) || /_tool_(use|result)$/.test(block.kind);
+}
+
+/**
+ * Whether 도구 호출과 결과 숨기기 takes the block at `key`
+ * (`"<message index>:<block number>"`) out. The result of a `draft` call stays:
+ * its card is the text the person asked for, not a tool's output to the model.
+ */
+function hiddenWithTools(block, key, draftKeys) {
+  return isToolBlock(block) && !draftKeys.has(key);
+}
+
+/**
+ * The messages as read with tool calls and results hidden:
+ * `{ messages, hiddenMessages, hiddenBlocks }`. A message keeps its other
+ * blocks; one that no tool block was taken from is the same object. A message
+ * is left out whole when nothing to read remains after its tool blocks: no
+ * block at all, or only "생각 과정" lines, which carry no content. A message
+ * without any tool block is never left out.
+ */
+export function conversationOnly(messages, draftKeys = NO_DRAFTS) {
+  const kept = [];
+  let hiddenMessages = 0;
+  let hiddenBlocks = 0;
+  for (const message of messages) {
+    const blocks = Array.isArray(message?.blocks) ? message.blocks : [];
+    const left = blocks.filter((block, n) => !hiddenWithTools(block, `${message.index}:${n}`, draftKeys));
+    hiddenBlocks += blocks.length - left.length;
+    if (left.length === blocks.length) kept.push(message);
+    else if (left.every((block) => block?.type === "thinking")) hiddenMessages += 1;
+    else kept.push({ ...message, blocks: left });
+  }
+  return { messages: kept, hiddenMessages, hiddenBlocks };
+}
+
+/** Added to the 찾기 lines while tool calls and results are hidden. */
+export const HIDE_FIND_NOTE = "숨긴 도구 호출과 결과 안은 찾지 않습니다.";
+
+/** The status line while tool calls and results are hidden and nothing is looked for. */
+export function hideSummary(loaded, hiddenMessages, hiddenBlocks) {
+  if (hiddenBlocks <= 0) return "불러온 메시지에 숨길 도구 호출이나 결과가 없습니다.";
+  const blocks = `도구 호출과 결과 ${formatInt(hiddenBlocks)}개를 숨겼습니다.`;
+  return hiddenMessages > 0
+    ? `${blocks} 불러온 메시지 ${formatInt(loaded)}개 중 ${formatInt(hiddenMessages)}개는 남는 글이 없어 통째로 숨겼습니다.`
+    : blocks;
+}
+
+/** The status line while tool calls and results are hidden and a query is in the input. */
+export function hideFindSummary(loaded, hiddenMessages, matched) {
+  return hiddenMessages > 0
+    ? `불러온 메시지 ${formatInt(loaded)}개 중 도구 호출과 결과만 든 ${formatInt(hiddenMessages)}개를 뺀 ${formatInt(loaded - hiddenMessages)}개에서 ${formatInt(matched)}개를 찾았습니다.`
+    : `도구 호출과 결과를 숨기고, 불러온 메시지 ${formatInt(loaded)}개 중 ${formatInt(matched)}개를 찾았습니다.`;
+}
+
+/** What to do when hiding tool calls and results leaves no message on screen. */
+export function hideEmptyBody(left) {
+  return left > 0
+    ? "불러온 메시지가 모두 도구 호출이나 결과뿐입니다. 아래 더 보기로 메시지를 더 불러오거나 체크를 풀어 보세요."
+    : "이 세션의 메시지가 모두 도구 호출이나 결과뿐입니다. 체크를 풀면 다시 볼 수 있습니다.";
 }
 
 /** The "back to the list" link shown next to the title. */
@@ -287,6 +363,8 @@ function mountFind(root, id) {
     "aria-describedby": "session-find-scope",
   });
   const clear = el("button", { type: "button", class: "button button-secondary", disabled: true }, "지우기");
+  // Off at first and kept nowhere but in this node, like the query.
+  const toggle = el("input", { id: "session-hide-tools", type: "checkbox" });
   const scope = el("p", { class: "summary", id: "session-find-scope" });
   const status = el("p", { class: "summary", role: "status" });
   const headCard = el("div", { class: "card session-head" });
@@ -297,9 +375,11 @@ function mountFind(root, id) {
     el("label", { for: input.id }, "불러온 메시지 안에서 찾기"),
     el("div", { class: "session-filter-fields" }, input, clear),
     scope,
+    el("span", { class: "check-toggle" }, toggle, el("label", { for: toggle.id }, "도구 호출과 결과 숨기기")),
   );
-  const shell = { id, input, clear, scope, status, headCard, body, paint: () => {} };
+  const shell = { id, input, clear, toggle, scope, status, headCard, body, paint: () => {} };
   input.addEventListener("input", () => shell.paint());
+  toggle.addEventListener("change", () => shell.paint());
   clear.addEventListener("click", () => {
     input.value = "";
     input.focus();
@@ -343,9 +423,11 @@ export function render(root, data, ctx) {
   // Keep the input node itself across refreshes, with its caret and IME state.
   const mounted = mountedFinds.get(root.children[1]);
   const shell = mounted?.id === data.id ? mounted : mountFind(root, data.id);
-  const { input, clear, scope, status } = shell;
+  const { input, clear, toggle, scope, status } = shell;
 
   const draftKeys = draftResultKeys(messages);
+  // The draft results as the list drew them: a card on screen is never counted as hidden.
+  const drawn = new Set(draftKeys);
   const list = el("ol", { class: "msgs", "aria-label": "대화" }, messages.map((m) => messageView(m, now, draftKeys)));
   const empty = el("div", { hidden: true });
   const count = el("p", { class: "summary", "aria-live": "polite" });
@@ -357,24 +439,43 @@ export function render(root, data, ctx) {
     if (node.textContent !== text) node.textContent = text;
   };
 
-  /** Shows only the messages that hold the input's text; returns how many of `among` do. */
+  /**
+   * Shows only the messages that hold the input's text, without their tool
+   * blocks while the box is checked; returns those of `among` left on screen.
+   */
   const applyFind = (among = []) => {
     const query = input.value;
-    const matched = new Set(findMessages(messages, query).map((m) => m.index));
+    const hide = toggle.checked === true;
+    // With tools hidden, 찾기 looks only in what stays on screen.
+    const view = hide ? conversationOnly(messages, drawn) : { messages, hiddenMessages: 0, hiddenBlocks: 0 };
+    const matched = new Set(findMessages(view.messages, query).map((m) => m.index));
     // Hiding instead of rebuilding keeps folded blocks and draft cards as they are.
-    for (const item of list.children) item.hidden = !matched.has(Number(item.getAttribute("data-index")));
+    for (const item of list.children) {
+      item.hidden = !matched.has(Number(item.getAttribute("data-index")));
+      for (const part of item.children) if (part.hasAttribute("data-tool")) part.hidden = hide;
+    }
     const left = more.done ? 0 : Math.max(0, total - more.next);
     const none = matched.size === 0;
     list.hidden = none;
     empty.hidden = !none;
-    empty.replaceChildren(
-      ...(none ? [notice({ title: "찾는 낱말이 든 메시지가 없습니다", body: findEmptyBody(left) })] : []),
-    );
+    const nothing = [];
+    if (none && hide && view.messages.length === 0) {
+      nothing.push(notice({ title: "도구 호출과 결과를 숨기면 보일 메시지가 없습니다", body: hideEmptyBody(left) }));
+    } else if (none) {
+      const body = hide ? `${findEmptyBody(left)} ${HIDE_FIND_NOTE}` : findEmptyBody(left);
+      nothing.push(notice({ title: "찾는 낱말이 든 메시지가 없습니다", body }));
+    }
+    empty.replaceChildren(...nothing);
     // The shared lines belong to the list on screen, not to one a refresh replaced.
     if (list.isConnected) {
-      // Left in place and emptied, so the next result is announced.
-      setText(status, findSummary(query, messages.length, matched.size));
-      setText(scope, findScope(left));
+      // One line for both controls, left in place and emptied, so a change is announced once.
+      const summary = !hide
+        ? findSummary(query, messages.length, matched.size)
+        : needleOf(query)
+          ? hideFindSummary(messages.length, view.hiddenMessages, matched.size)
+          : hideSummary(messages.length, view.hiddenMessages, view.hiddenBlocks);
+      setText(status, summary);
+      setText(scope, hide ? `${findScope(left)} ${HIDE_FIND_NOTE}` : findScope(left));
       clear.disabled = !input.value;
     }
     return among.filter((m) => matched.has(m.index));
@@ -408,6 +509,8 @@ export function render(root, data, ctx) {
       more.messages = mergePages(more.messages, added);
       messages = mergePages(messages, added);
       const pairs = draftResultKeys(messages);
+      const fresh = new Set(added.map((m) => m.index));
+      for (const key of pairs) if (fresh.has(Number(key.split(":")[0]))) drawn.add(key);
       list.append(...added.map((m) => messageView(m, now, pairs)));
       button.disabled = false;
       update();
@@ -419,10 +522,13 @@ export function render(root, data, ctx) {
       if (visible.length) list.querySelector(`[data-index="${visible[0].index}"]`)?.focus();
       else if (added.length && list.isConnected) (button.hidden ? input : button).focus();
       if (list.isConnected) {
+        const unseen = added.length - visible.length;
         ctx.announce(
           finding
             ? `메시지 ${formatInt(added.length)}개를 더 불러왔습니다. 그중 ${formatInt(visible.length)}개에 찾는 낱말이 있습니다.`
-            : `메시지 ${formatInt(added.length)}개를 더 불러왔습니다.`,
+            : unseen > 0
+              ? `메시지 ${formatInt(added.length)}개를 더 불러왔습니다. 그중 도구 호출과 결과만 든 ${formatInt(unseen)}개는 숨겼습니다.`
+              : `메시지 ${formatInt(added.length)}개를 더 불러왔습니다.`,
         );
       }
     } catch (err) {
