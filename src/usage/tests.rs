@@ -1189,3 +1189,206 @@ fn draft_lines_count_as_drafts_by_their_model_and_take_no_subagent_journal() {
         ]
     );
 }
+
+const FAKE_KEY_A: &str = concat!("sk-", "ant-fixtureNotARealAPIKey");
+const FAKE_KEY_B: &str = concat!("sk-", "ant-otherFixtureNotARealKey");
+
+/// No piece of either fake key is left in `text`.
+fn assert_no_key(text: &str) {
+    for piece in [
+        FAKE_KEY_A,
+        FAKE_KEY_B,
+        concat!("sk-", "ant-"),
+        "fixtureNotAReal",
+        "FixtureNotAReal",
+    ] {
+        assert!(!text.contains(piece), "a key piece is in\n{text}");
+    }
+}
+
+/// Two sessions whose folder and model names each hold a different key,
+/// and a plain one.
+fn credential_home(now: u64) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    journal(
+        home.path(),
+        "20261111-110000-aaaa",
+        json!({"created_at": now, "cwd": format!("/work/{FAKE_KEY_A}")}),
+        &[usage_line("usage", now, 10, 1, Some(FAKE_KEY_A))],
+    );
+    journal(
+        home.path(),
+        "20261111-110000-bbbb",
+        json!({"created_at": now, "cwd": format!("/work/{FAKE_KEY_B}")}),
+        &[usage_line("usage", now, 2000, 2, Some(FAKE_KEY_B))],
+    );
+    journal(
+        home.path(),
+        "20261111-110000-cccc",
+        json!({"created_at": now, "cwd": "/plain"}),
+        &[usage_line("usage", now, 300, 3, Some("claude-opus-4-7"))],
+    );
+    home
+}
+
+fn text_report(home: &Path, cwd: &str, by: By, all: bool, now: u64) -> String {
+    period(
+        home,
+        Path::new(cwd),
+        &UsageArgs {
+            days: 1,
+            by,
+            all,
+            ..UsageArgs::default()
+        },
+        &Prices::default(),
+        &zone("UTC"),
+        now,
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_text_table_and_notes_redact_credential_labels_without_merging_rows() {
+    let now = at(2026, 11, 11, 12, 0);
+    let home = credential_home(now);
+
+    for by in [By::Folder, By::Model] {
+        let text = text_report(home.path(), "/work", by, true, now);
+        assert_no_key(&text);
+        let lines: Vec<&str> = text.lines().collect();
+        let plain = if by == By::Folder {
+            "/plain"
+        } else {
+            "claude-opus-4-7"
+        };
+        // The label column is as wide as the longest label shown
+        // (`[redacted]` or the plain model name), not as the keys. Most
+        // tokens first, by the keys before masking: two rows, not one.
+        let width = plain.len().max("[redacted]".len());
+        let start = |label: &str, input: &str| format!("{label:<width$}  {input:>5}  ");
+        let want = [
+            start("", "input"),
+            start("[redacted]", "2,000"),
+            start(plain, "300"),
+            start("[redacted]", "10"),
+            start("total", "2,310"),
+        ];
+        assert!(lines.len() >= 6, "{text}");
+        for (line, want) in lines[1..6].iter().zip(&want) {
+            assert!(line.starts_with(want.as_str()), "{text}");
+        }
+        assert!(
+            text.contains("No price is known for [redacted], [redacted]: their tokens"),
+            "{text}"
+        );
+    }
+
+    // The folder in the opening line, with and without usage in it.
+    let here = format!("/work/{FAKE_KEY_A}");
+    let text = text_report(home.path(), &here, By::Source, false, now);
+    assert_no_key(&text);
+    assert!(
+        text.starts_with("Usage in this folder ([redacted]) today (2026-11-11, UTC), by source:\n"),
+        "{text}"
+    );
+    assert!(text.contains("\nterminal  "), "{text}");
+    let empty = format!("/empty/{FAKE_KEY_B}");
+    let text = text_report(home.path(), &empty, By::Day, false, now);
+    assert_eq!(
+        text,
+        "No usage recorded in this folder ([redacted]) today (2026-11-11, UTC).\n\
+         --all shows every folder.\n"
+    );
+}
+
+#[test]
+fn the_session_report_redacts_credential_model_names() {
+    let records = vec![
+        Record {
+            ts: 1,
+            kind: Kind::Call,
+            model: FAKE_KEY_A.into(),
+            usage: usage(10, 0, 0, 1, 0),
+            one_call: true,
+        },
+        Record {
+            ts: 2,
+            kind: Kind::Summary,
+            model: "claude-sonnet-4-6".into(),
+            usage: usage(1000, 0, 0, 100, 0),
+            one_call: true,
+        },
+    ];
+    let mut live = Usage::default();
+    for record in &records {
+        live.add(record.usage);
+    }
+    live.add(usage(5, 0, 0, 0, 0));
+    let live = Live {
+        usage: live,
+        model: FAKE_KEY_B.into(),
+        claude_code: false,
+    };
+    let text = session(
+        Some("s-1"),
+        &records,
+        &Stats::default(),
+        &live,
+        &Prices::default(),
+    );
+    assert_no_key(&text);
+    let labels: Vec<&str> = text
+        .lines()
+        .skip(2)
+        .take(4)
+        .map(|line| line.split("  ").next().unwrap())
+        .collect();
+    // The whole label is masked: the saved call and the unsaved rest stay
+    // two rows.
+    assert_eq!(
+        labels,
+        [
+            "[redacted]",
+            "summaries (claude-sonnet-4-6)",
+            "[redacted]",
+            "total"
+        ]
+    );
+    assert!(
+        text.contains("No price is known for [redacted], [redacted]: their tokens"),
+        "{text}"
+    );
+}
+
+#[test]
+fn plain_labels_are_shown_as_they_are() {
+    let home = period_home();
+    let now = at(2026, 11, 11, 12, 0);
+    for by in [By::Day, By::Model, By::Folder, By::Source] {
+        for all in [true, false] {
+            let text = run(home.path(), 7, by, all, "UTC", now);
+            assert!(!text.contains("[redacted]"), "{text}");
+        }
+    }
+    let text = run(home.path(), 7, By::Folder, true, "UTC", now);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[0],
+        "Usage in every folder the last 7 days (2026-11-05 to 2026-11-11, UTC), by folder:"
+    );
+    assert!(lines[1].starts_with("        input  "), "{text}");
+    assert!(lines[2].starts_with("/other  4,000  "), "{text}");
+    assert!(lines[3].starts_with("/work   3,500  "), "{text}");
+    assert!(lines[4].starts_with("total   7,500  "), "{text}");
+    assert!(
+        text.contains("No price is known for mystery-model: their tokens"),
+        "{text}"
+    );
+    let text = run(home.path(), 7, By::Model, false, "UTC", now);
+    assert!(
+        text.starts_with("Usage in this folder (/work) the last 7 days"),
+        "{text}"
+    );
+    assert!(text.contains("\nclaude-sonnet-4-6  1,500  "), "{text}");
+}
