@@ -257,6 +257,8 @@ tests/
   dashboard_chat.rs    실제 바이너리 junees dashboard --chat과 루프백 가짜 API: 이벤트 스트림의 턴, 승인 y/n과 명령 실행 여부, 턴 중 메시지 409, 닫힌 질문 409, after로 다시 연결, 취소(질문 대기 중, 모델 대기 중), --chat 없으면 404, Origin/토큰/본문/크기 검사, 이벤트와 로그에 비밀 값 없음, claude-code 거절
   update.rs            실제 바이너리로 junees update --check(가짜 릴리스 서버), --help와 잘못된 인자, 루프백 아닌 JUNEES_DOWNLOAD_BASE 거절, 대화의 /update(바이너리는 바꾸지 않는다)
   usage.rs             실제 바이너리와 가짜 API로 대화의 /usage(호출, /model 전환 뒤 다른 가격, 합계), 기록 줄의 모델, junees usage(모델별, 날짜별, prices 덮어쓰기, 폴더 범위와 --all, 도움말과 오류) 검증
+  usage_json.rs        실제 바이너리와 합성 세션 기록으로 junees usage --json(스키마 버전과 기간, 모델별 행 순서와 비용 필드, prices 덮어쓰기와 구독 턴, 지금 폴더 범위의 scope.folder, 빈 보고서, 캐시 적중률의 0·1000·null, 텍스트 표와 같은 비용, 메시지·도구 출력·세션 ID·키가 출력에 없음, 기록 파일이 바뀌지 않음, --json=true와 --days=0 오류) 검증
+  usage_text_mask.rs   실제 바이너리와 합성 세션 기록으로 junees usage 텍스트 표의 이름 가리기(키가 든 폴더·모델 이름은 [redacted], 가린 두 이름은 두 행, 가격을 모르는 모델 안내의 목록, 첫 줄의 지금 폴더, 키 없는 폴더는 그대로, 출력에 키 조각 없음, 기록 파일이 바뀌지 않음) 검증
   session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```
