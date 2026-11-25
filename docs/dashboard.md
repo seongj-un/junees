@@ -69,6 +69,8 @@ junees dashboard --chat --dir ~/work/x # 페이지에서 ~/work/x의 Junees와 �
 - `messages`: 기록된 사용자와 어시스턴트 메시지 수입니다. Claude Code 턴 하나는 2로 셉니다.
 - `input_tokens`: 캐시를 거치지 않은 입력 토큰입니다. `/api/usage`의 `input_tokens`와 같은 기준입니다.
 
+세션 화면의 정렬(최근 순, 비용 큰 순, 메시지 많은 순)은 이미 받은 이 목록 안에서만 브라우저가 하고, 요청을 새로 보내지 않습니다. `cost_usd`가 `null`인 세션은 비용 큰 순에서 맨 뒤에 두며, 선택한 정렬은 주소나 저장소에 남기지 않아 화면을 떠나면 최근 순으로 돌아갑니다.
+
 ### `GET /api/usage?days=30`
 
 오늘을 포함한 최근 `days`일(1부터 365, 기본 30)의 사용량을 날짜별, 모델별로 묶어 보냅니다. 모든 폴더가 대상입니다. 날짜는 `timezone` 설정(없으면 시스템 시간대)을 따르고, 오래된 날부터 보냅니다. 모델 이름은 `junees usage --by model`과 같습니다(Claude Code 턴은 `claude-code (<모델>)`).
