@@ -21,6 +21,8 @@ import {
   render,
 } from "../../view-session.js";
 
+const STATUS_LINE = "[draft] levels 3/3, 3 sections, failed sections: none, 9 calls";
+
 const text = (index, role, body) => ({ index, role, blocks: [{ type: "text", text: body }] });
 
 // With every message loaded and the box checked: 0, 1, 4, 6 and 7 stay,
@@ -54,7 +56,20 @@ const talk = Object.freeze([
     ],
   },
   { index: 5, role: "assistant", blocks: [{ type: "tool_use", name: "draft", tool_use_id: "d1", input_preview: '{"request":"안내문"}' }] },
-  { index: 6, role: "user", blocks: [{ type: "tool_result", tool_use_id: "d1", text_preview: "# 배포 안내\n## 개요\n롤백 절차를 적은 본문" }] },
+  {
+    index: 6,
+    role: "user",
+    blocks: [
+      {
+        type: "tool_result",
+        tool_use_id: "d1",
+        // As the server sends a result it read a status from: the `draft` object, and the
+        // `---` and `[draft] ...` line Junees puts at the end of the text.
+        text_preview: `# 배포 안내\n## 개요\n롤백 절차를 적은 본문\n---\n${STATUS_LINE}`,
+        draft: { stop: "done", levels: 3, levels_done: 3, calls: 9 },
+      },
+    ],
+  },
   text(7, "assistant", "정리했습니다."),
 ]);
 
@@ -309,7 +324,8 @@ test("with the box checked 찾기 looks only in what is on screen", async (t) =>
   await s.check(true);
 
   // Words that are only in a hidden call or result find nothing.
-  for (const word of ["read_file", "docs/", "cargo build", "롤백 방법", "draft"]) {
+  // The status line of the kept draft card is cut from the card, so it is not found either.
+  for (const word of ["read_file", "docs/", "cargo build", "롤백 방법", "draft", "[draft]", "levels 3/3", "9 calls", "failed sections"]) {
     await s.input.type(word);
     assert.deepEqual(s.shown(), [], word);
   }
@@ -337,6 +353,74 @@ test("with the box checked 찾기 looks only in what is on screen", async (t) =>
   assert.match(s.text(1), /read_file/);
   await s.input.type("배포");
   assert.deepEqual(s.shown(), [0, 2, 6]);
+});
+
+test("with the box checked a draft card is searched as it draws, and unchecked as the server sent it", async (t) => {
+  const s = screen(t, "hide-find-draft");
+  await s.check(true);
+  // The card shows the article, not the status line the server read its numbers from.
+  assert.doesNotMatch(s.text(6), /\[draft\]|levels 3\/3/);
+  await s.input.type("롤백 절차");
+  assert.deepEqual(s.shown(), [6]);
+  await s.input.type("[draft]");
+  assert.deepEqual(s.shown(), []);
+
+  // Unchecked, the old search is as before: it reads the text the server sent.
+  await s.check(false);
+  assert.deepEqual(s.shown(), [6]);
+  assert.equal(s.status(), findSummary("[draft]", 8, 1));
+});
+
+test("with the box checked a cut draft result is searched only in the part the card draws", async (t) => {
+  const messages = [
+    { index: 0, role: "assistant", blocks: [{ type: "tool_use", name: "draft", tool_use_id: "d9", input_preview: "{}" }] },
+    {
+      index: 1,
+      role: "user",
+      blocks: [
+        {
+          type: "tool_result",
+          tool_use_id: "d9",
+          text_preview: "# 안내문\n## 개요\n앞부분 본문",
+          // A cut result with no `omitted_chars`: the card does not draw the tail.
+          truncated: true,
+          text_tail: "꼬리말\n---\n[draft] levels 2/2",
+          draft: { stop: "done", levels: 2, levels_done: 2, calls: 4 },
+        },
+        {
+          type: "tool_result",
+          tool_use_id: "d9",
+          text_preview: "# 둘째 안내\n## 개요\n둘째 본문",
+          truncated: true,
+          omitted_chars: 700,
+          text_tail: "끝 문단\n---\n[draft] levels 2/2",
+          draft: { stop: "done", levels: 2, levels_done: 2, calls: 4 },
+        },
+      ],
+    },
+  ];
+  const s = screen(t, "hide-find-cut", { messages });
+  await s.check(true);
+  await s.input.type("앞부분 본문");
+  assert.deepEqual(s.shown(), [1]);
+  // Not drawn: the tail of the first result and the status line of the second.
+  await s.input.type("꼬리말");
+  assert.deepEqual(s.shown(), []);
+  await s.input.type("levels 2/2");
+  assert.deepEqual(s.shown(), []);
+  // Drawn: the tail of a result with a known gap, without its status line.
+  await s.input.type("끝 문단");
+  assert.deepEqual(s.shown(), [1]);
+});
+
+test("a block kind named like an object property reads as an unknown kind", (t) => {
+  const kinds = ["constructor", "toString", "__proto__", "hasOwnProperty"];
+  const messages = [...kinds, "web_search_tool_result"].map((kind, index) => ({ index, role: "assistant", blocks: [{ type: "other", kind }] }));
+  const s = screen(t, "hide-kinds", { messages });
+  kinds.forEach((kind, index) => {
+    assert.match(s.text(index), new RegExp(`기타 블록\\(${kind}\\)\\. 내용은 대시보드에 보내지 않습니다\\.`), kind);
+  });
+  assert.match(s.text(4), /웹 검색 결과\. 내용은/);
 });
 
 test("더 보기 keeps the box checked, hides the tools of the new messages and sends the state nowhere", async (t) => {

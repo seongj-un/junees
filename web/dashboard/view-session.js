@@ -1,7 +1,7 @@
 // 세션 상세: one session's conversation, 100 messages at a time.
 
 import { noticeLines } from "./checkpoints.js";
-import { draftResultKeys } from "./draft.js";
+import { draftResultKeys, resultText } from "./draft.js";
 import { code, el, notice, pathCode, timeEl } from "./dom.js";
 import { formatDateTime, formatInt, parseTime } from "./format.js";
 import { chatHash } from "./routes.js";
@@ -168,7 +168,7 @@ function blockView(block, messageIndex, n, draftKeys) {
       return el(
         "p",
         { class: "msg-note" },
-        `${OTHER_KINDS[block.kind] ?? `기타 블록(${block.kind ?? "종류 없음"})`}. 내용은 대시보드에 보내지 않습니다.`,
+        `${Object.hasOwn(OTHER_KINDS, block.kind) ? OTHER_KINDS[block.kind] : `기타 블록(${block.kind ?? "종류 없음"})`}. 내용은 대시보드에 보내지 않습니다.`,
       );
     default:
       return el("p", { class: "msg-note" }, `표시하지 않는 내용(${block.type ?? "알 수 없음"})`);
@@ -299,9 +299,22 @@ const needleOf = (query) => searchText(query).trim();
  * end. A part the server hid (a block, a result's first part or its end) is
  * left out: its `[hidden: ...]` line is the server's, not the message's.
  */
-export function messageSearchText(message) {
+export function messageSearchText(message, draftKeys = null) {
   const parts = [];
-  for (const block of Array.isArray(message?.blocks) ? message.blocks : []) {
+  const blocks = Array.isArray(message?.blocks) ? message.blocks : [];
+  for (const [n, block] of blocks.entries()) {
+    if (draftKeys !== null) {
+      // Tools hidden: only what is on screen. A hidden tool block adds nothing,
+      // and a draft card is read as it draws: resultText cuts the status line off.
+      const key = `${message?.index}:${n}`;
+      if (hiddenWithTools(block, key, draftKeys)) continue;
+      if (block?.type === "tool_result") {
+        const { head, tail } = resultText(block);
+        if (!isHiddenBlock(head)) parts.push(head);
+        if (!isHiddenBlock(tail)) parts.push(tail);
+        continue;
+      }
+    }
     if (block?.type === "text") {
       if (!isHiddenBlock(block.text)) parts.push(block.text);
     } else if (block?.type === "tool_use") {
@@ -317,16 +330,19 @@ export function messageSearchText(message) {
 }
 
 /** Whether a message holds the query: a literal part of its text, any letter case. */
-export function messageMatches(message, query) {
+export function messageMatches(message, query, draftKeys = null) {
   const needle = needleOf(query);
   if (!needle) return true;
-  return searchText(messageSearchText(message)).includes(needle);
+  return searchText(messageSearchText(message, draftKeys)).includes(needle);
 }
 
-/** The messages that hold the query, in their order; all of them for an empty query. */
-export function findMessages(messages, query) {
+/**
+ * The messages that hold the query, in their order; all of them for an empty
+ * query. With `draftKeys` (tools hidden) only the text on screen is searched.
+ */
+export function findMessages(messages, query, draftKeys = null) {
   if (!needleOf(query)) return messages;
-  return messages.filter((message) => messageMatches(message, query));
+  return messages.filter((message) => messageMatches(message, query, draftKeys));
 }
 
 /** The line under the input: how far 찾기 reaches. `left` is the count not loaded yet. */
@@ -448,7 +464,11 @@ export function render(root, data, ctx) {
     const hide = toggle.checked === true;
     // With tools hidden, 찾기 looks only in what stays on screen.
     const view = hide ? conversationOnly(messages, drawn) : { messages, hiddenMessages: 0, hiddenBlocks: 0 };
-    const matched = new Set(findMessages(view.messages, query).map((m) => m.index));
+    // Searched as loaded, not as trimmed, so a block keeps the number its draft key was made with.
+    const onScreen = new Set(view.messages.map((m) => m.index));
+    const matched = new Set(
+      (hide ? findMessages(messages.filter((m) => onScreen.has(m.index)), query, drawn) : findMessages(messages, query)).map((m) => m.index),
+    );
     // Hiding instead of rebuilding keeps folded blocks and draft cards as they are.
     for (const item of list.children) {
       item.hidden = !matched.has(Number(item.getAttribute("data-index")));
