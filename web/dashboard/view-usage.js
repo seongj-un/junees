@@ -1,6 +1,7 @@
 // 사용량: daily costs and tokens, and totals per model.
 
 import { card, code, dataTable, el, notice } from "./dom.js";
+import { SCROLL_KEY } from "./keep-ui.js";
 import { formatCompact, formatDay, formatDayShort, formatInt, formatUsd } from "./format.js";
 import { costLabel, dailyTotals, hasUnpriced, localDay, modelTotals, niceCeil } from "./usage.js";
 
@@ -129,7 +130,7 @@ function dailyTable(days, count) {
     el("summary", { id: "usage-day-table-toggle" }, "날짜별 토큰과 비용을 표로 보기"),
     el(
       "div",
-      { class: "table-wrap" },
+      { class: "table-wrap", [SCROLL_KEY]: `usage-day-table-${count}` },
       el(
         "table",
         { class: "plain-table" },
