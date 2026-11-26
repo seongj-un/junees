@@ -185,7 +185,9 @@ const NO_DRAFTS = new Set();
  * null when no block has any. A block the server hid is copied as the note
  * the screen shows in its place (the original is not in the browser), and a
  * Junees notice (`notice: true`, not the person's or the model's words) is
- * left out like the tool blocks and cards. `truncated` says that a block
+ * left out like the tool blocks and cards, also when the server hid it: the
+ * screen checks "hidden" first and draws the hidden note, but the copy
+ * checks `notice` first, so a hidden notice is not copied. `truncated` says that a block
  * shown here was cut by the server, so only its first part is copied.
  */
 export function messageCopyText(message) {
@@ -878,8 +880,9 @@ export function render(root, data, ctx) {
     // The same message's button if it is still on screen, else the box the person was reading from.
     const back = list.querySelector(`#${copyFocus}`);
     const item = list.querySelector(`[data-index="${copyFocus.slice("msg-copy-".length)}"]`);
-    if (back && item && !item.hidden && !list.hidden) back.focus();
-    else input.focus();
+    // preventScroll: a refresh every 30 s must not pull the page back to this message.
+    if (back && item && !item.hidden && !list.hidden) back.focus({ preventScroll: true });
+    else input.focus({ preventScroll: true });
   }
 }
 

@@ -323,6 +323,8 @@ test("a refresh keeps the result and the focus on the same message's button", as
   const after = s.button(1);
   assert.equal(after.id, "msg-copy-1");
   assert.equal(s.document.activeElement, after, "focus is on the new button, not the page");
+  // Without preventScroll every refresh would scroll the page back to this message.
+  assert.deepEqual(after.focusCalls, [{ preventScroll: true }]);
   assert.equal(s.result(1), "2번째 메시지의 글을 복사했습니다.", "the line just shown is not wiped");
   assert.equal(s.result(0), "");
   assert.equal(s.root.querySelectorAll("#msg-copy-1").length, 1);
@@ -354,6 +356,27 @@ test("when a refresh leaves the focused message off the screen, focus goes to th
   assert.deepEqual(s.shown(), [0]);
   s.draw();
   assert.equal(s.document.activeElement, s.input);
+  assert.deepEqual(s.input.focusCalls.at(-1), { preventScroll: true });
+});
+
+test("when a refresh takes the message's words away, the button is gone and focus goes to the search box", async (t) => {
+  const s = screen(t, "cm-refresh-vanished");
+  s.button(1).focus();
+  assert.equal(s.document.activeElement, s.button(1));
+  // The same message, now with only a tool block: no text, so no button.
+  const bare = talk.map((m) => (m.index === 1 ? { ...m, blocks: m.blocks.filter((b) => b.type !== "text") } : m));
+  s.draw({ messages: bare });
+  assert.equal(s.button(1), null);
+  assert.equal(s.item(1).hidden, false);
+  assert.equal(s.document.activeElement, s.input);
+  assert.deepEqual(s.input.focusCalls.at(-1), { preventScroll: true });
+});
+
+test("a notice the server hid is not copied, though the screen draws the hidden note for it", (t) => {
+  const hiddenNotice = { index: 0, role: "user", blocks: [{ type: "text", text: "[hidden: x]", notice: true }] };
+  assert.equal(messageCopyText(hiddenNotice).text, null);
+  const withText = { index: 0, role: "user", blocks: [{ type: "text", text: "[hidden]", notice: true }, { type: "text", text: "내 글" }] };
+  assert.equal(messageCopyText(withText).text, "내 글");
 });
 
 test("a refresh does not take focus from anything else", async (t) => {
