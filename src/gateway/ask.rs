@@ -6,11 +6,15 @@
 //!
 //! Every question gets an id of 128 random bits ([`new_id`]) that its
 //! buttons carry ([`button_data`]). A press counts only when it names the
-//! question that waits in the same conversation (and, once known, comes
-//! from the message holding it); a press on an older question, one that
-//! timed out or was stopped, or another conversation's question changes
-//! nothing ([`AnswerSlot::press`]). The routers check that the person
-//! pressing is an allowed user before they get here.
+//! question that waits in the same conversation and comes from the
+//! message holding it; a press on an older question, one that timed out
+//! or was stopped, or another conversation's question changes nothing
+//! ([`AnswerSlot::press`]). A press that arrives while the question is
+//! still being posted (the platform has shown the buttons, the gateway
+//! has not read the message's id yet) is held until the post ends and
+//! judged then ([`Pressed::Held`]), so the message is checked for it too.
+//! The routers check that the person pressing is an allowed user before
+//! they get here.
 //!
 //! Once a question is answered, the same user's next message, if it is
 //! only an answer word (`y`, `no`, ...) and comes within [`LATE_ANSWER`],
@@ -130,6 +134,37 @@ pub struct Press {
     pub by: String,
 }
 
+/// What a press did ([`AnswerSlot::press`]).
+pub enum Pressed {
+    /// It answered the question.
+    Answered,
+    /// It answers nothing.
+    Refused,
+    /// The question is still being posted: the press is judged once the
+    /// post ends, against the message that then holds the buttons. `true`
+    /// when it answered the question; a question that ends first (a text
+    /// answer, the timeout, a stop) drops the sender, and the press
+    /// answered nothing.
+    Held(oneshot::Receiver<bool>),
+}
+
+impl Pressed {
+    /// Whether the press answered the question, waiting for the question
+    /// to be posted if it has to. That wait ends with the post or with
+    /// the question, whichever comes first.
+    pub async fn answered(self) -> bool {
+        match self {
+            Self::Answered => true,
+            Self::Refused => false,
+            Self::Held(verdict) => verdict.await.unwrap_or(false),
+        }
+    }
+}
+
+/// How many presses a question holds while it is being posted; further
+/// ones answer nothing. A person presses once or twice in that moment.
+const MAX_HELD: usize = 8;
+
 /// How long after answering a question a user's answer word is taken for
 /// a late answer to it ([`AnswerSlot::late`]).
 pub const LATE_ANSWER: Duration = Duration::from_secs(30);
@@ -156,8 +191,30 @@ struct Pending {
     id: String,
     always: bool,
     sender: oneshot::Sender<Reply>,
-    /// The message holding the buttons, once posted.
-    message: Option<String>,
+    buttons: Buttons,
+}
+
+impl Pending {
+    /// Whether `press` names this question, which still waits, and is a
+    /// button it offered. Where the press comes from is checked apart
+    /// ([`Buttons`]).
+    fn offers(&self, press: &Press) -> bool {
+        self.id == press.id
+            && !self.sender.is_closed()
+            && (press.choice != Choice::Always || self.always)
+    }
+}
+
+/// Where a waiting question's buttons are.
+enum Buttons {
+    /// The question is being posted; the presses that came meanwhile wait
+    /// here for [`AnswerSlot::posted`] or [`AnswerSlot::unposted`].
+    Posting(Vec<(Press, oneshot::Sender<bool>)>),
+    /// On this message: only a press from it counts.
+    On(String),
+    /// Unknown: the platform named no message, or the post failed and
+    /// what it showed is not known. The question's id alone decides.
+    Unknown,
 }
 
 /// Who answered the last question, and when.
@@ -206,39 +263,31 @@ impl AnswerSlot {
         sent
     }
 
-    /// Answers the waiting question with a button press; false (and the
-    /// question keeps waiting) unless the press names that question, comes
-    /// from its message once that is known, and is a button it offered.
-    pub fn press(&self, press: Press) -> bool {
+    /// Answers the waiting question with a button press. The press
+    /// answers nothing (and the question keeps waiting) unless it names
+    /// that question, is a button it offered, and comes from the message
+    /// holding the buttons. While the question is being posted that
+    /// message is not known yet: such a press is held and judged when the
+    /// post ends ([`Pressed::Held`]).
+    pub fn press(&self, press: Press) -> Pressed {
         let mut slot = self.lock();
-        let matches = slot.pending.as_ref().is_some_and(|pending| {
-            pending.id == press.id
-                && !pending.sender.is_closed()
-                && (pending.message.is_none() || pending.message == press.message)
-                && (press.choice != Choice::Always || pending.always)
-        });
-        if !matches {
-            return false;
-        }
-        let Some(pending) = slot.pending.take() else {
-            return false;
+        let Some(pending) = slot.pending.as_mut() else {
+            return Pressed::Refused;
         };
-        let answer = match press.choice {
-            Choice::Allow => Answer::Yes,
-            Choice::Always => Answer::Always,
-            Choice::Decline => Answer::No,
-        };
-        let sent = pending
-            .sender
-            .send(Reply {
-                answer,
-                by: Some(press.by),
-            })
-            .is_ok();
-        if sent {
-            slot.answered(&press.user);
+        let offers = pending.offers(&press);
+        if let Buttons::Posting(held) = &mut pending.buttons {
+            if !offers || held.len() >= MAX_HELD {
+                return Pressed::Refused;
+            }
+            let (verdict, later) = oneshot::channel();
+            held.push((press, verdict));
+            return Pressed::Held(later);
         }
-        sent
+        if slot.press(press) {
+            Pressed::Answered
+        } else {
+            Pressed::Refused
+        }
     }
 
     /// Whether `text` of `user`, which answered no waiting question, is a
@@ -260,12 +309,31 @@ impl AnswerSlot {
             .is_some_and(|answered| answered.at.elapsed() < LATE_ANSWER && answer_word(text))
     }
 
-    /// Notes the message that holds the buttons of question `id`.
+    /// Notes the message that holds the buttons of question `id`, and
+    /// judges the presses held while it was posted.
     pub fn posted(&self, id: &str, message: String) {
-        if let Some(pending) = self.lock().pending.as_mut()
-            && pending.id == id
-        {
-            pending.message = Some(message);
+        self.settle(id, Buttons::On(message));
+    }
+
+    /// Notes that no message is known to hold the buttons of question
+    /// `id` (the platform has none, or the post failed): the presses held
+    /// meanwhile, and later ones, are judged by the question's id alone.
+    pub fn unposted(&self, id: &str) {
+        self.settle(id, Buttons::Unknown);
+    }
+
+    /// The post of question `id` ended with `buttons`: the held presses
+    /// are judged in the order they came, and each is told.
+    fn settle(&self, id: &str, buttons: Buttons) {
+        let mut slot = self.lock();
+        let Some(pending) = slot.pending.as_mut().filter(|pending| pending.id == id) else {
+            return;
+        };
+        let Buttons::Posting(held) = std::mem::replace(&mut pending.buttons, buttons) else {
+            return;
+        };
+        for (press, verdict) in held {
+            let _ = verdict.send(slot.press(press));
         }
     }
 
@@ -277,6 +345,43 @@ impl AnswerSlot {
 }
 
 impl Slot {
+    /// Answers the waiting question with `press` if it names it, is a
+    /// button it offered and comes from where its buttons are; false
+    /// (and the question keeps waiting) otherwise, and while the
+    /// question is still being posted.
+    fn press(&mut self, press: Press) -> bool {
+        let matches = self.pending.as_ref().is_some_and(|pending| {
+            pending.offers(&press)
+                && match &pending.buttons {
+                    Buttons::Posting(_) => false,
+                    Buttons::On(message) => press.message.as_deref() == Some(message),
+                    Buttons::Unknown => true,
+                }
+        });
+        if !matches {
+            return false;
+        }
+        let Some(pending) = self.pending.take() else {
+            return false;
+        };
+        let answer = match press.choice {
+            Choice::Allow => Answer::Yes,
+            Choice::Always => Answer::Always,
+            Choice::Decline => Answer::No,
+        };
+        let sent = pending
+            .sender
+            .send(Reply {
+                answer,
+                by: Some(press.by),
+            })
+            .is_ok();
+        if sent {
+            self.answered(&press.user);
+        }
+        sent
+    }
+
     fn answered(&mut self, user: &str) {
         self.answered = Some(Answered {
             user: user.to_string(),
@@ -345,7 +450,7 @@ impl Ask for DiscordAsk {
                 id: id.clone(),
                 always,
                 sender,
-                message: None,
+                buttons: Buttons::Posting(Vec::new()),
             }),
             // A new question: no late answers to the one before.
             answered: None,
@@ -587,6 +692,22 @@ mod tests {
         }
     }
 
+    impl AnswerSlot {
+        /// Whether `press` answered the question at once.
+        fn takes(&self, press: Press) -> bool {
+            matches!(self.press(press), Pressed::Answered)
+        }
+    }
+
+    /// Presses while the question is still being posted: held.
+    fn held(slot: &AnswerSlot, press: Press) -> oneshot::Receiver<bool> {
+        match slot.press(press) {
+            Pressed::Held(verdict) => verdict,
+            Pressed::Answered => panic!("answered while the question was being posted"),
+            Pressed::Refused => panic!("refused, not held"),
+        }
+    }
+
     #[tokio::test]
     async fn the_next_message_answers() {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -608,7 +729,7 @@ mod tests {
             })
         );
         // The question is over: its buttons do nothing.
-        assert!(!slot.press(press(&question.id, Choice::Allow, None)));
+        assert!(!slot.takes(press(&question.id, Choice::Allow, None)));
     }
 
     #[tokio::test]
@@ -624,12 +745,12 @@ mod tests {
         assert_eq!(Choice::offered(&question), [Choice::Allow, Choice::Decline]);
         slot.posted(&question.id, "77".into());
         // Another question's id, another message, a button not offered.
-        assert!(!slot.press(press(&new_id(), Choice::Allow, Some("77"))));
-        assert!(!slot.press(press(&question.id, Choice::Allow, Some("78"))));
-        assert!(!slot.press(press(&question.id, Choice::Allow, None)));
-        assert!(!slot.press(press(&question.id, Choice::Always, Some("77"))));
+        assert!(!slot.takes(press(&new_id(), Choice::Allow, Some("77"))));
+        assert!(!slot.takes(press(&question.id, Choice::Allow, Some("78"))));
+        assert!(!slot.takes(press(&question.id, Choice::Allow, None)));
+        assert!(!slot.takes(press(&question.id, Choice::Always, Some("77"))));
         assert!(slot.waiting());
-        assert!(slot.press(press(&question.id, Choice::Decline, Some("77"))));
+        assert!(slot.takes(press(&question.id, Choice::Decline, Some("77"))));
         assert_eq!(asking.await, Answer::No);
         assert_eq!(
             rx.recv().await,
@@ -638,17 +759,143 @@ mod tests {
                 outcome: "<@1>: 거절했습니다.".into()
             })
         );
-        assert!(!slot.press(press(&question.id, Choice::Allow, Some("77"))));
+        assert!(!slot.takes(press(&question.id, Choice::Allow, Some("77"))));
     }
 
     #[tokio::test]
-    async fn a_press_answers_before_the_message_is_known() {
+    async fn a_press_before_the_message_is_known_waits_for_it() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let slot = Arc::new(AnswerSlot::default());
         let mut ask = DiscordAsk::new(tx, Arc::clone(&slot), Duration::from_secs(5));
         let request = request();
         let (asking, question) = posted(&mut ask, &request, &mut rx).await;
-        assert!(slot.press(press(&question.id, Choice::Allow, Some("9"))));
+        // The right id from another message, then from the question's
+        // own: neither is judged before the message is known. What can be
+        // judged without it is: another id, a button not offered.
+        let mut elsewhere = held(&slot, press(&question.id, Choice::Allow, Some("8")));
+        let mut here = held(&slot, press(&question.id, Choice::Decline, Some("9")));
+        let mut again = held(&slot, press(&question.id, Choice::Allow, Some("9")));
+        assert!(matches!(
+            slot.press(press(&new_id(), Choice::Allow, Some("9"))),
+            Pressed::Refused
+        ));
+        assert!(slot.waiting());
+        assert!(elsewhere.try_recv().is_err() && here.try_recv().is_err());
+        slot.posted(&question.id, "9".into());
+        // In the order they came: the first from the message answers.
+        assert_eq!(elsewhere.try_recv(), Ok(false));
+        assert_eq!(here.try_recv(), Ok(true));
+        assert_eq!(again.try_recv(), Ok(false));
+        assert_eq!(asking.await, Answer::No);
+        assert_eq!(
+            rx.recv().await,
+            Some(Progress::Answered {
+                id: question.id.clone(),
+                outcome: "<@1>: 거절했습니다.".into()
+            })
+        );
+        // The presser's answer word right after is a late answer.
+        assert!(slot.late("1", "n"));
+    }
+
+    #[tokio::test]
+    async fn a_held_press_from_another_message_leaves_the_question_waiting() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(AnswerSlot::default());
+        let mut ask = DiscordAsk::new(tx, Arc::clone(&slot), Duration::from_secs(5));
+        let request = request();
+        let (asking, question) = posted(&mut ask, &request, &mut rx).await;
+        let elsewhere = held(&slot, press(&question.id, Choice::Allow, Some("8")));
+        let unnamed = held(&slot, press(&question.id, Choice::Allow, None));
+        slot.posted(&question.id, "9".into());
+        assert!(!Pressed::Held(elsewhere).answered().await);
+        assert!(!Pressed::Held(unnamed).answered().await);
+        assert!(slot.waiting());
+        assert!(!slot.late("1", "y"));
+        assert!(slot.takes(press(&question.id, Choice::Allow, Some("9"))));
+        assert_eq!(asking.await, Answer::Yes);
+    }
+
+    #[tokio::test]
+    async fn held_presses_go_by_the_id_alone_when_no_message_is_known() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(AnswerSlot::default());
+        let mut ask = DiscordAsk::new(tx, Arc::clone(&slot), Duration::from_secs(5));
+        let mut request = request();
+        request.kinds = vec![format!("bash: merge {ASKED_EVERY_TIME}")];
+        let (asking, question) = posted(&mut ask, &request, &mut rx).await;
+        // A button the question did not offer is not held at all.
+        assert!(matches!(
+            slot.press(press(&question.id, Choice::Always, Some("9"))),
+            Pressed::Refused
+        ));
+        let early = held(&slot, press(&question.id, Choice::Allow, Some("9")));
+        slot.unposted(&question.id);
+        assert!(Pressed::Held(early).answered().await);
+        assert_eq!(asking.await, Answer::Yes);
+
+        // And so do the presses after it.
+        while rx.try_recv().is_ok() {}
+        let (asking, question) = posted(&mut ask, &request, &mut rx).await;
+        slot.unposted(&question.id);
+        assert!(!slot.takes(press(&new_id(), Choice::Allow, None)));
+        assert!(slot.takes(press(&question.id, Choice::Decline, None)));
+        assert_eq!(asking.await, Answer::No);
+    }
+
+    #[tokio::test]
+    async fn a_question_that_ends_first_answers_its_held_presses_with_no() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(AnswerSlot::default());
+        let mut ask = DiscordAsk::new(tx, Arc::clone(&slot), Duration::from_secs(5));
+        let request = request();
+        // A text answer.
+        let (asking, question) = posted(&mut ask, &request, &mut rx).await;
+        let early = held(&slot, press(&question.id, Choice::Allow, Some("9")));
+        assert!(slot.answer("2", "n".into()));
+        assert_eq!(asking.await, Answer::No);
+        assert!(!Pressed::Held(early).answered().await);
+        // The post ending afterwards changes nothing.
+        slot.posted(&question.id, "9".into());
+        assert!(!slot.waiting());
+
+        // A stop: the question is dropped.
+        while rx.try_recv().is_ok() {}
+        let (asking, question) = posted(&mut ask, &request, &mut rx).await;
+        let early = held(&slot, press(&question.id, Choice::Allow, Some("9")));
+        drop(asking);
+        assert!(!Pressed::Held(early).answered().await);
+
+        // The post of an earlier question does not settle the next one's.
+        while rx.try_recv().is_ok() {}
+        let (asking, next) = posted(&mut ask, &request, &mut rx).await;
+        let mut early = held(&slot, press(&next.id, Choice::Allow, Some("9")));
+        slot.posted(&question.id, "9".into());
+        assert!(early.try_recv().is_err());
+        slot.posted(&next.id, "9".into());
+        assert_eq!(early.try_recv(), Ok(true));
+        assert_eq!(asking.await, Answer::Yes);
+    }
+
+    #[tokio::test]
+    async fn only_so_many_presses_are_held() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let slot = Arc::new(AnswerSlot::default());
+        let mut ask = DiscordAsk::new(tx, Arc::clone(&slot), Duration::from_secs(5));
+        let request = request();
+        let (asking, question) = posted(&mut ask, &request, &mut rx).await;
+        let early: Vec<_> = (0..MAX_HELD)
+            .map(|_| held(&slot, press(&question.id, Choice::Allow, Some("8"))))
+            .collect();
+        assert!(matches!(
+            slot.press(press(&question.id, Choice::Allow, Some("9"))),
+            Pressed::Refused
+        ));
+        slot.posted(&question.id, "9".into());
+        for verdict in early {
+            assert!(!Pressed::Held(verdict).answered().await);
+        }
+        assert!(slot.takes(press(&question.id, Choice::Allow, Some("9"))));
         assert_eq!(asking.await, Answer::Yes);
     }
 
@@ -674,7 +921,7 @@ mod tests {
                 outcome: "1초 안에 답이 없어 거절했습니다.".into()
             })
         );
-        assert!(!slot.press(press(&question.id, Choice::Allow, None)));
+        assert!(!slot.takes(press(&question.id, Choice::Allow, None)));
     }
 
     #[tokio::test]
@@ -693,7 +940,7 @@ mod tests {
                 outcome: "답하기 전에 턴이 멈췄습니다.".into()
             })
         );
-        assert!(!slot.press(press(&question.id, Choice::Allow, None)));
+        assert!(!slot.takes(press(&question.id, Choice::Allow, None)));
     }
 
     #[test]
@@ -738,7 +985,8 @@ mod tests {
         assert!(!slot.late("1", "y"));
 
         let (asking, question) = posted(&mut ask, &request, &mut rx).await;
-        assert!(slot.press(press(&question.id, Choice::Allow, None)));
+        slot.unposted(&question.id);
+        assert!(slot.takes(press(&question.id, Choice::Allow, None)));
         assert_eq!(asking.await, Answer::Yes);
         // Another user's word, then the presser's: late once, then no more.
         assert!(!slot.late("2", "y"));

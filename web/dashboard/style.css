@@ -549,6 +549,14 @@ a.button {
   cursor: default;
 }
 
+.session-filter .check-toggle {
+  margin-bottom: 12px;
+}
+
+.session-filter .check-toggle label {
+  font-weight: 500;
+}
+
 /* Badges */
 
 .badge {
