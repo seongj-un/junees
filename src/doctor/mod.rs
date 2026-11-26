@@ -322,6 +322,12 @@ pub fn hide_secrets<'a>(settings: &Settings, texts: impl Iterator<Item = &'a mut
     redact::redact(&hidden, texts);
 }
 
+/// The whole texts the hiding functions put where a secret was: a word or
+/// known value (`[hidden]`), or a whole field that still looked like a
+/// credential. Callers that cut hidden text by length must not cut inside
+/// one of them.
+pub(crate) const HIDDEN_MARKERS: [&str; 2] = [redact::HIDDEN, redact::LOOKS_SECRET];
+
 /// [`hide_secrets`] for what a user wrote (a session's first message):
 /// the report's rule that shortens ``got `value` `` to a length does not
 /// apply, since there it is ordinary text.
