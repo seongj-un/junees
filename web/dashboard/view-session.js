@@ -1,7 +1,7 @@
 // 세션 상세: one session's conversation, 100 messages at a time.
 
 import { noticeLines } from "./checkpoints.js";
-import { draftResultKeys, resultText } from "./draft.js";
+import { FAILED_SECTION_NOTE, applyDone, draftResultKeys, newDraft, parseArticle, resultStatus, resultText } from "./draft.js";
 import { code, el, notice, pathCode, timeEl } from "./dom.js";
 import { formatDateTime, formatInt, parseTime } from "./format.js";
 import { chatHash } from "./routes.js";
@@ -454,6 +454,37 @@ const searchText = (text) => String(text ?? "").normalize("NFC").toLowerCase();
 const needleOf = (query) => searchText(query).trim();
 
 /**
+ * The text a finished 글 생성 card draws for a `draft` result, as a list of
+ * parts: the title, each section's name (and its id tag when the server named
+ * it failed), its text, the fixed note of a failed section, and the end of a
+ * cut result. It reads the result the way `DraftCard.fromHistory` does
+ * (`resultText`, `parseArticle`, and the failed ids from the server's `draft`
+ * field only), so what is not drawn is not here: text before the first
+ * `# ` line, a result without one, the `#` marks, a `> [s2] ...` line, and the
+ * status line. A tail that is the server's `[hidden: ...]` line is left out.
+ */
+export function draftCardText(block) {
+  const parts = resultText(block);
+  const article = parseArticle(parts.head);
+  const state = newDraft("");
+  const status = resultStatus(block);
+  const failedIds = status && applyDone(state, status) ? state.done.failedSections : [];
+  const out = [];
+  if (article.title) out.push(article.title);
+  for (const section of article.sections) {
+    // A note in the text names a section only when the server's list does too.
+    const failed = section.failedId !== null && failedIds.includes(section.failedId);
+    const id = failed ? section.failedId : "";
+    if (section.concept || id) out.push(section.concept || id);
+    if (section.concept && id) out.push(id);
+    if (section.text) out.push(section.text);
+    if (failed) out.push(FAILED_SECTION_NOTE);
+  }
+  if (parts.omitted !== 0 && parts.tail && !isHiddenBlock(parts.tail)) out.push(parts.tail);
+  return out;
+}
+
+/**
  * The text of a message that 찾기 looks in: what the person and the model
  * wrote, a tool call's name and input, a tool result's first part and its
  * end. A part the server hid (a block, a result's first part or its end) is
@@ -465,13 +496,12 @@ export function messageSearchText(message, draftKeys = null) {
   for (const [n, block] of blocks.entries()) {
     if (draftKeys !== null) {
       // Tools hidden: only what is on screen. A hidden tool block adds nothing,
-      // and a draft card is read as it draws: resultText cuts the status line off.
+      // and a draft card gives only the text it draws. `message` must be the
+      // original: `n` is the block number the draft keys were made with.
       const key = `${message?.index}:${n}`;
       if (hiddenWithTools(block, key, draftKeys)) continue;
       if (block?.type === "tool_result") {
-        const { head, tail } = resultText(block);
-        if (!isHiddenBlock(head)) parts.push(head);
-        if (!isHiddenBlock(tail)) parts.push(tail);
+        parts.push(...draftCardText(block));
         continue;
       }
     }

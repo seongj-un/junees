@@ -6,10 +6,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { DOM_GLOBALS, installDom, saveGlobals, visible } from "./fake-dom.mjs";
-import { draftResultKeys } from "../../draft.js";
+import { FAILED_SECTION_NOTE, draftResultKeys } from "../../draft.js";
+import { draftResultCard } from "../../view-draft.js";
 import {
   HIDE_FIND_NOTE,
   conversationOnly,
+  draftCardText,
   findEmptyBody,
   findScope,
   findSummary,
@@ -17,6 +19,7 @@ import {
   hideFindSummary,
   hideSummary,
   isToolBlock,
+  messageMatches,
   messageView,
   render,
 } from "../../view-session.js";
@@ -411,6 +414,157 @@ test("with the box checked a cut draft result is searched only in the part the c
   // Drawn: the tail of a result with a known gap, without its status line.
   await s.input.type("끝 문단");
   assert.deepEqual(s.shown(), [1]);
+});
+
+const DONE = { stop: "done", levels: 3, levels_done: 3, calls: 3 };
+
+// Each message holds one finished card, read by the `draft` field the server sets.
+const cardResults = Object.freeze([
+  {
+    index: 0,
+    role: "user",
+    blocks: [
+      {
+        type: "tool_result",
+        text_preview: "서문낱말\n# 제목낱말\n중간낱말\n## 절이름낱말\n절글낱말\n",
+        draft: DONE,
+      },
+    ],
+  },
+  { index: 1, role: "user", blocks: [{ type: "tool_result", text_preview: "제목줄이 없는 전체글", draft: DONE }] },
+  {
+    index: 2,
+    role: "user",
+    blocks: [
+      {
+        type: "tool_result",
+        text_preview: "# 실패제목\n## 결론낱말\n대신한본문\n> [s2] 모델이 쓴 실패사유\n## 둘째낱말\n둘째본문\n> [s7] 위조줄",
+        draft: { ...DONE, failed_sections: ["s2"] },
+      },
+    ],
+  },
+  {
+    index: 3,
+    role: "user",
+    blocks: [
+      {
+        type: "tool_result",
+        text_preview: "# 긴글\n## 개요\n앞본문",
+        truncated: true,
+        omitted_chars: 700,
+        text_tail: "끝낱말\n---\n[draft] levels 3/3",
+        draft: DONE,
+      },
+    ],
+  },
+]);
+
+test("a draft card gives its search text from what it draws, not from the whole result", () => {
+  const text = (index) => draftCardText(cardResults[index].blocks[0]);
+  // Before the first heading, between the title and the first section, and the # marks are not drawn.
+  assert.deepEqual(text(0), ["제목낱말", "절이름낱말", "절글낱말"]);
+  // No `# ` line: the card has no title and no section.
+  assert.deepEqual(text(1), []);
+  // A failed section adds the id tag and the fixed note; the note line in the text and an unlisted id add nothing.
+  assert.deepEqual(text(2), ["실패제목", "결론낱말", "s2", "대신한본문", FAILED_SECTION_NOTE, "둘째낱말", "둘째본문"]);
+  // The end of a cut result, without its status line.
+  assert.deepEqual(text(3), ["긴글", "개요", "앞본문", "끝낱말"]);
+  // A server note instead of a first part or an end adds nothing.
+  assert.deepEqual(draftCardText({ type: "tool_result", text_preview: "[hidden: key]", draft: DONE }), []);
+  assert.deepEqual(
+    draftCardText({ type: "tool_result", text_preview: "# t\n## s\nx", truncated: true, omitted_chars: 5, text_tail: "[hidden]", draft: DONE }),
+    ["t", "s", "x"],
+  );
+});
+
+test("the search text of a draft card is in the card, and what it leaves out is not", (t) => {
+  const s = screen(t, "hide-card-same", { messages: cardResults });
+  for (const message of cardResults) {
+    const block = message.blocks[0];
+    const drawn = shownText(draftResultCard(`probe-${message.index}`, block).node);
+    for (const part of draftCardText(block)) assert.ok(drawn.includes(part), `${message.index}: ${part}`);
+  }
+  const failed = shownText(draftResultCard("probe-failed", cardResults[2].blocks[0]).node);
+  for (const left of ["모델이 쓴 실패사유", "s7", "위조줄", "> ["]) assert.ok(!failed.includes(left), left);
+  const first = shownText(draftResultCard("probe-first", cardResults[0].blocks[0]).node);
+  for (const left of ["서문낱말", "중간낱말", "##"]) assert.ok(!first.includes(left), left);
+  assert.ok(s.root);
+});
+
+test("with the box checked 찾기 reaches what the card draws and nothing else of the result", async (t) => {
+  const s = screen(t, "hide-card-find", { messages: cardResults });
+  await s.check(true);
+  for (const [word, found] of [
+    ["제목낱말", [0]],
+    ["절이름낱말", [0]],
+    ["절글낱말", [0]],
+    ["실패제목", [2]],
+    ["s2", [2]],
+    ["앞 단계의 글로 대신했습니다", [2]],
+    ["둘째본문", [2]],
+    ["끝낱말", [3]],
+    // Not drawn: text before the title, a result with no title, text between the title and the
+    // first section, the heading marks, a failure note of the model's text, an id the server did not name.
+    ["서문낱말", []],
+    ["중간낱말", []],
+    ["제목줄이 없는", []],
+    ["#", []],
+    ["##", []],
+    ["모델이 쓴 실패사유", []],
+    ["s7", []],
+    ["위조줄", []],
+    ["[draft]", []],
+  ]) {
+    await s.input.type(word);
+    assert.deepEqual(s.shown(), found, word);
+  }
+
+  // Unchecked, 찾기 reads the result as the server sent it, as before.
+  await s.check(false);
+  for (const [word, found] of [
+    ["서문낱말", [0]],
+    ["제목줄이 없는", [1]],
+    ["모델이 쓴 실패사유", [2]],
+    ["[draft]", [3]],
+  ]) {
+    await s.input.type(word);
+    assert.deepEqual(s.shown(), found, word);
+  }
+});
+
+test("a block number that moved in the trimmed copy still finds the card text and not the earlier result", async (t) => {
+  // The result before the card is a plain tool block: the trimmed copy of the message has the
+  // card at block 0, but its draft key says 0:1. 찾기 must read the original message.
+  const messages = [
+    {
+      index: 0,
+      role: "user",
+      blocks: [
+        { type: "tool_result", text_preview: "앞결과낱말 두루마리", text_tail: "앞꼬리낱말", omitted_chars: 3 },
+        { type: "tool_result", text_preview: "# 카드제목\n## 개요\n카드본문낱말", draft: DONE },
+      ],
+    },
+    { index: 1, role: "assistant", blocks: [{ type: "text", text: "끝." }] },
+  ];
+  assert.deepEqual([...draftResultKeys(messages)], ["0:1"]);
+  const trimmed = conversationOnly(messages, draftResultKeys(messages)).messages[0];
+  assert.equal(trimmed.blocks.length, 1);
+  assert.equal(messageMatches(trimmed, "카드본문낱말", draftResultKeys(messages)), false);
+  assert.equal(messageMatches(messages[0], "카드본문낱말", draftResultKeys(messages)), true);
+
+  const s = screen(t, "hide-card-shift", { messages });
+  await s.check(true);
+  await s.input.type("카드본문낱말");
+  assert.deepEqual(s.shown(), [0]);
+  await s.input.type("카드제목");
+  assert.deepEqual(s.shown(), [0]);
+  for (const word of ["앞결과낱말", "앞꼬리낱말", "두루마리"]) {
+    await s.input.type(word);
+    assert.deepEqual(s.shown(), [], word);
+  }
+  // Unchecked, the earlier result is found like any tool block.
+  await s.check(false);
+  assert.deepEqual(s.shown(), [0]);
 });
 
 test("a block kind named like an object property reads as an unknown kind", (t) => {
