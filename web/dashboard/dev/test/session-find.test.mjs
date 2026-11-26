@@ -148,7 +148,7 @@ function screen(t, id, { loaded = 3, total = talk.length } = {}) {
   const draw = () => render(root, data, ctx);
   draw();
   const shown = () => visible(root, "li").map((li) => Number(li.getAttribute("data-index")));
-  const status = () => root.querySelector('[role="status"]').textContent;
+  const status = () => root.querySelector("#session-find-status").textContent;
   const more = () => visible(root, "button").find((b) => b.textContent.includes("더 보기")) ?? null;
   return { document, root, calls, draw, shown, status, more, input: root.querySelector("#session-find") };
 }

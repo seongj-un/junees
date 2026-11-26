@@ -21,6 +21,7 @@ import {
   isToolBlock,
   messageMatches,
   messageView,
+  newCopyState,
   render,
 } from "../../view-session.js";
 
@@ -211,7 +212,7 @@ function screen(t, id, { messages = talk, loaded = messages.length, total = mess
     input: root.querySelector("#session-find"),
     // `.msg`, not `li`: a draft card has list items of its own.
     shown: () => visible(root, ".msg").map((li) => Number(li.getAttribute("data-index"))),
-    status: () => root.querySelector('[role="status"]').textContent,
+    status: () => root.querySelector("#session-find-status").textContent,
     scope: () => root.querySelector("#session-find-scope").textContent,
     count: () => root.querySelector(".more .summary").textContent,
     more: () => visible(root, "button").find((b) => b.textContent.includes("더 보기")) ?? null,
@@ -240,7 +241,7 @@ test("the box is a labelled checkbox that starts off, and the list is as before"
   // Every message reads as the message view alone draws it, and no block is hidden.
   const keys = draftResultKeys(talk);
   for (const message of talk) {
-    assert.equal(s.text(message.index), shownText(messageView(message, NOW, keys)));
+    assert.equal(s.text(message.index), shownText(messageView(message, NOW, keys, newCopyState())));
   }
   assert.equal(s.root.querySelectorAll("[data-tool]").length, 5);
   assert.equal(visible(s.root, "[data-tool]").length, 5);
