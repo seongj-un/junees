@@ -439,10 +439,16 @@ fn tail(settings: &Settings, text: &str, shown: usize, chars: usize) -> Option<(
     if window > 0 {
         let mut chars_at = text.chars().skip(window - 1);
         if chars_at.next().is_some_and(word_char) {
-            window += chars_at
-                .take(SECRET_MARGIN)
+            // A word that goes on past the margin keeps the window as it
+            // is: the check then sees the 512 characters after it and hides
+            // the word whole, as before.
+            let word = chars_at
+                .take(SECRET_MARGIN + 1)
                 .take_while(|c| word_char(*c))
                 .count();
+            if word <= SECRET_MARGIN {
+                window += word;
+            }
         }
     }
     let mut near: String = text.chars().skip(window).collect();
@@ -466,6 +472,11 @@ fn tail(settings: &Settings, text: &str, shown: usize, chars: usize) -> Option<(
             omitted = omitted.saturating_sub(from - marker_start);
             from = marker_start;
         }
+    }
+    // A field hidden whole is one marker that no `marker_across` finds
+    // (it starts at 0); the preview shows it already.
+    if omitted == 0 && crate::doctor::HIDDEN_MARKERS.contains(&near.as_str()) {
+        from = count;
     }
     let end: String = near.chars().skip(from).collect();
     Some((end, omitted))
@@ -500,8 +511,12 @@ pub(super) fn cut(settings: &Settings, text: &str, chars: usize) -> (String, boo
     let next = seen.get(window).copied();
     seen.truncate(window);
     if next.is_some_and(word_char) {
+        // A longer word stays: the check sees the 512 characters of it
+        // past the cut and hides it whole, as before.
         let word = seen.iter().rev().take_while(|c| word_char(**c)).count();
-        seen.truncate(seen.len() - word.min(SECRET_MARGIN));
+        if word <= SECRET_MARGIN {
+            seen.truncate(seen.len() - word);
+        }
     }
     let mut near: String = seen.into_iter().collect();
     crate::doctor::hide_secrets_in_user_text(settings, std::iter::once(&mut near));
