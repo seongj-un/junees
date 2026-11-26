@@ -1045,6 +1045,33 @@ a.button {
   font-size: 13px;
 }
 
+/* The head with its 복사 button: the head takes the row, the button keeps its size. */
+.msg-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.msg-bar .msg-head {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.msg-bar .button {
+  flex: none;
+}
+
+.msg-copy-status {
+  display: block;
+  margin: 0;
+}
+
+.msg-copy-status:not(:empty) {
+  margin: -2px 0 8px;
+}
+
 .msg-role {
   color: var(--text);
   font-weight: 700;

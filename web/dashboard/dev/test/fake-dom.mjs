@@ -247,7 +247,11 @@ class FakeElement extends FakeNode {
     return this.dispatch("input");
   }
 
-  focus() {
+  /** The options of every `focus()` call on this node, so a test can check `preventScroll`. */
+  focusCalls = [];
+
+  focus(options) {
+    this.focusCalls.push(options ?? null);
     if (this.isConnected && !this.hidden) document.activeElement = this;
   }
 }
