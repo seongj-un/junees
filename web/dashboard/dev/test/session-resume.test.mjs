@@ -12,6 +12,10 @@ import { render, resumeCommand, shellQuote } from "../../view-session.js";
  * Reads one POSIX shell word made only of single-quoted pieces and `\'`
  * (what shellQuote writes) back into the text it stands for. Any other
  * character outside quotes would be read by a shell as syntax, so it fails.
+ * Limit: this follows POSIX rules only (a backslash inside quotes is itself).
+ * fish reads `\'` and `\\` inside quotes as escapes, so `fishWord` below reads
+ * every made command by that rule too. No real shell runs here (CI forbids
+ * child processes, and fish is not installed on the build host).
  */
 function unquote(word) {
   let out = "";
@@ -27,6 +31,42 @@ function unquote(word) {
       at += 2;
     } else {
       assert.fail(`the character ${JSON.stringify(word[at])} is outside the quotes in ${word}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * The same word as fish reads it: inside single quotes `\'` and `\\` are
+ * escapes and every other backslash is itself; outside quotes only `\'` is
+ * allowed here. Returns null for a word with anything else outside quotes
+ * (fish would read it as syntax) or an unclosed quote.
+ */
+function fishWord(word) {
+  let out = "";
+  let at = 0;
+  while (at < word.length) {
+    if (word[at] === "'") {
+      at += 1;
+      for (;;) {
+        if (at >= word.length) return null;
+        const char = word[at];
+        if (char === "\\" && (word[at + 1] === "'" || word[at + 1] === "\\")) {
+          out += word[at + 1];
+          at += 2;
+        } else if (char === "'") {
+          at += 1;
+          break;
+        } else {
+          out += char;
+          at += 1;
+        }
+      }
+    } else if (word.startsWith("\\'", at)) {
+      out += "'";
+      at += 2;
+    } else {
+      return null;
     }
   }
   return out;
@@ -76,13 +116,16 @@ test("the command is one cd and one junees, with the folder as a single quoted w
   const { command, note } = resumeCommand("/work/x", "20261113-010203-abcd");
   assert.equal(command, "cd -- '/work/x' && junees --resume 20261113-010203-abcd");
   assert.match(note, /실행하지 않습니다/);
-  for (const cwd of NASTY.filter((path) => path.startsWith("/") && !path.includes("\n"))) {
+  for (const cwd of NASTY.filter((path) => path.startsWith("/") && !/[\n\\]/.test(path))) {
     const got = resumeCommand(cwd, "abc").command;
     const [head, tail, ...rest] = got.split(" && junees --resume ");
     assert.deepEqual(rest, [], cwd);
     assert.equal(tail, "abc");
     assert.ok(head.startsWith("cd -- "), cwd);
-    assert.equal(unquote(head.slice("cd -- ".length)), cwd);
+    const word = head.slice("cd -- ".length);
+    // The POSIX reader below and the fish reader both give back the folder, as one word.
+    assert.equal(unquote(word), cwd);
+    assert.equal(fishWord(word), cwd, `fish: ${cwd}`);
   }
   // A name that starts with a dash is after `--` and inside quotes.
   assert.equal(resumeCommand("/-rf", "a").command, "cd -- '/-rf' && junees --resume a");
@@ -93,6 +136,39 @@ test("a path with a line break or another control character gets no command and 
     const got = resumeCommand(cwd, "abc");
     assert.equal(got.command, null, JSON.stringify(cwd));
     assert.match(got.note, /한 줄 명령으로 안전하게 보여 줄 수 없어 명령을 만들지 않았습니다/);
+  }
+});
+
+test("a path with a backslash gets no cd command, because fish reads escapes inside single quotes", () => {
+  // The hazard: shellQuote is right for POSIX shells and wrong for fish when a backslash
+  // comes before a quote. fish ends the quote early and runs what follows the `;`.
+  const hostile = "/work/a\\'; touch x #";
+  assert.equal(unquote(shellQuote(hostile)), hostile);
+  assert.notEqual(fishWord(shellQuote(hostile)), hostile);
+  assert.equal(fishWord(shellQuote(hostile)), null);
+  for (const cwd of [hostile, "/work/a\\'b", "/work/end\\", "/work/two\\\\", "/work/\\\\'", "/work/a\\b", "/\\", "/\\'\\'", "/work/a\\'\\'; id #"]) {
+    const got = resumeCommand(cwd, "abc");
+    assert.equal(got.command, null, cwd);
+    assert.match(got.note, /역슬래시/);
+    assert.match(got.note, /한 줄 명령으로 안전하게 보여 줄 수 없어 명령을 만들지 않았습니다/);
+  }
+  // No backslash, a quote anywhere: both readers agree on every shape that is made.
+  for (const cwd of ["/work/'", "/work/a'b", "/work/''x''", "/work/'; touch x #", "/'/'/'", "/work/it's a $HOME"]) {
+    const word = resumeCommand(cwd, "abc").command.split(" && ")[0].slice("cd -- ".length);
+    assert.equal(unquote(word), cwd, cwd);
+    assert.equal(fishWord(word), cwd, `fish: ${cwd}`);
+  }
+});
+
+test("a path with a direction control character gets no command; zero-width joiners are fine", () => {
+  const unsafe = ["\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069"];
+  for (const char of unsafe) {
+    const got = resumeCommand(`/work/a${char}b`, "abc");
+    assert.equal(got.command, null, JSON.stringify(char));
+    assert.match(got.note, /글자 방향을 바꾸는 문자/);
+  }
+  for (const char of ["\u200c", "\u200d", "\u00ad"]) {
+    assert.equal(resumeCommand(`/work/a${char}b`, "abc").command, `cd -- '/work/a${char}b' && junees --resume abc`, JSON.stringify(char));
   }
 });
 
@@ -272,6 +348,22 @@ test("copy writes the shown command to the clipboard and says so, sending nothin
   assert.deepEqual(s.calls.fetched, []);
   assert.equal(s.calls.stored, 0);
   assert.deepEqual(s.calls.announced, []);
+});
+
+test("copying again empties the result line first, so the same result is announced again", async (t) => {
+  const seen = [];
+  let s = null;
+  s = screen(t, "resume-twice", {
+    clipboard: async () => {
+      // What the line says at the moment the browser is asked.
+      seen.push(s.result());
+    },
+  });
+  await s.button().click();
+  assert.equal(s.result(), "명령을 복사했습니다.");
+  await s.button().click();
+  assert.deepEqual(seen, ["", ""]);
+  assert.equal(s.result(), "명령을 복사했습니다.");
 });
 
 test("a refused or failed copy says so and tells the person to copy by hand", async (t) => {

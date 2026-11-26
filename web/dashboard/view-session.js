@@ -300,9 +300,17 @@ export function renderControls(root, ctx) {
 const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** The longest path Linux takes (PATH_MAX); longer is not a folder this command can name. */
 const MAX_PATH = 4096;
-/** Line breaks and other control characters: not safe to show as one pasted line. */
-const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
-/** The server puts `[hidden]` in place of a secret value it found, inside a path too. */
+/**
+ * Characters a path must not hold for a one-line command: line breaks and
+ * other control characters, the characters that change the direction text is
+ * drawn in (the screen and the pasted order would differ; U+200C and U+200D
+ * are left, real folder names use them), and the backslash. fish reads `\'`
+ * and `\\` as escapes inside single quotes, so a name like `a\'; touch x #`
+ * would end its quote early and run the rest; no quoting is the same word in
+ * both POSIX shells and fish once the path has no backslash.
+ */
+const UNSAFE_PATH = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\\]/;
+/** The path holds the server's `[hidden]` mark (a secret value it found and replaced). */
 const HIDDEN_IN_TEXT = /\[hidden(: [^\]\n]*)?\]/;
 
 /**
@@ -314,11 +322,11 @@ export function shellQuote(text) {
 }
 
 const NOTE_COPY =
-  "복사해서 터미널에 붙여 넣으세요. 대시보드는 이 명령을 실행하지 않습니다. 다른 Junees가 이 세션을 쓰는 중이거나 claude-code 백엔드로 만든 세션이면, 터미널이 이유와 바꾸는 방법을 알려 줍니다.";
+  "복사해서 터미널에 붙여 넣으세요. bash, zsh 같은 POSIX 셸용 명령이며(csh 계열은 폴더 이름의 느낌표를 다르게 읽습니다), 대시보드는 이 명령을 실행하지 않습니다. 다른 Junees가 이 세션을 쓰는 중이거나 claude-code 백엔드로 만든 세션이면, 터미널이 이유와 바꾸는 방법을 알려 줍니다.";
 const NOTE_NO_DIR =
-  "세션을 시작한 폴더를 알 수 없거나 서버가 가려서 폴더 이동 없이 만들었습니다. 지금 폴더에서 이어 가며, 기록 속 상대 경로는 세션을 시작한 폴더 기준입니다. 대시보드는 이 명령을 실행하지 않습니다.";
+  "세션을 시작한 폴더를 알 수 없거나, 폴더 이름에 서버가 비밀 값으로 보고 바꾼 [hidden] 표시가 들어 있거나, 절대 경로가 아니어서 폴더 이동 없이 만들었습니다. 지금 폴더에서 이어 가며, 기록 속 상대 경로는 세션을 시작한 폴더 기준입니다. 대시보드는 이 명령을 실행하지 않습니다.";
 const NOTE_BAD_DIR =
-  "폴더 경로에 줄바꿈이나 제어 문자가 있거나 너무 길어서 한 줄 명령으로 안전하게 보여 줄 수 없어 명령을 만들지 않았습니다.";
+  "폴더 경로에 줄바꿈, 제어 문자, 글자 방향을 바꾸는 문자, 역슬래시(\\)가 있거나 너무 길어서 한 줄 명령으로 안전하게 보여 줄 수 없어 명령을 만들지 않았습니다. 역슬래시는 fish가 따옴표 안에서도 다르게 읽습니다.";
 const NOTE_BAD_ID = "세션 ID가 예상한 형식(영문, 숫자, _, -로 1~64자)이 아니라서 명령을 만들지 않았습니다.";
 
 /**
@@ -331,7 +339,7 @@ export function resumeCommand(cwd, id) {
   const resume = `junees --resume ${id}`;
   // No folder, hidden by the server, or not an absolute path: no `cd`, the command still works.
   if (typeof cwd !== "string" || !cwd.startsWith("/") || HIDDEN_IN_TEXT.test(cwd)) return { command: resume, note: NOTE_NO_DIR };
-  if (CONTROL.test(cwd) || cwd.length > MAX_PATH) return { command: null, note: NOTE_BAD_DIR };
+  if (UNSAFE_PATH.test(cwd) || cwd.length > MAX_PATH) return { command: null, note: NOTE_BAD_DIR };
   // `--` so a folder name cannot be read as an option.
   return { command: `cd -- ${shellQuote(cwd)} && ${resume}`, note: NOTE_COPY };
 }
@@ -429,6 +437,8 @@ function mountResume() {
   button.addEventListener("click", async () => {
     const text = resume.current;
     if (text === null) return;
+    // Emptied first: the same result again would leave the line unchanged and say nothing.
+    putText(status, "");
     const result = await copyText(text);
     // The command changed while the browser was asking: the result is for the old one.
     if (resume.current !== text) return;
