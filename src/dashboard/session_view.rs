@@ -389,30 +389,83 @@ fn draft_json(
     })
 }
 
+/// Whether `c` can be part of a credential and so of the word a window's
+/// edge may cut in two: ASCII graphic characters, bar the ones that
+/// delimit a value in text (quotes, brackets, commas, backslash). Space,
+/// line breaks and every non-ASCII character end a word.
+fn word_char(c: char) -> bool {
+    c.is_ascii_graphic()
+        && !matches!(
+            c,
+            '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '{' | '}' | '[' | ']' | '<' | '>' | '\\'
+        )
+}
+
+/// The header line of a private key block, which a window that starts
+/// inside the block puts back in front of itself ([`tail`]).
+const KEY_BEGIN: &str = concat!("-----BEGIN ", "PRIVATE KEY-----\n");
+
+/// Whether byte `at` of `text` lies inside a private key block: after
+/// the last `-----BEGIN ... PRIVATE KEY` line and before any `-----END`.
+fn inside_private_key(text: &str, at: usize) -> bool {
+    let Some(begin) = text[..at].rfind("-----BEGIN") else {
+        return false;
+    };
+    let header = text[begin..].lines().next().unwrap_or("");
+    header.contains("PRIVATE KEY") && !text[begin..at].contains("-----END")
+}
+
 /// The end of `text` past its first `shown` characters, at most `chars`
 /// of it, with its secrets hidden, and how many characters lie between
-/// the two; `None` when `text` is no longer than `shown`. The end does
-/// not overlap what [`cut`] shows. Secrets are hidden in what lies up to
-/// [`SECRET_MARGIN`] before the end too, as [`cut`] does after its cut.
-/// A hiding marker is never cut: when the end would start inside one, it
-/// starts at the marker, so it can be a few characters longer than `chars`
-/// (up to a marker's length), and `omitted_chars` shrinks by as many.
+/// the two; `None` when `text` is no longer than `shown`. Secrets are
+/// hidden in what lies up to [`SECRET_MARGIN`] before the end too, as
+/// [`cut`] does after its cut. Where that window starts inside a word,
+/// the part of the word in the window is left out (at most
+/// [`SECRET_MARGIN`] characters of it): the secret check never saw the
+/// whole word, so it cannot say that the rest is not a piece of a key.
+/// A window that starts inside a private key block is hidden whole.
+/// A hiding marker is never cut: when the end would start inside one and
+/// lies away from the preview, it starts at the marker, so it can be a
+/// few characters longer than `chars` (up to a marker's length), and
+/// `omitted_chars` shrinks by as many; when the end follows the preview
+/// directly (`omitted_chars` 0), the preview already ends with the whole
+/// marker, so the end starts after it.
 fn tail(settings: &Settings, text: &str, shown: usize, chars: usize) -> Option<(String, usize)> {
     let total = text.chars().count();
     let past = total.checked_sub(shown).filter(|past| *past > 0)?;
     let kept = past.min(chars);
     let start = total - kept;
-    let mut near: String = text
-        .chars()
-        .skip(start.saturating_sub(SECRET_MARGIN))
-        .collect();
+    let mut window = start.saturating_sub(SECRET_MARGIN);
+    if window > 0 {
+        let mut chars_at = text.chars().skip(window - 1);
+        if chars_at.next().is_some_and(word_char) {
+            window += chars_at
+                .take(SECRET_MARGIN)
+                .take_while(|c| word_char(*c))
+                .count();
+        }
+    }
+    let mut near: String = text.chars().skip(window).collect();
+    if window > 0 {
+        let byte = text
+            .char_indices()
+            .nth(window)
+            .map_or(text.len(), |(at, _)| at);
+        if inside_private_key(text, byte) {
+            near.insert_str(0, KEY_BEGIN);
+        }
+    }
     crate::doctor::hide_secrets_in_user_text(settings, std::iter::once(&mut near));
     let count = near.chars().count();
     let mut from = count.saturating_sub(kept);
     let mut omitted = start - shown;
-    if let Some((marker_start, _)) = marker_across(&near, from) {
-        omitted = omitted.saturating_sub(from - marker_start);
-        from = marker_start;
+    if let Some((marker_start, marker_end)) = marker_across(&near, from) {
+        if omitted == 0 {
+            from = marker_end;
+        } else {
+            omitted = omitted.saturating_sub(from - marker_start);
+            from = marker_start;
+        }
     }
     let end: String = near.chars().skip(from).collect();
     Some((end, omitted))
@@ -434,12 +487,24 @@ fn marker_across(hidden: &str, at: usize) -> Option<(usize, usize)> {
 
 /// The first `chars` characters of `text` with its secrets hidden, and
 /// whether it was cut. Secrets are hidden before the cut, in what lies
-/// up to [`SECRET_MARGIN`] past it. A hiding marker is never cut: when the
+/// up to [`SECRET_MARGIN`] past it. Where that window ends inside a word,
+/// the part of the word in the window is left out (at most
+/// [`SECRET_MARGIN`] characters of it): hiding can shorten the window to
+/// `chars` or less, and what then shows its end is a piece of a word the
+/// secret check never saw whole. A hiding marker is never cut: when the
 /// cut would fall inside one, the text runs on to its end.
 pub(super) fn cut(settings: &Settings, text: &str, chars: usize) -> (String, bool) {
-    let mut near: String = text.chars().take(chars + SECRET_MARGIN).collect();
+    let window = chars + SECRET_MARGIN;
+    let mut seen: Vec<char> = text.chars().take(window + 1).collect();
+    let truncated = seen.len() > chars;
+    let next = seen.get(window).copied();
+    seen.truncate(window);
+    if next.is_some_and(word_char) {
+        let word = seen.iter().rev().take_while(|c| word_char(**c)).count();
+        seen.truncate(seen.len() - word.min(SECRET_MARGIN));
+    }
+    let mut near: String = seen.into_iter().collect();
     crate::doctor::hide_secrets_in_user_text(settings, std::iter::once(&mut near));
-    let truncated = text.chars().nth(chars).is_some();
     let upto = marker_across(&near, chars).map_or(chars, |(_, end)| end);
     let kept: String = near.chars().take(upto).collect();
     // Hiding can make the text longer or shorter; what counts is whether
@@ -659,11 +724,14 @@ mod tests {
         assert_eq!(text.chars().count(), 2_011);
         let (tail, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
         assert!(!marker_fragment(&tail), "{tail:?}");
-        assert!(
-            tail.contains("[hidden: it looks like it holds a credential]"),
-            "{tail:?}"
+        // The preview is that marker whole; the end follows it, so it has
+        // nothing left to show.
+        let shown = block_json(&settings, &ContentBlock::tool_result("t", text, false));
+        assert_eq!(
+            shown["text_preview"],
+            "[hidden: it looks like it holds a credential]"
         );
-        assert!(!tail.contains("PRIVATE"), "{tail:?}");
+        assert_eq!(tail, "");
         assert_eq!(omitted, 0);
     }
 
