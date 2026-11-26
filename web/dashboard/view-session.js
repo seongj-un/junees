@@ -288,6 +288,156 @@ export function renderControls(root, ctx) {
   root.replaceChildren(...links);
 }
 
+// ---- 터미널에서 이어 하기: a command to copy, never one the page runs ----
+//
+// The syntax is `junees --resume <id>` (src/cli.rs: `--resume <ID>`, "a unique
+// prefix is enough"; docs/usage.md). It opens a session from any folder, but
+// the history's relative paths mean the folder it started in (docs/usage.md,
+// src/main.rs "Relative paths in the history"), so the command goes to that
+// folder first. The id is `[A-Za-z0-9_-]` 1 to 64 characters (`valid_id` in
+// src/dashboard/session_view.rs), which a shell reads as one plain word.
+
+const SESSION_ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** The longest path Linux takes (PATH_MAX); longer is not a folder this command can name. */
+const MAX_PATH = 4096;
+/** Line breaks and other control characters: not safe to show as one pasted line. */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+/** The server puts `[hidden]` in place of a secret value it found, inside a path too. */
+const HIDDEN_IN_TEXT = /\[hidden(: [^\]\n]*)?\]/;
+
+/**
+ * `text` as one POSIX shell word: in single quotes, with each single quote
+ * written as `'\''`. Nothing inside single quotes is expanded or split.
+ */
+export function shellQuote(text) {
+  return `'${String(text).replaceAll("'", "'\\''")}'`;
+}
+
+const NOTE_COPY =
+  "복사해서 터미널에 붙여 넣으세요. 대시보드는 이 명령을 실행하지 않습니다. 다른 Junees가 이 세션을 쓰는 중이거나 claude-code 백엔드로 만든 세션이면, 터미널이 이유와 바꾸는 방법을 알려 줍니다.";
+const NOTE_NO_DIR =
+  "세션을 시작한 폴더를 알 수 없거나 서버가 가려서 폴더 이동 없이 만들었습니다. 지금 폴더에서 이어 가며, 기록 속 상대 경로는 세션을 시작한 폴더 기준입니다. 대시보드는 이 명령을 실행하지 않습니다.";
+const NOTE_BAD_DIR =
+  "폴더 경로에 줄바꿈이나 제어 문자가 있거나 너무 길어서 한 줄 명령으로 안전하게 보여 줄 수 없어 명령을 만들지 않았습니다.";
+const NOTE_BAD_ID = "세션 ID가 예상한 형식(영문, 숫자, _, -로 1~64자)이 아니라서 명령을 만들지 않았습니다.";
+
+/**
+ * The command that continues a session in a terminal, as `{ command, note }`:
+ * `command` is null when none can be shown safely and `note` says why (or,
+ * with a command, what to know about it). `cwd` is the folder the server sent.
+ */
+export function resumeCommand(cwd, id) {
+  if (typeof id !== "string" || !SESSION_ID.test(id)) return { command: null, note: NOTE_BAD_ID };
+  const resume = `junees --resume ${id}`;
+  // No folder, hidden by the server, or not an absolute path: no `cd`, the command still works.
+  if (typeof cwd !== "string" || !cwd.startsWith("/") || HIDDEN_IN_TEXT.test(cwd)) return { command: resume, note: NOTE_NO_DIR };
+  if (CONTROL.test(cwd) || cwd.length > MAX_PATH) return { command: null, note: NOTE_BAD_DIR };
+  // `--` so a folder name cannot be read as an option.
+  return { command: `cd -- ${shellQuote(cwd)} && ${resume}`, note: NOTE_COPY };
+}
+
+const COPY_RESULT = {
+  ok: "명령을 복사했습니다.",
+  denied: "복사하지 못했습니다. 위 명령을 직접 선택해 복사해 주세요.",
+  missing: "이 브라우저에서는 복사 기능을 쓸 수 없습니다. 위 명령을 직접 선택해 복사해 주세요.",
+};
+
+/** Writes `text` to the clipboard: `"ok"`, `"denied"` (refused or failed) or `"missing"` (no clipboard API). */
+async function copyText(text) {
+  let write = null;
+  try {
+    const clipboard = globalThis.navigator?.clipboard;
+    if (clipboard && typeof clipboard.writeText === "function") write = (value) => clipboard.writeText(value);
+  } catch {
+    write = null;
+  }
+  if (!write) return "missing";
+  try {
+    await write(text);
+    return "ok";
+  } catch {
+    return "denied";
+  }
+}
+
+/** Selects the text of `node`, where the browser can, so the person can copy it by hand. */
+function selectText(node) {
+  try {
+    const selection = globalThis.getSelection?.();
+    if (!selection || typeof document.createRange !== "function") return;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  } catch {
+    // Selecting is a courtesy; the text stays on screen either way.
+  }
+}
+
+const putText = (node, text) => {
+  if (node.textContent !== text) node.textContent = text;
+};
+
+/**
+ * The 이어 하기 block of the session card. Built once per mounted session and
+ * only updated by `show`, so a refresh never replaces the copy button: its
+ * focus and the result line stay.
+ */
+function mountResume() {
+  const titleId = "session-resume-title";
+  const command = el("code", { class: "code session-resume-command", id: "session-resume-command" });
+  const button = el(
+    "button",
+    { type: "button", id: "session-resume-copy", class: "button button-secondary button-small", "aria-label": "이어 하기 명령 복사" },
+    "복사",
+  );
+  const line = el("div", { class: "session-resume-line" }, command, button);
+  // Kept mounted and emptied, so a result is announced when it appears. An
+  // <output> has the implicit role "status" (and is a live region); the
+  // attribute is left off because the 찾기 line below is the screen's one
+  // `[role="status"]` that the other screen tests and tools look up first.
+  const status = el("output", { class: "summary", for: command.id });
+  const note = el("p", { class: "summary", id: "session-resume-note" });
+  const node = el(
+    "div",
+    { class: "session-resume", role: "group", "aria-labelledby": titleId },
+    el("p", { class: "session-resume-title", id: titleId }, "터미널에서 이어 하기"),
+    line,
+    status,
+    note,
+  );
+  const resume = {
+    node,
+    command,
+    button,
+    status,
+    note,
+    line,
+    /** The command on screen, or null. */
+    current: null,
+    show(info) {
+      // Another command means the old result no longer describes what is on screen.
+      if (info.command !== resume.current) {
+        resume.current = info.command;
+        putText(status, "");
+      }
+      putText(command, info.command ?? "");
+      line.hidden = info.command === null;
+      putText(note, info.note);
+    },
+  };
+  button.addEventListener("click", async () => {
+    const text = resume.current;
+    if (text === null) return;
+    const result = await copyText(text);
+    // The command changed while the browser was asking: the result is for the old one.
+    if (resume.current !== text) return;
+    putText(status, COPY_RESULT[result]);
+    if (result !== "ok") selectText(command);
+  });
+  return resume;
+}
+
 const searchText = (text) => String(text ?? "").normalize("NFC").toLowerCase();
 
 /** The query as compared: trimmed, any letter case. Empty means no 찾기. */
@@ -383,7 +533,10 @@ function mountFind(root, id) {
   const toggle = el("input", { id: "session-hide-tools", type: "checkbox" });
   const scope = el("p", { class: "summary", id: "session-find-scope" });
   const status = el("p", { class: "summary", role: "status" });
-  const headCard = el("div", { class: "card session-head" });
+  // Fixed slots: only the facts are redrawn, the 이어 하기 block stays mounted.
+  const facts = el("div", { class: "session-facts" });
+  const resume = mountResume();
+  const headCard = el("div", { class: "card session-head" }, facts, resume.node);
   const body = el("div");
   const find = el(
     "div",
@@ -393,7 +546,7 @@ function mountFind(root, id) {
     scope,
     el("span", { class: "check-toggle" }, toggle, el("label", { for: toggle.id }, "도구 호출과 결과 숨기기")),
   );
-  const shell = { id, input, clear, toggle, scope, status, headCard, body, paint: () => {} };
+  const shell = { id, input, clear, toggle, scope, status, headCard, facts, resume, body, paint: () => {} };
   input.addEventListener("input", () => shell.paint());
   toggle.addEventListener("change", () => shell.paint());
   clear.addEventListener("click", () => {
@@ -561,7 +714,8 @@ export function render(root, data, ctx) {
   });
 
   update();
-  shell.headCard.replaceChildren(head);
+  shell.facts.replaceChildren(head);
+  shell.resume.show(resumeCommand(data.cwd, data.id));
   shell.body.replaceChildren(list, empty, footer);
   shell.paint = () => applyFind();
   applyFind();

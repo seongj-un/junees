@@ -955,6 +955,50 @@ a.button {
   grid-template-columns: max-content minmax(0, 1fr);
 }
 
+.session-resume {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.session-resume-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.session-resume-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.session-resume-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.session-resume-line .button {
+  flex: none;
+}
+
+.session-resume .summary {
+  display: block;
+  margin: 6px 0 0;
+}
+
+.session-resume output:empty {
+  margin: 0;
+}
+
 .msgs {
   display: flex;
   flex-direction: column;
