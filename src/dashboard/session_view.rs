@@ -420,9 +420,9 @@ fn inside_private_key(text: &str, at: usize) -> bool {
 /// the two; `None` when `text` is no longer than `shown`. Secrets are
 /// hidden in what lies up to [`SECRET_MARGIN`] before the end too, as
 /// [`cut`] does after its cut. Where that window starts inside a word,
-/// the part of the word in the window is left out (at most
-/// [`SECRET_MARGIN`] characters of it): the secret check never saw the
-/// whole word, so it cannot say that the rest is not a piece of a key.
+/// the part of the word in the window is left out, only when that part
+/// is [`SECRET_MARGIN`] characters or fewer: the secret check never saw
+/// the whole word, so it cannot say that the rest is not a piece of a key.
 /// A window that starts inside a private key block is hidden whole.
 /// A hiding marker is never cut: when the end would start inside one and
 /// lies away from the preview, it starts at the marker, so it can be a
@@ -440,8 +440,9 @@ fn tail(settings: &Settings, text: &str, shown: usize, chars: usize) -> Option<(
         let mut chars_at = text.chars().skip(window - 1);
         if chars_at.next().is_some_and(word_char) {
             // A word that goes on past the margin keeps the window as it
-            // is: the check then sees the 512 characters after it and hides
-            // the word whole, as before.
+            // is, as before: the check looks at the part of the word in
+            // the window, and only if that part looks like a secret is the
+            // word hidden whole; otherwise the window start is shown.
             let word = chars_at
                 .take(SECRET_MARGIN + 1)
                 .take_while(|c| word_char(*c))
@@ -499,8 +500,8 @@ fn marker_across(hidden: &str, at: usize) -> Option<(usize, usize)> {
 /// The first `chars` characters of `text` with its secrets hidden, and
 /// whether it was cut. Secrets are hidden before the cut, in what lies
 /// up to [`SECRET_MARGIN`] past it. Where that window ends inside a word,
-/// the part of the word in the window is left out (at most
-/// [`SECRET_MARGIN`] characters of it): hiding can shorten the window to
+/// the part of the word in the window is left out, only when that part
+/// is [`SECRET_MARGIN`] characters or fewer: hiding can shorten the window to
 /// `chars` or less, and what then shows its end is a piece of a word the
 /// secret check never saw whole. A hiding marker is never cut: when the
 /// cut would fall inside one, the text runs on to its end.
@@ -511,8 +512,9 @@ pub(super) fn cut(settings: &Settings, text: &str, chars: usize) -> (String, boo
     let next = seen.get(window).copied();
     seen.truncate(window);
     if next.is_some_and(word_char) {
-        // A longer word stays: the check sees the 512 characters of it
-        // past the cut and hides it whole, as before.
+        // A longer word stays, as before: the check looks at the part of
+        // it in the window, and only if that part looks like a secret is
+        // the word hidden whole; otherwise the window end is shown.
         let word = seen.iter().rev().take_while(|c| word_char(**c)).count();
         if word <= SECRET_MARGIN {
             seen.truncate(seen.len() - word);
@@ -1027,7 +1029,45 @@ mod tests {
             let (shown, truncated) = cut(&settings, &text, 2_000);
             assert!(truncated);
             assert!(!shown.contains("Ab1"), "{start}: {shown:?}");
+            if start == 2_000 {
+                // Exactly 512 characters of the token are in the window:
+                // they are left out, so the text ends where the cut is.
+                assert_eq!(shown, filler(2_000));
+            } else {
+                // 543 and 513 are more than the margin: the window stays,
+                // the token is hidden whole and the marker is not cut.
+                assert!(shown.ends_with("[hidden]"), "{start}: {shown:?}");
+                assert_eq!(shown, format!("{}[hidden]", filler(start)), "{start}");
+                assert_eq!(shown.chars().count(), start + 8, "{start}");
+            }
         }
+    }
+
+    #[test]
+    fn a_word_of_512_characters_in_the_tail_window_is_left_out_and_one_of_513_is_not() {
+        let settings = settings();
+        // A 564-character token from 2,600; the window of the end starts
+        // inside it, with 512 or 513 of its characters in the window.
+        let word = "Ab1".repeat(188);
+        let rest = |len: usize| -> String {
+            format!(" {}", "cd ".repeat(200))
+                .chars()
+                .take(len)
+                .collect()
+        };
+        // 512: the token's end is 500 characters before the text's end.
+        let text = format!("{}{word}{}", filler(2_600), rest(500));
+        assert_eq!(text.chars().count(), 3_664);
+        let (end, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert_eq!(end, rest(500));
+        assert_eq!(omitted, 3_164 - 2_000);
+        // 513: one character more of it is in the window, so the window
+        // stays and the check hides the piece whole.
+        let text = format!("{}{word}{}", filler(2_600), rest(499));
+        assert_eq!(text.chars().count(), 3_663);
+        let (end, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert_eq!(end, format!("[hidden]{}", rest(499)));
+        assert_eq!(omitted, 3_163 - 2_000 - 7);
     }
 
     #[test]
