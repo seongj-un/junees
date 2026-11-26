@@ -211,7 +211,7 @@ function screen(t, id, { messages = talk, loaded = messages.length, total = mess
     input: root.querySelector("#session-find"),
     // `.msg`, not `li`: a draft card has list items of its own.
     shown: () => visible(root, ".msg").map((li) => Number(li.getAttribute("data-index"))),
-    status: () => root.querySelector('[role="status"]').textContent,
+    status: () => root.querySelector("#session-find-status").textContent,
     scope: () => root.querySelector("#session-find-scope").textContent,
     count: () => root.querySelector(".more .summary").textContent,
     more: () => visible(root, "button").find((b) => b.textContent.includes("더 보기")) ?? null,

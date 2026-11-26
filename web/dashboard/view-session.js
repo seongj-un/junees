@@ -368,6 +368,21 @@ async function copyText(text) {
   }
 }
 
+/** How long the emptied result line stays empty, so the screen is drawn once without it. */
+const SETTLE_MS = 60;
+
+/**
+ * {@link copyText}, then a short wait. Without a clipboard API nothing is
+ * awaited, so the line emptied at the press would be filled with the same
+ * words before the screen was drawn, and a second press would read as no
+ * change. The wait is the same for every outcome.
+ */
+async function copyAndSettle(text) {
+  const result = await copyText(text);
+  await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+  return result;
+}
+
 /** Selects the text of `node`, where the browser can, so the person can copy it by hand. */
 function selectText(node) {
   try {
@@ -403,7 +418,7 @@ function mountResume() {
   // Kept mounted and emptied, so a result is announced when it appears. An
   // <output> has the implicit role "status" (and is a live region); the
   // attribute is left off because the 찾기 line below is the screen's one
-  // `[role="status"]` that the other screen tests and tools look up first.
+  // `[role="status"]`, found by its id (`FIND_STATUS_ID`).
   const status = el("output", { class: "summary", for: command.id });
   const note = el("p", { class: "summary", id: "session-resume-note" });
   const node = el(
@@ -434,14 +449,17 @@ function mountResume() {
       putText(note, info.note);
     },
   };
+  let presses = 0;
   button.addEventListener("click", async () => {
     const text = resume.current;
     if (text === null) return;
     // Emptied first: the same result again would leave the line unchanged and say nothing.
     putText(status, "");
-    const result = await copyText(text);
-    // The command changed while the browser was asking: the result is for the old one.
-    if (resume.current !== text) return;
+    const press = ++presses;
+    const result = await copyAndSettle(text);
+    // The command changed while the browser was asking, or the button was
+    // pressed again: the result is for an older press.
+    if (resume.current !== text || press !== presses) return;
     putText(status, COPY_RESULT[result]);
     if (result !== "ok") selectText(command);
   });
@@ -559,6 +577,9 @@ export function findEmptyBody(left) {
 // drops the query: it is kept nowhere but in the input.
 const mountedFinds = new WeakMap();
 
+/** The 찾기 status line (`role="status"`); tests and tools look it up by this id. */
+export const FIND_STATUS_ID = "session-find-status";
+
 function mountFind(root, id) {
   const input = el("input", {
     id: "session-find",
@@ -572,7 +593,7 @@ function mountFind(root, id) {
   // Off at first and kept nowhere but in this node, like the query.
   const toggle = el("input", { id: "session-hide-tools", type: "checkbox" });
   const scope = el("p", { class: "summary", id: "session-find-scope" });
-  const status = el("p", { class: "summary", role: "status" });
+  const status = el("p", { class: "summary", id: FIND_STATUS_ID, role: "status" });
   // Fixed slots: only the facts are redrawn, the 이어 하기 block stays mounted.
   const facts = el("div", { class: "session-facts" });
   const resume = mountResume();

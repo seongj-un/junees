@@ -366,6 +366,36 @@ test("copying again empties the result line first, so the same result is announc
   assert.equal(s.result(), "명령을 복사했습니다.");
 });
 
+test("without a clipboard API a second press also empties the line before the words come back", async (t) => {
+  const s = screen(t, "resume-missing-twice", { clipboard: "none" });
+  const words = "이 브라우저에서는 복사 기능을 쓸 수 없습니다. 위 명령을 직접 선택해 복사해 주세요.";
+  await s.button().click();
+  assert.equal(s.result(), words);
+  // Right after the press the line is empty and stays so while the screen is drawn.
+  const second = s.button().click();
+  assert.equal(s.result(), "", "emptied at the press, not refilled in the same turn");
+  await Promise.resolve();
+  assert.equal(s.result(), "", "still empty after the microtasks");
+  await second;
+  assert.equal(s.result(), words);
+});
+
+test("a press answered after a newer press is dropped, so the line shows the newest result", async (t) => {
+  const waits = [];
+  const s = screen(t, "resume-overlap", {
+    clipboard: () => new Promise((resolve, reject) => waits.push({ resolve, reject })),
+  });
+  const first = s.button().click();
+  const second = s.button().click();
+  waits[1].resolve();
+  await second;
+  assert.equal(s.result(), "명령을 복사했습니다.");
+  // The older press fails late: its answer must not replace the newer one.
+  waits[0].reject(new Error("NotAllowedError"));
+  await first;
+  assert.equal(s.result(), "명령을 복사했습니다.");
+});
+
 test("a refused or failed copy says so and tells the person to copy by hand", async (t) => {
   for (const mode of ["refuses", "throws"]) {
     await t.test(mode, async (inner) => {
