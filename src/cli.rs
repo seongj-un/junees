@@ -855,7 +855,8 @@ mod tests {
             Command::Usage(UsageArgs {
                 days: 30,
                 by: By::Folder,
-                all: true
+                all: true,
+                json: false,
             })
         );
         assert_eq!(parse(&["usage", "-h"]).unwrap(), Command::UsageHelp);

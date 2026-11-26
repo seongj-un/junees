@@ -496,6 +496,11 @@ a.button {
   font-size: 14px;
 }
 
+.session-totals {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 .session-filter label {
   font-size: 14px;
   font-weight: 600;
@@ -519,12 +524,37 @@ a.button {
   font: inherit;
 }
 
+.session-sort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.session-sort-select {
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
 .session-filter-input::-webkit-search-cancel-button {
   display: none;
 }
 
 .session-filter button:disabled {
   cursor: default;
+}
+
+.session-filter .check-toggle {
+  margin-bottom: 12px;
+}
+
+.session-filter .check-toggle label {
+  font-weight: 500;
 }
 
 /* Badges */
@@ -925,6 +955,50 @@ a.button {
   grid-template-columns: max-content minmax(0, 1fr);
 }
 
+.session-resume {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.session-resume-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.session-resume-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.session-resume-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.session-resume-line .button {
+  flex: none;
+}
+
+.session-resume .summary {
+  display: block;
+  margin: 6px 0 0;
+}
+
+.session-resume output:empty {
+  margin: 0;
+}
+
 .msgs {
   display: flex;
   flex-direction: column;
@@ -969,6 +1043,33 @@ a.button {
   margin-bottom: 8px;
   color: var(--muted);
   font-size: 13px;
+}
+
+/* The head with its 복사 button: the head takes the row, the button keeps its size. */
+.msg-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.msg-bar .msg-head {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.msg-bar .button {
+  flex: none;
+}
+
+.msg-copy-status {
+  display: block;
+  margin: 0;
+}
+
+.msg-copy-status:not(:empty) {
+  margin: -2px 0 8px;
 }
 
 .msg-role {
