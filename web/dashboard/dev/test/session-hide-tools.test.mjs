@@ -21,6 +21,7 @@ import {
   isToolBlock,
   messageMatches,
   messageView,
+  newCopyState,
   render,
 } from "../../view-session.js";
 
@@ -240,7 +241,7 @@ test("the box is a labelled checkbox that starts off, and the list is as before"
   // Every message reads as the message view alone draws it, and no block is hidden.
   const keys = draftResultKeys(talk);
   for (const message of talk) {
-    assert.equal(s.text(message.index), shownText(messageView(message, NOW, keys)));
+    assert.equal(s.text(message.index), shownText(messageView(message, NOW, keys, newCopyState())));
   }
   assert.equal(s.root.querySelectorAll("[data-tool]").length, 5);
   assert.equal(visible(s.root, "[data-tool]").length, 5);

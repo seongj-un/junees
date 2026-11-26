@@ -177,26 +177,115 @@ function blockView(block, messageIndex, n, draftKeys) {
 
 const NO_DRAFTS = new Set();
 
+// ---- 글 복사: the words of one message, as the screen draws them ----
+
+/**
+ * The text a message's 복사 button copies, as `{ text, truncated }`: what the
+ * screen draws for each `text` block, joined by one empty line. `text` is
+ * null when no block has any. A block the server hid is copied as the note
+ * the screen shows in its place (the original is not in the browser), and a
+ * Junees notice (`notice: true`, not the person's or the model's words) is
+ * left out like the tool blocks and cards. `truncated` says that a block
+ * shown here was cut by the server, so only its first part is copied.
+ */
+export function messageCopyText(message) {
+  const blocks = Array.isArray(message?.blocks) ? message.blocks : [];
+  const parts = [];
+  let truncated = false;
+  for (const block of blocks) {
+    if (block?.type !== "text" || block.notice === true) continue;
+    if (isHiddenBlock(block.text)) {
+      parts.push(HIDDEN_NOTE);
+    } else if (typeof block.text === "string" && block.text.trim() !== "") {
+      parts.push(block.text);
+      if (block.truncated) truncated = true;
+    }
+  }
+  return parts.length ? { text: parts.join("\n\n"), truncated } : { text: null, truncated: false };
+}
+
+/** The result line of a message's 복사 button; `n` is the number the screen shows for it. */
+export function messageCopyResult(n, result, truncated) {
+  if (result === "missing") return "이 브라우저에서는 복사 기능을 쓸 수 없습니다. 화면의 글을 직접 선택해 복사해 주세요.";
+  if (result !== "ok") return `${n}번째 메시지의 글을 복사하지 못했습니다. 화면의 글을 직접 선택해 복사해 주세요.`;
+  return truncated
+    ? `${n}번째 메시지의 글 중 화면에 보이는 앞부분만 복사했습니다. 서버가 긴 글을 잘라서 보냈습니다.`
+    : `${n}번째 메시지의 글을 복사했습니다.`;
+}
+
+/**
+ * What the 복사 buttons of one mounted session remember, by message `index`:
+ * the last result line with the text it was for, the text now on screen, the
+ * result line now on screen and the count of presses. The screen's lists are
+ * rebuilt on every refresh; this is what lets the new buttons show the old
+ * result and drop an answer that comes for a press that is no longer the last.
+ */
+export function newCopyState() {
+  return { results: new Map(), texts: new Map(), statuses: new Map(), presses: new Map() };
+}
+
+/** The button and result line for a message, or null when it has no text to copy. */
+function copyControls(message, copy) {
+  const { index } = message;
+  const info = messageCopyText(message);
+  if (info.text === null) return null;
+  const n = formatInt(index + 1);
+  const buttonId = `msg-copy-${index}`;
+  // An <output> is a live region; it stays in the DOM and is emptied, so a result is announced.
+  const status = el("output", { class: "summary msg-copy-status", id: `msg-copy-status-${index}`, for: buttonId });
+  const kept = copy.results.get(index);
+  if (kept?.text === info.text) status.textContent = kept.line;
+  else copy.results.delete(index);
+  copy.texts.set(index, info.text);
+  copy.statuses.set(index, status);
+  const button = el(
+    "button",
+    { type: "button", id: buttonId, class: "button button-secondary button-small msg-copy", "aria-label": `${n}번째 메시지 글 복사` },
+    "복사",
+  );
+  button.addEventListener("click", async () => {
+    const text = info.text;
+    // The line on screen now, which a refresh may have replaced while the browser was asking.
+    const put = (line) => putText(copy.statuses.get(index) ?? status, line);
+    copy.results.delete(index);
+    put("");
+    const press = (copy.presses.get(index) ?? 0) + 1;
+    copy.presses.set(index, press);
+    const result = await copyAndSettle(text);
+    // A newer press, or a refresh that changed the message's text: not this result's line.
+    if (copy.presses.get(index) !== press || copy.texts.get(index) !== text) return;
+    const line = messageCopyResult(n, result, info.truncated);
+    copy.results.set(index, { text, line });
+    put(line);
+  });
+  return { button, status };
+}
+
 /**
  * One message. `draftKeys` is {@link draftResultKeys} of the list it is in,
- * for the tool results that answer a `draft` call.
+ * for the tool results that answer a `draft` call. With `copy` (a
+ * {@link newCopyState}) a message that has text gets a 복사 button in its head.
  */
-export function messageView(message, now, draftKeys = NO_DRAFTS) {
+export function messageView(message, now, draftKeys = NO_DRAFTS, copy = null) {
   const at = parseTime(message.at);
   const role = roleLabel(message);
   const tone = role === "도구 결과" ? "tool" : message.role === "user" ? "user" : message.role === "assistant" ? "assistant" : "other";
   const headId = `msg-${message.index}`;
   const blocks = Array.isArray(message.blocks) ? message.blocks : [];
+  const head = el(
+    "p",
+    { class: "msg-head", id: headId },
+    el("span", { class: "msg-role" }, role),
+    at ? timeEl(at, formatDateTime(at, now)) : null,
+    el("span", { class: "msg-index" }, `${formatInt(message.index + 1)}번째`),
+  );
+  const controls = copy ? copyControls(message, copy) : null;
+  // The button sits beside the head, not in it: the item is named by the head alone.
+  const top = controls ? [el("div", { class: "msg-bar" }, head, controls.button), controls.status] : [head];
   return el(
     "li",
     { class: `msg msg-${tone}`, "aria-labelledby": headId, tabindex: "-1", "data-index": message.index },
-    el(
-      "p",
-      { class: "msg-head", id: headId },
-      el("span", { class: "msg-role" }, role),
-      at ? timeEl(at, formatDateTime(at, now)) : null,
-      el("span", { class: "msg-index" }, `${formatInt(message.index + 1)}번째`),
-    ),
+    top,
     blocks.length
       ? blocks.map((block, n) => {
           const node = blockView(block, message.index, n, draftKeys);
@@ -607,7 +696,9 @@ function mountFind(root, id) {
     scope,
     el("span", { class: "check-toggle" }, toggle, el("label", { for: toggle.id }, "도구 호출과 결과 숨기기")),
   );
-  const shell = { id, input, clear, toggle, scope, status, headCard, facts, resume, body, paint: () => {} };
+  // What the messages' 복사 buttons remember across refreshes; kept nowhere else.
+  const copy = newCopyState();
+  const shell = { id, input, clear, toggle, scope, status, headCard, facts, resume, body, copy, paint: () => {} };
   input.addEventListener("input", () => shell.paint());
   toggle.addEventListener("change", () => shell.paint());
   clear.addEventListener("click", () => {
@@ -658,7 +749,7 @@ export function render(root, data, ctx) {
   const draftKeys = draftResultKeys(messages);
   // The draft results as the list drew them: a card on screen is never counted as hidden.
   const drawn = new Set(draftKeys);
-  const list = el("ol", { class: "msgs", "aria-label": "대화" }, messages.map((m) => messageView(m, now, draftKeys)));
+  const list = el("ol", { class: "msgs", "aria-label": "대화" }, messages.map((m) => messageView(m, now, draftKeys, shell.copy)));
   const empty = el("div", { hidden: true });
   const count = el("p", { class: "summary", "aria-live": "polite" });
   const error = el("div", { class: "more-error", role: "alert", hidden: true });
@@ -745,7 +836,7 @@ export function render(root, data, ctx) {
       const pairs = draftResultKeys(messages);
       const fresh = new Set(added.map((m) => m.index));
       for (const key of pairs) if (fresh.has(Number(key.split(":")[0]))) drawn.add(key);
-      list.append(...added.map((m) => messageView(m, now, pairs)));
+      list.append(...added.map((m) => messageView(m, now, pairs, shell.copy)));
       button.disabled = false;
       update();
       // The text being looked for applies to the new messages too.
@@ -777,9 +868,19 @@ export function render(root, data, ctx) {
   update();
   shell.facts.replaceChildren(head);
   shell.resume.show(resumeCommand(data.cwd, data.id));
+  // The refresh replaces the list, and a replaced focused node drops focus to the page.
+  const active = document.activeElement;
+  const copyFocus = active && shell.body.contains(active) && /^msg-copy-\d+$/.test(active.id ?? "") ? active.id : null;
   shell.body.replaceChildren(list, empty, footer);
   shell.paint = () => applyFind();
   applyFind();
+  if (copyFocus) {
+    // The same message's button if it is still on screen, else the box the person was reading from.
+    const back = list.querySelector(`#${copyFocus}`);
+    const item = list.querySelector(`[data-index="${copyFocus.slice("msg-copy-".length)}"]`);
+    if (back && item && !item.hidden && !list.hidden) back.focus();
+    else input.focus();
+  }
 }
 
 /** Korean text for a failed first load of this screen. */

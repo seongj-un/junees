@@ -297,7 +297,7 @@ test("the session card shows the command in a code element with a labelled copy 
   assert.ok(s.root.children[0].contains(button));
   assert.match(s.note(), /대시보드는 이 명령을 실행하지 않습니다/);
   // The result line exists from the start, empty: a live region that appears with its text may not be read.
-  assert.equal(s.root.querySelectorAll("output").length, 1);
+  assert.equal(s.root.querySelectorAll(".session-resume output").length, 1);
   assert.equal(s.result(), "");
   assert.equal(visible(s.root, "#session-resume-command").length, 1);
 });
@@ -455,7 +455,7 @@ test("a refresh keeps the copy button mounted and focused, with its result, and 
   assert.equal(s.input.detached, 0);
   assert.equal(s.toggle.detached, 0);
   assert.equal(s.root.querySelectorAll("#session-resume-command").length, 1);
-  assert.equal(s.root.querySelectorAll("output").length, 1);
+  assert.equal(s.root.querySelectorAll(".session-resume output").length, 1);
 });
 
 test("a refresh that changes the folder updates the command in place and clears the old result", async (t) => {
