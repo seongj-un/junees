@@ -39,6 +39,20 @@ test("no test left a swapped global behind", () => {
   );
 });
 
+// The snapshot above is blind to a file-level `before` hook: in one process it
+// runs before this file is even imported, so the swapped value becomes the
+// "original". These names do not exist in Node at all, so no snapshot is needed
+// to know the right answer.
+const BROWSER_ONLY = Object.freeze(["document", "Node", "location", "history"]);
+
+test("browser-only globals do not exist once every test has finished", () => {
+  assert.deepEqual(
+    BROWSER_ONLY.filter((name) => Object.getOwnPropertyDescriptor(globalThis, name)),
+    [],
+    "these exist only because a test (or a file-level before hook) put them there; use saveGlobals with t.after in each test",
+  );
+});
+
 test("this guard is the last test file by name", () => {
   const files = readdirSync(import.meta.dirname)
     .filter((name) => name.endsWith(".test.mjs"))
