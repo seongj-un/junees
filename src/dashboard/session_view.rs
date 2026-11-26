@@ -977,4 +977,58 @@ mod tests {
         assert_eq!(omitted, 0);
         assert_eq!(format!("{preview}{end}").matches("[hidden").count(), 1);
     }
+
+    #[test]
+    fn a_field_hidden_whole_shows_its_marker_once_for_any_length_past_the_preview() {
+        let key = format!("\n{KEY_LINE}\n");
+        // 45 to 500 characters past the preview: the end window is the
+        // marker alone.
+        for total in [2_046, 2_100, 2_500] {
+            let text: String = "ab "
+                .repeat(900)
+                .chars()
+                .take(total - key.len())
+                .chain(key.chars())
+                .collect();
+            assert_eq!(text.chars().count(), total);
+            let (preview, end, omitted) = shown_parts(text);
+            assert_eq!(omitted, 0, "{total}");
+            assert_eq!(
+                format!("{preview}{end}").matches("[hidden").count(),
+                1,
+                "{total}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_longer_than_the_margin_at_the_end_of_the_preview_window_is_hidden_whole() {
+        let settings = settings();
+        // The token is 702 characters; 543, 513 and 512 of them are in the
+        // window (it ends at 2,512). As on main, the secret check sees them
+        // all (or, at 512, they are held back), so no piece of it shows.
+        for start in [1_969, 1_999, 2_000] {
+            let text = format!("{}{} tail", filler(start), "Ab1".repeat(234));
+            let (shown, truncated) = cut(&settings, &text, 2_000);
+            assert!(truncated);
+            assert!(!shown.contains("Ab1"), "{start}: {shown:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_longer_than_the_margin_at_the_start_of_the_tail_window_is_hidden_whole() {
+        let settings = settings();
+        // A 564-character token from 2,600 to 3,164, which is 20 characters
+        // into the last 500 (the window of the end starts at 2,632, inside
+        // the token and 532 characters before the token's end).
+        let rest: String = format!(" {}", "cd ".repeat(160))
+            .chars()
+            .take(480)
+            .collect();
+        let text = format!("{}{}{rest}", filler(2_600), "Ab1".repeat(188));
+        assert_eq!(text.chars().count(), 3_644);
+        let (end, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert!(!end.contains("Ab1"), "{end:?}");
+        assert_eq!(omitted, 3_144 - 2_000);
+    }
 }
