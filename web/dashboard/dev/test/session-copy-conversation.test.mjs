@@ -477,6 +477,53 @@ test("an answer that comes after a refresh lands on the line now on screen", asy
   assert.equal(s.root.querySelectorAll("#session-copy-conversation-status").length, 1);
 });
 
+test("another session gets its own button: it copies only its words, starts with an empty line, and an old answer never reaches it", async (t) => {
+  const copied = [];
+  const waits = [];
+  // The first copy (session A) waits for the test; later ones answer at once.
+  const s = screen(t, "cc-switch-a", {
+    clipboard: (text) => {
+      copied.push(text);
+      return copied.length === 1 ? new Promise((resolve) => waits.push(resolve)) : Promise.resolve();
+    },
+  });
+  const buttonA = s.button();
+  const pressA = buttonA.click();
+  assert.equal(copied.length, 1);
+  assert.equal(copied[0], ALL);
+  // Session B is drawn in the same place while A's copy is still out.
+  const listB = [
+    { index: 0, role: "user", blocks: [{ type: "text", text: "B의 글" }] },
+    { index: 1, role: "assistant", blocks: [{ type: "text", text: "B의 답" }] },
+  ];
+  s.draw({ id: "cc-switch-b", title: "다른 세션", total: 2, messages: listB });
+  const buttonB = s.button();
+  assert.notEqual(buttonB, buttonA, "a new session mounts its own button");
+  assert.equal(s.root.contains(buttonA), false);
+  assert.equal(s.root.querySelectorAll("#session-copy-conversation").length, 1);
+  assert.equal(s.result(), "", "B starts with an empty result line");
+  await buttonB.click();
+  assert.deepEqual(copied.at(-1), "### 1. 사용자\n\nB의 글\n\n### 2. 어시스턴트\n\nB의 답", "only B's words, nothing of A");
+  assert.equal(copied.at(-1).includes("배포 가이드"), false);
+  const lineB = "메시지 2개의 글을 Markdown으로 복사했습니다.";
+  assert.equal(s.result(), lineB);
+  // A's answer comes late: it does not touch B's line.
+  waits[0]();
+  await pressA;
+  assert.equal(s.result(), lineB);
+  assert.equal(s.root.querySelectorAll("#session-copy-conversation-status").length, 1);
+});
+
+test("the stylesheet never hides the result line with display: none", async (t) => {
+  const { readFileSync } = await import("node:fs");
+  const css = readFileSync(new URL("../../style.css", import.meta.url), "utf8");
+  // Every rule whose selector names the line: none may set display: none (it would leave the accessibility tree while empty).
+  const rules = [...css.matchAll(/([^{}]*session-copy-all-status[^{}]*)\{([^}]*)\}/g)];
+  assert.ok(rules.length >= 1, "the line has a rule");
+  for (const [, selector, body] of rules) assert.equal(/display\s*:\s*none/.test(body), false, selector.trim());
+  assert.equal(/session-copy-all-status:empty/.test(css), false);
+});
+
 test("the copied words are never put in markup: the line is set as text", async (t) => {
   const evil = [{ index: 0, role: "user", blocks: [{ type: "text", text: '<img src=x onerror="alert(1)">' }] }];
   const s = screen(t, "cc-markup", { list: evil });
