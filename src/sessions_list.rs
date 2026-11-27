@@ -173,9 +173,20 @@ pub fn list(
         .collect())
 }
 
-/// `text` with hidden characters escaped, cut to `max` characters.
+/// `text` as one line that shows what it holds: hidden characters
+/// escaped ([`escape_hidden`]), and the tab, line end and carriage return
+/// it lets through written as `\t`, `\n` and `\r` too, so a value cannot
+/// split a session's line or pass for another one.
+fn one_line(text: &str) -> String {
+    escape_hidden(text)
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
+/// [`one_line`] cut to `max` characters.
 fn shown(text: &str, max: usize) -> String {
-    let text = escape_hidden(text);
+    let text = one_line(text);
     if text.chars().count() <= max {
         return text;
     }
@@ -212,22 +223,20 @@ pub fn for_terminal(sessions: &[Listed], cwd: &Path, args: &ListArgs) -> String 
     let mut out = String::new();
     for listed in sessions {
         let mut parts = vec![
-            escape_hidden(&listed.id),
+            one_line(&listed.id),
             format!("{} UTC", session::format_utc(listed.updated)),
         ];
         if let Some(backend) = &listed.backend {
-            parts.push(format!("[{}]", escape_hidden(backend)));
+            parts.push(format!("[{}]", one_line(backend)));
         }
         if listed.source != TERMINAL {
-            parts.push(format!("[{}]", escape_hidden(&listed.source)));
+            parts.push(format!("[{}]", one_line(&listed.source)));
         }
         if args.all {
             parts.push(shown(&listed.cwd, FOLDER_CHARS));
         }
         parts.push(match &listed.title {
-            Some(title) => {
-                crate::cli::preview(&escape_hidden(title), crate::cli::SESSION_PREVIEW_CHARS)
-            }
+            Some(title) => crate::cli::preview(&one_line(title), crate::cli::SESSION_PREVIEW_CHARS),
             None => "(empty)".to_string(),
         });
         out.push_str(&parts.join("  "));
@@ -259,7 +268,27 @@ pub fn for_json(sessions: &[Listed], cwd: &Path, args: &ListArgs) -> String {
         "sessions": sessions,
     })
     .to_string();
+    out = escape_hidden_json(&out);
     out.push('\n');
+    out
+}
+
+/// `json` with every hidden character ([`crate::prompt_text::is_hidden`])
+/// that `serde_json` leaves as it is (U+007F, the C1 controls, the
+/// bidirectional formatting characters, U+2028 and U+2029) written as a
+/// `\uXXXX` escape, so that the output cannot act on a terminal. They are
+/// all in the Basic Multilingual Plane, and outside a string value they
+/// cannot occur, so the parsed value stays the same.
+fn escape_hidden_json(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if crate::prompt_text::is_hidden(c) {
+            debug_assert!(u32::from(c) <= 0xFFFF);
+            out.push_str(&format!("\\u{:04x}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
     out
 }
 
@@ -457,6 +486,57 @@ mod tests {
             !out.contains('\u{1b}') && !out.contains('\u{202e}'),
             "{out}"
         );
+    }
+
+    #[test]
+    fn values_never_split_a_line() {
+        assert_eq!(
+            one_line("a\nb\r\nc\td\re\u{1b}f"),
+            "a\\nb\\r\\nc\\td\\re\\u{1b}f"
+        );
+        let mut one = listed("x\n2026-11-01 00:00 UTC  fake", "terminal", Some("t"));
+        one.cwd = "/w\r\n/x\ty".to_string();
+        one.backend = Some("b\nc".to_string());
+        let all = ListArgs {
+            all: true,
+            ..ListArgs::default()
+        };
+        let out = for_terminal(&[one], Path::new("/w"), &all);
+        // One session line and the closing hint.
+        assert_eq!(out.lines().count(), 2, "{out}");
+        assert!(!out.contains('\t') && !out.contains('\r'), "{out:?}");
+        assert!(out.contains("/w\\r\\n/x\\ty"), "{out}");
+        let empty = for_terminal(&[], Path::new("/w\n/x\ty"), &ListArgs::default());
+        assert_eq!(empty.lines().count(), 1, "{empty}");
+        assert!(empty.contains("/w\\n/x\\ty"), "{empty}");
+    }
+
+    #[test]
+    fn json_writes_hidden_characters_as_escapes() {
+        let mut one = listed(
+            "a",
+            "terminal",
+            Some("t\u{9b}1\u{202e}2\u{2028}3\u{7f}4\u{200e}5"),
+        );
+        one.cwd = "/w\u{85}\u{2066}x\n".to_string();
+        let out = for_json(&[one.clone()], Path::new("/w\u{9b}"), &ListArgs::default());
+        for c in [
+            '\u{9b}', '\u{202e}', '\u{2028}', '\u{7f}', '\u{200e}', '\u{85}', '\u{2066}',
+        ] {
+            assert!(!out.contains(c), "{c:?} in {out:?}");
+        }
+        assert!(out.contains("\\u009b") && out.contains("\\u202e") && out.contains("\\u2028"));
+        let value: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["sessions"][0]["title"], one.title.unwrap());
+        assert_eq!(value["sessions"][0]["cwd"], one.cwd);
+        assert_eq!(value["scope"]["folder"], "/w\u{9b}");
+        // Hangul and other text stay as written.
+        let plain = for_json(
+            &[listed("a", "terminal", Some("한글 é"))],
+            Path::new("/w"),
+            &ListArgs::default(),
+        );
+        assert!(plain.contains("한글 é"), "{plain}");
     }
 
     #[test]

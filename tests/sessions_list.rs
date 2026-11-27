@@ -531,3 +531,63 @@ async fn search_and_help_are_as_before() {
         out.stdout
     );
 }
+
+#[tokio::test]
+async fn odd_characters_in_folders_and_ids_keep_one_line_per_session() {
+    let f = fixture();
+    let odd = f._dir.path().join("od\nd\r\nfolder\t2026");
+    std::fs::create_dir(&odd).unwrap();
+    let odd = odd.canonicalize().unwrap();
+    journal(
+        &f.home,
+        "20261101-000010-nl\n20261101-000011-fake",
+        &odd,
+        None,
+        None,
+        "줄바꿈 폴더",
+        5,
+    );
+    let out = run(&f, &odd, &["sessions", "list", "--all", "--source", "all"]).await;
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    // Eight fixture sessions, the odd one, and the closing hint.
+    assert_eq!(out.stdout.lines().count(), 10, "{}", out.stdout);
+    assert!(!out.stdout.contains('\t') && !out.stdout.contains('\r'));
+    let first = out.stdout.lines().next().unwrap();
+    assert!(
+        first.starts_with("20261101-000010-nl\\n20261101-000011-fake  "),
+        "{first}"
+    );
+    assert!(first.contains("od\\nd\\r\\nfolder\\t2026"), "{first}");
+    assert!(first.ends_with("  줄바꿈 폴더"), "{first}");
+
+    // The empty-list note names this folder on one line.
+    let empty = f._dir.path().join("e\nmpty\tdir");
+    std::fs::create_dir(&empty).unwrap();
+    let empty = empty.canonicalize().unwrap();
+    let out = run(&f, &empty, &["sessions", "list"]).await;
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(out.stdout.lines().count(), 1, "{}", out.stdout);
+    assert!(out.stdout.contains("e\\nmpty\\tdir"), "{}", out.stdout);
+}
+
+#[tokio::test]
+async fn json_has_no_raw_hidden_characters() {
+    let f = fixture();
+    let odd = f._dir.path().join("f\u{9b}o\u{202e}l\u{2028}d");
+    std::fs::create_dir(&odd).unwrap();
+    let odd = odd.canonicalize().unwrap();
+    let title = "제\u{9b}목\u{202e}끝\u{2028}뒤";
+    journal(&f.home, "20261101-000012-bidi", &odd, None, None, title, 5);
+    let out = run(&f, &odd, &["sessions", "list", "--json"]).await;
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    for c in ['\u{9b}', '\u{202e}', '\u{2028}'] {
+        assert!(!out.stdout.contains(c), "{c:?} in {:?}", out.stdout);
+    }
+    for escape in ["\\u009b", "\\u202e", "\\u2028"] {
+        assert!(out.stdout.contains(escape), "{escape} in {}", out.stdout);
+    }
+    let value: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(value["sessions"][0]["title"], title);
+    assert_eq!(value["sessions"][0]["cwd"], json!(odd));
+    assert_eq!(value["scope"]["folder"], json!(odd));
+}

@@ -94,8 +94,10 @@ junees sessions list --json
 - `--json`: stdout에 객체 하나와 줄바꿈만 쓴다.
 
   ```json
-  {"schema_version":1,"scope":{"all":false,"folder":"/work/app"},"sessions":[{"id":"20261101-000008-new","updated_at":"2026-11-01T09:30:00Z","cwd":"/work/app","backend":"api","source":"terminal","title":"가장 새 입력"}]}
+  {"schema_version":1,"scope":{"all":false,"folder":"/work/app"},"sessions":[{"backend":"api","cwd":"/work/app","id":"20261101-000008-new","source":"terminal","title":"가장 새 입력","updated_at":"2026-11-01T09:30:00Z"}]}
   ```
+
+  키는 이름순으로 나온다. 순서에 기대지 말고 JSON으로 파싱해서 읽는다. 문자열 안의 제어 문자와 방향 제어 문자(U+007F 이상의 보이지 않는 문자와 U+2028·U+2029 포함)는 `\u009b`처럼 이스케이프해 내보낸다. 파싱한 값은 원래 문자열과 같다. 텍스트 출력에서는 폴더와 id의 줄바꿈·탭이 `\n`, `\t`로 보여 한 줄에 세션 하나가 지켜진다.
 
   `scope.folder`는 `--all`이면 `null`이다. `updated_at`은 UTC RFC 3339, `backend`는 기록에 없으면 `"api"`(Junees 자체 에이전트), `source`는 위 출처 이름, `title`은 첫 입력이 없거나 비면 `null`이다. 빈 목록은 `"sessions":[]`이고 종료 코드 0이다. 안내 문구는 JSON에 섞지 않는다.
 - 제목: 대시보드 `/api/sessions`의 `title`과 같은 함수다. 첫 입력의 첫 줄(공백만 있는 줄은 건너뜀)에서 비밀 값을 가린 뒤 80자까지 자른다. 채널 ID, 저널 본문, 도구 출력은 출력하지 않는다.
