@@ -557,6 +557,19 @@ a.button {
   font-weight: 500;
 }
 
+.session-copy-all {
+  margin-bottom: 4px;
+}
+
+.session-copy-all-status {
+  display: block;
+  margin: 8px 0 0;
+}
+
+.session-copy-all-status:empty {
+  display: none;
+}
+
 /* Badges */
 
 .badge {

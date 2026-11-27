@@ -215,6 +215,62 @@ export function messageCopyResult(n, result, truncated) {
     : `${n}번째 메시지의 글을 복사했습니다.`;
 }
 
+// ---- 대화 복사: the words of every message on screen, as Markdown ----
+
+/**
+ * The Markdown the 대화 복사 button copies for `messages` (the ones on screen,
+ * in order), as `{ text, count, truncated }`: for each message that has words
+ * (the same {@link messageCopyText} the message's own 복사 button uses) a
+ * heading `### <number the screen shows>. <role as shown>`, an empty line and
+ * the words; messages are joined by one empty line. A message without words is
+ * skipped, and the words are not changed (their own Markdown stays as it is).
+ * Nothing else goes in: no id, folder, time or cost. `text` is null when no
+ * message has words. `truncated` says that a message shown here was cut by the
+ * server.
+ */
+export function conversationCopyText(messages) {
+  const sections = [];
+  let truncated = false;
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (!message) continue;
+    const info = messageCopyText(message);
+    if (info.text === null) continue;
+    sections.push(`### ${formatInt(message.index + 1)}. ${roleLabel(message)}\n\n${info.text}`);
+    if (info.truncated) truncated = true;
+  }
+  return sections.length
+    ? { text: sections.join("\n\n"), count: sections.length, truncated }
+    : { text: null, count: 0, truncated: false };
+}
+
+/**
+ * What the copy leaves out, as sentences: `scope.filtered` messages the
+ * search took off the screen, `scope.left` messages not loaded yet.
+ */
+function conversationLeftOut(scope) {
+  const lines = [];
+  if (scope.filtered > 0) lines.push(`찾기에 걸리지 않은 메시지 ${formatInt(scope.filtered)}개는 들어 있지 않습니다.`);
+  if (scope.left > 0) lines.push(`아직 불러오지 않은 메시지 ${formatInt(scope.left)}개는 들어 있지 않습니다.`);
+  return lines;
+}
+
+/** The result line of the 대화 복사 button; `info` is {@link conversationCopyText}'s answer. */
+export function conversationCopyResult(result, info, scope) {
+  if (result === "missing") return "이 브라우저에서는 복사 기능을 쓸 수 없습니다. 화면의 글을 직접 선택해 복사해 주세요.";
+  if (result !== "ok") return "대화를 복사하지 못했습니다. 화면의 글을 직접 선택해 복사해 주세요.";
+  const lines = [`메시지 ${formatInt(info.count)}개의 글을 Markdown으로 복사했습니다.`, ...conversationLeftOut(scope)];
+  if (info.truncated) lines.push("서버가 긴 글을 잘라서 보냈으므로 잘린 글은 온 만큼만 들어 있습니다.");
+  return lines.join(" ");
+}
+
+/** The line shown instead of a copy when no message on screen has words. */
+export function conversationCopyEmpty(scope) {
+  const lines = ["지금 화면에 복사할 글이 있는 메시지가 없어 아무것도 복사하지 않았습니다."];
+  if (scope.filtered > 0) lines.push("찾기에 걸리지 않은 메시지는 복사 대상이 아닙니다.");
+  if (scope.left > 0) lines.push(`아직 불러오지 않은 메시지 ${formatInt(scope.left)}개는 더 보기로 불러온 뒤에 복사할 수 있습니다.`);
+  return lines.join(" ");
+}
+
 /**
  * What the 복사 buttons of one mounted session remember, by message `index`:
  * the last result line with the text it was for, the text now on screen, the
@@ -557,6 +613,44 @@ function mountResume() {
   return resume;
 }
 
+/** The ids of the 대화 복사 button and its result line; tests and tools look them up by these. */
+export const COPY_ALL_ID = "session-copy-conversation";
+export const COPY_ALL_STATUS_ID = "session-copy-conversation-status";
+
+/**
+ * The 대화 복사 button and its result line. Built once per mounted session, so
+ * a refresh, 더 보기, a search or the tool checkbox never replaces them: the
+ * focus and the result just shown stay. `getView` gives what is on screen now
+ * (`{ shown, left, filtered }`, set by the screen's last draw), read at the
+ * press, so a press after a refresh copies the list as it is then.
+ */
+function mountCopyAll(getView) {
+  const button = el("button", { type: "button", id: COPY_ALL_ID, class: "button button-secondary" }, "대화 복사");
+  // Kept mounted and emptied, so a result is announced; an <output> is a live region.
+  const status = el("output", { class: "summary session-copy-all-status", id: COPY_ALL_STATUS_ID, for: COPY_ALL_ID });
+  const node = el("div", { class: "session-copy-all" }, button, status);
+  let presses = 0;
+  button.addEventListener("click", async () => {
+    const view = getView();
+    const info = conversationCopyText(view?.shown);
+    const scope = { left: view?.left ?? 0, filtered: view?.filtered ?? 0 };
+    // Emptied first: the same result again would leave the line unchanged and say nothing.
+    putText(status, "");
+    const press = ++presses;
+    if (info.text === null) {
+      // Nothing is written to the clipboard; the short wait is the same as for a copy.
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      if (press === presses) putText(status, conversationCopyEmpty(scope));
+      return;
+    }
+    const result = await copyAndSettle(info.text);
+    // A newer press made this result an old one.
+    if (press !== presses) return;
+    putText(status, conversationCopyResult(result, info, scope));
+  });
+  return { node, button, status };
+}
+
 const searchText = (text) => String(text ?? "").normalize("NFC").toLowerCase();
 
 /** The query as compared: trimmed, any letter case. Empty means no 찾기. */
@@ -688,6 +782,7 @@ function mountFind(root, id) {
   // Fixed slots: only the facts are redrawn, the 이어 하기 block stays mounted.
   const facts = el("div", { class: "session-facts" });
   const resume = mountResume();
+  const copyAll = mountCopyAll(() => shell.view);
   const headCard = el("div", { class: "card session-head" }, facts, resume.node);
   const body = el("div");
   const find = el(
@@ -697,10 +792,12 @@ function mountFind(root, id) {
     el("div", { class: "session-filter-fields" }, input, clear),
     scope,
     el("span", { class: "check-toggle" }, toggle, el("label", { for: toggle.id }, "도구 호출과 결과 숨기기")),
+    copyAll.node,
   );
   // What the messages' 복사 buttons remember across refreshes; kept nowhere else.
   const copy = newCopyState();
-  const shell = { id, input, clear, toggle, scope, status, headCard, facts, resume, body, copy, paint: () => {} };
+  // `view`: what is on screen, set by each draw of the list now mounted (see applyFind).
+  const shell = { id, input, clear, toggle, scope, status, headCard, facts, resume, body, copy, copyAll, view: null, paint: () => {} };
   input.addEventListener("input", () => shell.paint());
   toggle.addEventListener("change", () => shell.paint());
   clear.addEventListener("click", () => {
@@ -804,6 +901,13 @@ export function render(root, data, ctx) {
       setText(status, summary);
       setText(scope, hide ? `${findScope(left)} ${HIDE_FIND_NOTE}` : findScope(left));
       clear.disabled = !input.value;
+      // What 대화 복사 copies: the loaded messages left on screen, and what it leaves out.
+      shell.view = {
+        shown: messages.filter((m) => matched.has(m.index)),
+        left,
+        // Not on screen because of the search (tool-only messages that hiding took out are not counted).
+        filtered: needleOf(query) ? view.messages.length - matched.size : 0,
+      };
     }
     return among.filter((m) => matched.has(m.index));
   };
