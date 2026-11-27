@@ -90,6 +90,7 @@ src/
     report.rs          /usage의 세션 표(기록에 없는 사용량 포함)와 junees usage의 기간 표(날짜/모델/폴더/출처별), 안내 줄
     args.rs            junees usage 옵션과 도움말
     tests.rs           가격 계산, 덮어쓰기, 모르는 모델, 기록 종류별 합산, 깨진 줄, 날짜 경계(UTC와 시간대), 범위와 정렬 검증
+  sessions_list.rs   junees sessions list (최근 세션 목록, 텍스트와 --json, 대시보드와 공유하는 제목 함수)
   search/            세션 검색 (session_search 도구, /search, junees sessions search)
     mod.rs             검색 옵션과 결과, 상한(결과 수, 스니펫, 줄과 텍스트 크기, 시간), 출처 이름
     query.rs           질의 파싱(낱말 AND, 따옴표 구절), 대소문자 무시 매칭, 원래 글자로 스니펫
@@ -259,6 +260,7 @@ tests/
   usage.rs             실제 바이너리와 가짜 API로 대화의 /usage(호출, /model 전환 뒤 다른 가격, 합계), 기록 줄의 모델, junees usage(모델별, 날짜별, prices 덮어쓰기, 폴더 범위와 --all, 도움말과 오류) 검증
   usage_json.rs        실제 바이너리와 합성 세션 기록으로 junees usage --json(스키마 버전과 기간, 모델별 행 순서와 비용 필드, prices 덮어쓰기와 구독 턴, 지금 폴더 범위의 scope.folder, 빈 보고서, 캐시 적중률의 0·1000·null, 텍스트 표의 비용 표시($0.0200), 메시지·도구 출력·세션 ID·키가 출력에 없음, 기록 파일이 바뀌지 않음, --json=true와 --days=0 오류) 검증
   usage_text_mask.rs   실제 바이너리와 합성 세션 기록으로 junees usage 텍스트 표의 이름 가리기(키가 든 폴더·모델 이름은 [redacted], 가린 두 이름은 두 행, 가격을 모르는 모델 안내의 목록, 첫 줄의 지금 폴더, 키 없는 폴더는 그대로, 출력에 키 조각 없음, 기록 파일이 바뀌지 않음) 검증
+  sessions_list.rs     실제 바이너리와 합성 세션으로 junees sessions list 검증(지금 폴더, --all, --limit 경계, --source, 빈 목록, --json 모양, 한글 제목 자르기, 채널 세션 제외, 세션 파일 불변)
   session_search.rs    실제 바이너리와 가짜 API로 -p의 session_search 결과(지금 폴더, 채널 세션 제외, 데이터 표시), 대화의 /search와 junees sessions search 출력 검증
   simple_cli.rs        실제 바이너리로 위치 인자 질문과 설정 파일(환경 변수 우선, 잘못된 파일), 터미널 아닐 때 마법사 없음, 가상 터미널에서 처음 실행 마법사(키가 화면에 안 나옴, 0600), junees task "목표" -> junees task -> junees status, 대화의 /backend(대화도 전환), /task, /status, /sessions 고르기(다른 백엔드 세션 거절), /model, /new 검증
 ```

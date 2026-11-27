@@ -33,6 +33,7 @@ pub mod sandbox;
 pub mod search;
 pub mod secrets;
 pub mod session;
+pub mod sessions_list;
 pub mod setup;
 pub mod skills;
 pub mod slack;

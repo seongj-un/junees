@@ -20,9 +20,9 @@ use crate::cron::store::LastRun;
 const SESSIONS_LIMIT: (u32, u32) = (50, 200);
 /// `days` of `/api/usage` without one, and the most it may be.
 const USAGE_DAYS: (u32, u32) = (30, 365);
-/// Characters of a session's preview and title.
+/// Characters of a session's preview; its title is
+/// [`crate::sessions_list::title`].
 const PREVIEW_CHARS: usize = 200;
-const TITLE_CHARS: usize = 80;
 
 /// What answers a request for an API path.
 #[derive(Debug)]
@@ -321,14 +321,9 @@ fn sessions(settings: &Settings, limit: u32, context: &Context) -> Result<Value,
         .iter()
         .map(|(path, summary)| {
             let counted = counted(&context.sessions, path, &prices);
-            let first_line = summary
-                .first_input
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or_default();
             json!({
                 "id": summary.id,
-                "title": shown(settings, first_line, TITLE_CHARS),
+                "title": crate::sessions_list::title(settings, &summary.first_input),
                 "cwd": summary.cwd,
                 "updated_at": time(i64::try_from(summary.updated).unwrap_or(i64::MAX)),
                 "messages": counted.messages,

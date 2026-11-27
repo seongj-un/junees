@@ -76,6 +76,33 @@ JUNEES_BACKEND=claude-code junees task --max-time 2h
 - 토큰 사용량도 기록되고, 이어 가면 그 세션의 누적값부터 다시 센다.
 - 기록 쓰기가 실패하면 경고를 한 번 띄우고 그 세션의 나머지는 기록하지 않는다(파일이 대화의 빈틈 없는 앞부분으로 남도록).
 
+## 세션 목록
+
+대화에 들어가지 않고 터미널에서 최근 세션을 보고, 이어 갈 세션의 id를 골라 `junees --resume <id>`에 쓴다.
+
+```bash
+junees sessions list                      # 지금 폴더에서 터미널로 시작한 세션, 새것부터 10개
+junees sessions list --all --limit 30     # 모든 폴더, 30개까지
+junees sessions list --source discord,cron
+junees sessions list --json
+```
+
+- 옵션: `--all`(모든 작업 폴더), `--limit <N>`(1부터 50, 기본 10), `--source <S>`(`terminal`, `discord`, `telegram`, `slack`, `cron`, `webhook`, `mcp`, `all`, 반복하거나 쉼표로, 기본 `terminal`), `--json`. 범위를 벗어난 `--limit`과 모르는 출처, 낱말은 오류로 끝난다(종료 코드 1). 낱말로 찾으려면 `junees sessions search`를 쓴다.
+- 범위: 기본은 지금 폴더(기록의 `cwd`가 같은 것)에서 시작한 세션이다. 출처 판정은 `junees sessions search`와 같은 규칙을 쓴다.
+- 정렬: 마지막으로 기록된(파일 수정 시각) 세션부터. 세션 폴더 안의 심볼릭 링크와 서브에이전트 기록은 세션으로 세지 않는다.
+- 텍스트 출력: 한 줄에 세션 하나. 세션 id, 마지막 기록 시각(`YYYY-MM-DD HH:MM UTC`, `/sessions`와 검색 출력과 같다), claude-code 백엔드면 `[claude-code]`, 출처가 터미널이 아니면 `[discord]`처럼 출처, `--all`이면 작업 폴더, 첫 입력의 첫 줄(60자에서 `...`로 줄임, 한글도 글자 단위). 첫 입력이 없으면 `(empty)`. 끝에 `junees --resume <id>`로 이어 간다는 안내 한 줄이 붙는다. 세션이 없으면 그 사실을 한 줄로 알리고 종료 코드 0이다. 이어 갈 수 있는 것은 터미널 세션이다(채널 세션은 해당 게이트웨이가 이어 간다).
+- `--json`: stdout에 객체 하나와 줄바꿈만 쓴다.
+
+  ```json
+  {"schema_version":1,"scope":{"all":false,"folder":"/work/app"},"sessions":[{"backend":"api","cwd":"/work/app","id":"20261101-000008-new","source":"terminal","title":"가장 새 입력","updated_at":"2026-11-01T09:30:00Z"}]}
+  ```
+
+  키는 이름순으로 나온다. 순서에 기대지 말고 JSON으로 파싱해서 읽는다. 문자열 안의 제어 문자와 방향 제어 문자(U+007F 이상의 보이지 않는 문자와 U+2028·U+2029 포함)는 `\u009b`처럼 이스케이프해 내보낸다. 파싱한 값은 원래 문자열과 같다. 텍스트 출력에서는 폴더와 id의 줄바꿈·탭이 `\n`, `\t`로 보여 한 줄에 세션 하나가 지켜진다.
+
+  `scope.folder`는 `--all`이면 `null`이다. `updated_at`은 UTC RFC 3339, `backend`는 기록에 없으면 `"api"`(Junees 자체 에이전트), `source`는 위 출처 이름, `title`은 첫 입력이 없거나 비면 `null`이다. 빈 목록은 `"sessions":[]`이고 종료 코드 0이다. 안내 문구는 JSON에 섞지 않는다.
+- 제목: 대시보드 `/api/sessions`의 `title`과 같은 함수다. 첫 입력의 첫 줄(공백만 있는 줄은 건너뜀)에서 비밀 값을 가린 뒤 80자까지 자른다. 채널 ID, 저널 본문, 도구 출력은 출력하지 않는다.
+- 읽기 전용: 세션 파일과 색인을 바꾸지 않고, `/sessions`처럼 각 파일의 meta 줄과 첫 항목만 읽는다. API 키가 없어도 되고 네트워크를 쓰지 않는다. 설정 파일이 깨져 있으면 `junees usage`처럼 오류로 끝난다.
+
 ## 세션 검색
 
 지난 세션에서 한 일을 찾는다. 모델 도구 `session_search`, 대화의 `/search <낱말>`, 명령줄 `junees sessions search <낱말>`이 같은 검색을 쓴다.

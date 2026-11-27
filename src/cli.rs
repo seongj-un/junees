@@ -27,6 +27,8 @@ Usage:
   junees webhook          HTTP requests that start a run (`junees webhook --help`)
   junees doctor           check the installation and the settings (--json,
                           --online; see `junees doctor --help`)
+  junees sessions list    list the recent sessions of this folder, to pick an
+                          id for --resume (--all, --limit, --source, --json)
   junees sessions search <words>
                           search the saved sessions (--all: every folder; see
                           `junees sessions --help`)
@@ -250,6 +252,8 @@ pub enum Command {
     Hooks(crate::hooks::cli::HooksCommand),
     /// `junees mcp login|logout <server>`.
     Mcp(crate::mcp::oauth::cli::McpCommand),
+    /// `junees sessions list ...`.
+    SessionsList(crate::sessions_list::ListArgs),
     /// `junees sessions search ...`.
     SessionsSearch(crate::search::args::HumanSearch),
     /// `junees sessions --help`.
@@ -547,14 +551,43 @@ Options:
                    or all
                    (default all; repeat or use a comma list)
   --session <ID>   only this session (an id or the start of one), in any folder
+
+junees sessions list [OPTIONS]
+
+Lists the saved sessions, most recently written first, one per line: id,
+last write (UTC), [claude-code] for that backend, the source when it is
+not the terminal, the working folder with --all, and the start of the
+first input. Continue one with `junees --resume <id>`. Changes nothing.
+
+Options:
+  --all            every working folder, not only this one
+  --limit <N>      sessions to show, 1 to 50 (default 10)
+  --source <S>     sessions from terminal, discord, telegram, slack, cron, webhook, mcp
+                   or all
+                   (default terminal; repeat or use a comma list)
+  --json           one JSON object: schema_version, scope {all, folder},
+                   sessions [{id, updated_at, cwd, backend, source, title}]
 ";
 
 fn parse_sessions(mut args: impl Iterator<Item = String>) -> Result<Command> {
     match args.next().as_deref() {
         Some("search") => {}
+        Some("list") => {
+            let args: Vec<String> = args.collect();
+            if args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+            {
+                return Ok(Command::SessionsHelp);
+            }
+            return crate::sessions_list::ListArgs::parse(args)
+                .map(Command::SessionsList)
+                .map_err(anyhow::Error::msg);
+        }
         None | Some("-h" | "--help") => return Ok(Command::SessionsHelp),
         Some(other) => bail!(
-            "unknown sessions command `{other}`; {}",
+            "unknown sessions command `{other}`; use `list` or `search`\n{}\n{}",
+            crate::sessions_list::USAGE,
             crate::search::args::USAGE
         ),
     }
@@ -700,7 +733,8 @@ pub fn session_line(summary: &Summary, current: bool) -> String {
     )
 }
 
-const SESSION_PREVIEW_CHARS: usize = 60;
+/// Characters of the first input a session list shows.
+pub const SESSION_PREVIEW_CHARS: usize = 60;
 
 /// One-line preview: whitespace collapsed, cut to `max_chars` characters.
 pub fn preview(text: &str, max_chars: usize) -> String {
@@ -892,7 +926,10 @@ mod tests {
             assert_eq!(parse(args).unwrap(), Command::SessionsHelp, "{args:?}");
         }
         for (args, expected) in [
-            (&["sessions", "list"][..], "unknown sessions command `list`"),
+            (
+                &["sessions", "show"][..],
+                "unknown sessions command `show`; use `list` or `search`\nusage: junees sessions list",
+            ),
             (&["sessions", "search"], "give the words to look for"),
             (
                 &["sessions", "search", "--limit", "x", "y"],
@@ -906,6 +943,63 @@ mod tests {
         assert_eq!(
             parse(&["-p", "sessions"]).unwrap(),
             run(Some("sessions"), SessionMode::New)
+        );
+    }
+
+    #[test]
+    fn parses_sessions_list() {
+        use crate::sessions_list::ListArgs;
+        assert_eq!(
+            parse(&["sessions", "list"]).unwrap(),
+            Command::SessionsList(ListArgs::default())
+        );
+        assert_eq!(
+            parse(&[
+                "sessions", "list", "--all", "--limit", "30", "--source", "discord", "--json"
+            ])
+            .unwrap(),
+            Command::SessionsList(ListArgs {
+                all: true,
+                limit: 30,
+                sources: vec!["discord".into()],
+                json: true,
+            })
+        );
+        for args in [
+            &["sessions", "list", "--help"][..],
+            &["sessions", "list", "--json", "-h"],
+        ] {
+            assert_eq!(parse(args).unwrap(), Command::SessionsHelp, "{args:?}");
+        }
+        for (args, expected) in [
+            (
+                &["sessions", "list", "--limit", "0"][..],
+                "--limit must be a whole number from 1 to 50, got `0`",
+            ),
+            (&["sessions", "list", "--limit", "51"], "got `51`"),
+            (
+                &["sessions", "list", "--source", "irc"],
+                "unknown session source `irc`",
+            ),
+            (
+                &["sessions", "list", "--session", "x"],
+                "unknown option `--session`",
+            ),
+            (
+                &["sessions", "list", "words"],
+                "takes no words (got `words`)",
+            ),
+        ] {
+            let err = parse(args).unwrap_err().to_string();
+            assert!(err.contains(expected), "{args:?}: {err}");
+        }
+        for word in ["list", "--all", "--limit <N>", "--source <S>", "--json"] {
+            assert!(SESSIONS_HELP.contains(word), "{word}");
+        }
+        // Through -p the words are a prompt.
+        assert_eq!(
+            parse(&["-p", "sessions list"]).unwrap(),
+            run(Some("sessions list"), SessionMode::New)
         );
     }
 
