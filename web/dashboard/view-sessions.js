@@ -17,6 +17,80 @@ export function filterSessions(sessions, query) {
   );
 }
 
+/** The first entry is the default: the order the server sent, newest first. */
+export const SORTS = Object.freeze([
+  Object.freeze({ value: "recent", label: "최근 순" }),
+  Object.freeze({ value: "cost", label: "비용 큰 순" }),
+  Object.freeze({ value: "messages", label: "메시지 많은 순" }),
+]);
+
+// No prototype, so a name like "constructor" is not taken for a sort.
+const SORT_FIELDS = Object.freeze({ __proto__: null, cost: "cost_usd", messages: "messages" });
+
+/**
+ * Order only the loaded list, without changing the array passed in. The
+ * largest value comes first and equal values keep the server order. A session
+ * whose value is unknown (`null` cost) goes last instead of counting as 0.
+ */
+export function sortSessions(sessions, sort) {
+  const field = SORT_FIELDS[sort];
+  if (!field) return sessions;
+  const known = (session) => typeof session[field] === "number" && Number.isFinite(session[field]);
+  // Array.prototype.sort is stable, so ties stay in server order.
+  return sessions.slice().sort((a, b) => {
+    if (!known(a) || !known(b)) return Number(known(b)) - Number(known(a));
+    return b[field] - a[field];
+  });
+}
+
+const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
+
+/** The sum of the values that are numbers, or `null` when none is. */
+function sumKnown(sessions, field) {
+  let sum = null;
+  for (const session of sessions) {
+    if (isNumber(session[field])) sum = (sum ?? 0) + session[field];
+  }
+  return sum;
+}
+
+/**
+ * Totals of the sessions passed in (the ones on screen). A value that is not
+ * a number is left out of its own sum instead of counting as 0, and a sum with
+ * no known value is `null`. `unpriced` counts the sessions whose cost is
+ * unknown, so a free session (0) and an unknown one stay apart.
+ */
+export function sumSessions(sessions) {
+  return {
+    count: sessions.length,
+    messages: sumKnown(sessions, "messages"),
+    input_tokens: sumKnown(sessions, "input_tokens"),
+    output_tokens: sumKnown(sessions, "output_tokens"),
+    cost_usd: sumKnown(sessions, "cost_usd"),
+    unpriced: sessions.filter((session) => !isNumber(session.cost_usd)).length,
+  };
+}
+
+/** The totals line for {@link sumSessions}; empty when no session is shown. */
+export function totalsText(totals) {
+  if (totals.count === 0) return "";
+  const input = totals.input_tokens;
+  const output = totals.output_tokens;
+  const tokens = input === null && output === null ? null : (input ?? 0) + (output ?? 0);
+  const unpriced = `비용을 모르는 세션 ${formatInt(totals.unpriced)}개`;
+  const cost =
+    totals.cost_usd === null
+      ? `비용 모름 (${unpriced})`
+      : totals.unpriced > 0
+        ? `비용 ${formatUsd(totals.cost_usd)} (${unpriced} 제외)`
+        : `비용 ${formatUsd(totals.cost_usd)}`;
+  return [
+    `보이는 세션 ${formatInt(totals.count)}개 합계: 메시지 ${formatInt(totals.messages)}`,
+    `토큰 ${formatInt(tokens)} (입력 ${formatInt(input)} · 출력 ${formatInt(output)})`,
+    cost,
+  ].join(" · ");
+}
+
 /**
  * The preview without the title it starts with: the server takes the title
  * from the first line of the same message, so showing both repeats it.
@@ -108,12 +182,21 @@ function mountFilter(root) {
     "aria-describedby": "session-search-scope",
   });
   const clear = el("button", { type: "button", class: "button button-secondary" }, "지우기");
+  // The choice lives only in this control: no URL, storage or request carries it.
+  const sort = el(
+    "select",
+    { id: "session-sort", class: "session-sort-select", "aria-describedby": "session-search-scope" },
+    SORTS.map((option) => el("option", { value: option.value }, option.label)),
+  );
   const summary = el("p", { class: "summary", role: "status" });
+  // Not a live region: the status line above already announces each change,
+  // so the totals are not read out again on every keystroke.
+  const totals = el("p", { class: "summary session-totals", id: "session-totals" });
   const results = el("div");
 
   function paintResults() {
     const query = input.value.trim();
-    const matches = filterSessions(sessions, query);
+    const matches = sortSessions(filterSessions(sessions, query), sort.value);
     const total = formatInt(sessions.length);
     const message = query
       ? `검색 결과 ${formatInt(matches.length)}개 / 불러온 세션 ${total}개`
@@ -122,6 +205,10 @@ function mountFilter(root) {
         : `세션 ${total}개`;
     if (summary.textContent !== message) summary.textContent = message;
     clear.disabled = !input.value;
+    // Sorting does not change the sum; an empty list shows no totals line.
+    const totalsLine = totalsText(sumSessions(matches));
+    if (totals.textContent !== totalsLine) totals.textContent = totalsLine;
+    totals.hidden = totalsLine === "";
 
     const active = document.activeElement;
     const focusId = results.contains(active) ? active.id : null;
@@ -146,6 +233,7 @@ function mountFilter(root) {
   }
 
   input.addEventListener("input", paintResults);
+  sort.addEventListener("change", paintResults);
   clear.addEventListener("click", () => {
     input.value = "";
     input.focus();
@@ -157,10 +245,11 @@ function mountFilter(root) {
     { class: "session-filter" },
     el("label", { for: input.id }, "제목 또는 작업 폴더 검색"),
     el("div", { class: "session-filter-fields" }, input, clear),
+    el("div", { class: "session-sort" }, el("label", { for: sort.id }, "정렬"), sort),
     el(
       "p",
       { class: "summary", id: "session-search-scope" },
-      `이미 불러온 최근 세션 최대 ${LIMIT}개에서만 검색합니다.`,
+      `이미 불러온 최근 세션 최대 ${LIMIT}개에서만 검색하고 정렬하며, 합계도 이 안에서만 냅니다.`,
     ),
   );
   const update = (data, at) => {
@@ -169,12 +258,13 @@ function mountFilter(root) {
     paintResults();
   };
   mountedFilters.set(filter, update);
-  root.replaceChildren(filter, summary, results);
+  root.replaceChildren(filter, summary, totals, results);
   return update;
 }
 
 export function render(root, data, { now }) {
-  // Keep the input node itself across refreshes, including its caret and IME state.
+  // Keep the input and the sort control themselves across refreshes, so the
+  // caret, IME state and chosen order survive.
   const update = mountedFilters.get(root.firstElementChild) ?? mountFilter(root);
   update(Array.isArray(data.sessions) ? data.sessions : [], now);
 }

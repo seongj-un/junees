@@ -326,7 +326,8 @@ impl Router {
             return;
         };
         let user = query.pointer("/from/id").and_then(Value::as_i64);
-        let note = match user {
+        // What the press did, or the note for one that reached no question.
+        let verdict = match user {
             Some(user) if self.allowed.contains(&user) => {
                 let message = query.get("message");
                 let chat = message
@@ -352,13 +353,9 @@ impl Router {
                             user: user.to_string(),
                             by: presser(query.get("from").unwrap_or(&Value::Null)),
                         };
-                        if self.channels.press(&Target { chat, thread }.key(), press) {
-                            None
-                        } else {
-                            Some(ALREADY_HANDLED)
-                        }
+                        Ok(self.channels.press(&Target { chat, thread }.key(), press))
                     }
-                    _ => Some(NOT_OURS),
+                    _ => Err(NOT_OURS),
                 }
             }
             _ => {
@@ -369,7 +366,7 @@ impl Router {
                         "ignoring button presses of user {user}: not in telegram_allowed_users"
                     ));
                 }
-                Some(NOT_ALLOWED)
+                Err(NOT_ALLOWED)
             }
         };
         let shared = self.channels.shared();
@@ -377,6 +374,12 @@ impl Router {
         let log = Arc::clone(&shared.log);
         let id = id.to_string();
         tokio::spawn(async move {
+            let note = match verdict {
+                // A press held while its question was being posted: what
+                // it did is known once that post ends.
+                Ok(pressed) => (!pressed.answered().await).then_some(ALREADY_HANDLED),
+                Err(note) => Some(note),
+            };
             if let Err(err) = api.answer_callback(&id, note).await {
                 log(&format!("cannot answer a button press: {err}"));
             }
