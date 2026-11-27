@@ -561,13 +561,14 @@ a.button {
   margin-bottom: 4px;
 }
 
+/* Drawn even while empty (never display: none), so the live region stays in the accessibility tree; only the space depends on text. */
 .session-copy-all-status {
   display: block;
-  margin: 8px 0 0;
+  margin: 0;
 }
 
-.session-copy-all-status:empty {
-  display: none;
+.session-copy-all-status:not(:empty) {
+  margin: 8px 0 0;
 }
 
 /* Badges */
