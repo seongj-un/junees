@@ -105,6 +105,7 @@ task_max_tokens = 2000000        # JUNEES_TASK_MAX_TOKENS
 - `junees gateway`(`junees discord`), `junees gateway telegram`(`junees telegram`), `junees gateway slack`(`junees slack`): 채팅 봇([게이트웨이](docs/gateways.md))
 - `junees cron add|list|remove|pause|resume|run|daemon`: 예약 작업([예약 작업](docs/automation.md#예약-작업))
 - `junees webhook serve|add|add-github|list|remove|pause|resume|test`: 웹훅과 GitHub PR 흐름([웹훅](docs/automation.md#웹훅))
+- `junees sessions list [--all] [--limit N] [--source S] [--json]`: 최근 세션 목록, `--resume`에 쓸 id 고르기([세션 목록](docs/usage.md#세션-목록))
 - `junees sessions search <낱말>`: 세션 검색([세션 검색](docs/usage.md#세션-검색))
 - `junees write [--levels 2|3|4] [--parallel N] [--polish] [--out <파일>] [--lang ko|en] "<요청>"`: 긴 글을 단계별로, 섹션을 동시에 쓰기. 터미널에서는 단계마다 글을 덮어 그린다([NCM식 글 쓰기](docs/write.md))
 - `junees usage`: 지난 며칠의 토큰과 비용([사용량과 비용](docs/usage.md#사용량과-비용))

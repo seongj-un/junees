@@ -207,6 +207,17 @@ async fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         // Reads the journals only.
+        Command::SessionsList(args) => {
+            let settings = Settings::from_env()?;
+            let home = junees::config_file::home_dir(|key| settings.get(key))
+                .context("neither JUNEES_HOME nor HOME is set, so there are no saved sessions")?;
+            let cwd = std::env::current_dir().context("cannot read the current directory")?;
+            print!(
+                "{}",
+                junees::sessions_list::run(&home, &cwd, &settings, &args)?
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::SessionsSearch(search) => {
             let home = junees::config_file::home_dir(|key| std::env::var(key).ok())
                 .context("neither JUNEES_HOME nor HOME is set, so there are no saved sessions")?;
@@ -271,6 +282,7 @@ async fn run() -> Result<ExitCode> {
         | Command::Hooks(_)
         | Command::Mcp(_)
         | Command::SessionsHelp
+        | Command::SessionsList(_)
         | Command::SessionsSearch(_)
         | Command::Doctor(_)
         | Command::DoctorHelp

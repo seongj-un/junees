@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::config_file::Settings;
 use crate::prompt_text::escape_hidden;
-use crate::search::{SOURCES, TERMINAL};
+use crate::search::TERMINAL;
 use crate::session;
 
 /// Sessions listed when no limit is given.
@@ -145,7 +145,12 @@ pub fn title(settings: &Settings, first_input: &str) -> Option<String> {
 
 /// The sessions of the state folder `home` that `args` ask for, most
 /// recently written first: those started in `cwd` unless `args.all`.
-pub fn list(home: &Path, cwd: &Path, settings: &Settings, args: &ListArgs) -> anyhow::Result<Vec<Listed>> {
+pub fn list(
+    home: &Path,
+    cwd: &Path,
+    settings: &Settings,
+    args: &ListArgs,
+) -> anyhow::Result<Vec<Listed>> {
     let folder = (!args.all).then(|| cwd.to_string_lossy().into_owned());
     let old_channels = crate::search::gateway_channels(home);
     let found = session::list_tagged(home, args.limit, |meta| {
@@ -220,7 +225,9 @@ pub fn for_terminal(sessions: &[Listed], cwd: &Path, args: &ListArgs) -> String 
             parts.push(shown(&listed.cwd, FOLDER_CHARS));
         }
         parts.push(match &listed.title {
-            Some(title) => crate::cli::preview(&escape_hidden(title), crate::cli::SESSION_PREVIEW_CHARS),
+            Some(title) => {
+                crate::cli::preview(&escape_hidden(title), crate::cli::SESSION_PREVIEW_CHARS)
+            }
             None => "(empty)".to_string(),
         });
         out.push_str(&parts.join("  "));
@@ -261,7 +268,12 @@ pub fn for_json(sessions: &[Listed], cwd: &Path, args: &ListArgs) -> String {
 const API_BACKEND: &str = "api";
 
 /// What `junees sessions list` prints for `args`.
-pub fn run(home: &Path, cwd: &Path, settings: &Settings, args: &ListArgs) -> anyhow::Result<String> {
+pub fn run(
+    home: &Path,
+    cwd: &Path,
+    settings: &Settings,
+    args: &ListArgs,
+) -> anyhow::Result<String> {
     let sessions = list(home, cwd, settings, args)?;
     Ok(if args.json {
         for_json(&sessions, cwd, args)
@@ -270,15 +282,10 @@ pub fn run(home: &Path, cwd: &Path, settings: &Settings, args: &ListArgs) -> any
     })
 }
 
-/// Every source name `--source` takes, for the help text's test.
-#[cfg(test)]
-fn source_names() -> Vec<&'static str> {
-    SOURCES.to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::SOURCES;
 
     fn parse(tokens: &[&str]) -> Result<ListArgs, String> {
         ListArgs::parse(tokens.iter().map(|t| t.to_string()))
@@ -320,8 +327,16 @@ mod tests {
     #[test]
     fn parses_every_option() {
         let args = parse(&[
-            "--json", "--source", "discord,cron", "--all", "--limit", "50", "--source", "cron",
-            "--source", "terminal",
+            "--json",
+            "--source",
+            "discord,cron",
+            "--all",
+            "--limit",
+            "50",
+            "--source",
+            "cron",
+            "--source",
+            "terminal",
         ])
         .unwrap();
         assert_eq!(
@@ -341,15 +356,24 @@ mod tests {
     fn refuses_what_it_does_not_take() {
         for (tokens, expected) in [
             (&["--limit"][..], "--limit needs a number"),
-            (&["--limit", "0"], "--limit must be a whole number from 1 to 50, got `0`"),
-            (&["--limit", "51"], "--limit must be a whole number from 1 to 50, got `51`"),
+            (
+                &["--limit", "0"],
+                "--limit must be a whole number from 1 to 50, got `0`",
+            ),
+            (
+                &["--limit", "51"],
+                "--limit must be a whole number from 1 to 50, got `51`",
+            ),
             (&["--limit", "-1"], "got `-1`"),
             (&["--limit", "2.5"], "got `2.5`"),
             (&["--limit", "many"], "got `many`"),
             (&["--source"], "--source needs a source name"),
             (&["--source", "irc"], "unknown session source `irc`"),
             (&["--source", ""], "unknown session source ``"),
-            (&["--session", "x"], "unknown option `--session`; usage: junees sessions list"),
+            (
+                &["--session", "x"],
+                "unknown option `--session`; usage: junees sessions list",
+            ),
             (&["-a"], "unknown option `-a`"),
             (&["빌드"], "takes no words (got `빌드`)"),
         ] {
@@ -363,7 +387,7 @@ mod tests {
 
     #[test]
     fn usage_names_every_source() {
-        for source in source_names() {
+        for source in SOURCES {
             assert!(USAGE.contains(source), "{source}");
         }
     }
@@ -378,10 +402,7 @@ mod tests {
             Some("빌드 실패 원인")
         );
         let long = "가".repeat(TITLE_CHARS + 5);
-        assert_eq!(
-            title(&settings, &long).unwrap(),
-            "가".repeat(TITLE_CHARS)
-        );
+        assert_eq!(title(&settings, &long).unwrap(), "가".repeat(TITLE_CHARS));
         assert_eq!(
             title(&settings, &"가".repeat(TITLE_CHARS)).unwrap(),
             "가".repeat(TITLE_CHARS)
@@ -426,10 +447,16 @@ mod tests {
         let long = listed("a", "terminal", Some(&"가".repeat(80)));
         let out = for_terminal(&[long], cwd, &ListArgs::default());
         let line = out.lines().next().unwrap();
-        assert!(line.ends_with(&format!("  {}...", "가".repeat(57))), "{line}");
+        assert!(
+            line.ends_with(&format!("  {}...", "가".repeat(57))),
+            "{line}"
+        );
         let hidden = listed("a", "terminal", Some("x\u{1b}[2Jy\u{202e}z"));
         let out = for_terminal(&[hidden], cwd, &ListArgs::default());
-        assert!(!out.contains('\u{1b}') && !out.contains('\u{202e}'), "{out}");
+        assert!(
+            !out.contains('\u{1b}') && !out.contains('\u{202e}'),
+            "{out}"
+        );
     }
 
     #[test]
@@ -457,7 +484,10 @@ mod tests {
         claude.backend = Some("claude-code".into());
         let discord = listed("20261102-101010-bbbb", "discord", None);
         let out = for_json(&[claude, discord], cwd, &ListArgs::default());
-        assert!(out.ends_with('\n') && out.matches('\n').count() == 1, "{out}");
+        assert!(
+            out.ends_with('\n') && out.matches('\n').count() == 1,
+            "{out}"
+        );
         let value: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             value,
