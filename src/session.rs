@@ -1522,6 +1522,27 @@ pub fn list_all(home: &Path, limit: usize) -> Result<Vec<(PathBuf, Summary)>> {
     list(home, limit, None)
 }
 
+/// Up to `limit` sessions `tag` keeps, most recently written first, each
+/// with what `tag` made of its meta line: for a list with its own scope
+/// (`junees sessions list`). Journals are read like [`list_recent`] reads
+/// them, files `tag` leaves out only as far as their meta line, and a
+/// journal that is a symbolic link is left out like in [`list_all`].
+pub fn list_tagged<T>(
+    home: &Path,
+    limit: usize,
+    mut tag: impl FnMut(&Meta) -> Option<T>,
+) -> Result<Vec<(T, Summary)>> {
+    let mut tags = Vec::new();
+    let list = list_kept(home, limit, true, |meta| {
+        tag(meta).map(|tag| tags.push(tag)).is_some()
+    })?;
+    Ok(tags
+        .into_iter()
+        .zip(list)
+        .map(|(tag, (_, summary))| (tag, summary))
+        .collect())
+}
+
 fn summaries(list: Vec<(PathBuf, Summary)>) -> Vec<Summary> {
     list.into_iter().map(|(_, summary)| summary).collect()
 }
@@ -1529,16 +1550,30 @@ fn summaries(list: Vec<(PathBuf, Summary)>) -> Vec<Summary> {
 /// `channels`: `Some(true)` for the sessions of channels only,
 /// `Some(false)` for those of the terminal only, `None` for both.
 fn list(home: &Path, limit: usize, channels: Option<bool>) -> Result<Vec<(PathBuf, Summary)>> {
+    list_kept(home, limit, channels.is_none(), |meta| {
+        channels.is_none_or(|channels| meta.source.is_some() == channels)
+    })
+}
+
+/// The sessions whose meta line `keep` accepts, up to `limit`, most
+/// recently written first. `skip_links` leaves out a journal that is a
+/// symbolic link.
+fn list_kept(
+    home: &Path,
+    limit: usize,
+    skip_links: bool,
+    mut keep: impl FnMut(&Meta) -> bool,
+) -> Result<Vec<(PathBuf, Summary)>> {
     Ok(session_files(home)?
         .into_iter()
         .filter_map(|file| {
-            if channels.is_none()
+            if skip_links
                 && fs::symlink_metadata(&file.path).is_ok_and(|meta| meta.file_type().is_symlink())
             {
                 return None;
             }
             let (meta, mut rest) = read_head(&file.path)?;
-            if channels.is_some_and(|channels| meta.source.is_some() != channels) {
+            if !keep(&meta) {
                 return None;
             }
             let first_input = match read_entry(&mut rest) {
