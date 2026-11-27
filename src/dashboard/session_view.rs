@@ -389,34 +389,141 @@ fn draft_json(
     })
 }
 
+/// Whether `c` can be part of a credential and so of the word a window's
+/// edge may cut in two: ASCII graphic characters, bar the ones that
+/// delimit a value in text (quotes, brackets, commas, backslash). Space,
+/// line breaks and every non-ASCII character end a word.
+fn word_char(c: char) -> bool {
+    c.is_ascii_graphic()
+        && !matches!(
+            c,
+            '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '{' | '}' | '[' | ']' | '<' | '>' | '\\'
+        )
+}
+
+/// The header line of a private key block, which a window that starts
+/// inside the block puts back in front of itself ([`tail`]).
+const KEY_BEGIN: &str = concat!("-----BEGIN ", "PRIVATE KEY-----\n");
+
+/// Whether byte `at` of `text` lies inside a private key block: after
+/// the last `-----BEGIN ... PRIVATE KEY` line and before any `-----END`.
+fn inside_private_key(text: &str, at: usize) -> bool {
+    let Some(begin) = text[..at].rfind("-----BEGIN") else {
+        return false;
+    };
+    let header = text[begin..].lines().next().unwrap_or("");
+    header.contains("PRIVATE KEY") && !text[begin..at].contains("-----END")
+}
+
 /// The end of `text` past its first `shown` characters, at most `chars`
 /// of it, with its secrets hidden, and how many characters lie between
-/// the two; `None` when `text` is no longer than `shown`. The end does
-/// not overlap what [`cut`] shows. Secrets are hidden in what lies up to
-/// [`SECRET_MARGIN`] before the end too, as [`cut`] does after its cut.
+/// the two; `None` when `text` is no longer than `shown`. Secrets are
+/// hidden in what lies up to [`SECRET_MARGIN`] before the end too, as
+/// [`cut`] does after its cut. Where that window starts inside a word,
+/// the part of the word in the window is left out, only when that part
+/// is [`SECRET_MARGIN`] characters or fewer: the secret check never saw
+/// the whole word, so it cannot say that the rest is not a piece of a key.
+/// A window that starts inside a private key block is hidden whole.
+/// A hiding marker is never cut: when the end would start inside one and
+/// lies away from the preview, it starts at the marker, so it can be a
+/// few characters longer than `chars` (up to a marker's length), and
+/// `omitted_chars` shrinks by as many; when the end follows the preview
+/// directly (`omitted_chars` 0), the preview already ends with the whole
+/// marker, so the end starts after it.
 fn tail(settings: &Settings, text: &str, shown: usize, chars: usize) -> Option<(String, usize)> {
     let total = text.chars().count();
     let past = total.checked_sub(shown).filter(|past| *past > 0)?;
     let kept = past.min(chars);
     let start = total - kept;
-    let mut near: String = text
-        .chars()
-        .skip(start.saturating_sub(SECRET_MARGIN))
-        .collect();
+    let mut window = start.saturating_sub(SECRET_MARGIN);
+    if window > 0 {
+        let mut chars_at = text.chars().skip(window - 1);
+        if chars_at.next().is_some_and(word_char) {
+            // A word that goes on past the margin keeps the window as it
+            // is, as before: the check looks at the part of the word in
+            // the window, and only if that part looks like a secret is the
+            // word hidden whole; otherwise the window start is shown.
+            let word = chars_at
+                .take(SECRET_MARGIN + 1)
+                .take_while(|c| word_char(*c))
+                .count();
+            if word <= SECRET_MARGIN {
+                window += word;
+            }
+        }
+    }
+    let mut near: String = text.chars().skip(window).collect();
+    if window > 0 {
+        let byte = text
+            .char_indices()
+            .nth(window)
+            .map_or(text.len(), |(at, _)| at);
+        if inside_private_key(text, byte) {
+            near.insert_str(0, KEY_BEGIN);
+        }
+    }
     crate::doctor::hide_secrets_in_user_text(settings, std::iter::once(&mut near));
     let count = near.chars().count();
-    let end: String = near.chars().skip(count.saturating_sub(kept)).collect();
-    Some((end, start - shown))
+    let mut from = count.saturating_sub(kept);
+    let mut omitted = start - shown;
+    if let Some((marker_start, marker_end)) = marker_across(&near, from) {
+        if omitted == 0 {
+            from = marker_end;
+        } else {
+            omitted = omitted.saturating_sub(from - marker_start);
+            from = marker_start;
+        }
+    }
+    // A field hidden whole is one marker that no `marker_across` finds
+    // (it starts at 0); the preview shows it already.
+    if omitted == 0 && crate::doctor::HIDDEN_MARKERS.contains(&near.as_str()) {
+        from = count;
+    }
+    let end: String = near.chars().skip(from).collect();
+    Some((end, omitted))
+}
+
+/// The character range of the hiding marker in `hidden` that the boundary
+/// before character `at` falls inside of, if one does. A marker the
+/// boundary only touches is whole on one side, so it does not count.
+fn marker_across(hidden: &str, at: usize) -> Option<(usize, usize)> {
+    crate::doctor::HIDDEN_MARKERS
+        .iter()
+        .flat_map(|marker| hidden.match_indices(marker))
+        .map(|(byte, marker)| {
+            let start = hidden[..byte].chars().count();
+            (start, start + marker.chars().count())
+        })
+        .find(|(start, end)| *start < at && at < *end)
 }
 
 /// The first `chars` characters of `text` with its secrets hidden, and
 /// whether it was cut. Secrets are hidden before the cut, in what lies
-/// up to [`SECRET_MARGIN`] past it.
+/// up to [`SECRET_MARGIN`] past it. Where that window ends inside a word,
+/// the part of the word in the window is left out, only when that part
+/// is [`SECRET_MARGIN`] characters or fewer: hiding can shorten the window to
+/// `chars` or less, and what then shows its end is a piece of a word the
+/// secret check never saw whole. A hiding marker is never cut: when the
+/// cut would fall inside one, the text runs on to its end.
 pub(super) fn cut(settings: &Settings, text: &str, chars: usize) -> (String, bool) {
-    let mut near: String = text.chars().take(chars + SECRET_MARGIN).collect();
+    let window = chars + SECRET_MARGIN;
+    let mut seen: Vec<char> = text.chars().take(window + 1).collect();
+    let truncated = seen.len() > chars;
+    let next = seen.get(window).copied();
+    seen.truncate(window);
+    if next.is_some_and(word_char) {
+        // A longer word stays, as before: the check looks at the part of
+        // it in the window, and only if that part looks like a secret is
+        // the word hidden whole; otherwise the window end is shown.
+        let word = seen.iter().rev().take_while(|c| word_char(**c)).count();
+        if word <= SECRET_MARGIN {
+            seen.truncate(seen.len() - word);
+        }
+    }
+    let mut near: String = seen.into_iter().collect();
     crate::doctor::hide_secrets_in_user_text(settings, std::iter::once(&mut near));
-    let truncated = text.chars().nth(chars).is_some();
-    let kept: String = near.chars().take(chars).collect();
+    let upto = marker_across(&near, chars).map_or(chars, |(_, end)| end);
+    let kept: String = near.chars().take(upto).collect();
     // Hiding can make the text longer or shorter; what counts is whether
     // the original went on past the cut.
     (kept, truncated)
@@ -602,5 +709,381 @@ mod tests {
         );
         let shown = block_json(&settings, &ContentBlock::text("y".repeat(8_000)));
         assert!(shown.get("truncated").is_none(), "{shown}");
+    }
+
+    /// Every way a hiding marker can show up cut: a prefix or a suffix of
+    /// one that is not the whole marker.
+    fn marker_fragment(text: &str) -> bool {
+        crate::doctor::HIDDEN_MARKERS.iter().any(|marker| {
+            (1..marker.len())
+                .filter(|n| marker.is_char_boundary(*n))
+                .any(|n| text.starts_with(&marker[n..]) || text.ends_with(&marker[..n]))
+        })
+    }
+
+    /// A field the hiding replaces as a whole (no word of it is a secret).
+    const KEY_LINE: &str = concat!("-----BEGIN ", "PRIVATE KEY-----");
+    /// A word the hiding replaces by `[hidden]`.
+    const KEY_WORD: &str = concat!("ghp_", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4");
+
+    #[test]
+    fn a_whole_field_hidden_is_not_cut_to_a_fragment_by_the_tail() {
+        let settings = settings();
+        // 2,011 characters, a key in the last lines: the end window is one
+        // marker, and 11 characters are left to show.
+        let key = format!("\n{KEY_LINE}\n");
+        let text = format!("{}{key}", "ab ".repeat((2_011 - key.len()) / 3 + 1));
+        let text: String = text
+            .chars()
+            .take(2_011 - key.len())
+            .chain(key.chars())
+            .collect();
+        assert_eq!(text.chars().count(), 2_011);
+        let (tail, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert!(!marker_fragment(&tail), "{tail:?}");
+        // The preview is that marker whole; the end follows it, so it has
+        // nothing left to show.
+        let shown = block_json(&settings, &ContentBlock::tool_result("t", text, false));
+        assert_eq!(
+            shown["text_preview"],
+            "[hidden: it looks like it holds a credential]"
+        );
+        assert_eq!(tail, "");
+        assert_eq!(omitted, 0);
+    }
+
+    #[test]
+    fn a_hidden_word_on_the_edge_of_the_tail_is_shown_whole() {
+        let settings = settings();
+        // The 500-character end starts 4 characters into `[hidden]`.
+        let end = format!("{KEY_WORD} {}", "ab ".repeat(165));
+        let end = &end[..KEY_WORD.len() + 1 + 495];
+        let text = format!("{}{end}", "ab ".repeat(900));
+        let (tail, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert!(tail.starts_with("[hidden] "), "{tail:?}");
+        assert!(!tail.contains("ghp_"), "{tail:?}");
+        assert!(!marker_fragment(&tail), "{tail:?}");
+        // 3,228 characters: the end starts at the 2,728th, 4 characters
+        // inside the marker, so 728 - 4 lie between.
+        assert_eq!(text.chars().count(), 3_228);
+        assert_eq!(omitted, 724);
+    }
+
+    #[test]
+    fn a_hidden_word_on_the_edge_of_the_preview_is_shown_whole() {
+        let settings = settings();
+        // The word starts 3 characters before the 2,000th: its marker would
+        // be cut after `[hi`.
+        let text = format!(
+            "{}{KEY_WORD} {}",
+            "ab ".repeat(665) + "a",
+            "cd ".repeat(100)
+        );
+        assert_eq!(text.chars().take(1_996).count(), 1_996);
+        let shown = block_json(&settings, &ContentBlock::tool_result("t", text, false));
+        let preview = shown["text_preview"].as_str().unwrap();
+        assert!(preview.ends_with("[hidden]"), "{preview:?}");
+        assert!(!marker_fragment(preview), "{preview:?}");
+        assert_eq!(shown["truncated"], true);
+    }
+
+    /// A word the secret check takes for a token (120 characters with upper
+    /// case, lower case and digits): hidden whole, 8 characters are left.
+    fn long_token() -> String {
+        "Ab1".repeat(40)
+    }
+
+    /// `len` characters of plain words, the last one a space.
+    fn filler(len: usize) -> String {
+        let mut text: String = "ab ".repeat(len / 3 + 1).chars().take(len - 1).collect();
+        text.push(' ');
+        text
+    }
+
+    /// The part of a block's text a client reads: the preview and the end
+    /// joined where `omitted_chars` says nothing lies between.
+    fn shown_parts(text: String) -> (String, String, u64) {
+        let shown = block_json(&settings(), &ContentBlock::tool_result("t", text, false));
+        (
+            shown["text_preview"].as_str().unwrap().to_string(),
+            shown["text_tail"].as_str().unwrap().to_string(),
+            shown["omitted_chars"].as_u64().unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_word_cut_at_the_window_end_is_not_shown_when_hiding_shortens_the_window() {
+        let settings = settings();
+        // 12 long tokens in front: hiding takes 12 * 112 characters off, far
+        // more than the margin, so the whole window is left under the 2,000.
+        let head: String = (0..12).map(|_| format!("{} ", long_token())).collect();
+        assert_eq!(head.chars().count(), 12 * 121);
+        // The key starts 15 characters before the window's end (2,512): of
+        // its `ghp_` and 28 characters, only 11 would be in the window.
+        let at = 2_000 + SECRET_MARGIN - 15;
+        let text = format!(
+            "{head}{}{KEY_WORD} {}",
+            filler(at - head.chars().count()),
+            "cd ".repeat(100)
+        );
+        assert_eq!(text.find(KEY_WORD), Some(at));
+        let (shown, truncated) = cut(&settings, &text, 2_000);
+        assert!(truncated);
+        assert!(!shown.contains("ghp_"), "{shown:?}");
+        assert!(!shown.contains("a1B2c3D4"), "{shown:?}");
+        // What is left is the 12 hidden tokens and the plain words.
+        assert_eq!(shown.chars().count(), 12 * 9 + (at - head.chars().count()));
+    }
+
+    #[test]
+    fn a_word_cut_at_the_window_start_of_the_tail_is_not_shown_when_hiding_shortens_the_window() {
+        let settings = settings();
+        // The window of the end starts 17 characters into the key, so its
+        // last 15 are in the window; 6 long tokens after them shrink the
+        // window to under the 500 the end keeps.
+        let before = format!("{}{}", filler(2_583), &KEY_WORD[..17]);
+        assert_eq!(before.chars().count(), 2_600);
+        let near = format!(
+            "{} {}{}",
+            &KEY_WORD[17..],
+            (0..6)
+                .map(|_| format!("{} ", long_token()))
+                .collect::<String>(),
+            "cd ".repeat(90)
+        );
+        assert_eq!(near.chars().count(), 1_012);
+        let text = format!("{before}{near}");
+        let (end, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert!(!end.contains("7H8i9J0k"), "{end:?}");
+        assert!(!end.contains("9J0k1L2m"), "{end:?}");
+        assert_eq!(omitted, text.chars().count() - 500 - 2_000);
+    }
+
+    /// Lines of a private key's body: no word of them reads as a token.
+    fn key_body(lines: usize) -> String {
+        "abcdefghijklmnopqrstuvwxyzabcd/abcdefghijklmnopqrstuvwxyzabcd/\n".repeat(lines)
+    }
+
+    #[test]
+    fn the_tail_of_a_text_inside_a_private_key_block_is_hidden_whole() {
+        let settings = settings();
+        let text = format!("{KEY_LINE}\n{}", key_body(60));
+        let (end, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert_eq!(end, "[hidden: it looks like it holds a credential]");
+        assert_eq!(omitted, text.chars().count() - 500 - 2_000);
+        // A block that ended before the end window is no reason to hide it.
+        let text = format!(
+            "{KEY_LINE}\n{}-----END PRIVATE KEY-----\n{}",
+            key_body(2),
+            "ab ".repeat(1_500)
+        );
+        let (end, _) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert_eq!(end.len(), 500);
+        assert!(!end.contains("[hidden"), "{end:?}");
+    }
+
+    #[test]
+    fn a_private_key_block_in_the_window_of_the_preview_hides_all_of_it() {
+        let text = format!("{}\n{KEY_LINE}\n{}", filler(1_990), key_body(60));
+        let (shown, truncated) = cut(&settings(), &text, 2_000);
+        assert!(truncated);
+        assert_eq!(shown, "[hidden: it looks like it holds a credential]");
+    }
+
+    #[test]
+    fn a_long_word_without_secrets_is_cut_where_it_was_before() {
+        let (shown, truncated) = cut(&settings(), &"a".repeat(3_000), 2_000);
+        assert_eq!((shown.len(), truncated), (2_000, true));
+        let (end, omitted) = tail(&settings(), &"a".repeat(3_000), 2_000, 500).unwrap();
+        assert_eq!((end.len(), omitted), (500, 500));
+    }
+
+    #[test]
+    fn a_marker_is_across_a_boundary_only_when_the_boundary_is_inside_it() {
+        let hidden = "ab[hidden]cd";
+        // The marker is characters 2 to 10.
+        assert_eq!(marker_across(hidden, 2), None);
+        assert_eq!(marker_across(hidden, 3), Some((2, 10)));
+        assert_eq!(marker_across(hidden, 9), Some((2, 10)));
+        assert_eq!(marker_across(hidden, 10), None);
+        // Several markers: only the one the boundary is inside of.
+        let hidden = "[hidden] [hidden]";
+        assert_eq!(marker_across(hidden, 4), Some((0, 8)));
+        assert_eq!(marker_across(hidden, 8), None);
+        assert_eq!(marker_across(hidden, 9), None);
+        assert_eq!(marker_across(hidden, 12), Some((9, 17)));
+        // Characters before the marker are counted as characters, not bytes.
+        let hidden = "가나다[hidden]라";
+        assert_eq!(marker_across(hidden, 3), None);
+        assert_eq!(marker_across(hidden, 4), Some((3, 11)));
+        assert_eq!(marker_across(hidden, 11), None);
+        // The long marker too.
+        let long = format!("x{}y", crate::doctor::HIDDEN_MARKERS[1]);
+        assert_eq!(marker_across(&long, 1), None);
+        assert_eq!(marker_across(&long, 2), Some((1, 46)));
+        assert_eq!(marker_across(&long, 46), None);
+    }
+
+    #[test]
+    fn a_boundary_that_only_touches_a_marker_does_not_move() {
+        let settings = settings();
+        // The preview's boundary is right before the marker, and right
+        // after it: the preview is exactly 2,000 characters either way.
+        let rest = format!("{KEY_WORD} {}", "cd ".repeat(50));
+        let (shown, _) = cut(&settings, &format!("{}{rest}", filler(2_000)), 2_000);
+        assert_eq!(shown, filler(2_000));
+        let (shown, _) = cut(&settings, &format!("{}{rest}", filler(1_992)), 2_000);
+        assert_eq!(shown, format!("{}[hidden]", filler(1_992)));
+        // The same for the start of the end: 500 characters after the
+        // marker, and 508 with it.
+        let after = format!(
+            " {}",
+            "cd ".repeat(167).chars().take(499).collect::<String>()
+        );
+        assert_eq!(after.chars().count(), 500);
+        let text = format!("{}{KEY_WORD}{after}", "ab ".repeat(900));
+        assert_eq!(text.chars().count(), 3_232);
+        assert_eq!(
+            tail(&settings, &text, 2_000, 500),
+            Some((after.clone(), 732))
+        );
+        assert_eq!(
+            tail(&settings, &text, 2_000, 508),
+            Some((format!("[hidden]{after}"), 724))
+        );
+    }
+
+    #[test]
+    fn several_markers_and_wide_characters_in_front_leave_the_counts_right() {
+        let settings = settings();
+        // Hangul (3 bytes each) before a word on the edge of the preview:
+        // the marker's place is found by characters, so the preview still
+        // runs to the end of the marker the cut is inside of.
+        let text = format!(
+            "{}{KEY_WORD} {KEY_WORD} {}",
+            "가나다 ".repeat(499),
+            "cd ".repeat(100)
+        );
+        let before = text.find(KEY_WORD).unwrap();
+        assert_eq!(text[..before].chars().count(), 1_996);
+        let (shown, _) = cut(&settings, &text, 2_000);
+        assert!(shown.ends_with("[hidden]"), "{shown:?}");
+        assert_eq!(shown.chars().count(), 1_996 + 8);
+        // The second marker is not part of it.
+        assert_eq!(shown.matches("[hidden]").count(), 1);
+    }
+
+    #[test]
+    fn a_hidden_word_across_the_end_of_the_preview_shows_once() {
+        // The word starts 30 characters before the 2,000th and hiding takes
+        // 24 off it: the end starts inside its marker, which the preview
+        // already shows whole.
+        let text = format!("{}{KEY_WORD} {}", "x ".repeat(985), "cd ".repeat(89));
+        let (preview, end, omitted) = shown_parts(text);
+        assert_eq!(omitted, 0);
+        assert_eq!(format!("{preview}{end}").matches("[hidden]").count(), 1);
+        // A field hidden whole, in the last lines: one marker, not two.
+        let key = format!("\n{KEY_LINE}\n");
+        let text: String = "ab "
+            .repeat(700)
+            .chars()
+            .take(2_011 - key.len())
+            .chain(key.chars())
+            .collect();
+        let (preview, end, omitted) = shown_parts(text);
+        assert_eq!(omitted, 0);
+        assert_eq!(format!("{preview}{end}").matches("[hidden").count(), 1);
+    }
+
+    #[test]
+    fn a_field_hidden_whole_shows_its_marker_once_for_any_length_past_the_preview() {
+        let key = format!("\n{KEY_LINE}\n");
+        // 45 to 500 characters past the preview: the end window is the
+        // marker alone.
+        for total in [2_046, 2_100, 2_500] {
+            let text: String = "ab "
+                .repeat(900)
+                .chars()
+                .take(total - key.len())
+                .chain(key.chars())
+                .collect();
+            assert_eq!(text.chars().count(), total);
+            let (preview, end, omitted) = shown_parts(text);
+            assert_eq!(omitted, 0, "{total}");
+            assert_eq!(
+                format!("{preview}{end}").matches("[hidden").count(),
+                1,
+                "{total}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_longer_than_the_margin_at_the_end_of_the_preview_window_is_hidden_whole() {
+        let settings = settings();
+        // The token is 702 characters; 543, 513 and 512 of them are in the
+        // window (it ends at 2,512). As on main, the secret check sees them
+        // all (or, at 512, they are held back), so no piece of it shows.
+        for start in [1_969, 1_999, 2_000] {
+            let text = format!("{}{} tail", filler(start), "Ab1".repeat(234));
+            let (shown, truncated) = cut(&settings, &text, 2_000);
+            assert!(truncated);
+            assert!(!shown.contains("Ab1"), "{start}: {shown:?}");
+            if start == 2_000 {
+                // Exactly 512 characters of the token are in the window:
+                // they are left out, so the text ends where the cut is.
+                assert_eq!(shown, filler(2_000));
+            } else {
+                // 543 and 513 are more than the margin: the window stays,
+                // the token is hidden whole and the marker is not cut.
+                assert!(shown.ends_with("[hidden]"), "{start}: {shown:?}");
+                assert_eq!(shown, format!("{}[hidden]", filler(start)), "{start}");
+                assert_eq!(shown.chars().count(), start + 8, "{start}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_word_of_512_characters_in_the_tail_window_is_left_out_and_one_of_513_is_not() {
+        let settings = settings();
+        // A 564-character token from 2,600; the window of the end starts
+        // inside it, with 512 or 513 of its characters in the window.
+        let word = "Ab1".repeat(188);
+        let rest = |len: usize| -> String {
+            format!(" {}", "cd ".repeat(200))
+                .chars()
+                .take(len)
+                .collect()
+        };
+        // 512: the token's end is 500 characters before the text's end.
+        let text = format!("{}{word}{}", filler(2_600), rest(500));
+        assert_eq!(text.chars().count(), 3_664);
+        let (end, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert_eq!(end, rest(500));
+        assert_eq!(omitted, 3_164 - 2_000);
+        // 513: one character more of it is in the window, so the window
+        // stays and the check hides the piece whole.
+        let text = format!("{}{word}{}", filler(2_600), rest(499));
+        assert_eq!(text.chars().count(), 3_663);
+        let (end, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert_eq!(end, format!("[hidden]{}", rest(499)));
+        assert_eq!(omitted, 3_163 - 2_000 - 7);
+    }
+
+    #[test]
+    fn a_word_longer_than_the_margin_at_the_start_of_the_tail_window_is_hidden_whole() {
+        let settings = settings();
+        // A 564-character token from 2,600 to 3,164, which is 20 characters
+        // into the last 500 (the window of the end starts at 2,632, inside
+        // the token and 532 characters before the token's end).
+        let rest: String = format!(" {}", "cd ".repeat(160))
+            .chars()
+            .take(480)
+            .collect();
+        let text = format!("{}{}{rest}", filler(2_600), "Ab1".repeat(188));
+        assert_eq!(text.chars().count(), 3_644);
+        let (end, omitted) = tail(&settings, &text, 2_000, 500).unwrap();
+        assert!(!end.contains("Ab1"), "{end:?}");
+        assert_eq!(omitted, 3_144 - 2_000);
     }
 }

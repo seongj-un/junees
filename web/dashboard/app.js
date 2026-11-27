@@ -12,6 +12,7 @@ import {
 } from "./api.js";
 import { el, notice, skeleton } from "./dom.js";
 import { formatClock } from "./format.js";
+import { renderKeepingUi } from "./keep-ui.js";
 import { chatEnabled } from "./chat-stream.js";
 import { chatHash, parseHash } from "./routes.js";
 import * as automation from "./view-automation.js";
@@ -226,19 +227,6 @@ function setBusy(busy) {
   ui.refresh.textContent = busy ? "불러오는 중" : "새로고침";
 }
 
-/** Re-renders while keeping open <details> and the focused control. */
-function renderKeepingUi(render) {
-  const open = new Set([...ui.view.querySelectorAll("details[id][open]")].map((d) => d.id));
-  const active = document.activeElement;
-  const focusId = active && ui.view.contains(active) && active.id ? active.id : null;
-  render();
-  for (const id of open) {
-    const details = document.getElementById(id);
-    if (details) details.open = true;
-  }
-  if (focusId) document.getElementById(focusId)?.focus({ preventScroll: true });
-}
-
 function retryButton(label = "다시 시도") {
   return el("button", { type: "button", class: "button", onclick: () => load({ manual: true }) }, label);
 }
@@ -251,7 +239,7 @@ function paint() {
 
   if (entry) {
     try {
-      renderKeepingUi(() => route.render(ui.view, entry.data, ctx()));
+      renderKeepingUi(ui.view, () => route.render(ui.view, entry.data, ctx()));
     } catch (err) {
       console.error(err);
       ui.view.replaceChildren(

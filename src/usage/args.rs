@@ -2,7 +2,7 @@
 
 /// `junees usage --help`.
 pub const HELP: &str = "\
-junees usage [--days N] [--by day|model|folder|source] [--all]
+junees usage [--days N] [--by day|model|folder|source] [--all] [--json]
 
 Shows the tokens the saved sessions ($JUNEES_HOME/sessions) used and what
 they cost, read from the session journals: the conversation's model calls,
@@ -14,6 +14,7 @@ Options:
   --by <B>     one row per day (default), model, folder or source
                (terminal, discord, telegram, slack, cron, webhook)
   --all        every working folder, not only this one
+  --json       one JSON report instead of the text table
 
 The cost is an estimate from the Claude API's list prices (the table in
 Junees names its source and date); a model without a price is counted but
@@ -49,6 +50,8 @@ pub struct UsageArgs {
     pub by: By,
     /// Every working folder, not only the current one.
     pub all: bool,
+    /// Emit JSON instead of the text table.
+    pub json: bool,
 }
 
 impl Default for UsageArgs {
@@ -57,6 +60,7 @@ impl Default for UsageArgs {
             days: DEFAULT_DAYS,
             by: By::Day,
             all: false,
+            json: false,
         }
     }
 }
@@ -79,6 +83,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<UsageArgs>
         match name.as_str() {
             "-h" | "--help" => return Ok(None),
             "--all" if inline.is_none() => parsed.all = true,
+            "--json" if inline.is_none() => parsed.json = true,
             "--days" => {
                 let days = value("a number of days")?;
                 parsed.days = days

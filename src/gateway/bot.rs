@@ -400,7 +400,8 @@ impl Bot {
         // `member` in a server, `user` in a DM.
         let user = text("/member/user/id").or_else(|| text("/user/id"));
         let channel = text("/channel_id").or_else(|| text("/channel/id"));
-        let refusal = match (user, channel) {
+        // What the press did, or the note for one that reached no question.
+        let verdict = match (user, channel) {
             (Some(user), Some(channel)) if self.config.allowed_users.contains(user) => {
                 match text("/data/custom_id").and_then(parse_button) {
                     Some((question, choice)) => {
@@ -411,13 +412,9 @@ impl Bot {
                             user: user.to_string(),
                             by: format!("<@{user}>"),
                         };
-                        if self.channels.press(channel, press) {
-                            None
-                        } else {
-                            Some(ALREADY_HANDLED)
-                        }
+                        Ok(self.channels.press(channel, press))
                     }
-                    None => Some(NOT_OURS),
+                    None => Err(NOT_OURS),
                 }
             }
             (user, _) => {
@@ -428,25 +425,31 @@ impl Bot {
                         "ignoring button presses of user {user}: not in discord_allowed_users"
                     ));
                 }
-                Some(NOT_ALLOWED)
+                Err(NOT_ALLOWED)
             }
-        };
-        let response = match refusal {
-            None => json!({"type": DEFERRED_UPDATE_MESSAGE}),
-            Some(note) => json!({
-                "type": CHANNEL_MESSAGE_WITH_SOURCE,
-                "data": {
-                    "content": note,
-                    "flags": EPHEMERAL,
-                    "allowed_mentions": {"parse": []},
-                },
-            }),
         };
         let shared = self.channels.shared();
         let rest = Arc::clone(&shared.platform.rest);
         let log = Arc::clone(&shared.log);
         let (id, token) = (id.to_string(), token.to_string());
         tokio::spawn(async move {
+            let refusal = match verdict {
+                // A press held while its question was being posted: what
+                // it did is known once that post ends.
+                Ok(pressed) => (!pressed.answered().await).then_some(ALREADY_HANDLED),
+                Err(note) => Some(note),
+            };
+            let response = match refusal {
+                None => json!({"type": DEFERRED_UPDATE_MESSAGE}),
+                Some(note) => json!({
+                    "type": CHANNEL_MESSAGE_WITH_SOURCE,
+                    "data": {
+                        "content": note,
+                        "flags": EPHEMERAL,
+                        "allowed_mentions": {"parse": []},
+                    },
+                }),
+            };
             if let Err(err) = rest.respond(&id, &token, response).await {
                 log(&format!("cannot answer a button press: {err:#}"));
             }

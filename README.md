@@ -26,15 +26,15 @@ curl -fsSL https://raw.githubusercontent.com/seongj-un/junees/main/install.sh | 
 ```sh
 git clone https://github.com/seongj-un/junees
 cd junees
-cargo install --path .
+cargo install --locked --path .
 ```
 
-`cargo install` 없이 `cargo build --release` 후 `./target/release/junees`로 써도 된다. 구독으로 쓰려면 Claude Code CLI(`claude`, 2.1.259 이상)를 따로 설치하고 직접 로그인해 둔다([구독 모드](docs/subscription.md)). 설치와 설정은 `junees doctor`로 점검한다.
+`cargo install` 없이 `cargo build --release --locked` 후 `./target/release/junees`로 써도 된다. 구독으로 쓰려면 Claude Code CLI(`claude`, 2.1.259 이상)를 따로 설치하고 직접 로그인해 둔다([구독 모드](docs/subscription.md)). 설치와 설정은 `junees doctor`로 점검한다.
 
 ## 빠른 시작
 
 ```sh
-cargo install --path .              # 한 번 설치하면 어디서나 junees (~/.cargo/bin)
+cargo install --locked --path .     # 한 번 설치하면 어디서나 junees (~/.cargo/bin)
 junees                              # 대화 (처음이면 설정 마법사가 먼저 뜸)
 junees "이 폴더에 뭐가 있어?"        # 한 번만 묻기
 junees -c                           # 이 폴더의 마지막 대화 이어서

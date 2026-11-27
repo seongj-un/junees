@@ -21,7 +21,7 @@ pub(super) const HIDDEN: &str = "[hidden]";
 
 /// What a field becomes when it still looks like it holds a credential
 /// after its words were checked one by one.
-const LOOKS_SECRET: &str = "[hidden: it looks like it holds a credential]";
+pub(super) const LOOKS_SECRET: &str = "[hidden: it looks like it holds a credential]";
 
 /// Values shorter than this are not hidden: they could be ordinary words.
 const SHORTEST: usize = 8;

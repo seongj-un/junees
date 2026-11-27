@@ -38,7 +38,7 @@ use serde_json::Value;
 use super::api::Me;
 use super::format::{escape, from_slack};
 use super::platform::{Slack, Target, attachments};
-use crate::gateway::ask::{Press, parse_button};
+use crate::gateway::ask::{Press, Pressed, parse_button};
 use crate::gateway::bot::parse_command;
 use crate::gateway::channels::{Channels, Shared};
 use crate::prompt_text::escape_hidden;
@@ -281,14 +281,15 @@ impl Router {
         };
         let message = text("/message/ts").or_else(|| text("/container/message_ts"));
         let thread = text("/message/thread_ts").or_else(|| text("/container/thread_ts"));
-        let refusal = if !self.allowed.contains(user) {
+        // What the press did, or the note for one that reached no question.
+        let verdict = if !self.allowed.contains(user) {
             if self.strangers.insert(user.to_string()) {
                 (self.channels.shared().log)(&format!(
                     "ignoring button presses of user {}: not in slack_allowed_users",
                     escape_hidden(user)
                 ));
             }
-            Some(NOT_ALLOWED)
+            Err(NOT_ALLOWED)
         } else {
             let button = payload
                 .pointer("/actions/0/value")
@@ -311,18 +312,14 @@ impl Router {
                         user: user.to_string(),
                         by: escape_hidden(name),
                     };
-                    if self.channels.press(&key, press) {
-                        None
-                    } else {
-                        Some(ALREADY_HANDLED)
-                    }
+                    Ok(self.channels.press(&key, press))
                 }
-                _ => Some(NOT_OURS),
+                _ => Err(NOT_OURS),
             }
         };
-        let Some(note) = refusal else {
+        if matches!(verdict, Ok(Pressed::Answered)) {
             return;
-        };
+        }
         let shared = self.channels.shared();
         let api = Arc::clone(&shared.platform.api);
         let log = Arc::clone(&shared.log);
@@ -332,6 +329,17 @@ impl Router {
             thread.map(str::to_string),
         );
         tokio::spawn(async move {
+            let note = match verdict {
+                // A press held while its question was being posted: what
+                // it did is known once that post ends.
+                Ok(pressed) => {
+                    if pressed.answered().await {
+                        return;
+                    }
+                    ALREADY_HANDLED
+                }
+                Err(note) => note,
+            };
             if let Err(err) = api
                 .post_ephemeral(&channel, &user, thread.as_deref(), &escape(note))
                 .await
